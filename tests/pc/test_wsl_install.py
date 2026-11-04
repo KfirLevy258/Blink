@@ -504,3 +504,71 @@ def test_holds_ours_reads_the_homes_hook_marker(tmp_path):
                                    "command": "sh /gone/blink-statusline.sh"}})
     assert cli._holds_ours(p, h) is True
     assert cli._holds_ours(p, claude_home.native()) is False
+
+
+# ------------------------------------------------------- review of e000823
+
+@posix_only
+def test_uninstall_stops_when_the_chain_file_cannot_be_read(tmp_path):
+    """The chain read exits 0 for a missing file, so a failure there is
+    wsl.exe failing. Taken for "no chain", uninstall dropped statusLine and
+    deleted the customer's only copy of their command."""
+    lin = _tree(tmp_path, {"statusLine": {"type": "command",
+                                          "command": "my-bar"}}, link=False)
+    home = _home(lin)
+    real = _runner(lin, _fake_bin(tmp_path))
+    install_statusline.install_into(home, real)
+    target = lin / ".claude" / "settings.json"
+    before = target.read_bytes()
+    chain = lin / ".blink" / "statusline-chain"
+
+    def run(argv, stdin=None):
+        if len(argv) > 2 and argv[2] == install_statusline._CAT_OR_NOTHING:
+            return -1, b"", b""
+        return real(argv, stdin)
+
+    with pytest.raises(install_statusline.WslInstallError) as e:
+        install_statusline.uninstall_from(home, run)
+    assert "chain" in str(e.value) and str(lin) not in str(e.value)
+    assert target.read_bytes() == before
+    assert chain.read_text() == "my-bar\n"
+    assert install_statusline._read_marker(home) == _sl_cmd(lin)
+
+
+@posix_only
+def test_uninstall_says_when_the_shims_were_not_removed(tmp_path):
+    lin = _tree(tmp_path, {}, link=False)
+    home = _home(lin)
+    real = _runner(lin, _fake_bin(tmp_path))
+    install_statusline.install_into(home, real)
+
+    def run(argv, stdin=None):
+        if len(argv) > 2 and argv[2] == install_statusline._RM \
+                and any(a.endswith("blink-hook.sh") for a in argv):
+            return 1, b"", b""
+        return real(argv, stdin)
+
+    msg = install_statusline.uninstall_from(home, run)
+    assert "Could not remove Blink's shims" in msg
+    assert str(lin) not in msg
+
+
+@posix_only
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root reads a mode-000 file")
+@pytest.mark.parametrize("shim", ["blink-statusline.sh", "blink-hook.sh"])
+def test_an_unreadable_out_file_prints_nothing(tmp_path, shim):
+    home = tmp_path / "home"
+    (home / ".blink").mkdir(parents=True)
+    out = home / ".blink" / "out"
+    out.write_text("/nowhere\n")
+    out.chmod(0o000)
+    try:
+        done = subprocess.run(["sh", os.path.join(REPO, "tools", shim), "Stop"],
+                              input=b'{"session_id":"a"}', capture_output=True,
+                              env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+                              timeout=30)
+    finally:
+        out.chmod(0o600)
+    assert done.returncode == 0
+    assert done.stderr == b""

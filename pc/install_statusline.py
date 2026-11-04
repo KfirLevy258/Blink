@@ -875,8 +875,9 @@ def _wsl_write(wsl_run, path: str, want: str, mode: str, data: bytes,
         raise WslInstallError(f"Could not write {what} inside WSL.")
 
 
-def _wsl_rm(wsl_run, *paths) -> None:
-    wsl_run(["sh", "-c", _RM, "sh", *paths])
+def _wsl_rm(wsl_run, *paths) -> bool:
+    """rm -f inside the distribution; False when wsl.exe or rm failed."""
+    return wsl_run(["sh", "-c", _RM, "sh", *paths])[0] == 0
 
 
 def _wsl_out_dir(home, wsl_run) -> str:
@@ -920,6 +921,11 @@ def install_into(home, wsl_run, *, hooks=True, files=True) -> str:
     unchanged; the markers, on Windows, only after the write succeeded.
     Raises WslInstallError or SettingsUnreadable, with nothing written to
     settings.json in either case.
+
+    The returned text is for the interactive install note only and must
+    never be logged: when a status line was chained it quotes the
+    customer's own command, which carries their paths. The drift check,
+    whose messages do reach bridge.log, discards it (_wsl_drift).
     """
     from pc import install_hooks
 
@@ -965,13 +971,25 @@ def uninstall_from(home, wsl_run) -> str:
     """uninstall() and install_hooks.uninstall() for a WSL home, and the
     shims and out file taken out of the distribution, as a native uninstall
     takes ~/.blink's. settings.json is written only if something of ours
-    was in it."""
+    was in it.
+
+    Like install_into's, the returned text is for the person running
+    uninstall and must never be logged: "Restored previous statusline"
+    quotes the customer's own command."""
     from pc import install_hooks
 
     st = _wsl_read_settings(home, wsl_run)
     chain = wsl_shim_path(home, os.path.basename(CHAIN_PATH))
     rc, out, _ = wsl_run(["sh", "-c", _CAT_OR_NOTHING, "sh", chain])
-    chain_text = out.decode("utf-8", "replace") if rc == 0 and out else None
+    # _CAT_OR_NOTHING exits 0 for a missing chain file, so a non-zero rc is
+    # wsl.exe itself failing or timing out -- not "no chain". Read as empty,
+    # merge_uninstall would drop statusLine instead of restoring the
+    # customer's command and then delete the only copy of it (review of
+    # e000823). Stop before anything is written.
+    if rc != 0:
+        raise WslInstallError("Could not read Blink's status line chain file"
+                              " inside WSL.")
+    chain_text = out.decode("utf-8", "replace") if out else None
 
     sl_doc, sl_marker, action, msg = merge_uninstall(
         st.doc, _read_marker(home), chain_text, wsl_statusline_command(home))
@@ -987,8 +1005,12 @@ def uninstall_from(home, wsl_run) -> str:
         _wsl_apply_chain(home, wsl_run, action)
         _remove_marker(home)
     install_hooks._remove_marker(home)
-    _wsl_rm(wsl_run, *(wsl_shim_path(home, n) for n in WSL_SHIMS + ("out",)))
-    return " ".join((msg, install_hooks.uninstall_message(removed)))
+    lines = [msg, install_hooks.uninstall_message(removed)]
+    if not _wsl_rm(wsl_run,
+                   *(wsl_shim_path(home, n) for n in WSL_SHIMS + ("out",))):
+        lines.append("Could not remove Blink's shims inside WSL; they do"
+                     " nothing without the settings above.")
+    return " ".join(lines)
 
 
 # --- anti-drift watchdog --------------------------------------------------

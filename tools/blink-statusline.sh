@@ -54,7 +54,10 @@ umask 077
 # variable, so the test is on the value, not on read's status.
 OUT="$HOME/.blink"
 if [ -f "$HOME/.blink/out" ]; then
-  IFS= read -r out_dir < "$HOME/.blink/out"
+  # 2>/dev/null before the `<`: an unreadable out file must not print on
+  # every render, and the shell reports a failed open on the stderr in
+  # effect when it reaches that redirection (see the write below).
+  IFS= read -r out_dir 2>/dev/null < "$HOME/.blink/out"
   [ -n "$out_dir" ] && OUT=$out_dir
 fi
 
