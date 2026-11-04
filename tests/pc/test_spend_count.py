@@ -637,13 +637,15 @@ def _sessions_life(seed, steps=300):
     (cost back to zero), exits (Claude Code saves its total as the
     session's lastCost) or is joined by `claude --continue`, which
     restores that saved total -- or starts at zero when none is saved.
-    Returns (counted, spent)."""
+    One step a second. Returns the counter and the spend as (second,
+    cents) pairs, so a /usage at any moment can be checked against it."""
     import random
     r = random.Random(seed)
     live, saved = [0], None
-    spent, t = 0, 1000
+    spend, t = [], 1000
     c = SpendCounter(persist=False)
     for _ in range(steps):
+        t += 1
         roll = r.random()
         if not live or (roll < 0.03 and len(live) < 3):
             # A restore of the saved total revives the ledger that exited
@@ -664,33 +666,64 @@ def _sessions_life(seed, steps=300):
             else:
                 d = r.randrange(0, 120)
                 live[i] += d
-                spent += d
+                spend.append((t, d))
         if r.random() < 0.7:                         # else lost
-            t += 1
             c.observe("a", live[i] / 100.0, t)
-    return c.since(0), spent
+    return c, spend
+
+
+def _anchors(steps=300):
+    """A /usage between every two steps of a life. The cross-ledger case
+    R1 found came up about once in 13,000 (life, anchor) pairs here, so a
+    handful of anchors a life never met it."""
+    return [1000 + k + 0.5 for k in range(steps)]
 
 
 @pytest.mark.parametrize("seed", range(500))
 def test_never_counts_more_than_was_spent(seed):
     """Whatever the interleaving of processes, /logins, exits, resumes and
     lost renders, the count never exceeds the spend (the module
-    docstring's argument, tested)."""
-    counted, spent = _sessions_life(seed)
-    assert counted <= spent
+    docstring's argument, tested): since the period start, and since a
+    /usage at any moment, which measured everything spent before it.
+    The second is the straddling rule's promise; round 2's review (R1)
+    found the first cut of the ledgers breaking it, 460 cents counted for
+    425, through a mark one ledger had taken over from another."""
+    c, spend = _sessions_life(seed)
+    assert c.since(0) <= sum(d for _t, d in spend)
+    for anchor in _anchors():
+        assert c.since(anchor) <= sum(d for t, d in spend if t > anchor)
 
 
 def test_the_count_stays_close_to_the_spend():
     """And it is not safe by counting nothing: over these lives the count
-    is most of the spend. What it misses is each /login's first figure, a
-    restarted ledger passing a dead mark, and rises behind lost renders
-    on a ledger that is passed meanwhile."""
+    since the period start is most of the spend. What it misses is each
+    /login's first figure, a restarted ledger passing a dead mark, and
+    rises behind lost renders on a ledger that is passed meanwhile."""
     counted = spent = 0
     for seed in range(500):
-        c, s = _sessions_life(seed)
-        counted += c
-        spent += s
+        c, spend = _sessions_life(seed)
+        counted += c.since(0)
+        spent += sum(d for _t, d in spend)
     assert counted > 0.85 * spent
+
+
+def test_a_rise_carried_past_the_anchor_by_another_ledger_is_dropped():
+    """R1, round 2 of the 2026-11-04 review. B at 4.00 before a /usage at
+    100, really at 4.50 by then (its render lost). A, after a /login, is
+    seen at 0.10 and then 4.05 -- the figure lands on B's mark, and the
+    mark took A's time. B's 4.60 was then counted from 4.05 as a rise
+    after the /usage: 55 cents, of which 45 were spent before it. A rise
+    is now stamped with the oldest sighting among the marks it could
+    continue, and those marks keep the oldest stamp they could carry."""
+    c = SpendCounter(persist=False)
+    c.observe("s", 12.00, 95)
+    c.observe("s", 4.00, 96)
+    c.observe("s", 0.10, 105)           # A, after /login
+    c.observe("s", 4.05, 107)
+    c.observe("s", 4.60, 110)           # B
+    c.observe("s", 4.15, 115)           # A
+    # Spent after 100: A's 0.10 and 405 after it, B's 10.
+    assert c.since(100) <= 10 + 405 + 10
 
 
 def test_two_resumes_from_one_saved_total_can_overcount():
@@ -789,3 +822,41 @@ def test_an_exit_inside_bind_does_not_save_a_torn_count(tmp_path):
     d.bind("other", 0)
     assert d.since(0) == 0
 
+
+
+def test_two_live_ledgers_count_again_once_each_is_seen_after_the_anchor():
+    """What R1's rule costs two processes taking turns: after a /usage, a
+    figure counts toward it only once every mark at or below it has been
+    seen after the /usage. A at 10.00 and B at 4.00 before 100. A's first
+    rise after it is dropped, as one ledger's would be, and B's first one
+    too: its mark took A's older stamp when A passed it. From then on both
+    count, every cent spent after 100 that the straddling rule allows."""
+    c = SpendCounter(persist=False)
+    c.observe("a", 10.00, 90)
+    c.observe("a", 4.00, 91)
+    c.observe("a", 10.20, 101)          # dropped: straddles 100
+    c.observe("a", 4.10, 102)           # dropped: straddles 100
+    c.observe("a", 10.50, 103)          # +30
+    c.observe("a", 4.30, 104)           # +20
+    c.observe("a", 10.70, 105)          # +20
+    c.observe("a", 4.40, 106)           # +10
+    assert c.since(100) == 30 + 20 + 20 + 10
+    assert c.since(0) == 20 + 10 + 30 + 20 + 20 + 10
+
+
+def test_a_stranded_mark_before_the_anchor_holds_the_count_back():
+    """The price of R1's rule, kept: a mark no ledger comes back to -- a
+    process that exited, or the old total a /login left behind once the
+    new ledger passed it -- stays under every later figure with its old
+    stamp, and after a /usage those figures count nothing toward it. It
+    could still be a live process whose renders were lost, spending
+    before the /usage. Here B exited at 4.00 before the /usage at 100;
+    A's rises after it count toward the period, not toward the /usage,
+    until the next /usage's figure takes them in exactly."""
+    c = SpendCounter(persist=False)
+    c.observe("a", 10.00, 90)
+    c.observe("a", 4.00, 91)            # B, never seen again
+    for i, at in enumerate(range(101, 106)):
+        c.observe("a", 10.00 + (i + 1) / 10, at)
+    assert c.since(100) == 0
+    assert c.since(0) == 50

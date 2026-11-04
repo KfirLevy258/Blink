@@ -63,6 +63,22 @@ Rules, each from a way the raw number misleads:
   counts only rises whose previous sighting is at or after the anchor: a rise
   between a sighting before the anchor and one after it may have happened
   partly before /usage measured, so it is dropped rather than counted twice.
+  With several ledgers the figure's own is not known, so the stamp is the
+  oldest among the marks at or below the figure, and the marks it passes
+  keep the oldest stamp they could stand for (R1, round 2 of the 2026-11-04
+  review: one ledger's figure landing on another's mark moved that mark's
+  stamp past a /usage, and the other's next rise was counted whole, 460
+  cents for 425). What that costs, kept: a mark no ledger returns to -- a
+  process that exited, the old total a /login left behind once the new
+  ledger passed it -- stays under every later figure with its old stamp,
+  and after the next /usage the session's rises above it count toward the
+  period but not toward the /usage, until the /usage after that measures
+  them. It may be a live process whose renders were lost, spending before
+  the /usage; nothing on the status line says it is not. In the random
+  lives of tests/pc/test_spend_count.py, every one a session with several
+  ledgers, the count since a /usage is 31% of the spend after it; with one
+  mark a session, as before K1, it was 20%. A session with one ledger, the
+  usual one, is counted as before.
 * `at` is the render's own time (the payload's mtime), so reading the same
   render again moves nothing.
 
@@ -422,11 +438,10 @@ class SpendCounter:
             self._dirty = self._urgent = True
             return True
         # The ledger this figure continues: the highest mark at or below
-        # it, so the rise counted is the smallest it could be.
-        best = None
-        for t in tracks:
-            if t[0] <= cents and (best is None or t[0] > best[0]):
-                best = t
+        # it, so the rise counted is the smallest it could be. Every mark
+        # at or below it is a ledger it could continue, though.
+        cands = [t for t in tracks if t[0] <= cents]
+        best = max(cands, key=lambda t: t[0], default=None)
         if best is None:
             # Below every mark: a new ledger, a base like a first sighting.
             # Not urgent: a restart that missed it opens it again from the
@@ -439,11 +454,28 @@ class SpendCounter:
             self._dirty = True
             return True
         hw, last = best
+        # Stamped with the oldest sighting among the marks it could
+        # continue, and those it passed take the older of their own stamp
+        # and the one `best` held (R1, round 2 of the 2026-11-04 review).
+        # Stamped with `best`'s alone, a figure from another ledger moved
+        # `best`'s stamp past a /usage while the ledger it had stood for
+        # was still behind it, and that ledger's next figure was counted
+        # in full against the newer stamp: B at 4.00 before a /usage at
+        # 100, A's 4.05 at 107 on B's mark, B's 4.60 counted as 55 cents
+        # after the /usage, 45 of them spent before it. Whichever ledger
+        # the figure came from, the one it did not is now at its own mark
+        # or at `best`'s, sighted no later than the older stamp, and the
+        # straddling rule (the module docstring) needs that older one.
+        prev = min(t[1] for t in cands)
         changed = False
         if cents > hw:
-            self._adds.append([last, at, cents - hw])
+            self._adds.append([prev, at, cents - hw])
             best[0] = cents
             changed = True
+        for t in cands:
+            if t is not best and t[1] > last:
+                t[1] = last
+                changed = True
         if at > last:
             best[1] = at
             changed = True
