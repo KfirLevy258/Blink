@@ -167,6 +167,55 @@ def test_a_switch_is_dated_when_seen_and_startup_is_not_a_switch(tmp_path):
     assert w.since == NOW + 2
 
 
+def _stamp(path, at):
+    os.utime(path, (at, at))
+
+
+def test_a_switch_is_dated_by_the_rewrite_that_carried_it(tmp_path):
+    """/code-review max of 2026-11-04, finding 9: the switch was dated by
+    the poll on which PlanReader's cached view first showed the new login,
+    up to RECHECK_S after /login, and select() then dropped every reading
+    the new login made in that minute as the old one's. /login writes the
+    file, so the switch happened no later than the mtime that carries the
+    new fingerprint, and no earlier than the mtime that still carried the
+    old one."""
+    p = save_login(tmp_path / ".claude.json", org_type="claude_max")
+    _stamp(p, NOW - 500)
+    reader = claude_plan.PlanReader(path=str(p))
+    w = claude_account.AccountWatch(reader.look)
+    w.poll(NOW - 100)
+    save_login(p, org_type="claude_enterprise", account="acct-2",
+               org="org-2")
+    _stamp(p, NOW - 55)                       # /login, 55 s before the look
+    for t in range(-98, 2, 2):                # paced: seen at the next look
+        w.poll(NOW + t)
+    assert w.kind == "enterprise"
+    assert w.since == NOW - 55
+    # The new login's first reading, made inside that minute, is kept.
+    kept = claude_account.select([windows(NOW - 50, src="cli")], NOW,
+                                 w.kind, w.since, w.touched_at)
+    assert any(f.observed_at == NOW - 50 for f in kept)
+
+
+def test_a_rewrite_stamp_that_cannot_be_the_switch_is_not_used(tmp_path):
+    p = save_login(tmp_path / ".claude.json", org_type="claude_max")
+    _stamp(p, NOW - 500)
+    w = watch_of(p)
+    w.poll(NOW - 100)
+    # A stamp from the future (a clock that disagrees) dates it now.
+    save_login(p, org_type="claude_enterprise", account="acct-2",
+               org="org-2")
+    _stamp(p, NOW + 3600)
+    w.poll(NOW)
+    assert w.since == NOW
+    # One no newer than the stamp the old login was read under is not a
+    # rewrite that carried the switch either.
+    save_login(p, org_type="claude_max", account="u-0001", org="o-0001")
+    _stamp(p, NOW - 900)
+    w.poll(NOW + 10)
+    assert w.since == NOW + 10
+
+
 def test_an_unreadable_moment_changes_nothing(tmp_path):
     p = save_login(tmp_path / ".claude.json",
                    org_type="claude_enterprise")

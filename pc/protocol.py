@@ -632,6 +632,25 @@ def meaningful_usage(msg: dict) -> dict:
     return {k: v for k, v in msg.items() if k not in VOLATILE_USAGE_KEYS}
 
 
+# The largest percentage the board takes (proto.c PCT_MAX). One over it is
+# refused whole and the board keeps its default: 0%, no "used up".
+PCT_MAX = 1000.0
+
+
+def _share(frame):
+    """A frame's session figure as it goes on the wire. A spend share is
+    held at PCT_MAX: $300 against a cap cut to $20 is 1500%, which the
+    board refused, drawing 0% for a page far over its cap (/code-review max
+    of 2026-11-04, U3). A window's figure is left as it is: its sources
+    already refuse one past PCT_MAX."""
+    pct = frame.session_pct
+    if (getattr(frame, "plan", PLAN_WINDOWS) == PLAN_SPEND
+            and isinstance(pct, (int, float)) and not isinstance(pct, bool)
+            and pct > PCT_MAX):
+        return PCT_MAX
+    return pct
+
+
 def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
     """Turn a NormalizedUsageFrame into the usage message for the board.
 
@@ -642,7 +661,7 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
     only thing that decides what a frame looks like on the wire.
     """
     return usage(
-        frame.session_pct, frame.session_resets_at,
+        _share(frame), frame.session_resets_at,
         frame.weekly_pct, frame.weekly_resets_at,
         [],
         session_resets_in_s=secs_until(frame.session_resets_at, now_epoch,
@@ -664,7 +683,7 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         n_stuck=frame.n_stuck + (secondary.n_stuck if secondary else 0),
         n_agents=frame.n_agents + (secondary.n_agents if secondary else 0),
         p2=(secondary.provider if secondary else ""),
-        p2_session_pct=(secondary.session_pct if secondary else UNKNOWN),
+        p2_session_pct=(_share(secondary) if secondary else UNKNOWN),
         p2_weekly_pct=(secondary.weekly_pct if secondary else UNKNOWN),
         p2_session_resets_in_s=(secs_until(secondary.session_resets_at,
                                            now_epoch,
@@ -786,6 +805,12 @@ def plan(provider, kind, period="", usd=None, limit=None, account="",
     return msg
 
 
+# The status line's src (statusline_source.SRC_ID, which imports this
+# module, so it is spelled here and a test holds the two together). A spend
+# frame from it is a gateway's own spend_limit figure.
+GATEWAY_SRC_ID = "cli"
+
+
 def plan_for(primary, secondary=None) -> dict:
     """Build `plan` from the (primary, secondary) frames on the panel.
 
@@ -798,9 +823,18 @@ def plan_for(primary, secondary=None) -> dict:
         kind = getattr(f, "plan", PLAN_WINDOWS)
         if kind != PLAN_WINDOWS:
             spend = kind == PLAN_SPEND
+            # A gateway's figure is the gateway's own count, not this
+            # side's estimate; it is marked only when the reading itself is
+            # old. spend_exact is set on the config's page alone, and until
+            # the /code-review max of 2026-11-04 (U4) every gateway seat
+            # read "~$314" for it.
+            if getattr(f, "src", "") == GATEWAY_SRC_ID:
+                est = bool(getattr(f, "stale", False))
+            else:
+                est = not f.spend_exact
             return plan(f.provider, kind, f.spend_period, f.spend_usd,
                         f.spend_limit_usd, f.account,
-                        est=spend and not f.spend_exact,
+                        est=spend and est,
                         hint=spend and bool(f.spend_hint))
     return plan(PLAN_PROVIDER, PLAN_WINDOWS)
 
@@ -828,6 +862,37 @@ def hide_plan_for_board(msg, plan_msg, can_plan: bool):
     if msg.get("provider") == page:
         blanked.update(session_pct=UNKNOWN, session_resets_in_s=-1)
     return blanked
+
+
+def blank_page(last_usage, page) -> dict:
+    """A usage line that takes `page`'s figures down and leaves the rest.
+
+    For the switch away from a spend login with nothing yet to replace it
+    (Bridge._take_down_spend): the plan goes back to windows, and the share
+    the board holds must go with it, or the board repaints that share of
+    dollars under "SESSION 5h" until the new login first renders -- hours on
+    an idle desk (/code-review max of 2026-11-04, U15).
+
+    Built from `last_usage`, the line the board last had, so the other page
+    and the light keep what they showed; with none, a line that knows
+    nothing, naming `page`. The message passed in is never changed.
+    """
+    if not isinstance(last_usage, dict) or last_usage.get("t") != "usage":
+        return usage(UNKNOWN, None, UNKNOWN, None, [], provider=page)
+    out = dict(last_usage)
+    if out.get("provider") == page:
+        out.update(session_pct=UNKNOWN, session_resets_in_s=-1,
+                   weekly_pct=UNKNOWN, weekly_resets_in_s=-1)
+        # The burn rate and the per-model figures belong to the share.
+        for k in ("burn_pph", "fable_pct", "sonnet_pct", "opus_pct"):
+            out.pop(k, None)
+    if out.get("p2") == page:
+        # Dropped, not set to -1: usage() omits an unknown second-page
+        # figure, and proto.c reads an absent one as -1.
+        for k in ("p2_session_pct", "p2_weekly_pct", "p2_s_in_s",
+                  "p2_w_in_s"):
+            out.pop(k, None)
+    return out
 
 
 def _active_age(frame, secondary, now_epoch: float) -> int:

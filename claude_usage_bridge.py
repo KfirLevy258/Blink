@@ -417,6 +417,15 @@ PROBE_S = 1.5
 # seconds cannot miss a live board.
 PROBE_PATIENT_S = 11.0
 
+# What a `plan` line is compared on for the log (logbook.RepeatsBy below):
+# everything it says except the dollars. On a working spend desk the
+# dollars move with nearly every render, so a plan went out about every ten
+# seconds and each one was a line in bridge.log -- some 360 an hour, with the
+# board's "[plan]" echo of each beside it (/code-review max of 2026-11-04,
+# U5). A change of plan, period, cap or flag is still a line at once; the
+# dollars travel on the wire and are never in the log anyway.
+PLAN_LOGGED_FIELDS = ("plan", "period", "lim", "acct", "est", "hint")
+
 
 def hold_single_instance(home, on_wait=None, poll_s=5.0):
     """Block until this process is the only daemon, then keep the lock.
@@ -561,7 +570,43 @@ def learn_board(known, port, msg):
             "caps": caps}
 
 
-def probe_is_our_board(ser, timeout=PROBE_S, tap=None):
+# How long the probe goes on listening after the first message, for the
+# pref: see probe_is_our_board's `heard`. The board answers a welcome at
+# once, so this only covers a ping that happened to land first.
+PROBE_PREF_GRACE_S = 0.3
+
+
+def board_caps_hint(heard, known):
+    """What Bridge may take this board to draw before it speaks on the read
+    loop: its `board_caps_hint`.
+
+    The pref the probe heard (`heard`, from probe_is_our_board) when there
+    is one: that is the board on this port answering our welcome, so its
+    caps are its own. Until the /code-review max of 2026-11-04 (U17) the
+    hint was board.json's alone, which names the LAST board that spoke: an
+    older board swapped in on the same port, or this one reflashed down,
+    was taken to draw plans, and was handed the spend share for its
+    "SESSION 5h" dial until its own pref reached the bridge.
+
+    With no pref heard -- the reset path, whose hello says soon enough, or a
+    probe that heard only a ping -- board.json's caps stand, less the two
+    that decide what a spend page's figures mean on the wire. Every board
+    that draws plans answers a welcome with its pref (proto.c), and the two
+    wrong guesses are not alike: a plan-less board told it draws plans
+    shows dollars as a session percentage, a plan board told it does not
+    shows "--" for a moment, until it speaks.
+    """
+    for msg in reversed(heard or ()):
+        if isinstance(msg, dict) and msg.get("t") in ("hello", "pref"):
+            return sorted(protocol.board_caps(msg))
+    caps = known.get("caps") if isinstance(known, dict) else None
+    if not isinstance(caps, (list, tuple)):
+        return None
+    unsure = (protocol.BOARD_CAP_PLAN, protocol.BOARD_CAP_SPENDBURN)
+    return [c for c in caps if c not in unsure]
+
+
+def probe_is_our_board(ser, timeout=PROBE_S, tap=None, heard=None):
     """Ask the thing on this port whether it is a Blink board, without a reset.
 
     Why this exists: the reset below is not free, and it is not aimed at a
@@ -589,6 +634,12 @@ def probe_is_our_board(ser, timeout=PROBE_S, tap=None):
     only evidence that it ever slept was being consumed by the question that
     woke it. Unset BLINK_TAP means tap is None and this path is exactly what
     it always was.
+
+    `heard`, when a list, is given every message read here, and the probe
+    then listens on past the first one -- at most PROBE_PREF_GRACE_S, never
+    past `timeout` -- until the board's pref has come: board_caps_hint
+    takes this board's caps from it. None returns at the first message, as
+    the probe always did.
     """
     # encode_checked, as every production writer is (CLAUDE.md). This
     # welcome is the one that decides what the board offers when the daemon
@@ -602,6 +653,7 @@ def probe_is_our_board(ser, timeout=PROBE_S, tap=None):
                                                         RELEASE_VERSION))
     if raw is None:
         print(f"[bridge] probe not sent: {why}", file=sys.stderr)
+    ours = False            # heard from, while still listening for the pref
     try:
         ser.reset_input_buffer()
         if raw is not None:
@@ -623,12 +675,20 @@ def probe_is_our_board(ser, timeout=PROBE_S, tap=None):
                 # arrives first is timing, and identity is the only question
                 # being asked here.
                 if isinstance(msg, dict) and msg.get("t"):
-                    return True
+                    if heard is None:
+                        return True
+                    heard.append(msg)
+                    if msg.get("t") in ("pref", "hello"):
+                        return True
+                    if not ours:
+                        ours = True
+                        deadline = min(deadline,
+                                       time.time() + PROBE_PREF_GRACE_S)
     except Exception:
         # A probe that fails is not evidence of anything; fall through and let
-        # the usual path decide.
-        return False
-    return False
+        # the usual path decide. A board already heard stays heard.
+        return ours
+    return ours
 
 
 def wait_for_port(explicit=None, poll_s=3.0, on_wait=None):
@@ -903,8 +963,15 @@ def main(argv=None):
     # quarter-hour, and the rest counted. Per page, like svc_frames: with a
     # claude and a codex line alternating, one Repeats would log them all.
     burn_frames = logbook.RepeatsBy("p", ("q",), "burn lines")
+    # The spend page's two lines, for the same reason (U5 of the
+    # /code-review max of 2026-11-04: about 1000 lines an hour on a spend
+    # desk). The plan on what it says, not the dollars (PLAN_LOGGED_FIELDS),
+    # and restated each heartbeat; sburn exactly as the token burn line.
+    plan_frames = logbook.RepeatsBy("p", PLAN_LOGGED_FIELDS, "plan lines")
+    sburn_frames = logbook.RepeatsBy("p", ("q",), "spend burn lines")
     _REPEATED = {"usage": usage_frames, "time": time_frames,
-                 "svc": svc_frames, "burn": burn_frames}
+                 "svc": svc_frames, "burn": burn_frames,
+                 "plan": plan_frames, "sburn": sburn_frames}
     # For this computer's own Claude Code, in the folder `blink install`
     # recorded (pc/claude_home): a login service does not see the shell's
     # CLAUDE_CONFIG_DIR, so the watchdog guards the file install wrote.
@@ -965,7 +1032,8 @@ def main(argv=None):
         if drifted:
             print(f"[watchdog] {drifted}", file=sys.stderr)
         for line in (heartbeat.due(), usage_frames.due(), time_frames.due(),
-                     svc_frames.due(), burn_frames.due()):
+                     svc_frames.due(), burn_frames.due(), plan_frames.due(),
+                     sburn_frames.due()):
             if line:
                 print(line, file=sys.stderr)
         if logbook.rotate_if_full(_log_file, sys.stderr):
@@ -1106,8 +1174,12 @@ def main(argv=None):
             # VID:PID that got us here belongs to a chip used by a great deal
             # of hardware that is not ours, and a reset is not a question, it
             # is an action taken on someone's device.
+            # What the board said to the probe, for board_caps_hint: its pref
+            # names what THIS board draws, where board.json names the last.
+            heard = []
             already_running = probe_is_our_board(
-                ser, PROBE_PATIENT_S if patient else PROBE_S, tap)
+                ser, PROBE_PATIENT_S if patient else PROBE_S, tap,
+                heard=heard)
             asked.add(port)
 
             # May this port be reset if it stays silent?
@@ -1350,8 +1422,9 @@ def main(argv=None):
                         builder_ended=theme_builder.ended,
                         builder_open=theme_builder.editing,
                         edit_answers=theme_answers,
-                        # What the board can show, until it says again.
-                        board_caps_hint=known.get("caps"),
+                        # What the board can show, until it says again:
+                        # its own pref to the probe when it gave one.
+                        board_caps_hint=board_caps_hint(heard, known),
                         pending=update.PendingFirmware(
                             os.path.join(blink_home, "pending_fw.json")))
         report_failure = None   # handed to the Bridge above; never repeated

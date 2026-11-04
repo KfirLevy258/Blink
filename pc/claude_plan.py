@@ -95,6 +95,12 @@ from pc import claude_account, claude_home
 # stale name from vouching for a downgraded desk (is_ultra).
 RECHECK_S = 60
 
+# Before the first answer (PlanReader.look), how soon the file is tried
+# again. Not every poll: a config that never parses would then be read
+# whole every two seconds on the serial thread. A source answers from
+# memory and is asked at every look until it answers.
+FIRST_ANSWER_RETRY_S = 5
+
 # The largest file read. Claude Code's config grows with every project it
 # has been run in (a history and settings per folder); 120 KB on the owner's
 # desk after months of use. Eight megabytes is sixty times that, and bounds
@@ -381,6 +387,9 @@ class PlanReader:
         self._looked_at = None
         self._sig = None
         self._view = EMPTY_VIEW
+        # False until a look has had an answer: a view from the source, or
+        # the file read (or found missing). See look().
+        self._answered = False
 
     def path(self):
         if self._path is not None:
@@ -389,21 +398,40 @@ class PlanReader:
 
     def look(self, now_epoch) -> ConfigView:
         """The view as of the last look. A look is due RECHECK_S after the
-        last one, or at once if the clock has gone back past it."""
+        last one, or at once if the clock has gone back past it.
+
+        And at once until a look has had an answer at all. The view held
+        before then is EMPTY_VIEW, which says "no seat, not Ultra", and a
+        first look that got nothing -- a WSL watch that has not ticked yet
+        (its source answers None), a config locked or caught mid-write --
+        used to hold it for RECHECK_S all the same. A spend desk then
+        showed Claude Desktop's windows figures, a saved Ultra verdict's
+        mark and the token burn view for most of a minute after every
+        daemon start (/code-review max of 2026-11-04, U18). Until then the
+        source, which is memory, is asked at every look, and the file
+        every FIRST_ANSWER_RETRY_S."""
+        if self._answered:
+            wait = RECHECK_S
+        elif self._source is not None:
+            wait = 0
+        else:
+            wait = FIRST_ANSWER_RETRY_S
         if (self._looked_at is not None
-                and 0 <= now_epoch - self._looked_at < RECHECK_S):
+                and 0 <= now_epoch - self._looked_at < wait):
             return self._view
         self._looked_at = now_epoch
         if self._source is not None:
             got = self._source()
             if got is not None:
                 self._view = got
+                self._answered = True
             return self._view
         try:
             p = self.path()
             st = os.stat(p)
         except FileNotFoundError:
             self._sig, self._view = None, EMPTY_VIEW
+            self._answered = True
             return self._view
         except (OSError, ValueError):
             return self._view           # not knowing is not "no seat"
@@ -421,6 +449,7 @@ class PlanReader:
             self._sig = None
             return self._view
         self._sig, self._view = sig, got
+        self._answered = True
         return self._view
 
     def ultra(self, now_epoch) -> bool:

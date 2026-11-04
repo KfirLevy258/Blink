@@ -301,6 +301,23 @@ def test_merge_never_marks_a_group_with_a_spend_figure():
     assert page.no_session_window is False
 
 
+def test_an_unreported_page_is_never_marked():
+    """/code-review max of 2026-11-04, U38: an Enterprise or Team login that
+    reports nothing gets claude_account's unreported frame, and the hook's
+    frames beside it carry the mark a saved Ultra verdict puts on them. The
+    merge then said no_session_window, and the "Not reported" ENTERPRISE
+    page got the token burn view, with the transcripts read for it. The
+    verdict is the earlier Ultra login's; it says nothing of this one."""
+    from pc import normalizer
+    from pc import claude_account
+    unreported = claude_account._unreported("enterprise", NOW, NOW - 60)
+    marked = _hook_state(NOW)
+    marked.no_session_window = True
+    page = normalizer.merge([unreported, marked])
+    assert page.plan == base.PLAN_UNREPORTED
+    assert page.no_session_window is False
+
+
 def test_no_token_burn_on_a_spend_page(tmp_path):
     _proved_no_window(tmp_path)
     asked = []
@@ -363,6 +380,108 @@ def test_login_round_trip_restarts_the_count(tmp_path):
     bus3 = bus_on(clock)
     bus3.poll()
     assert bus3.plan_msg()["usd"] == 0.0
+
+
+def test_a_login_away_and_back_takes_new_baselines(tmp_path):
+    """/code-review max of 2026-11-04, U9: Claude Code keeps a session's id
+    across /login but starts its cost again from zero. Back on the same
+    seat, bind() keeps the count (same fingerprint) and the high-water
+    marks with it, so every render under the old mark counted nothing:
+    $0.30 of new spend shown as none. A login switch seen by the provider
+    now drops the per-session marks (SpendCounter.forget_sessions), so the
+    next sighting is a first one and the rises after it count."""
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 3600, cache=False)
+    bus = bus_on(clock)
+    for at, cost in ((NOW, 1.00), (NOW + 10, 1.30)):
+        render(tmp_path, at, cost, session="sess-a")
+        clock.t = at + 1
+        bus.poll()
+    assert bus.plan_msg()["usd"] == 0.30
+    t = NOW + 100
+    max_config(tmp_path, t)
+    render(tmp_path, t, 0.00, session="sess-a", rate_limits=WINDOWS)
+    clock.t = t + 1
+    bus.poll()
+    assert bus.plan_msg()["plan"] == "windows"
+    t = NOW + 200
+    config(tmp_path, t, cache=False)
+    for at, cost in ((t, 0.20), (t + 10, 0.50), (t + 20, 0.75)):
+        render(tmp_path, at, cost, session="sess-a")
+        clock.t = at + 1
+        bus.poll()
+    assert bus.plan_msg()["plan"] == "spend"
+    assert bus.plan_msg()["usd"] == 0.85
+
+
+def test_another_organisation_does_not_take_the_old_usage(tmp_path):
+    """/code-review max of 2026-11-04, U11: the saved /usage is matched to
+    the login by accountUuid alone, so /login to another organisation as
+    the same person kept the old organisation's $300 of $500 on the page.
+    The fingerprint covers both ids: a /usage fetched no later than the
+    last config that still carried the old fingerprint is that login's."""
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 50, used=30000, limit=50000, fetched=NOW - 60)
+    bus = bus_on(clock)
+    bus.poll()
+    assert bus.plan_msg()["usd"] == 300.0
+    t = NOW + 100
+    config(tmp_path, t, used=30000, limit=50000, fetched=NOW - 60, org=ORG_B)
+    clock.t = t + 1
+    bus.poll()
+    plan = bus.plan_msg()
+    assert plan["plan"] == "spend"
+    assert plan["usd"] == 0.0 and "lim" not in plan and plan["hint"] == 1
+    # A /usage under the new login is its own, and is used.
+    t = NOW + 200
+    config(tmp_path, t, used=1234, limit=25000, fetched=t - 5, org=ORG_B)
+    clock.t = t + 1
+    bus.poll()
+    assert bus.plan_msg()["usd"] == 12.34 and bus.plan_msg()["lim"] == 250.0
+
+
+def test_a_remembered_gateway_share_does_not_name_the_config_page(tmp_path):
+    """/code-review max of 2026-11-04, U14: a gateway figure remembered from
+    an earlier render (the last payload with a session figure) was offered
+    beside the config's page, and with no /usage this month the config's
+    page has no share, so the remembered $200 of $500 at 40% won the dial
+    for as long as it was remembered. On a seat billed by usage the page is
+    the config's; only the live render's gateway figure takes it."""
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 3600, cache=False)
+    gateway = {"spend_limit": {"used_percentage": 40.0,
+                               "resets_at": NEXT_MONTH, "used_usd": 200.0,
+                               "limit_usd": 500, "period": "monthly"}}
+    render(tmp_path, NOW - 30, 1.00, rate_limits=gateway)
+    bus = bus_on(clock)
+    bus.poll()
+    assert bus.claude_page().src == ss.SRC_ID
+    for step in (60, 600, 3000):
+        render(tmp_path, NOW + step - 1, 1.20)
+        clock.t = NOW + step
+        msg = bus.poll()
+        page = bus.claude_page()
+        assert page.src == claude_cli.SPEND_SRC_ID
+        assert msg["session_pct"] == -1
+        assert bus.plan_msg()["usd"] != 200.0
+
+
+def test_a_gateway_share_without_a_reset_is_not_blanked_after_5h(tmp_path):
+    """/code-review max of 2026-11-04, U39: a five_hour figure whose
+    resets_at will not read is blanked five hours and ten minutes after it
+    was fetched, because a window open then has ended. A spend_limit
+    without resets_at went through the same bound and the month's share
+    went to "--" after 5h10m. A monthly cap is no five-hour window."""
+    clock = Clock(NOW)
+    max_config(tmp_path, NOW - 3600)
+    gateway = {"spend_limit": {"used_percentage": 62.8, "used_usd": 314.12,
+                               "limit_usd": 500, "period": "monthly"}}
+    render(tmp_path, NOW - 30, 1.00, rate_limits=gateway)
+    bus = bus_on(clock)
+    assert bus.poll()["session_pct"] == 62.8
+    clock.t = NOW + 6 * 3600
+    render(tmp_path, NOW + 6 * 3600 - 30, 1.00, rate_limits=gateway)
+    assert bus.poll()["session_pct"] == 62.8
 
 
 def test_no_weekly_on_a_spend_page(tmp_path):

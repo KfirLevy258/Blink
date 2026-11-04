@@ -194,8 +194,9 @@ def test_the_bus_shows_spend_and_says_so():
     msg = bus.poll()
     assert msg["session_pct"] == 62.8
     assert msg["session_resets_in_s"] == 18 * 86400 + 4 * 3600
+    # A status-line (gateway) frame: the gateway's own figure, exact (U4).
     assert bus.plan_msg() == protocol.plan(
-        "claude", "spend", "monthly", 314.12, 500.0, est=True)
+        "claude", "spend", "monthly", 314.12, 500.0)
     assert bus.fetch().plan_msg() == bus.plan_msg()
 
 
@@ -305,7 +306,6 @@ def test_the_plan_is_sent_on_change_and_again_on_every_connect():
     _hello(b, "1.4.0")
     for _ in range(5):
         b.poll_if_changed()
-        b.poll_once()
     assert [m["t"] for m in sent].count("plan") == 1
 
     # The dollars move on their own schedule; the usage line does not.
@@ -344,17 +344,110 @@ def test_a_desk_without_plans_sends_nothing_new():
 
 
 def test_switching_back_clears_the_plan_before_max_has_said_anything():
+    """/login back to Max with no Max reading yet: the plan goes back to
+    windows, and the spend share the board holds goes with it. The plan
+    alone (what this test asserted until the /code-review max of
+    2026-11-04, U15) left the board repainting 62.8 -- a share of dollars --
+    under "SESSION 5h" beside a 26-day countdown, and "Session almost used
+    up" near the cap, until Max next rendered: hours on an idle desk."""
     sent = []
     f = _Fetch(protocol.frame_to_usage(spend(), NOW),
                protocol.plan_for(spend()))
     b = _bridge(f, sent)
     _hello(b, "1.4.0")
     f.usage, f.plan = None, protocol.plan("claude", "windows")
+    n = len(sent)
     b.poll_if_changed()
-    assert sent[-1] == protocol.plan("claude", "windows")
+    new = sent[n:]
+    assert [m["t"] for m in new] == ["plan", "usage"]
+    assert new[0] == protocol.plan("claude", "windows")
+    blank = new[1]
+    assert blank["provider"] == "claude"
+    assert blank["session_pct"] == -1 and blank["weekly_pct"] == -1
+    assert blank["session_resets_in_s"] == -1
+    assert blank["weekly_resets_in_s"] == -1
+    raw, why = protocol.encode_checked(blank)
+    assert why is None
+    # Said once: the next ticks have nothing new to take down.
+    n = len(sent)
+    b.poll_if_changed()
+    b.poll_once()
+    assert "usage" not in [m["t"] for m in sent[n:]]
     f.plan = protocol.plan("claude", "unreported", account="enterprise")
     b.poll_once()
     assert [m for m in sent if m["t"] == "plan"][-1]["plan"] == "unreported"
+
+
+def test_the_blank_keeps_the_other_page():
+    """A spend page on the second slot, Codex main: only the spend page's
+    figures are taken down, from the line the board last had."""
+    sent = []
+    codex = windows(provider="codex", s=33.0, w=7.0)
+    f = _Fetch(protocol.frame_to_usage(codex, NOW, secondary=spend()),
+               protocol.plan_for(codex, spend()))
+    b = _bridge(f, sent)
+    _hello(b, "1.4.0")
+    f.usage, f.plan = None, protocol.plan("claude", "windows")
+    b.poll_once()
+    blank = [m for m in sent if m["t"] == "usage"][-1]
+    assert blank["provider"] == "codex" and blank["p2"] == "claude"
+    assert blank["session_pct"] == 33.0 and blank["weekly_pct"] == 7.0
+    # Absent is -1 to proto.c, and how usage() says unknown on page two.
+    for k in ("p2_session_pct", "p2_s_in_s", "p2_weekly_pct", "p2_w_in_s"):
+        assert k not in blank
+
+
+def test_no_blank_when_a_reading_comes_with_the_switch():
+    """With a Max reading in hand, the usage line itself replaces the share:
+    no second line."""
+    sent = []
+    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
+               protocol.plan_for(spend()))
+    b = _bridge(f, sent)
+    _hello(b, "1.4.0")
+    f.usage = protocol.frame_to_usage(windows(), NOW)
+    f.plan = protocol.plan("claude", "windows")
+    n = len(sent)
+    b.poll_if_changed()
+    usages = [m for m in sent[n:] if m["t"] == "usage"]
+    assert len(usages) == 1 and usages[0]["session_pct"] == 41.0
+
+
+def test_the_heartbeat_restates_the_plan():
+    """One plan line lost on the wire -- dropped whole, as any line can be
+    -- was repaired only when the dollars next moved, which on an idle desk
+    is hours: the board drew the spend share under "SESSION 5h" all that
+    time (/code-review max of 2026-11-04, U16). The heartbeat restates the
+    plan, as it restates svc and the usage line, and always before the
+    usage line it describes; the fast tick still sends it on change only."""
+    sent = []
+    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
+               protocol.plan_for(spend()))
+    b = _bridge(f, sent)
+    _hello(b, "1.4.0")
+    n = len(sent)
+    for _ in range(3):
+        b.poll_once()
+    types_ = [m["t"] for m in sent[n:]]
+    assert types_.count("plan") == 3
+    for i, t in enumerate(types_):
+        if t == "usage":
+            assert types_[i - 1] == "plan"
+    n = len(sent)
+    for _ in range(3):
+        b.poll_if_changed()
+    assert "plan" not in [m["t"] for m in sent[n:]]
+    # With no reading at all the heartbeat still restates it.
+    f.usage = None
+    n = len(sent)
+    b.poll_once()
+    assert [m["t"] for m in sent[n:]].count("plan") == 1
+    # And a desk that has never seen a plan still sends none.
+    sent2 = []
+    b2 = _bridge(_Fetch(protocol.frame_to_usage(windows(), NOW), None), sent2)
+    _hello(b2, "1.4.0")
+    b2.poll_once()
+    assert "plan" not in [m["t"] for m in sent2]
 
 
 def test_every_message_the_bridge_writes_fits_the_line():
@@ -434,8 +527,9 @@ def test_plan_flags_only_when_true():
     m = protocol.plan("claude", base.PLAN_UNREPORTED, account="team",
                       est=True, hint=True)
     assert "est" not in m and "hint" not in m
-    # plan_for reads them off the spend primary.
+    # plan_for reads them off the spend primary: the config's page.
     f = spend()
+    f.src = base.SPEND_SRC_ID
     assert "est" in protocol.plan_for(f) and "hint" not in protocol.plan_for(f)
     f.spend_exact = True
     assert "est" not in protocol.plan_for(f)
@@ -449,6 +543,7 @@ def test_plan_resent_when_estimate_starts():
     compared, so the flag goes out on its own."""
     sent = []
     exact = spend()
+    exact.src = base.SPEND_SRC_ID
     exact.spend_exact = True
     f = _Fetch(protocol.frame_to_usage(exact, NOW), protocol.plan_for(exact))
     b = _bridge(f, sent)
@@ -458,6 +553,7 @@ def test_plan_resent_when_estimate_starts():
     b.poll_if_changed()
     assert [m["t"] for m in sent].count("plan") == 1
     old = spend()                       # anchor 900 s old: not exact now
+    old.src = base.SPEND_SRC_ID
     f.plan = protocol.plan_for(old)
     b.poll_if_changed()
     plans = [m for m in sent if m["t"] == "plan"]
@@ -649,3 +745,110 @@ def test_widest_sburn_line():
         "claude", q, [protocol.SBURN_MAX_CENTS] * 20))
     assert why is None and len(raw) <= protocol.MAX_LINE_BYTES
     assert len(raw) == 234, len(raw)
+
+
+# ------------------------------------------------------------- the log
+
+
+def test_the_daemon_logs_plan_and_sburn_by_change_not_by_send():
+    """/code-review max of 2026-11-04, U5: on a working spend desk the plan
+    went out with every cent and the sburn line every 15 s, and neither was
+    in _REPEATED, so each send was a line in bridge.log -- with the board's
+    "[plan]" echo of each plan beside it, some 1000 lines an hour against a
+    Max desk's 370. The plan is compared on what it says, not the dollars,
+    which move by construction; sburn on the page and quarter-hour, as the
+    token burn line is."""
+    import ast
+    import pathlib
+    from pc import logbook
+    root = pathlib.Path(__file__).resolve().parents[2]
+    src = ast.unparse(ast.parse(
+        (root / "claude_usage_bridge.py").read_text(encoding="utf-8")))
+    assert "'plan': plan_frames" in src and "'sburn': sburn_frames" in src
+    assert "plan_frames.due()" in src and "sburn_frames.due()" in src
+    assert ("logbook.RepeatsBy('p', PLAN_LOGGED_FIELDS, 'plan lines')"
+            in src)
+    assert "logbook.RepeatsBy('p', ('q',), 'spend burn lines')" in src
+
+    import claude_usage_bridge as cub
+    r = logbook.RepeatsBy("p", cub.PLAN_LOGGED_FIELDS, "plan lines")
+    logged = 0
+    for cents in range(31412, 31412 + 300):
+        m = protocol.plan("claude", base.PLAN_SPEND, "monthly",
+                          cents / 100, 500.0, est=True)
+        logged += r.worth_logging(m)
+    assert logged == 1                       # three hundred cents, one line
+    assert r.worth_logging(protocol.plan("claude", base.PLAN_WINDOWS))
+    assert "usd" not in cub.PLAN_LOGGED_FIELDS
+
+
+def test_the_boards_plan_echo_is_collapsed():
+    """The board prints "[plan] <page> <kind>" for every plan it takes, and
+    bridge.log keeps only the tag (console_line), so each restated plan was
+    an identical line. Logged at most once per ten minutes, with a count of
+    what was held back; other tags are untouched."""
+    from pc import logbook
+    t = [0.0]
+    e = logbook.ConsoleEcho(now=lambda: t[0])
+    out = []
+    for _ in range(100):
+        out += e.feed(b"[plan] claude spend monthly\n[usage] x 5\n")
+        t[0] += 5
+    assert out.count("[plan]") == 1
+    assert out.count("[usage]") == 100
+    t[0] += 600
+    out = e.feed(b"[plan] claude windows\n")
+    assert out == ["[plan] (99 more not logged)"]
+    assert e.feed(b"[plan] claude windows\n") == []
+
+
+def test_a_benched_provider_is_logged_by_type_only(capsys):
+    """The message of an exception out of a provider can carry what it was
+    reading -- "int too large to convert to float" from a damaged status
+    line, a path, a character of Claude Code's config -- and the bench line
+    put it in bridge.log. The type is enough to say what broke."""
+    class Broken:
+        def poll(self, now):
+            raise ValueError("secret /Users/someone/.claude.json 31412")
+
+    bus = ingest.IngestionBus(providers=[Broken()], now=lambda: NOW,
+                              verdict=None)
+    bus.poll()
+    err = capsys.readouterr().err
+    assert "Broken failed and will be skipped (ValueError)" in err
+    assert "secret" not in err and "31412" not in err
+
+
+def test_a_share_over_the_boards_range_is_clamped_not_refused():
+    """/code-review max of 2026-11-04, U3: $300 spent against a cap cut to
+    $20 is 1500%, and proto.c refuses a percentage over PCT_MAX (1000) and
+    keeps its default, so the board drew 0% and no "used up". A spend share
+    goes out at most PCT_MAX: far over the cap still reads as over it."""
+    assert protocol.PCT_MAX == 1000.0
+    msg = protocol.frame_to_usage(spend(pct=1500.0), NOW)
+    assert msg["session_pct"] == protocol.PCT_MAX
+    msg = protocol.frame_to_usage(windows(provider="codex"), NOW,
+                                  secondary=spend(pct=1e300))
+    assert msg["p2_session_pct"] == protocol.PCT_MAX
+    # Under it, untouched.
+    assert protocol.frame_to_usage(spend(pct=102.3), NOW)["session_pct"] \
+        == 102.3
+
+
+def test_a_gateway_figure_is_not_an_estimate():
+    """/code-review max of 2026-11-04, U4: est was "not spend_exact", and
+    spend_exact is set only on the config's page, so every gateway seat's
+    figure -- the gateway's own count, off the status line -- went out as
+    an estimate: "~$314", "Spent ~$314 of $500". It is marked only when
+    the reading itself is stale."""
+    from pc import statusline_source as ss
+    assert protocol.GATEWAY_SRC_ID == ss.SRC_ID
+    f = spend()
+    assert f.src == ss.SRC_ID
+    assert "est" not in protocol.plan_for(f)
+    f.stale = True
+    assert protocol.plan_for(f)["est"] == 1
+    # A scenario's step says for itself.
+    g = spend()
+    g.src = "scripted"
+    assert protocol.plan_for(g)["est"] == 1
