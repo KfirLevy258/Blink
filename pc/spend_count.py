@@ -23,6 +23,21 @@ Rules, each from a way the raw number misleads:
   payload can, and a negative "high-water mark" would count the next real
   figure twice over.
 
+* A residual, kept rather than fixed (U10 in the final review of
+  2026-11-04). Two processes on one session id -- `claude --continue` in
+  a second terminal -- render different totals, and any sighting at or
+  after the last one moves the session's stamp. If the leading process's
+  render just before a /usage is lost (another session wrote
+  statusline.json over it before the poll read it), the lagging one's
+  figure, equal to the high-water mark, stamps the session after the
+  anchor, and the leader's next rise is counted in full although part of
+  it was spent before /usage measured: 30 cents counted for 20. Only a
+  sighting below the mark could be told apart, and the lost render makes
+  the lagging one's equal to it, so no rule on the figures alone fixes
+  it; the status line carries no process id. It needs two processes on
+  one session, a lost render and a /usage together, and the next /usage
+  makes the figure exact again.
+
 What the file keeps, and why it stays small. Until the final review of
 2026-11-04 every rise of the month was kept one by one, so the file grew
 all month and was rewritten on nearly every render. Now:
