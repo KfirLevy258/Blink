@@ -121,11 +121,10 @@ def test_spend_seat_gives_a_spend_plan_message(tmp_path):
 
 
 def test_rises_after_the_anchor_add_up(tmp_path):
-    clock = Clock(NOW - 449)
+    clock = Clock(NOW - 499)
     config(tmp_path, NOW - 600, used=1000, fetched=NOW - 600)
     bus = bus_on(clock)
-    # The first sighting more than spend_count.SKEW_S after the /usage.
-    for at, cost in ((NOW - 450, 1.00), (NOW - 400, 1.50),
+    for at, cost in ((NOW - 500, 1.00), (NOW - 400, 1.50),
                      (NOW - 300, 1.75)):
         render(tmp_path, at, cost)
         clock.t = at + 1
@@ -1001,10 +1000,11 @@ def test_no_status_file_at_the_switch_marks_nothing(tmp_path):
     assert any(f.session_pct == 3.0 for f in p.poll(NOW + 8))
 
 
-def test_a_rise_inside_the_usage_margin_is_not_exact(tmp_path):
-    """Round 6, item 6: a /usage a minute ago and a rise since, inside the
-    two minutes the count leaves to the next /usage: the figure is the
-    /usage alone, and it is an estimate, not exact."""
+def test_a_native_desk_counts_from_the_usage_with_no_margin(tmp_path):
+    """Final review of round 7, F1: the two-minute margin is for a WSL
+    desk, whose render times come from the Windows clock and whose /usage
+    time from the distribution's; a native desk has one clock, and a rise
+    30 s after its /usage is counted. The page is an estimate then."""
     clock = Clock(NOW)
     config(tmp_path, NOW - 60, used=1000, fetched=NOW - 60)
     bus = bus_on(clock)
@@ -1012,5 +1012,25 @@ def test_a_rise_inside_the_usage_margin_is_not_exact(tmp_path):
         render(tmp_path, at, cost)
         clock.t = at + 1
         bus.poll()
-    assert bus.plan_msg()["usd"] == 10.00
+    assert bus.plan_msg()["usd"] == 10.50
     assert bus.claude_page().spend_exact is False
+
+
+def _anchor(fetched_at, used=1000):
+    return claude_plan.SpendAnchor(used_cents=used, limit_cents=25000,
+                                   enabled=True, fetched_at=fetched_at)
+
+
+def test_a_wsl_desk_leaves_the_margin_to_the_next_usage():
+    """F1: on a WSL home a rise from a sighting inside SKEW_S after the
+    /usage is left to the next one, and the page says it is an estimate
+    (round 6, item 6)."""
+    from pc import spend_count
+    c = spend_count.SpendCounter(persist=False)
+    c.observe("a", 1.00, NOW - 50)
+    c.observe("a", 1.50, NOW - 40)
+    f = claude_cli._spend_frame(_anchor(NOW - 60), c, NOW, NOW - 40,
+                                wsl=True)
+    assert f.spend_usd == 10.00 and f.spend_exact is False
+    g = claude_cli._spend_frame(_anchor(NOW - 60), c, NOW, NOW - 40)
+    assert g.spend_usd == 10.50 and g.spend_exact is False

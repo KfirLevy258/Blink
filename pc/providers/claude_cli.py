@@ -81,6 +81,7 @@ import math
 import os
 import sys
 
+from pc import claude_home
 from pc import claude_plan
 from pc import protocol
 from pc import session_verdict
@@ -761,7 +762,18 @@ class ClaudeCliProvider(base.ProviderParser):
                 and anchor.fetched_at <= self._anchor_floor):
             anchor = None
         return _spend_frame(anchor, counter, now_epoch, self._render_at,
-                            view.mtime)
+                            view.mtime, wsl=self._on_wsl())
+
+    def _on_wsl(self):
+        """Whether the Claude home read is a WSL distribution's: its
+        renders are dated by the Windows clock and its /usage by the
+        distribution's (spend_count.SKEW_S). Not knowing is native."""
+        try:
+            home = (self._home() if self._home is not None
+                    else claude_home.current())
+        except Exception:
+            return False
+        return getattr(home, "kind", None) == claude_home.WSL
 
     def _note_login(self, view):
         """Follow the config's login across switches, for the count and
@@ -969,7 +981,8 @@ def _file_sig(path):
         return None
 
 
-def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None):
+def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None,
+                 wsl=False):
     """The spend page: the /usage figure plus what was counted since it.
 
     docs/plans/enterprise-spend.md, "The figure". The anchor is the cents
@@ -985,6 +998,9 @@ def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None):
     the cap is reached, whatever the cents say. A cap of zero is reached
     too, not a division. With no cap the share is UNKNOWN and the dollars
     are the page (base.has_usage).
+
+    `wsl`: the Claude home is a WSL distribution's, whose render times and
+    /usage time come from two clocks (spend_count.SKEW_S).
 
     Dated by the newer of the last status-line render and the /usage,
     whichever Claude Code did last; by the config's mtime (`config_at`,
@@ -1006,10 +1022,12 @@ def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None):
         added = counter.since(period)
         cents, limit = added, None
     else:
-        # From SKEW_S after the /usage: its time is not the renders' clock,
-        # and how far the two disagree on a WSL desk is an owed
-        # measurement (spend_count.SKEW_S).
-        added = counter.since_usage(a.fetched_at)
+        # On a WSL desk from SKEW_S after the /usage: its time is not the
+        # renders' clock, and how far the two disagree is an owed
+        # measurement (spend_count.SKEW_S). A native desk has one clock,
+        # and no margin (final review of round 7, F1).
+        added = (counter.since_usage(a.fetched_at) if wsl
+                 else counter.since(a.fetched_at))
         cents, limit = a.used_cents + added, a.limit_cents
     pct = base.UNKNOWN
     if limit is not None:

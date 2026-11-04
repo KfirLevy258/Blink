@@ -157,7 +157,8 @@ SAVE_EVERY_S = 60
 # is an estimate while there are any (rose_after). Round 5 of the review
 # took the margin out for claiming "exact" over those rises; round 6 put
 # it back with that fixed. Applied by since_usage, which claude_cli asks
-# with a /usage time.
+# with a /usage time on a WSL home only: a native desk dates both by one
+# clock (final review of round 7, F1).
 SKEW_S = 120
 # 2: the carried entry and the newest anchor asked about. A version-1 file
 # (every rise one by one, from before 2026-11-04) is read as empty, as any
