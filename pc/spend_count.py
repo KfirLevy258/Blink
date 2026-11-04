@@ -141,9 +141,14 @@ SAVE_EVERY_S = 60
 # file this cannot read is: it held an estimate, which the next /usage
 # makes exact.
 _VERSION = 2
-# Round 3 of the 2026-11-04 review's builds wrote a session as a flat list
-# of several [mark, seen] pairs, one a ledger. Read as the highest mark
-# and the stamp that set it, which is what one mark would have held.
+# Round 2 of the 2026-11-04 review's builds wrote a session as a flat list
+# of [mark, seen] pairs, one a cost ledger, up to eight (_parse). Read as
+# the highest mark, stamped with the oldest of the pairs' times: in those
+# builds an equal figure from another process restamped a mark, so the
+# highest mark's own time may be later than the sighting that set it, and
+# a rise counted from it would be taken in toward a /usage it straddled
+# (round 4). The oldest time can only drop such a rise, never add one.
+_LEGACY_PAIRS_MAX = 8
 
 
 # The largest figure the counter believes, in cents: ten million dollars.
@@ -233,16 +238,16 @@ def _parse(d):
     sessions = {}
     for sid, v in d["sessions"].items():
         if (not isinstance(v, list) or not v or len(v) % 2
-                or len(v) > 16):
+                or len(v) > 2 * _LEGACY_PAIRS_MAX):
             return None
-        best = None
-        for hw, seen in zip(v[::2], v[1::2]):
+        pairs = list(zip(v[::2], v[1::2]))
+        for hw, seen in pairs:
             if isinstance(hw, bool) or not isinstance(hw, int) \
                     or not _cents(hw) or not _time(seen):
                 return None
-            if best is None or hw > best[0]:
-                best = [hw, seen]
-        sessions[sid] = best
+        # One pair is today's [mark, seen]; several, see _LEGACY_PAIRS_MAX.
+        sessions[sid] = [max(hw for hw, _s in pairs),
+                         min(seen for _h, seen in pairs)]
     adds = []
     for a in d["adds"]:
         if not isinstance(a, list) or len(a) != 3:
