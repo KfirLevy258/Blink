@@ -305,6 +305,11 @@ class ClaudeCliProvider(base.ProviderParser):
         # A /usage fetched at or before this belongs to an earlier login
         # (_note_login); None while no switch has been seen.
         self._anchor_floor = None
+        # (config mtime, newest render read) at the last login switch: a
+        # render dated before the first or no later than the second is an
+        # earlier login's, and is neither offered nor counted
+        # (_note_login, _old_login); None while no switch has been seen.
+        self._render_floor = None
         # The running count of spend between /usage runs (pc/spend_count),
         # fed and saved only while the config names a spend seat. The bus
         # hands in the one it owns, persisted; built here, for `blink
@@ -676,8 +681,11 @@ class ClaudeCliProvider(base.ProviderParser):
 
     def poll(self, now_epoch):
         """The status line's frames, and on a spend seat the spend page."""
+        # The config first: a /login it shows drops the old login's renders
+        # (_note_login) before this poll's frames are made from them.
+        view = self._look(now_epoch)
         frames = self._status_frames(now_epoch)
-        spend = self._spend(now_epoch, frames)
+        spend = self._spend(now_epoch, frames, view)
         if spend is not None:
             # The config's page is built only when the live render carries
             # no gateway figure (_spend_or_none), so any gateway spend frame
@@ -690,26 +698,39 @@ class ClaudeCliProvider(base.ProviderParser):
             frames.append(spend)
         return frames
 
-    def _spend(self, now_epoch, frames):
-        """The spend frame for this poll, or None: not a spend seat, a
-        gateway figure already on the status line, or a failure, which is
-        said once in fixed words (spend_failed) and costs this frame only.
-        """
+    def _look(self, now_epoch):
+        """The config's view this poll, with its login noted, or None when
+        looking failed -- said once in fixed words (spend_failed), as a
+        failure of the spend page it is for, and costing this poll's spend
+        page only. The config is looked at on every poll (paced by
+        claude_plan.RECHECK_S), so a /usage or a /login shows within about
+        a minute."""
         try:
-            return self._spend_or_none(now_epoch, frames)
+            view = self._plan.look(now_epoch)
+            # Whatever the seat: a login away and back is two switches, and
+            # the one away is seen on a Max view.
+            self._note_login(view)
+            return view
         except Exception:
             spend_failed()
             return None
 
-    def _spend_or_none(self, now_epoch, frames):
-        """See _spend. The config is looked at on every poll (paced by
-        claude_plan.RECHECK_S), so a /usage or a /login shows within about
-        a minute; on a seat that is not billed by usage nothing below the
-        look runs, and the count is neither touched nor saved."""
-        view = self._plan.look(now_epoch)
-        # Whatever the seat: a login away and back is two switches, and the
-        # one away is seen on a Max view.
-        self._note_login(view)
+    def _spend(self, now_epoch, frames, view):
+        """The spend frame for this poll, or None: not a spend seat, a
+        gateway figure already on the status line, or a failure, which is
+        said once in fixed words (spend_failed) and costs this frame only.
+        """
+        if view is None:
+            return None
+        try:
+            return self._spend_or_none(now_epoch, frames, view)
+        except Exception:
+            spend_failed()
+            return None
+
+    def _spend_or_none(self, now_epoch, frames, view):
+        """See _spend. On a seat that is not billed by usage nothing below
+        the look runs, and the count is neither touched nor saved."""
         if not view.spend_seat:
             return None
         counter = self._counter
@@ -778,7 +799,34 @@ class ClaudeCliProvider(base.ProviderParser):
                 forget()
             if self._login_mtime is not None:
                 self._anchor_floor = self._login_mtime
+            # The renders: every one read before this poll, and every one
+            # dated before the config that names the new login, is the old
+            # login's. Dropped here, at the source, and not offered again
+            # -- not the file in front of us, not either memory -- so the
+            # bus has nothing of the old login to put under the new one's
+            # plan (round 4 of the 2026-11-04 review). Four rounds of
+            # hiding the old reading in the Bridge each broke: it kept the
+            # old gateway's 62.8% under "SESSION 5h", or blanked the new
+            # login's page for good. The newest render read counts as well
+            # as the config's time because a render can be dated ahead of
+            # this clock (a 9P mount's), and the bus holds such a reading's
+            # time at now, past any switch: a render ten minutes ahead kept
+            # the old gateway's spend page after a /login to another
+            # account. A new login's render read before the switch was
+            # seen -- the config is looked at once a RECHECK_S -- goes with
+            # them; its next render is shown.
+            self._render_floor = (view.mtime or None, self._render_at)
+            self._remembered = self._any = None
         self._login_fp, self._login_mtime = fp, (view.mtime or None)
+
+    def _old_login(self, mtime):
+        """Whether a render dated `mtime` is from before the last login
+        switch (_note_login)."""
+        if mtime is None or self._render_floor is None:
+            return False
+        config_at, read_at = self._render_floor
+        return ((config_at is not None and mtime < config_at)
+                or (read_at is not None and mtime <= read_at))
 
     def _status_frames(self, now_epoch):
         """The frames the status line gives this poll; see the module
@@ -797,6 +845,8 @@ class ClaudeCliProvider(base.ProviderParser):
         self._polled_at = now_epoch
         self._live = None
         payload, mtime = ss.read_payload(self.path())
+        if self._old_login(mtime):
+            payload, mtime = None, None  # see _note_login
         self._read = (payload, mtime)
         if mtime is not None and (self._render_at is None
                                   or mtime > self._render_at):
@@ -902,7 +952,8 @@ def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None):
         added = counter.since(period)
         cents, limit = added, None
     else:
-        added = counter.since(a.fetched_at)
+        # From SKEW_S after the /usage: its time is not the renders' clock.
+        added = counter.since_usage(a.fetched_at)
         cents, limit = a.used_cents + added, a.limit_cents
     pct = base.UNKNOWN
     if limit is not None:

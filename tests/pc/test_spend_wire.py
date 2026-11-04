@@ -7,8 +7,6 @@ $314.12 used, 62.8% of it.
 import json
 import types
 
-import pytest
-
 from pc import ingest, protocol
 from pc.bridge import Bridge
 from pc.providers import base
@@ -270,12 +268,6 @@ class _Fetch:
     def plan_msg(self):
         return self.plan
 
-    def reading(self, provider):
-        """The bus's identity of the reading on a page (IngestionBus
-        .reading); None, the default, leaves the Bridge the page's
-        figures to go on."""
-        return getattr(self, "ident", {}).get(provider)
-
 
 def _bridge(fetch, sent):
     return Bridge(write_msg=sent.append, fetch_usage=fetch,
@@ -376,11 +368,14 @@ def test_switching_back_clears_the_plan_before_max_has_said_anything():
     assert blank["weekly_resets_in_s"] == -1
     raw, why = protocol.encode_checked(blank)
     assert why is None
-    # Said once: the next ticks have nothing new to take down.
+    # The fast tick has nothing new to say; the heartbeat restates the
+    # blank, as it restates every line (test_the_blank_stays_until_the
+    # _page_has_a_reading).
     n = len(sent)
     b.poll_if_changed()
-    b.poll_once()
     assert "usage" not in [m["t"] for m in sent[n:]]
+    b.poll_once()
+    assert all(m["session_pct"] == -1 for m in _usages_after(sent, n))
     f.plan = protocol.plan("claude", "unreported", account="enterprise")
     b.poll_once()
     assert [m for m in sent if m["t"] == "plan"][-1]["plan"] == "unreported"
@@ -409,258 +404,59 @@ def _usages_after(sent, n):
     return [m for m in sent[n:] if m["t"] == "usage"]
 
 
-def test_a_switch_with_the_reading_unchanged_takes_the_share_down():
-    """Round 2 of the 2026-11-04 review, K3. The bus can go on offering
-    the spend login's last reading after a /login to Max -- the payload it
-    remembers, until Max renders -- so the usage line is byte for byte the
-    one the board has. poll_if_changed's unchanged-usage branch sent the
-    windows plan and dropped what it replaced: no blank line, and the
-    board drew 62.8, a share of dollars, under "SESSION 5h". Now the share
-    comes down as it does with no reading at all, and stays down: neither
-    the fast tick nor the heartbeat puts the same stale figures back."""
+def test_the_blank_stays_until_the_page_has_a_reading():
+    """Round 4 of the 2026-11-04 review: the page a spend plan leaves with
+    no reading to replace it is sent blank, and the blank is what the
+    heartbeat restates and what a reconnecting board is told -- never the
+    line from before it, whose share is the old login's dollars -- until
+    the bus offers any reading for the page. The provider drops the old
+    login's renders when it sees the switch (claude_cli._note_login), so
+    whatever the bus offers then is the new login's, drawn as it is, the
+    same share as the old one included."""
     sent = []
-    stale = protocol.frame_to_usage(spend(), NOW)
-    f = _Fetch(stale, protocol.plan_for(spend()))
+    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
+               protocol.plan_for(spend()))
     b = _bridge(f, sent)
     _hello(b, "1.4.0")
     b.poll_if_changed()
-    f.plan = protocol.plan("claude", "windows")
-    n = len(sent)
+    f.usage, f.plan = None, protocol.plan("claude", "windows")
     b.poll_if_changed()
-    new = sent[n:]
-    assert [m["t"] for m in new] == ["plan", "usage"]
-    assert new[1]["session_pct"] == -1
     n = len(sent)
     for _ in range(3):
         b.poll_if_changed()
         b.poll_once()
-    for m in _usages_after(sent, n):
-        assert m["session_pct"] == -1
-    # Max's own reading, when it comes, goes out as it is.
-    f.usage = protocol.frame_to_usage(windows(), NOW)
-    n = len(sent)
-    b.poll_if_changed()
-    assert _usages_after(sent, n)[-1]["session_pct"] == 41.0
-
-
-def test_a_switch_with_only_the_light_moving_takes_the_share_down():
-    """The same stale figures beside a light that changed: the usage line
-    differs, so _send_usage sends it, after the plan, carrying the spend
-    share under the windows captions. The share on the line that follows
-    a spend page's plan going is taken down when it is still the one the
-    board had."""
-    sent = []
-    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
-               protocol.plan_for(spend()))
-    b = _bridge(f, sent)
     _hello(b, "1.4.0")
-    b.poll_if_changed()
-    busy = spend()
-    busy.n_run = 1
-    f.usage = protocol.frame_to_usage(busy, NOW)
-    f.plan = protocol.plan("claude", "windows")
+    b.poll_once()
+    usages = _usages_after(sent, n)
+    assert usages and all(m["session_pct"] == -1 for m in usages)
+    f.usage = protocol.frame_to_usage(windows(s=62.8, w=-1), NOW)
     n = len(sent)
     b.poll_if_changed()
-    new = sent[n:]
-    assert [m["t"] for m in new] == ["plan", "usage"]
-    assert new[1]["session_pct"] == -1 and new[1]["n_run"] == 1
+    assert _usages_after(sent, n)[-1]["session_pct"] == 62.8
     n = len(sent)
     b.poll_once()
-    for m in _usages_after(sent, n):
-        assert m["session_pct"] == -1
-
-
-def test_a_spend_page_back_with_the_same_share_is_drawn():
-    """Taken down for the windows plan only: back on the spend login, the
-    same share is the right figure again."""
-    sent = []
-    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
-               protocol.plan_for(spend()))
-    b = _bridge(f, sent)
-    _hello(b, "1.4.0")
-    b.poll_if_changed()
-    f.plan = protocol.plan("claude", "windows")
-    b.poll_if_changed()
-    f.plan = protocol.plan_for(spend())
-    n = len(sent)
-    b.poll_if_changed()
-    b.poll_if_changed()
     assert _usages_after(sent, n)[-1]["session_pct"] == 62.8
 
 
-def test_the_new_logins_reading_ends_the_hiding_even_with_the_same_shares():
-    """R5, round 2's review of K3: the hiding ended only when the shares
-    changed, so a new login whose page carried the same ones -- 62.8 and
-    no weekly here; 0.0 and none on a fresh seat -- stayed "--" for as
-    long as nothing moved, hours on an idle desk. Another reading, by the
-    bus's identity for it (IngestionBus.reading), is the new login's,
-    whatever it says."""
-    sent = []
-    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
-               protocol.plan_for(spend()))
-    f.ident = {"claude": ("cli", NOW - 5)}
-    b = _bridge(f, sent)
-    _hello(b, "1.4.0")
-    b.poll_if_changed()
-    f.plan = protocol.plan("claude", "windows")
-    b.poll_if_changed()
-    assert [m for m in sent if m["t"] == "usage"][-1]["session_pct"] == -1
-    fresh = windows(at=NOW - 1, s=62.8, w=-1)
-    f.usage = protocol.frame_to_usage(fresh, NOW)
-    f.ident = {"claude": ("cli", NOW - 1)}
-    n = len(sent)
-    b.poll_if_changed()
-    assert _usages_after(sent, n)[-1]["session_pct"] == 62.8
-
-
-def test_the_remembered_reading_stays_down_as_it_ages():
-    """Its age grows with the clock; it is the same reading, and stays
-    down."""
-    sent, clock = [], [1000.0]
-    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
-               protocol.plan_for(spend()))
-    b = Bridge(write_msg=sent.append, fetch_usage=f, now=lambda: clock[0],
-               wall=lambda: (1752444000, 0), **_NO_FEED)
-    _hello(b, "1.4.0")
-    b.poll_if_changed()
-    f.plan = protocol.plan("claude", "windows")
-    b.poll_if_changed()
-    n = len(sent)
-    for k in range(1, 40, 7):
-        clock[0] = 1000.0 + k
-        f.usage = protocol.frame_to_usage(spend(), NOW + k)
-        b.poll_if_changed()
-        b.poll_once()
-    for m in _usages_after(sent, n):
-        assert m["session_pct"] == -1
-
-
-def test_a_reconnect_keeps_the_taken_down_page_down():
-    """greet() forgets the plan it last sent, so the board hears it again;
-    the reading it took a page down from is still the remembered one, and
-    a reconnect is no reason to put its share back."""
+def test_a_line_without_the_page_ends_the_blank():
+    """A reading for the other provider alone: the board is sent that line,
+    which carries no claude page to blank or to restate."""
     sent = []
     f = _Fetch(protocol.frame_to_usage(spend(), NOW),
                protocol.plan_for(spend()))
     b = _bridge(f, sent)
     _hello(b, "1.4.0")
     b.poll_if_changed()
-    f.plan = protocol.plan("claude", "windows")
+    f.usage, f.plan = None, protocol.plan("claude", "windows")
     b.poll_if_changed()
-    n = len(sent)
-    _hello(b, "1.4.0")
-    b.poll_if_changed()
-    usages = _usages_after(sent, n)
-    assert usages and all(m["session_pct"] == -1 for m in usages)
-
-
-def _clocked(f, sent, clock):
-    return Bridge(write_msg=sent.append, fetch_usage=f,
-                  now=lambda: clock[0],
-                  wall=lambda: (int(1752444000 + clock[0]), 0), **_NO_FEED)
-
-
-def test_a_new_reading_after_a_long_wait_brings_the_page_back():
-    """Round 3's (d): the reading taken down was dated at the take-down,
-    from its age as last sent against the clock of the take-down -- too
-    late by however long the line had stood -- and every later reading
-    looked no newer than it. The page stayed blank for good (30 ticks in
-    the review's run). It is told by the bus's own identity for it,
-    recorded when the line went out."""
-    sent, clock = [], [1000.0]
-    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
-               protocol.plan_for(spend()))
-    f.ident = {"claude": ("cli", NOW - 5)}
-    b = _clocked(f, sent, clock)
-    _hello(b, "1.4.0")
-    for k in range(30):
-        clock[0] += 2
-        f.usage = protocol.frame_to_usage(spend(), NOW + 2 * k)
-        b.poll_if_changed()
-    f.plan = protocol.plan("claude", "windows")
-    clock[0] += 2
-    b.poll_if_changed()
-    assert [m for m in sent if m["t"] == "usage"][-1]["session_pct"] == -1
-    f.usage = protocol.frame_to_usage(
-        windows(at=NOW + 61, s=62.8, w=-1), NOW + 62)
-    f.ident = {"claude": ("cli", NOW + 61)}
-    clock[0] += 2
-    n = len(sent)
-    b.poll_if_changed()
-    assert _usages_after(sent, n)[-1]["session_pct"] == 62.8
-
-
-@pytest.mark.parametrize("step", [0, 3600, -3600])
-def test_a_reading_dated_in_the_future_or_a_clock_step_keeps_it_down(step):
-    """Round 3's (e): the bridge's own clock less the line's age, clamped
-    at zero, said "newer" on every poll for a reading stamped in the
-    future (a 9P mount's mtime) and at any step of the clock, and the old
-    dollar share went back under "SESSION 5h". The same reading is the
-    same identity whatever the clocks do."""
-    sent, clock = [], [1000.0]
-    future = spend(at=NOW + 600)            # age clamps at 0
-    f = _Fetch(protocol.frame_to_usage(future, NOW),
-               protocol.plan_for(future))
-    f.ident = {"claude": ("cli", NOW + 600)}
-    b = _clocked(f, sent, clock)
-    _hello(b, "1.4.0")
-    b.poll_if_changed()
-    f.plan = protocol.plan("claude", "windows")
-    b.poll_if_changed()
-    n = len(sent)
-    clock[0] += step
-    for k in range(5):
-        clock[0] += 2
-        f.usage = protocol.frame_to_usage(future, NOW + 2 * k)
-        b.poll_if_changed()
-        b.poll_once()
-    usages = _usages_after(sent, n)
-    assert usages and all(m["session_pct"] == -1 for m in usages)
-
-
-def test_back_to_spend_the_share_goes_out_with_its_plan():
-    """Round 3's (f) and (g): the take-down was decided twice, when the
-    reading was read and when it was sent, and the first ran before the
-    tick's plan was known. Back on the spend login, that tick sent the
-    plan and the line blank, and the share came a tick later. Decided
-    once, after the plan, every plan change ends the hiding."""
-    sent = []
-    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
-               protocol.plan_for(spend()))
-    b = _bridge(f, sent)
-    _hello(b, "1.4.0")
-    b.poll_if_changed()
-    f.plan = protocol.plan("claude", "windows")
-    b.poll_if_changed()
-    f.plan = protocol.plan_for(spend())
-    n = len(sent)
-    b.poll_if_changed()
-    new = sent[n:]
-    assert [m["t"] for m in new][:2] == ["plan", "usage"]
-    assert new[1]["session_pct"] == 62.8
-
-
-def test_a_take_down_for_a_page_the_board_was_not_sent_hides_nothing():
-    """(f): when the last line sent did not carry the page, there is no
-    reading to hold down, and none from an earlier take-down is used."""
-    sent = []
-    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
-               protocol.plan_for(spend()))
-    b = _bridge(f, sent)
-    _hello(b, "1.4.0")
-    b.poll_if_changed()
-    f.plan = protocol.plan("claude", "windows")
-    b.poll_if_changed()                         # held: claude
     codex = windows(provider="codex", s=33.0, w=7.0)
     f.usage = protocol.frame_to_usage(codex, NOW)
-    f.plan = protocol.plan_for(spend())
-    b.poll_if_changed()                         # board: codex only
-    f.plan = protocol.plan("claude", "windows")
-    b.poll_if_changed()
-    f.usage = protocol.frame_to_usage(spend(), NOW)
     n = len(sent)
     b.poll_if_changed()
-    assert _usages_after(sent, n)[-1]["session_pct"] == 62.8
+    b.poll_once()
+    usages = _usages_after(sent, n)
+    assert usages and all(m["provider"] == "codex"
+                          and m["session_pct"] == 33.0 for m in usages)
 
 
 def test_no_blank_when_a_reading_comes_with_the_switch():

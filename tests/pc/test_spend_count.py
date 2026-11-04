@@ -66,6 +66,27 @@ def test_rise_straddling_the_anchor_is_dropped():
     assert c.since(150) == 20
 
 
+def test_a_render_clock_ahead_of_the_usage_clock_does_not_count_twice():
+    """Round 4 of the 2026-11-04 review. On a WSL desk the render's time is
+    the drop file's mtime, from the Windows clock, and the /usage time is
+    Date.now() inside the distribution, a clock that runs behind it: 30
+    seconds measured, more after the host sleeps. A render made before the
+    /usage then carries a time after it, and the rise from it was counted
+    whole although part of it was in the /usage figure. A rise counts
+    toward a /usage only from a sighting SKEW_S or more after it
+    (since_usage, which claude_cli asks with the /usage time)."""
+    import spend_count
+    skew = spend_count.SKEW_S
+    assert 60 <= skew <= 120
+    c = SpendCounter(persist=False)
+    c.observe("a", 1.00, 1030)          # before the /usage, 30 s ahead
+    c.observe("a", 1.50, 1100)
+    assert c.since_usage(1000) == 0
+    c.observe("a", 1.70, 1000 + skew + 50)
+    c.observe("a", 2.00, 1000 + skew + 100)
+    assert c.since_usage(1000) == 30
+
+
 def test_buckets():
     now = 1_800_000_000 + 600
     c = SpendCounter(persist=False)
@@ -726,15 +747,20 @@ def test_a_same_seat_relogin_is_counted_once_past_its_old_total():
 
 
 def test_a_file_from_the_per_ledger_builds_reads_as_one_mark(tmp_path):
-    """Round 2's builds wrote a session as [mark, seen, mark, seen, ...];
-    the highest mark and the stamp that set it are what one mark would
-    have held."""
-    d = _v2(sessions={"a": [400, 96, 1200, 95]}, adds=[])
+    """Round 2's builds wrote a session as [mark, seen, mark, seen, ...].
+    Read as the highest mark, stamped with the OLDEST of the pairs' times
+    (round 4 of the review): in those builds an equal figure from another
+    process restamped a mark, so the highest mark's own time may be later
+    than the sighting that set it, and a rise from it would be counted
+    toward a /usage it straddled. Here 12.00's stamp of 150 came from such
+    an equal figure; the oldest time, 95, keeps the rise after a /usage
+    at 100 out of it."""
+    d = _v2(sessions={"a": [400, 96, 1200, 150]}, adds=[])
     (tmp_path / "spend-count.json").write_text(json.dumps(d))
     c = mk(tmp_path)
     c.bind("fp", 0)
-    c.observe("a", 4.60, 110)
-    c.observe("a", 12.30, 120)
+    c.observe("a", 4.60, 160)
+    c.observe("a", 12.30, 170)
     assert c.since(0) == 30
     assert c.since(100) == 0
 

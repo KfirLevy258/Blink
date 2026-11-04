@@ -121,10 +121,11 @@ def test_spend_seat_gives_a_spend_plan_message(tmp_path):
 
 
 def test_rises_after_the_anchor_add_up(tmp_path):
-    clock = Clock(NOW - 499)
+    clock = Clock(NOW - 449)
     config(tmp_path, NOW - 600, used=1000, fetched=NOW - 600)
     bus = bus_on(clock)
-    for at, cost in ((NOW - 500, 1.00), (NOW - 400, 1.50),
+    # The first sighting more than spend_count.SKEW_S after the /usage.
+    for at, cost in ((NOW - 450, 1.00), (NOW - 400, 1.50),
                      (NOW - 300, 1.75)):
         render(tmp_path, at, cost)
         clock.t = at + 1
@@ -704,23 +705,128 @@ def test_nothing_spend_related_is_printed(tmp_path, capfd, caplog,
     assert out.err.count(claude_cli.SPEND_FAILED_MSG) == 1
 
 
-def test_the_bus_names_the_reading_on_a_page(tmp_path):
-    """Bridge._outgoing tells the reading a spend page was taken down from
-    by IngestionBus.reading: the same for as long as the same render is
-    offered, whatever the clock does, and another for the next render."""
+# -- the old login's readings after a /login (round 4 of 2026-11-04) ----------
+
+GATEWAY = {"spend_limit": {"used_percentage": 62.8,
+                           "resets_at": NOW + 10 * 86400, "used_usd": 314.12,
+                           "limit_usd": 500, "period": "monthly"}}
+
+
+def _desk(home, clock):
+    """The bus and a Bridge on it, as the daemon wires them, with a board
+    that draws plans. Returns (bridge, sent)."""
+    from pc.bridge import Bridge
+    from pc import protocol
+    bus = bus_on(clock)
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=bus.fetch(),
+               now=lambda: clock.t, wall=lambda: (int(clock.t), 0),
+               fetch_manifest=lambda: None,
+               fetch_signed_manifest=lambda: None)
+    b.on_message({"t": "hello", "v": protocol.VERSION, "fw": "1.4.0",
+                  "caps": [protocol.BOARD_CAP_PLAN]})
+    return b, sent
+
+
+def _drawn(sent):
+    """(plan in force, the claude page's share) for every usage line, in
+    order, as the board would draw them."""
+    plan, out = None, []
+    for m in sent:
+        if m["t"] == "plan" and m.get("p") == "claude":
+            plan = m["plan"]
+        elif m["t"] == "usage":
+            if m.get("provider") == "claude":
+                out.append((plan, m.get("session_pct")))
+            elif m.get("p2") == "claude":
+                out.append((plan, m.get("p2_session_pct", -1)))
+    return out
+
+
+def _switch_and_wait(b, clock, home, ticks=40):
+    config(home, clock.t + 1, seat="max", billing="subscription",
+           cache=False, acct="ACCT-OTHER-0c0c0c", org="ORG-OTHER-0d0d0d",
+           org_type="claude_max")
+    for k in range(ticks):
+        clock.t += 2
+        b.poll_if_changed()
+        if k % 15 == 0:
+            b.poll_once()
+
+
+@pytest.mark.parametrize("dated", [-30, 600])
+def test_the_old_logins_spend_share_never_reaches_the_new_login(tmp_path,
+                                                                 dated):
+    """Round 4 of the 2026-11-04 review: four rounds of hiding the old
+    login's reading in the bridge each broke, and a render dated ten
+    minutes ahead (a 9P mount's clock) kept the old gateway's 62.8% and
+    its spend plan on the page after a /login to another account, the bus
+    guard keeping it because a reading's time is held at now. The provider
+    now drops every render of the old login when it sees the switch, so
+    the bus never offers one: the page goes blank and stays blank, and
+    the new login's first render is drawn as it is."""
     clock = Clock(NOW)
     max_config(tmp_path, NOW - 3600)
+    render(tmp_path, NOW + dated, 1.00, rate_limits=GATEWAY)
+    b, sent = _desk(tmp_path, clock)
+    for _ in range(3):
+        clock.t += 2
+        b.poll_if_changed()
+    assert _drawn(sent)[-1] == ("spend", 62.8)
+    n = len(sent)
+    _switch_and_wait(b, clock, tmp_path)
+    after = _drawn(sent[n:])
+    # Until the config is looked at again (claude_plan.RECHECK_S) the old
+    # login is the login; from the first line under another plan on, the
+    # page is blank.
+    turned = [i for i, (plan, _s) in enumerate(after) if plan != "spend"]
+    assert turned
+    assert all(share == -1 for _plan, share in after[turned[0]:])
+    # The new login renders: the same share, from its own gateway.
+    render(tmp_path, clock.t + 700, 2.00, rate_limits=GATEWAY)
+    clock.t += 2
+    n = len(sent)
+    b.poll_if_changed()
+    assert _drawn(sent[n:])[-1][1] == 62.8
+
+
+def test_the_old_logins_windows_are_not_offered_for_the_new_one(tmp_path):
+    """The same for a Max login's windows: after a /login to another
+    account, 41% is the old account's, and the bus offers no claude
+    reading until the new one renders."""
+    clock = Clock(NOW)
+    max_config(tmp_path, NOW - 3600)
+    render(tmp_path, NOW - 30, 1.00, rate_limits=WINDOWS)
     bus = bus_on(clock)
-    render(tmp_path, NOW + 600, 0.10, rate_limits=WINDOWS)   # dated ahead
-    clock.t = NOW + 1
-    bus.poll()
-    first = bus.fetch().reading("claude")
-    assert first is not None
-    for step in (2, 3600, -7200):
-        clock.t += step
-        bus.poll()
-        assert bus.fetch().reading("claude") == first
-    render(tmp_path, NOW + 700, 0.20, rate_limits=WINDOWS)
-    bus.poll()
-    assert bus.fetch().reading("claude") != first
-    assert bus.fetch().reading("codex") is None
+    assert bus.poll()["session_pct"] == 41.0
+    config(tmp_path, NOW + 1, seat="max", billing="subscription",
+           cache=False, acct="ACCT-OTHER-0c0c0c", org="ORG-OTHER-0d0d0d",
+           org_type="claude_max")
+    clock.t = NOW + 120                 # past claude_plan.RECHECK_S
+    assert bus.poll() is None
+    render(tmp_path, NOW + 130, 0.10, rate_limits=WINDOWS)
+    clock.t = NOW + 132
+    assert bus.poll()["session_pct"] == 41.0
+
+
+def test_a_config_spend_page_goes_blank_after_a_login_to_max(tmp_path):
+    """U15's case end to end: the config's spend page, /login to Max with
+    no Max render yet. Blank, restated at the heartbeat and on a
+    reconnect, never the dollar share under windows captions."""
+    from pc import protocol
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 60, fetched=NOW - 60)
+    render(tmp_path, NOW - 30, 1.00)
+    b, sent = _desk(tmp_path, clock)
+    for _ in range(3):
+        clock.t += 2
+        b.poll_if_changed()
+    assert _drawn(sent)[-1] == ("spend", 4.9)
+    n = len(sent)
+    _switch_and_wait(b, clock, tmp_path)
+    b.on_message({"t": "hello", "v": protocol.VERSION, "fw": "1.4.0",
+                  "caps": [protocol.BOARD_CAP_PLAN]})
+    b.poll_once()
+    after = _drawn(sent[n:])
+    assert ("windows", 4.9) not in after
+    assert after[-1] == ("windows", -1)

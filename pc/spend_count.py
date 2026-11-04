@@ -18,7 +18,8 @@ Rules, each from a way the raw number misleads:
   against. `since(anchor)` counts only rises stamped at or after the
   anchor: a rise from a mark set before the anchor may have happened
   partly before /usage measured, so it is dropped rather than counted
-  twice.
+  twice. For a /usage the anchor is moved SKEW_S later (since_usage),
+  because its time and a render's come from clocks that can disagree.
 * `at` is the render's own time (the payload's mtime), so reading the same
   render again moves nothing.
 
@@ -91,7 +92,11 @@ all month and was rewritten on nearly every render. Now:
   forward within a login and a month, and bind() empties everything when
   either changes.
 * Each session's mark, so a resumed session's past cost is never counted
-  as new. These are kept until the month turns or the login
+  as new: its highest cost estimate and the time of the render that first
+  showed that amount -- the session's first render, or the one where it
+  last rose. A render showing the same amount again does not move it (an
+  equal figure may be another process's). These are kept until the month
+  turns or the login
   changes, and they are what the file's size follows: about 70 bytes a
   session, so 2 KB a day at thirty sessions a day and 66 KB by the 31st
   (tests/pc/test_spend_count.py's busy month, U13b in the final review of
@@ -136,14 +141,32 @@ _BUCKETS = 20
 _RECENT_S = _BUCKETS * 900
 # The shortest gap between two writes of the file, on the monotonic clock.
 SAVE_EVERY_S = 60
+# How far after a /usage a rise's previous sighting must be for the rise to
+# count toward it (since). The two times come from different clocks: a
+# render's is the status-line file's mtime, and on a WSL desk that file is
+# written to the Windows side and dated by the Windows clock, while the
+# /usage time is Date.now() inside the distribution, whose clock runs
+# behind -- 30 seconds measured in round 4 of the 2026-11-04 review, more
+# after the host sleeps. A render made before the /usage then carried a
+# time after it, and the rise from it was counted whole although part of
+# it was in the /usage figure. Two minutes covers what was measured with
+# room; what it costs is the rises whose previous sighting falls in the
+# two minutes after a /usage, left to the next one. Applied by
+# since_usage, which claude_cli asks with a /usage time.
+SKEW_S = 120
 # 2: the carried entry and the newest anchor asked about. A version-1 file
 # (every rise one by one, from before 2026-11-04) is read as empty, as any
 # file this cannot read is: it held an estimate, which the next /usage
 # makes exact.
 _VERSION = 2
-# Round 3 of the 2026-11-04 review's builds wrote a session as a flat list
-# of several [mark, seen] pairs, one a ledger. Read as the highest mark
-# and the stamp that set it, which is what one mark would have held.
+# Round 2 of the 2026-11-04 review's builds wrote a session as a flat list
+# of [mark, seen] pairs, one a cost ledger, up to eight (_parse). Read as
+# the highest mark, stamped with the oldest of the pairs' times: in those
+# builds an equal figure from another process restamped a mark, so the
+# highest mark's own time may be later than the sighting that set it, and
+# a rise counted from it would be taken in toward a /usage it straddled
+# (round 4). The oldest time can only drop such a rise, never add one.
+_LEGACY_PAIRS_MAX = 8
 
 
 # The largest figure the counter believes, in cents: ten million dollars.
@@ -233,16 +256,16 @@ def _parse(d):
     sessions = {}
     for sid, v in d["sessions"].items():
         if (not isinstance(v, list) or not v or len(v) % 2
-                or len(v) > 16):
+                or len(v) > 2 * _LEGACY_PAIRS_MAX):
             return None
-        best = None
-        for hw, seen in zip(v[::2], v[1::2]):
+        pairs = list(zip(v[::2], v[1::2]))
+        for hw, seen in pairs:
             if isinstance(hw, bool) or not isinstance(hw, int) \
                     or not _cents(hw) or not _time(seen):
                 return None
-            if best is None or hw > best[0]:
-                best = [hw, seen]
-        sessions[sid] = best
+        # One pair is today's [mark, seen]; several, see _LEGACY_PAIRS_MAX.
+        sessions[sid] = [max(hw for hw, _s in pairs),
+                         min(seen for _h, seen in pairs)]
     adds = []
     for a in d["adds"]:
         if not isinstance(a, list) or len(a) != 3:
@@ -277,7 +300,8 @@ class SpendCounter:
         self._written_to = None  # the file the last write went to
         self._fp = None
         self._period = None
-        # sid -> [high_water_cents, the time of the sighting that set it]
+        # sid -> [highest cost estimate in cents, the time of the render
+        # that first showed it: the session's first, or its last rise]
         self._sessions = {}
         self._adds = []       # [prev_seen, at, cents], the last _RECENT_S
         # [boundary, cents_from_boundary, cents, first_prev, last_at], or
@@ -457,6 +481,14 @@ class SpendCounter:
             self._anchor = anchor_at
         return (self._folded_since(anchor_at)
                 + sum(c for prev, _at, c in self._adds if prev >= anchor_at))
+
+    def since_usage(self, fetched_at) -> int:
+        """since() for a /usage made at `fetched_at`: counted from SKEW_S
+        after it, for the clocks the two times come from. The period start
+        needs no such margin -- bind() empties the count there, so a rise
+        dated into the month that was made before it is counted once, in
+        the month it is dated to."""
+        return self.since(fetched_at + SKEW_S)
 
     def buckets(self, now) -> list:
         out = [0] * _BUCKETS
