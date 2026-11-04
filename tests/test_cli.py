@@ -2568,7 +2568,8 @@ def test_a_service_that_sees_what_this_shell_does_not_says_so(
 
 def _plan_file(out):
     lines = out.splitlines()
-    i = lines.index("  one, it reads Claude Code's config to learn the plan:")
+    i = lines.index(
+        "  It reads Claude Code's config to learn the plan and the seat type:")
     return lines[i + 1].strip(), lines[i + 2:]
 
 
@@ -2587,11 +2588,13 @@ def test_the_install_note_says_what_is_taken_from_claude_json(
     said = " ".join(l.strip() for l in out.splitlines())
     assert ("The whole file is parsed in memory. It can hold your MCP"
             " servers' tokens and, on Linux and Windows, an API key; only the"
-            " plan name and rate-limit tier in it are looked at, only whether"
-            " they say Ultra is kept, and nothing from it is logged, printed"
-            " or saved.") in said
-    assert ("On the Ultra plan one such reply switches on the burn view;"
-            " other plans need five and a quarter hours of them, longer"
+            " plan name, rate-limit tier, seat type and the account and"
+            " organisation ids in it are looked at, plus, on a usage-billed"
+            " seat, the spend Claude Code saved at the last /usage. Only"
+            " whether they say Ultra is kept, and nothing from the file is"
+            " logged or printed.") in said
+    assert ("On the Ultra plan one reply with a weekly figure and no"
+            " five-hour one switches on the burn view; other plans need five and a quarter hours of them, longer"
             " after a break of over an hour.") in said
     from pc.providers import claude_cli
     assert claude_cli.CHAIN_SPAN_S == 5 * 3600 + 15 * 60
@@ -2902,3 +2905,59 @@ def test_a_non_string_user_value_leaves_the_machines_in_force(monkeypatch):
     monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(
         {("HKCU", "CODEX_HOME"): (1, 4), ("HKLM", "CODEX_HOME"): (r"D:\cx", 1)}))
     assert cli._SchtasksBackend().service_environ("CODEX_HOME") == r"D:\cx"
+
+
+SPEND_NOTE = (
+    "This Claude seat is billed by usage. BLINK reads the seat type, and the"
+    " month's spend and limit that Claude Code saved the last time /usage ran"
+    " in a terminal. Between /usage runs it adds the cost Claude Code's status"
+    " line estimates for each session, and keeps each session's last estimate"
+    " and the total in {path}. Spend in Claude Desktop (chat"
+    " and its Code tab), Cowork, claude.ai, claude -p, the Agent SDK or on"
+    " other computers appears only after the next /usage, and a session's last"
+    " reply can be missed. Between /usage runs the figure is an estimate and"
+    " may differ from your bill; run /usage in Claude Code to make it exact."
+    " Nothing about it leaves this computer except the figure on the board.")
+
+
+def _claude_json(tmp_path, seat, used=4321):
+    d = {"oauthAccount": {"accountUuid": "A-1", "organizationUuid": "O-1"},
+         "cachedUsageUtilization": {
+             "accountUuid": "A-1", "fetchedAtMs": 1_793_500_000_000,
+             "utilization": {"extra_usage": {
+                 "is_enabled": True, "monthly_limit": 25000,
+                 "used_credits": used, "currency": "usd"}}}}
+    if seat:
+        d["oauthAccount"]["seatTier"] = seat
+    (tmp_path / ".claude.json").write_text(json.dumps(d), encoding="utf-8")
+
+
+def test_install_note_on_a_spend_seat(tmp_path, capsys, monkeypatch):
+    from pc import spend_count
+    as_checkout(monkeypatch)
+    _claude_json(tmp_path, "enterprise_usage_based")
+    cli._announce()
+    said = " ".join(l.strip() for l in capsys.readouterr().out.splitlines())
+    assert SPEND_NOTE.format(path=spend_count._default_path()) in said
+
+
+def test_no_spend_note_on_max(tmp_path, capsys, monkeypatch):
+    as_checkout(monkeypatch)
+    _claude_json(tmp_path, "max_5x")
+    cli._announce()
+    assert "billed by usage" not in capsys.readouterr().out
+
+
+def test_status_never_prints_amounts(tmp_path, capsys, monkeypatch):
+    _claude_json(tmp_path, "enterprise_usage_based", used=4321)
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "4321" not in out and "43.21" not in out
+
+
+def test_config_disclosure_names_seat_fields(tmp_path, capsys, monkeypatch):
+    as_checkout(monkeypatch)
+    cli._announce()
+    said = " ".join(l.strip() for l in capsys.readouterr().out.splitlines())
+    assert "learn the plan and the seat type" in said
+    assert "weekly figure and no five-hour one, it reads" not in said

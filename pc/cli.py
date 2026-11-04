@@ -3092,18 +3092,26 @@ def _announce():
     # Five and a quarter hours is claude_cli.CHAIN_SPAN_S, and a break of
     # over an hour (CHAIN_MAX_GAP_S) starts the count again; "five hours"
     # until the review of PR #6.
-    print("  When a Claude Code reply shows a weekly figure and no five-hour")
-    print("  one, it reads Claude Code's config to learn the plan:")
+    # Read on every desk now, not only after a weekly-only reply: the seat
+    # type decides whether the spend page exists at all, and that has to be
+    # known before any reply. The condition that used to sit here ("only
+    # when a reply shows a weekly figure and no five-hour one") is now the
+    # Ultra fast path's alone, and the sentence below keeps it.
+    print("  It reads Claude Code's config to learn the plan and the seat type:")
     print(f"    {plan_file}")
     print("  The whole file is parsed in memory. It can hold your MCP servers'")
-    print("  tokens and, on Linux and Windows, an API key; only the plan name")
-    print("  and rate-limit tier in it are looked at, only whether they say")
-    print("  Ultra is kept, and nothing from it is logged, printed or saved.")
-    print("  On the Ultra plan one such reply switches on the burn view; other")
-    print("  plans need five and a quarter hours of them, longer after a")
+    print("  tokens and, on Linux and Windows, an API key; only the plan name,")
+    print("  rate-limit tier, seat type and the account and organisation ids")
+    print("  in it are looked at, plus, on a usage-billed seat, the spend")
+    print("  Claude Code saved at the last /usage. Only whether they say Ultra")
+    print("  is kept, and nothing from the file is logged or printed.")
+    print("  On the Ultra plan one reply with a weekly figure and no")
+    print("  five-hour one switches on the burn view; other plans need five")
+    print("  and a quarter hours of them, longer after a")
     print("  break of over an hour.")
     for line in caveat:
         print(line)
+    _announce_spend_seat()
     # The same for Codex (CodexBurnReader): an account whose Codex log
     # reports a weekly limit and no five-hour one -- Codex Pro on the
     # owner's desk, 2026-11-01 -- has its page fed from the same rollouts
@@ -3131,6 +3139,36 @@ def _announce():
         print(line)
     print()
     print(f"  To undo all of it:  {command_to_type()} uninstall")
+    print()
+
+
+def _announce_spend_seat() -> None:
+    """The extra paragraph a usage-billed Claude seat gets. Install asks the
+    config now, rather than saying "if" for a thing it can see: on a seat
+    billed by usage BLINK keeps per-session cost estimates in a file, and
+    that is not true of any other desk, so it is said only where it is
+    true. A config that cannot be read means no paragraph; the daemon
+    would not show the page either."""
+    from pc import claude_plan, spend_count
+    try:
+        spend = claude_plan.PlanReader().look(time.time()).spend_seat
+    except Exception:
+        return
+    if not spend:
+        return
+    print()
+    for line in (
+        "This Claude seat is billed by usage. BLINK reads the seat type, and the",
+        "month's spend and limit that Claude Code saved the last time /usage ran",
+        "in a terminal. Between /usage runs it adds the cost Claude Code's status",
+        "line estimates for each session, and keeps each session's last estimate",
+        f"and the total in {spend_count._default_path()}. Spend in Claude Desktop (chat",
+        "and its Code tab), Cowork, claude.ai, claude -p, the Agent SDK or on",
+        "other computers appears only after the next /usage, and a session's last",
+        "reply can be missed. Between /usage runs the figure is an estimate and",
+        "may differ from your bill; run /usage in Claude Code to make it exact.",
+        "Nothing about it leaves this computer except the figure on the board."):
+        print("  " + line)
     print()
 
 

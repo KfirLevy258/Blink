@@ -647,9 +647,10 @@ def test_the_readme_privacy_paragraph_names_the_plan_read():
     for said in ("it reads Claude Code's config, `~/.claude.json`: the whole"
                  " file is parsed in memory, and it can hold your MCP"
                  " servers' tokens",
-                 "only the plan name (`planDisplayName`) and rate-limit tier"
-                 " (`organizationRateLimitTier`) are looked at, only whether"
-                 " they say Ultra is kept",
+                 "only the plan name and rate-limit tier, the seat type"
+                 " (`oauthAccount.seatTier`, `billingType`), the account and"
+                 " organisation ids, and on a usage-billed seat the spend"
+                 " Claude Code saved at the last `/usage`, are looked at.",
                  "While the account is marked as having no five-hour limit"
                  " it also reads",
                  "the next five-hour figure Claude Code shows lifts the mark"):
@@ -667,7 +668,7 @@ def test_the_full_readme_has_a_reads_row_for_the_plan():
                  "`organizationRateLimitTier`", "legacy `.config.json`",
                  "The whole file is read and parsed in memory",
                  "which can include their tokens",
-                 "kept, logged, printed or saved",
+                 "kept, logged or printed",
                  "anything but a regular file, is not opened",
                  "is not parsed again until it changes"):
         assert said in row[0], said

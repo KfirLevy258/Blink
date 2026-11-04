@@ -13,8 +13,14 @@
 # and the session's cost. The daemon reads `rate_limits`, `session_id` and
 # `cost.total_cost_usd` out of it -- the last two, held in memory and never
 # logged or saved, only to tell a reply that came back without a five-hour
-# window (pc/session_verdict). This said "only `rate_limits`" after the
-# other two started being read, until the /code-review max of 2026-11-01.
+# window (pc/session_verdict). On a usage-billed seat they are saved after
+# all: the daemon keeps each session's last cost estimate and the running
+# total in ~/.blink/spend-count.json (pc/spend_count), because the
+# month's spend between two /usage runs is those totals added up, and a
+# total that dies with the process would start the month again at every
+# restart. Every other seat still holds them in memory only. This said
+# "only `rate_limits`" after the other two started being read, until the
+# /code-review max of 2026-11-01.
 # Nothing leaves this file -- but the file exists, so it is written
 # readable by this user alone (the umask below), and the disclosure says what
 # is in it rather than claiming it holds two numbers. POSIX sh has no JSON
