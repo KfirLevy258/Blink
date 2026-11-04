@@ -150,7 +150,9 @@ class WslWatch:
     returning. `running` is wsl.running (name -> bool), `clock` wall time.
     `wsl_run`, `drift` and `burn_reader` are for the tests: the drift
     watchdog is install_statusline.wsl_drift_watchdog(home, wsl_run), the
-    reader a BurnReader of home.transcripts.
+    reader a BurnReader of home.transcripts. The drift check runs only on
+    a live tick, and at most every 300 s of monotonic time even then
+    (DriftWatchdog's interval).
     """
 
     def __init__(self, home, running=wsl.running, clock=time.time,
@@ -237,13 +239,20 @@ class WslWatch:
             self._live = live
             wanted_at = self._wanted_at
         wanted = wanted_at is not None and 0 <= now - wanted_at <= WANT_TTL_S
-        view, notes = None, []
+        notes = []
         # Into the distribution only on the tick that has just been told it
         # is running. A True up to RUNNING_EVERY_S old is not enough: a
         # `wsl --shutdown` inside that window, then a UNC read, would start
         # the distribution again behind the user's back.
         if live and asked_now:
             view = self._look()
+            # Published before anything else here can raise: _look() has
+            # already taken the file's signature as read, so a view held
+            # back by a burn poll or a drift check that then raised would
+            # not be read again until the file next changed.
+            if view is not None:
+                with self._lock:
+                    self._view = view
             if wanted:
                 got = self._reader.poll(now)
             else:
@@ -254,8 +263,6 @@ class WslWatch:
         else:
             got = self._reader.held(now)
         with self._lock:
-            if view is not None:
-                self._view = view
             self._burn = got
         for line in notes:
             print(line, file=sys.stderr)

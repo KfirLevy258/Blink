@@ -8,10 +8,12 @@ running, on a worker thread (docs/plans/enterprise-spend.md rev 3, section
 
 No real wsl.exe is started and no real UNC path is touched: `tmp_path/unc`
 stands in for \\\\?\\UNC\\wsl.localhost\\<name>, and every os.stat,
-os.lstat, os.scandir, os.listdir and os.open under it is counted, so "no
-UNC access" is measured rather than assumed.
+os.lstat, os.scandir, os.listdir, os.open and builtin open() under it is
+counted, so "no UNC access" is measured rather than assumed.
 """
+import builtins
 import dataclasses
+import io
 import json
 import os
 import threading
@@ -92,7 +94,8 @@ class _Drift:
 
 
 def _count_unc(monkeypatch, root):
-    """Every filesystem call under `root`, by name."""
+    """Every filesystem call under `root`, by name: the os calls and
+    builtin open()."""
     hits = []
     for name in ("stat", "lstat", "scandir", "listdir", "open"):
         real = getattr(os, name)
@@ -104,6 +107,17 @@ def _count_unc(monkeypatch, root):
                 hits.append(_name)
             return _real(*a, **k)
         monkeypatch.setattr(os, name, wrap)
+    real_open = builtins.open
+
+    def wrap_open(file, *a, **k):
+        if isinstance(file, (str, bytes, os.PathLike)) and \
+                os.fsdecode(file).startswith(root):
+            hits.append("builtins.open")
+        return real_open(file, *a, **k)
+    # io.open is the same function under another name, and patching one
+    # name does not change the other, so both are patched.
+    monkeypatch.setattr(builtins, "open", wrap_open)
+    monkeypatch.setattr(io, "open", wrap_open)
     return hits
 
 
@@ -501,3 +515,35 @@ def test_a_failing_tick_is_said_once_by_kind(tmp_path, capsys):
     err = capsys.readouterr().err
     assert err.count("RuntimeError") == 1
     assert home.config_dir not in err and "unc" not in err
+
+
+def test_a_new_view_survives_a_tick_that_raises_after_it(tmp_path):
+    """_look() takes the file's signature as read; if the burn poll (or the
+    drift check) then raised and the view was not yet published, the new
+    view was lost until the file next changed (review of Task 5)."""
+    home, _ = _home(tmp_path)
+    _write_config(home, seat=False)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0)
+
+    class Boom:
+        def poll(self, now, budget=None):
+            raise OSError("transcripts")
+
+        def held(self, now):
+            return None
+
+    w = _watch(home, clock, _Running(True), burn_reader=Boom())
+    w.burn_source().poll(clock.t)               # wanted: poll will raise
+    with pytest.raises(OSError):
+        w.tick()
+    assert w.view() is not None and not w.view().spend_seat
+
+    _write_config(home, seat=True)
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    w.burn_source().poll(clock.t)
+    with pytest.raises(OSError):
+        w.tick()
+    assert w.view().spend_seat
