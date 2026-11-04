@@ -171,9 +171,26 @@ _secs_until = protocol.secs_until
 # it, and a figure json reads -- an int of any length, a float up to 1e308
 # -- reached the wire unbounded.
 MAX_USD = 10_000_000
-# A spend share is bounded like a window's percentage in _window above:
-# 0..1000, 1000 and not 100 because overage carries a share past its cap.
+# A spend share is held at 1000, the board's PCT_MAX: 1000 and not 100
+# because overage carries a share past its cap. Held, not refused (_share).
 MAX_SHARE = 1000
+
+
+def _share(v):
+    """A spend share from the payload: a number at or above zero, held at
+    MAX_SHARE, else None.
+
+    Held rather than refused (round 2 of the 2026-11-04 review, K2). $300
+    against a cap cut to $20 is 1500%, a figure a gateway really sends, and
+    refusing it dropped the whole spend page for the windows one;
+    protocol._share and proto.c's num_pct hold one past 1000 at 1000 for
+    the same reason. NaN, a negative and a non-number are no share. An int
+    too long for a float (10**400) is compared as an int, never converted,
+    which is where math.isfinite raised OverflowError (U2).
+    """
+    if type(v) not in (int, float) or v != v or v < 0:
+        return None
+    return float(MAX_SHARE) if v > MAX_SHARE else float(v)
 
 
 def _amount(v, ceiling=MAX_USD):
@@ -233,10 +250,9 @@ def _spend_frame(rate_limits: dict, now_epoch: float, mtime_epoch: float):
     obj = rate_limits.get("spend_limit")
     if not isinstance(obj, dict):
         return None
-    pct = _amount(obj.get("used_percentage"), MAX_SHARE)
+    pct = _share(obj.get("used_percentage"))
     if pct is None:
-        # Not a percentage, or a negative, NaN or out-of-bound one (5000
-        # went to the board as it was until U2). Without it there is
+        # Not a percentage, or a negative or NaN one. Without it there is
         # nothing to put on a gauge, and an object we cannot read is not
         # evidence of an allowance -- so the payload is read the old way.
         return None

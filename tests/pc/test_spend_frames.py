@@ -208,11 +208,24 @@ def test_a_huge_dollar_figure_is_not_reported(field, value):
                        "limit_usd": "spend_limit_usd"}[field]) is None
 
 
-@pytest.mark.parametrize("pct", [HUGE, 5000, 1000.5])
-def test_a_spend_share_past_the_windows_bound_is_not_drawn(pct):
-    """0..1000, the bound statusline_source._window puts on a window's
-    percentage (overage carries one past 100). 5000 went to the board as
-    it was."""
+@pytest.mark.parametrize("pct", [HUGE, 5000, 1000.5, float("inf")])
+def test_a_spend_share_past_the_bound_is_held_at_it(pct):
+    """Round 2 of the 2026-11-04 review, K2. 5000 went to the board as it
+    was until U2, and U2's bound then dropped the whole spend page for it:
+    $300 against a cap cut to $20 is 1500%, a real gateway figure, and the
+    desk fell back to the windows page. It is held at 1000, as
+    protocol._share and proto.c's num_pct hold one: far over the cap still
+    reads as over it."""
+    f = frame_of(spend_payload(used_percentage=pct))
+    assert f.plan == base.PLAN_SPEND
+    assert f.session_pct == ss.MAX_SHARE == 1000
+
+
+@pytest.mark.parametrize("pct", [float("nan"), -1, -0.5, float("-inf"),
+                                 True, "50", None])
+def test_a_spend_share_that_is_not_one_is_not_drawn(pct):
+    """NaN, a negative or a non-number is no percentage at all, and an
+    object without one is no evidence of an allowance."""
     assert frame_of(spend_payload(used_percentage=pct)).plan \
         == base.PLAN_WINDOWS
 
