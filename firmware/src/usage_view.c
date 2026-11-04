@@ -3965,11 +3965,17 @@ void usage_view_set_plan(const char *prov, const char *plan,
 	}
 
 	/*
-	 * Nothing to do when nothing moved, and that is most calls: proto.c
-	 * resets the plan on every welcome, so a board that has never had a
-	 * spend page hears "windows" at each connect -- the probe's welcome
-	 * during the boot clip included, where a redraw and a status re-ask
-	 * would raise the connecting overlay over the animation.
+	 * Nothing to do when nothing moved, and that is most calls. Since
+	 * FW3 (review of feat/enterprise-spend, 2026-11-04) a welcome no
+	 * longer resets the plan: it marks it unconfirmed (proto.c,
+	 * plan_unconfirmed), and the connection's first usage line resets it
+	 * to windows only if no plan line came first. So a board that has
+	 * never had a spend page, talking to a daemon that states no plan,
+	 * hears "windows" at the first usage line of each connect, the boot
+	 * clip's included, where a redraw and a status re-ask would raise the
+	 * connecting overlay over the animation; and a daemon that does state
+	 * one restates the same plan on every connect (greet() forgets the
+	 * last one sent).
 	 */
 	if (plan_same(&next, &plan_rec)) {
 		return;

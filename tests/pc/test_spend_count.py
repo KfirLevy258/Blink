@@ -414,6 +414,10 @@ def _v2(**kw):
     _v2(sessions={"a": [100, 1e300]}),
     _v2(sessions={"a": [100, 50, 7]}),
     _v2(sessions={"a": "xy"}),
+    _v2(sessions={"a": []}),
+    # One ledger more than _TRACKS (8).
+    _v2(sessions={"a": [100, 50] * 9}),
+    _v2(sessions={"a": [100, 50, -1, 60]}),
 ])
 def test_a_malformed_file_loads_empty(tmp_path, doc):
     (tmp_path / "spend-count.json").write_text(json.dumps(doc))
@@ -521,3 +525,267 @@ def test_the_file_at_the_end_of_a_busy_month(tmp_path):
     assert 50_000 < sizes[-1] < 72_000
     # Roughly linear: a day's sessions, not the month's rises.
     assert 1_500 < (sizes[-1] - sizes[0]) / 30 < 2_500
+
+
+# -- a cost that starts again from zero (round 2 of 2026-11-04, K1) ----------
+#
+# Claude Code keeps a session's id across /login and starts its cost again
+# from zero (2.1.318's costLedger.reset). A sign-out and sign-in to the same
+# seat leaves the fingerprint as it was, so nothing upstream sees it, and a
+# single high-water mark swallowed every rise until the session passed its
+# old total: $14.34 shown for $16.84 in U9. Each process keeps its own
+# ledger, so every figure a session shows continues one of a few ledgers:
+# the counter keeps a mark per ledger and counts a figure against the
+# highest mark at or below it.
+
+def test_a_same_seat_relogin_counts_from_the_new_base():
+    c = SpendCounter(persist=False)
+    c.observe("a", 16.84, 100)
+    c.observe("a", 17.00, 200)          # +16
+    c.observe("a", 0.00, 300)           # /login: a new base, adds nothing
+    c.observe("a", 0.50, 400)           # +50
+    c.observe("a", 2.50, 500)           # +200
+    assert c.since(0) == 16 + 50 + 200
+
+
+def test_a_restarted_ledger_crossing_its_old_mark_undercounts_once():
+    """The one figure that passes the dead ledger's mark is counted from
+    that mark, not from its own last figure: the two cannot be told apart
+    (a live first process rising 20 cents looks the same), so the smaller
+    rise is the one counted. 16.50 to 17.20 is 70 cents; 20 are counted,
+    once, and every rise after it is whole."""
+    c = SpendCounter(persist=False)
+    c.observe("a", 17.00, 100)
+    c.observe("a", 0.00, 200)
+    c.observe("a", 16.50, 300)          # +1650
+    c.observe("a", 17.20, 400)          # +20, not +70
+    c.observe("a", 17.90, 500)          # +70
+    assert c.since(0) == 1650 + 20 + 70
+
+
+def test_two_processes_alternating_count_only_their_own_rises():
+    """`claude --continue` in a second terminal: a second process on the
+    same session id, restored to an earlier total, rendering in turn with
+    the first. Each figure is counted against its own process's last one,
+    never against the other's, so taking turns adds nothing: A 10.00 ->
+    10.50 is 50 cents, B 4.00 -> 4.60 is 60, and the same two figures
+    shown again and again add none."""
+    c = SpendCounter(persist=False)
+    seq = [10.00, 4.00, 10.30, 4.20, 10.50, 4.60]
+    for i, v in enumerate(seq):
+        c.observe("a", v, 100 + i)
+    assert c.since(0) == 50 + 60
+    for i in range(20):
+        c.observe("a", (10.50, 4.60)[i % 2], 200 + i)
+    assert c.since(0) == 50 + 60
+
+
+def test_a_resume_restoring_an_earlier_total_adds_nothing():
+    c = SpendCounter(persist=False)
+    c.observe("a", 10.00, 100)
+    c.observe("a", 10.40, 200)          # +40
+    c.observe("a", 8.00, 300)           # resumed at an older total: +0
+    c.observe("a", 10.40, 400)          # the first process again: +0
+    assert c.since(0) == 40
+
+
+def test_a_rise_on_a_second_ledger_straddling_the_anchor_is_dropped():
+    """Each ledger keeps its own last sighting for the straddling rule: a
+    rise on B whose previous B figure predates /usage is dropped even
+    though A was seen after it."""
+    c = SpendCounter(persist=False)
+    c.observe("a", 10.00, 100)
+    c.observe("a", 4.00, 110)
+    c.observe("a", 10.20, 200)          # prev 100: straddles 150
+    c.observe("a", 4.50, 300)           # prev 110: straddles 150
+    c.observe("a", 10.40, 400)          # prev 200: counts
+    assert c.since(150) == 20
+    assert c.since(0) == 20 + 50 + 20
+
+
+def test_ledgers_past_the_cap_are_not_opened():
+    """A session keeps at most spend_count._TRACKS ledgers. A figure below
+    all of them on a full session adds nothing and opens nothing: the
+    safe direction, an undercount until the next /usage."""
+    import spend_count
+    c = SpendCounter(persist=False)
+    n = spend_count._TRACKS
+    for i in range(n):
+        c.observe("a", 10.0 * (n - i), 100 + i)
+    assert c.observe("a", 1.00, 200) is False
+    c.observe("a", 1.50, 300)
+    assert c.since(0) == 0
+
+
+def test_ledgers_survive_a_restart(tmp_path):
+    c = mk(tmp_path)
+    c.bind("fp", 0)
+    c.observe("a", 17.00, 100)
+    c.observe("a", 0.00, 200)
+    c._urgent = True
+    c.save()
+    d = mk(tmp_path)
+    d.bind("fp", 0)
+    d.observe("a", 0.40, 300)
+    d.observe("a", 17.10, 400)
+    assert d.since(0) == 40 + 10
+
+
+def _sessions_life(seed, steps=300):
+    """One session id's processes, at random: each spends, renders (some
+    renders lost to other sessions writing over them), takes a /login
+    (cost back to zero), exits (Claude Code saves its total as the
+    session's lastCost) or is joined by `claude --continue`, which
+    restores that saved total -- or starts at zero when none is saved.
+    Returns (counted, spent)."""
+    import random
+    r = random.Random(seed)
+    live, saved = [0], None
+    spent, t = 0, 1000
+    c = SpendCounter(persist=False)
+    for _ in range(steps):
+        roll = r.random()
+        if not live or (roll < 0.03 and len(live) < 3):
+            # A restore of the saved total revives the ledger that exited
+            # with it. Once revived it is not handed out again: two live
+            # processes from one saved total are the residual pinned in
+            # test_two_resumes_from_one_saved_total_can_overcount.
+            live.append(saved if saved is not None else 0)
+            saved = None
+            i = len(live) - 1
+        elif roll < 0.06 and len(live) > 1:
+            i = r.randrange(len(live))
+            saved = live.pop(i)
+            continue
+        else:
+            i = r.randrange(len(live))
+            if roll < 0.07:
+                live[i] = 0                          # /login
+            else:
+                d = r.randrange(0, 120)
+                live[i] += d
+                spent += d
+        if r.random() < 0.7:                         # else lost
+            t += 1
+            c.observe("a", live[i] / 100.0, t)
+    return c.since(0), spent
+
+
+@pytest.mark.parametrize("seed", range(500))
+def test_never_counts_more_than_was_spent(seed):
+    """Whatever the interleaving of processes, /logins, exits, resumes and
+    lost renders, the count never exceeds the spend (the module
+    docstring's argument, tested)."""
+    counted, spent = _sessions_life(seed)
+    assert counted <= spent
+
+
+def test_the_count_stays_close_to_the_spend():
+    """And it is not safe by counting nothing: over these lives the count
+    is most of the spend. What it misses is each /login's first figure, a
+    restarted ledger passing a dead mark, and rises behind lost renders
+    on a ledger that is passed meanwhile."""
+    counted = spent = 0
+    for seed in range(500):
+        c, s = _sessions_life(seed)
+        counted += c
+        spent += s
+    assert counted > 0.85 * spent
+
+
+def test_two_resumes_from_one_saved_total_can_overcount():
+    """The residual (module docstring): two processes resumed from the
+    same saved total, in a session that already holds a lower ledger. The
+    first rises past the saved total before the second renders, so the
+    second's first figure lies above the lower ledger's mark and is
+    counted from it. Here 10.00 was saved; a /login ledger stands at 2.00;
+    A resumes and reaches 10.50; B resumes, spends 20 cents and renders
+    10.20, counted as 820 cents. Real spend: 50 + 20 + 20 (the lower
+    ledger's own 1.80 -> 2.00)."""
+    c = SpendCounter(persist=False)
+    c.observe("a", 10.00, 100)          # the first process, then exits
+    c.observe("a", 1.80, 110)           # a second, after /login
+    c.observe("a", 2.00, 120)           # +20
+    c.observe("a", 10.00, 130)          # A, resumed from the saved 10.00
+    c.observe("a", 10.50, 140)          # +50
+    c.observe("a", 10.20, 150)          # B, resumed from 10.00 too: +820
+    assert c.since(0) == 20 + 50 + 820
+
+
+def test_one_process_is_counted_exactly():
+    import random
+    r = random.Random(7)
+    v, t = 0, 1000
+    c = SpendCounter(persist=False)
+    c.observe("a", 0.0, t)
+    for _ in range(500):
+        v += r.randrange(0, 80)
+        t += 1
+        c.observe("a", v / 100.0, t)
+    assert c.since(0) == v
+
+
+# -- an exit inside observe() (round 2 of 2026-11-04, K4) ---------------------
+
+class _ExitAfterAppend(list):
+    """The rise list, raising the daemon's SIGTERM exit (SystemExit, from
+    claude_usage_bridge._on_sigterm, which can land between any two
+    bytecodes of the main thread) right after a rise is appended and
+    before its mark moves."""
+
+    def append(self, x):
+        super().append(x)
+        raise SystemExit(0)
+
+
+def test_an_exit_inside_observe_does_not_save_a_torn_count(tmp_path):
+    """The exit flush wrote whatever was in memory. A SIGTERM between the
+    rise's append and the mark's update left a rise of 50 cents counted
+    against the old mark of 1.00, and the restart counted it again from
+    that mark: a dollar on the page for 50 cents spent. It needs the count
+    dirty already, which is every render after a paced save. Skipped, the
+    flush leaves the file as last written, mark 1.00, and the restart
+    counts the whole 50 cents from it at the session's next render -- the
+    pre-U12 recovery, for the one exit that lands mid-update."""
+    import spend_count
+    tick = Tick()
+    c = mk(tmp_path, clock=tick)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    c.save()
+    c.observe("a", 1.20, 105)           # held back by the pacing
+    tick.t += 5
+    c.save()
+    c._adds = _ExitAfterAppend(c._adds)
+    with pytest.raises(SystemExit):
+        c.observe("a", 1.50, 110)
+    spend_count._flush_at_exit()
+    d = mk(tmp_path)
+    d.bind("fp", 0)
+    d.observe("a", 1.50, 110)
+    assert d.since(0) == 50
+
+
+def test_an_exit_inside_bind_does_not_save_a_torn_count(tmp_path):
+    """bind() names the new login before it empties the count; an exit
+    between the two would save the old login's count under the new one."""
+    import spend_count
+    tick = Tick()
+    c = mk(tmp_path, clock=tick)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    c.save()
+    c.observe("a", 1.50, 110)           # held back by the pacing
+    tick.t += 5
+    c.save()
+
+    def boom():
+        raise SystemExit(0)
+    c._clear = boom
+    with pytest.raises(SystemExit):
+        c.bind("other", 0)
+    spend_count._flush_at_exit()
+    d = mk(tmp_path)
+    d.bind("other", 0)
+    assert d.since(0) == 0
+

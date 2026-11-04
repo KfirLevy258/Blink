@@ -397,6 +397,89 @@ def test_the_blank_keeps_the_other_page():
         assert k not in blank
 
 
+def _usages_after(sent, n):
+    return [m for m in sent[n:] if m["t"] == "usage"]
+
+
+def test_a_switch_with_the_reading_unchanged_takes_the_share_down():
+    """Round 2 of the 2026-11-04 review, K3. The bus can go on offering
+    the spend login's last reading after a /login to Max -- the payload it
+    remembers, until Max renders -- so the usage line is byte for byte the
+    one the board has. poll_if_changed's unchanged-usage branch sent the
+    windows plan and dropped what it replaced: no blank line, and the
+    board drew 62.8, a share of dollars, under "SESSION 5h". Now the share
+    comes down as it does with no reading at all, and stays down: neither
+    the fast tick nor the heartbeat puts the same stale figures back."""
+    sent = []
+    stale = protocol.frame_to_usage(spend(), NOW)
+    f = _Fetch(stale, protocol.plan_for(spend()))
+    b = _bridge(f, sent)
+    _hello(b, "1.4.0")
+    b.poll_if_changed()
+    f.plan = protocol.plan("claude", "windows")
+    n = len(sent)
+    b.poll_if_changed()
+    new = sent[n:]
+    assert [m["t"] for m in new] == ["plan", "usage"]
+    assert new[1]["session_pct"] == -1
+    n = len(sent)
+    for _ in range(3):
+        b.poll_if_changed()
+        b.poll_once()
+    for m in _usages_after(sent, n):
+        assert m["session_pct"] == -1
+    # Max's own reading, when it comes, goes out as it is.
+    f.usage = protocol.frame_to_usage(windows(), NOW)
+    n = len(sent)
+    b.poll_if_changed()
+    assert _usages_after(sent, n)[-1]["session_pct"] == 41.0
+
+
+def test_a_switch_with_only_the_light_moving_takes_the_share_down():
+    """The same stale figures beside a light that changed: the usage line
+    differs, so _send_usage sends it, after the plan, carrying the spend
+    share under the windows captions. The share on the line that follows
+    a spend page's plan going is taken down when it is still the one the
+    board had."""
+    sent = []
+    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
+               protocol.plan_for(spend()))
+    b = _bridge(f, sent)
+    _hello(b, "1.4.0")
+    b.poll_if_changed()
+    busy = spend()
+    busy.n_run = 1
+    f.usage = protocol.frame_to_usage(busy, NOW)
+    f.plan = protocol.plan("claude", "windows")
+    n = len(sent)
+    b.poll_if_changed()
+    new = sent[n:]
+    assert [m["t"] for m in new] == ["plan", "usage"]
+    assert new[1]["session_pct"] == -1 and new[1]["n_run"] == 1
+    n = len(sent)
+    b.poll_once()
+    for m in _usages_after(sent, n):
+        assert m["session_pct"] == -1
+
+
+def test_a_spend_page_back_with_the_same_share_is_drawn():
+    """Taken down for the windows plan only: back on the spend login, the
+    same share is the right figure again."""
+    sent = []
+    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
+               protocol.plan_for(spend()))
+    b = _bridge(f, sent)
+    _hello(b, "1.4.0")
+    b.poll_if_changed()
+    f.plan = protocol.plan("claude", "windows")
+    b.poll_if_changed()
+    f.plan = protocol.plan_for(spend())
+    n = len(sent)
+    b.poll_if_changed()
+    b.poll_if_changed()
+    assert _usages_after(sent, n)[-1]["session_pct"] == 62.8
+
+
 def test_no_blank_when_a_reading_comes_with_the_switch():
     """With a Max reading in hand, the usage line itself replaces the share:
     no second line."""

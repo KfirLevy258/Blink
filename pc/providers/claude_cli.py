@@ -763,7 +763,11 @@ class ClaudeCliProvider(base.ProviderParser):
         in memory: a daemon restarted after the switch cannot tell.
 
         A same-seat re-login without a switch in between (sign out, sign
-        in) leaves the fingerprint as it was, and is not seen here."""
+        in) leaves the fingerprint as it was, and is not seen here. The
+        count meets it as a figure below the session's mark, which
+        SpendCounter.observe takes for a new ledger and counts the rises
+        of (round 2 of the 2026-11-04 review, K1); the /usage needs no
+        floor, being the same login's."""
         fp = view.account_fp
         if not fp:
             return
