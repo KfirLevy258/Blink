@@ -271,6 +271,10 @@ static const struct line_w {
 	{ 14, "Spend limit almost used up", 202 },
 	{ 14, "SPEND", 51 },
 	{ 14, "SPEND month", 105 },
+	/* An unreported page's words (lv_text_get_size on host LVGL,
+	 * 2026-11-04). */
+	{ 14, "Not reported", 95 },
+	{ 14, "ENTERPRISE", 89 },
 	/* The burn view's total: twenty buckets at the ceiling,
 	 * $19,999,999.80, the sweep's widest under $20M. */
 	{ 20, "$20.0M", 72 },
@@ -406,6 +410,21 @@ static void test_spend_page(void)
 	      "Focus's spend caption fits inside the thick ring");
 	CHECK(w_spend_month > FOCUS_NAME_W,
 	      "and the period's caption would not, which is why it is cut");
+	/*
+	 * And an unreported page's. "Not reported" overran the 67 px open
+	 * quarter under the big ring and "ENTERPRISE" the 85 px caption
+	 * (review of feat/enterprise-spend, 2026-11-04, FW2), so in Focus
+	 * the left gauge is always the big one, captioned "SPEND", and the
+	 * words go on the dim line, which holds them.
+	 */
+	CHECK(measured_w(14, "Not reported") > FOCUS_CD_W,
+	      "\"Not reported\" does not fit Focus's countdown slot");
+	CHECK(measured_w(14, "Not reported") <= FOCUS_OTHER_MAX_W,
+	      "\"Not reported\" fits Focus mode's dim line");
+	CHECK(measured_w(14, "ENTERPRISE") > FOCUS_NAME_W,
+	      "\"ENTERPRISE\" would not fit the big ring's caption");
+	CHECK(measured_w(14, "Not reported") <= GAUGE_CD_MAX_W,
+	      "\"Not reported\", measured, fits the two-gauge countdown");
 
 	/* Focus mode's dim line, and the status row's two spend sentences. */
 	CHECK(w_focus_line <= FOCUS_OTHER_MAX_W,

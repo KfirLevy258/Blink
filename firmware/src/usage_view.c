@@ -126,8 +126,9 @@ LV_FONT_DECLARE(font_focus_40);
 /*
  * Which gauge Focus wants big: the owner's choice, except on a spend page,
  * where it is always the share (docs/plans/enterprise-spend.md section 3) --
- * the right gauge there is money, not a window. Defined with the plan record
- * it asks.
+ * the right gauge there is money, not a window -- and on an unreported one,
+ * whose right gauge is a caption too wide for the big ring. Defined with the
+ * plan record it asks.
  */
 static struct gauge *focus_big(void);
 
@@ -344,7 +345,14 @@ static enum plan_kind plan_of(int page)
 
 static struct gauge *focus_big(void)
 {
-	if (plan_of(cur_page) == PLAN_KIND_SPEND) {
+	/*
+	 * An unreported page too. Its right gauge is the kind of login,
+	 * "ENTERPRISE" at 89 px against the 85 the thick ring's hollow holds
+	 * at the caption's depth (Bold's stroke under its ends, review of
+	 * feat/enterprise-spend, 2026-11-04, FW2); the left one says "SPEND",
+	 * 51 px, and the dim line under the ring carries the rest.
+	 */
+	if (plan_of(cur_page) != PLAN_KIND_WINDOWS) {
 		return &session;
 	}
 	return focus_weekly ? &weekly : &session;
@@ -846,6 +854,23 @@ static void render_countdown(struct gauge *g)
 		}
 		break;
 	case PLAN_KIND_UNREPORTED:
+		/*
+		 * In Focus, on the dim line under the ring, not in the big
+		 * gauge's open quarter: that holds 67 px ("999d 23h") and
+		 * "Not reported" is 95, which ran into the ring's ends and
+		 * its ball -- 314 px of Bold's stroke, 36 of the default's
+		 * (review of feat/enterprise-spend, 2026-11-04, FW2).
+		 */
+		if (focus_on) {
+			lv_label_set_text(g->countdown, is_focus_line(g)
+								? "Not reported"
+								: "");
+			if (is_focus_line(g)) {
+				lv_obj_set_style_text_color(g->countdown,
+							    COL_DIM, 0);
+			}
+			return;
+		}
 		lv_label_set_text(g->countdown,
 				  g == &session ? "Not reported" : "");
 		return;
