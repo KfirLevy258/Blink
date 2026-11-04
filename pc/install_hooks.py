@@ -102,7 +102,12 @@ def _read_marker(home=None) -> set:
     try:
         with open(_marker_path(home), encoding="utf-8") as f:
             return {ln.strip() for ln in f if ln.strip()}
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, so a marker that is not valid
+        # UTF-8 slipped past `except OSError` into install and uninstall
+        # (review of feat/enterprise-spend). No marker is the answer
+        # install_statusline._read_marker gives such a file too: the hooks
+        # are then recognised by the commands this home would write.
         return set()
 
 
