@@ -580,20 +580,6 @@ class IngestionBus:
         that select_pair left off the board."""
         return self._pages.get(provider)
 
-    def reading(self, provider):
-        """Which reading the last poll() put on `provider`'s page, as
-        (source id, observed_at), or None with no page.
-
-        For the Bridge's take-down of a spend page (Bridge._outgoing): it
-        must know whether the line in front of it carries the reading the
-        board was last sent or a newer one, and the usage line says only
-        how old a reading is, against the clock of the moment, where a
-        file stamped in the future reads as new on every poll (round 3 of
-        the 2026-11-04 review). observed_at is the reading's own time,
-        the same number for as long as the same reading is offered."""
-        f = self._pages.get(provider)
-        return None if f is None else (f.src, f.observed_at)
-
     def burn_pages(self):
         """The providers whose page the last poll() found without a session
         window and that have a reader: the pages a burn line is for. Asks
@@ -789,9 +775,6 @@ class _BusFetch:
 
     def plan_msg(self):
         return self._bus.plan_msg()
-
-    def reading(self, provider):
-        return self._bus.reading(provider)
 
 
 # Which count describes which state. STATE_FAILED reads n_stuck because that

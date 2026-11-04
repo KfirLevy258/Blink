@@ -95,22 +95,6 @@ def _proto_for_log(proto) -> str:
     return "a newer protocol"
 
 
-def _page_shares(usage, page):
-    """The shares a usage line gives `page` -- the figures
-    protocol.blank_page takes down -- or None when the line does not name
-    it. The countdowns are left out: they move on every line by themselves
-    (protocol.VOLATILE_USAGE_KEYS), and it is the share that misleads.
-    What Bridge._outgoing tells readings apart by when the fetch cannot
-    name them (a plain callable, the tests' fakes)."""
-    if not isinstance(usage, dict) or usage.get("t") != "usage":
-        return None
-    if usage.get("provider") == page:
-        return ("main", usage.get("session_pct"), usage.get("weekly_pct"))
-    if usage.get("p2") == page:
-        return ("p2", usage.get("p2_session_pct"), usage.get("p2_weekly_pct"))
-    return None
-
-
 class Bridge:
     def __init__(self, write_msg, fetch_usage, now=time.monotonic,
                  set_preferred=None,
@@ -199,12 +183,9 @@ class Bridge:
         # And the line itself, whole: what _outgoing blanks a page
         # out of, so the other page keeps what the board was last told.
         self._last_usage = None
-        # Which reading each page of the last usage line sent came from,
-        # and the page a spend plan left while the fetch still offers the
-        # reading it was sent: see _outgoing.
-        self._sent_ident = {}
-        self._pending_ident = {}         # _outgoing's, for the line it returned
-        self._held = None
+        # The page a spend plan left with no reading to replace its share,
+        # sent blank and restated blank until a line comes: see _outgoing.
+        self._blanked = None
         # Themes (pc/theme.py). theme_sync owns the files and what the
         # board is believed to hold; open_builder starts the builder and a
         # browser on it, returning whether one opened, and is rate-limited
@@ -1038,8 +1019,14 @@ class Bridge:
             # Nothing to draw, but perhaps something to take down: straight
             # after a switch back from a spend login there may be no reading
             # at all, and the board still holds the old account's plan --
-            # and its share (_outgoing).
+            # and its share (_outgoing). Taken down on an earlier tick, the
+            # blank line is restated, as every heartbeat restates the line:
+            # one lost on the wire, or a board that just connected, would
+            # otherwise be left with the old login's share.
+            held = self._blanked
             self._outgoing(None)
+            if held is not None and self._last_usage is not None:
+                self._write(self._last_usage)
             # No statusline payload yet. The board keeps its last values and
             # its own dot, which is right -- but the daemon used to say nothing
             # at all, so a machine where Claude Code has simply never rendered
@@ -1160,68 +1147,37 @@ class Bridge:
             usage, self._plan_msg(), self._board_can(protocol.BOARD_CAP_PLAN))
 
     def _outgoing(self, usage):
-        """The plan, then the usage line as it should go out: once a tick,
-        before anything is compared or sent. None when there is no line.
+        """Send the plan, and take a spend page's share down when the plan
+        leaves it with nothing to replace it; returns `usage`. Once a tick,
+        before anything is compared or sent.
 
-        A spend plan leaving a page leaves the board holding that page's
-        share of dollars, which it would repaint under "SESSION 5h" with
-        the month's countdown -- red "Session almost used up" near the
-        cap -- until the new login rendered: hours on an idle desk (U15 of
-        the final review of 2026-11-04). With no line to send, the page is
-        blanked out of the last line sent. With one, the fetch may still
-        be offering the spend login's last reading -- the payload the bus
-        remembers -- and that line goes out with the page blank, for as
-        long as it is the same reading (K3). The first other reading is
-        the new login's, whatever its figures (R5).
+        /login back to Max before Max has rendered leaves the bus with no
+        claude reading, and the plan alone took the caption down but not
+        the figure: the board repainted its share of dollars under
+        "SESSION 5h" with the month's countdown -- red "Session almost
+        used up" near the cap -- until the new login rendered, hours on an
+        idle desk (U15 of the final review of 2026-11-04). So the page is
+        blanked out of the last line sent, and that blank line is what the
+        heartbeat restates (poll_once) until the bus offers a line again.
 
-        "The same reading" is the bus's own identity for it, the source
-        and the time it was observed (IngestionBus.reading), recorded for
-        each page as a line goes out. Round 3 of the review found the
-        version before this working it out from the line's age against
-        the bridge's clock: dated at the take-down, too late, it blanked
-        the page for good (d); a reading stamped in the future, or a step
-        of the clock, made the same reading look new on every poll (e).
-        That version also decided twice, as the reading was read and as it
-        was sent, and the first ran before the tick's plan was known (f,
-        g). Any change in the plan the fetch states ends the hiding; the
-        plan resent to a board that just connected is not a change."""
+        Any line it offers is the new login's: the provider drops the old
+        login's renders when it sees the switch (claude_cli._note_login).
+        Four rounds of the review tried to tell the old reading from the
+        new one here instead -- by its figures, its age, the bus's
+        identity for it -- and each broke, keeping the old share under the
+        new captions or the new login's page blank (round 4)."""
         replaced = self._send_plan_if_changed()
-        plan = self._plan_msg()
-        if self._held is not None and plan != self._held["plan"]:
-            self._held = None
+        if usage is not None:
+            self._blanked = None
+            return usage
         page = self._spend_page_gone(replaced)
         if page is not None:
-            ident = self._sent_ident.get(page)
-            self._held = (None if ident is None else
-                          {"page": page, "ident": ident, "plan": plan})
-            if usage is None:
-                blank = protocol.blank_page(self._last_usage, page)
-                self._write(blank)
-                self._last_pushed = protocol.meaningful_usage(blank)
-                self._last_usage = blank
-        if usage is None:
-            return None
-        idents = self._idents(usage)
-        held = self._held
-        if held is not None:
-            if idents.get(held["page"]) == held["ident"]:
-                usage = protocol.blank_page(usage, held["page"])
-            else:
-                self._held = None
-        self._pending_ident = idents
-        return usage
-
-    def _idents(self, usage):
-        """{page: which reading it carries} for the pages `usage` names."""
-        ask = getattr(self._fetch, "reading", None)
-        out = {}
-        for page in (usage.get("provider"), usage.get("p2")):
-            if not page:
-                continue
-            ident = ask(page) if ask is not None else None
-            out[page] = ident if ident is not None \
-                else _page_shares(usage, page)
-        return out
+            self._blanked = page
+            blank = protocol.blank_page(self._last_usage, page)
+            self._write(blank)
+            self._last_pushed = protocol.meaningful_usage(blank)
+            self._last_usage = blank
+        return None
 
     def _plan_msg(self):
         """Asked of the fetch when it can answer; None otherwise. A plain
@@ -1237,7 +1193,6 @@ class Bridge:
         # and the other order would draw a spend share under the old
         # captions until the next message.
         self._write(usage)
-        self._sent_ident = self._pending_ident
         # Recorded here, once, so that no path can push without moving the
         # baseline -- a push that forgot to would leave the fast tick
         # re-sending the same message every two seconds forever.

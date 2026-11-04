@@ -704,28 +704,6 @@ def test_nothing_spend_related_is_printed(tmp_path, capfd, caplog,
     assert out.err.count(claude_cli.SPEND_FAILED_MSG) == 1
 
 
-def test_the_bus_names_the_reading_on_a_page(tmp_path):
-    """Bridge._outgoing tells the reading a spend page was taken down from
-    by IngestionBus.reading: the same for as long as the same render is
-    offered, whatever the clock does, and another for the next render."""
-    clock = Clock(NOW)
-    max_config(tmp_path, NOW - 3600)
-    bus = bus_on(clock)
-    render(tmp_path, NOW + 600, 0.10, rate_limits=WINDOWS)   # dated ahead
-    clock.t = NOW + 1
-    bus.poll()
-    first = bus.fetch().reading("claude")
-    assert first is not None
-    for step in (2, 3600, -7200):
-        clock.t += step
-        bus.poll()
-        assert bus.fetch().reading("claude") == first
-    render(tmp_path, NOW + 700, 0.20, rate_limits=WINDOWS)
-    bus.poll()
-    assert bus.fetch().reading("claude") != first
-    assert bus.fetch().reading("codex") is None
-
-
 # -- the old login's readings after a /login (round 4 of 2026-11-04) ----------
 
 GATEWAY = {"spend_limit": {"used_percentage": 62.8,
