@@ -693,9 +693,23 @@ def claude_hooks(home=None):
     total = len(install_hooks.HOOK_EVENTS)
     shim = os.path.exists(hook_shim_path(home))
     try:
-        data = install_statusline._load(settings_path(home))
+        if home.kind == claude_home.WSL:
+            # Read inside the distribution, as install_into reads it, not
+            # over \\wsl.localhost: Microsoft's 9P server opens with
+            # O_NOFOLLOW, so a settings.json symlinked into a dotfiles
+            # folder may not resolve through UNC, and status said "unknown"
+            # or "hooks not installed" for hooks install had written into
+            # the real file (review of feat/enterprise-spend, U45). Only
+            # asked while the distribution runs (cmd_status), so it starts
+            # nothing.
+            data = install_statusline._wsl_read_settings(
+                home, install_statusline.default_wsl_run(home)).doc
+        else:
+            data = install_statusline._load(settings_path(home))
     except install_statusline.SettingsUnreadable:
         return ClaudeHooks(0, total, False, False, shim)
+    except install_statusline.WslInstallError:
+        return ClaudeHooks(0, total, False, False, shim, unreachable=True)
     except OSError:
         # A WSL home's settings.json is read over \\wsl.localhost, where a
         # distribution stopping between `wsl -l --running` and the read

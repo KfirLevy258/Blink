@@ -3207,6 +3207,15 @@ def _wsl_desk(monkeypatch, reg, probe=None, running=False):
                         lambda: calls.append(("restart",)) or "restarted")
     monkeypatch.setattr(cli, "halt_service",
                         lambda: calls.append(("halt",)))
+
+    def fake_run_in(home):
+        # What status reads settings.json through inside a running
+        # distribution (claude_hooks): no file there.
+        def run(argv, stdin=None):
+            calls.append(("wsl_run", home.distro_name))
+            return 0, argv[-1].encode() + b"\nabsent\n", b""
+        return run
+    monkeypatch.setattr(install_statusline, "default_wsl_run", fake_run_in)
     monkeypatch.setattr(cli, "_install_service",
                         lambda: calls.append(("service",))
                         or "running (Scheduled Task)")
@@ -3865,12 +3874,36 @@ def test_status_says_a_failed_read_is_not_a_parse_error(tmp_path, monkeypatch,
     _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), running=True)
     _recorded_wsl(tmp_path)
 
-    def fails(path):
-        raise OSError("gone")
-    monkeypatch.setattr(install_statusline, "_load", fails)
+    monkeypatch.setattr(install_statusline, "default_wsl_run",
+                        lambda home: lambda argv, stdin=None: (1, b"", b""))
     cli.main(["status"])
     out = capsys.readouterr().out
     assert "Activity    unknown -- settings.json could not be read" in out
+
+
+def test_status_follows_a_symlinked_settings_json_inside_wsl(
+        tmp_path, monkeypatch, capsys):
+    """U45: read inside the distribution, where readlink -f resolves a
+    settings.json linked into a dotfiles folder, not over UNC, where the
+    9P server may not follow it."""
+    from pc import install_hooks
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), running=True)
+    home = _recorded_wsl(tmp_path)
+    doc = {"hooks": {ev: [{"hooks": [{
+        "type": "command",
+        "command": install_hooks.wsl_hook_command(home, ev)}]}]
+        for ev, _ in install_hooks.HOOK_EVENTS}}
+    asked = []
+
+    def run(argv, stdin=None):
+        asked.append(argv[-1])
+        return (0, b"/home/zoe/dotfiles/claude-settings.json\npresent\n"
+                + json.dumps(doc).encode(), b"")
+    monkeypatch.setattr(install_statusline, "default_wsl_run",
+                        lambda h: run)
+    hooks = cli.claude_hooks(home)
+    assert hooks.readable and hooks.wired == hooks.total
+    assert asked == ["/home/zoe/.claude/settings.json"]
 
 
 def test_plain_install_on_a_wsl_desk_discloses_the_wsl_files(
@@ -3987,10 +4020,12 @@ def test_status_says_it_could_not_check_wsl(tmp_path, monkeypatch, capsys):
 def test_status_says_a_distro_was_renamed(tmp_path, monkeypatch, capsys):
     """Finding 7: found by GUID under another name, status says so and
     reads it under the name it has now."""
-    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Work")]), running=True)
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Work")]),
+                      running=True)
     _recorded_wsl(tmp_path, name="Ubuntu")
     watch = _UncWatch(monkeypatch)
     cli.main(["status"])
+    assert ("wsl_run", "Work") in calls and ("wsl_run", "Ubuntu") not in calls
     out = capsys.readouterr().out
     assert "Claude Code WSL (Work), running" in out
     assert (f"renamed from Ubuntu -- run `{cli._repair_command()} install`"
