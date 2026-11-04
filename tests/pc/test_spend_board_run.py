@@ -189,6 +189,48 @@ def test_the_judge_passes_a_board_that_followed_along(tmp_path):
         assert figure not in text
 
 
+def test_the_judge_fails_a_spend_step_whose_dollar_line_never_went(
+        tmp_path):
+    """"rising" is both the estimated and the reached step's preset, so a
+    set of what was sent still holds it with the reached step's line gone;
+    the order does not."""
+    sent = _drive(tmp_path, "1.5.0")
+    from pc.providers.scripted import SBURN_PRESETS
+    rising = SBURN_PRESETS["rising"]
+    # Drop every sburn line of the second "rising" run (the reached step).
+    runs, out, prev = 0, [], None
+    for m in sent:
+        if m["t"] == "sburn":
+            if m["b"] == rising and prev != rising:
+                runs += 1
+            prev = m["b"]
+            if m["b"] == rising and runs == 2:
+                continue
+        out.append(m)
+    assert runs == 2 and len(out) < len(sent)
+    ok, lines = run.judge(_records(out))
+    assert not ok
+    assert any(x.startswith("FAIL daemon sent") and "bucket sets" in x
+               for x in lines)
+
+
+def test_caps_from_a_pref_without_a_hello(tmp_path):
+    """A board already running when the daemon connects sends a pref, not a
+    hello; its caps still decide what the board is judged as."""
+    sent = _drive(tmp_path, "1.5.0")
+    recs = [r for r in _records(sent)
+            if r.get("msg", {}).get("t") != "hello"]
+    recs.insert(0, {"dir": "rx", "msg": {
+        "t": "pref", "v": protocol.VERSION,
+        "caps": [protocol.BOARD_CAP_PLAN, protocol.BOARD_CAP_SPENDBURN]}})
+    caps = protocol.board_caps(run.board_hello(recs))
+    assert protocol.BOARD_CAP_PLAN in caps
+    assert protocol.BOARD_CAP_SPENDBURN in caps
+    ok, lines = run.judge(recs)
+    assert ok, lines
+    assert "announces plans, announces spendburn" in lines[0]
+
+
 def test_the_judge_fails_a_board_that_missed_a_page(tmp_path):
     sent = _drive(tmp_path, "1.5.0")
     board = ["[plan] claude spend monthly", "[plan] claude windows"]
@@ -223,8 +265,9 @@ def test_the_judge_fails_a_run_with_no_ping(tmp_path):
     sent = _drive(tmp_path, "1.5.0")
     recs = [r for r in _records(sent)
             if r.get("msg", {}).get("t") != "ping"]
-    ok, _ = run.judge(recs)
+    ok, lines = run.judge(recs)
     assert not ok
+    assert "FAIL no ping heard, so no uptime to judge a reboot by" in lines
 
 
 def test_the_firmware_comes_from_the_ota_query_without_a_hello(tmp_path):

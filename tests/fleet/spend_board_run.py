@@ -265,11 +265,17 @@ def judge(records):
 
     sburns = sent(records, "sburn")
     if dollars:
-        shown = {tuple(m.get("b") or ()) for m in sburns}
-        missing = [b for b in expected_sburns() if b not in shown]
-        check(not missing,
-              f"daemon sent {len(sburns)} sburn lines, every spend step's",
-              f"{len(missing)} spend steps' dollar buckets never sent")
+        # In order, by buckets: presets repeat across steps ("rising" is
+        # both estimated and reached), so a set of what was sent could not
+        # see one of them go missing. A heartbeat re-sends the same buckets,
+        # which is a repeat, not a step.
+        shown = _dedupe([tuple(m.get("b") or ()) for m in sburns])
+        want_b = _dedupe(expected_sburns())
+        check(shown == want_b,
+              f"daemon sent {len(sburns)} sburn lines, every spend step's"
+              f" in order",
+              f"daemon sent {len(shown)} sburn bucket sets in order,"
+              f" wanted {len(want_b)}")
     else:
         check(not sburns, "no sburn line sent",
               f"{len(sburns)} sburn lines sent to a board without the cap")
@@ -301,7 +307,8 @@ def judge(records):
               f" {up[-1] // 1000} s over {len(up)} pings",
               f"board uptime went back {restarted} times")
     else:
-        check(False, "", "no ping heard, so no uptime to judge a reboot by")
+        check(False, "no reboot: board uptime heard",
+              "no ping heard, so no uptime to judge a reboot by")
     return ok, lines
 
 
