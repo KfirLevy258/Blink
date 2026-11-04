@@ -5238,19 +5238,33 @@ def _wire_line(home=None, reachable=True):
     import json as _json
     from pc import ingest, session_verdict, spend_count
     # The persisted verdict, read and never written: the daemon writes it.
-    # The spend count likewise: one in memory, so a status run neither
-    # writes the daemon's ~/.blink/spend-count.json nor races its save.
+    # The spend count likewise: loaded from the daemon's
+    # ~/.blink/spend-count.json and never saved, so a status run neither
+    # writes it nor races its save. Loaded, not empty: until the review of
+    # feat/enterprise-spend (U19) it started from nothing, and on a seat
+    # billed by usage between /usage runs the wire line left out every
+    # rise the daemon had counted -- 20.0% here, 24.0% on the board.
+    # SpendCounter has no load-only mode, so the load is asked for by
+    # hand; it only reads.
+    counter = spend_count.SpendCounter(persist=False)
+    counter._load()
     extra = {}
+    if home is not None:
+        # Pinned to the home status found: with none, each of the bus's
+        # readers asks claude_home.current(), which is the record -- for a
+        # renamed distribution, paths under the old name that lead nowhere,
+        # while plain status read the new one (U20).
+        extra["home"] = lambda: home
     if home is not None and home.kind == claude_home.WSL and not reachable:
         from pc import wsl_watch
         from pc.burn_reader import CodexBurnReader
         watch = wsl_watch.WslWatch(home)
-        extra = dict(burn={"claude": watch.burn_source(),
+        extra.update(burn={"claude": watch.burn_source(),
                            "codex": CodexBurnReader()},
                      plan_source=watch.view)
     bus = ingest.IngestionBus(
         verdict=session_verdict.SessionVerdict(persist=False),
-        counter=spend_count.SpendCounter(persist=False), **extra)
+        counter=counter, **extra)
     msg = bus.poll()
     _session_window_line(bus.claude_page(), bus.verdict())
     from pc.providers import codex_cli

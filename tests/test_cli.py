@@ -3083,6 +3083,36 @@ def test_disclosure_says_what_a_usage_seat_keeps_on_any_desk(
     assert SPEND_LATER.format(path=spend_count._default_path()) in said
 
 
+def test_status_wire_counts_what_the_daemon_counted(tmp_path, capsys,
+                                                    monkeypatch):
+    """U19: on a seat billed by usage between /usage runs, `--wire` built
+    its count from nothing and printed only the /usage share, while the
+    board showed it plus every rise the daemon had counted since. The
+    count is loaded from the daemon's file now (and still never saved)."""
+    import json as _json
+    from pc import claude_plan, spend_count
+    now = time.time()
+    _claude_json(tmp_path, "enterprise_usage_based", used=4321,
+                 fetched_ms=int((now - 60) * 1000))
+    view = claude_plan.PlanReader().look(now)
+    path = inside(tmp_path, spend_count._default_path())
+    daemon = spend_count.SpendCounter(path=path)
+    daemon.bind(view.account_fp, claude_plan.month_start_utc(now))
+    daemon.observe("s1", 1.00, now - 30)
+    daemon.observe("s1", 11.00, now - 20)       # $10.00 counted
+    daemon.save()
+    with open(path, "rb") as f:
+        saved = f.read()
+    cli.main(["status", "--wire"])
+    lines = capsys.readouterr().out.splitlines()
+    i = lines.index("Wire        the next usage message, exactly as the"
+                    " board gets it:")
+    wire = _json.loads(lines[i + 1])
+    assert wire["session_pct"] == 21.3          # (4321 + 1000) / 25000
+    with open(path, "rb") as f:
+        assert f.read() == saved
+
+
 def test_config_disclosure_names_seat_fields(tmp_path, capsys, monkeypatch):
     as_checkout(monkeypatch)
     cli._announce()
@@ -3967,6 +3997,21 @@ def test_status_says_a_distro_was_renamed(tmp_path, monkeypatch, capsys):
             in out)
     assert watch.paths
     assert all("\\Work\\" in p and "Ubuntu" not in p for p in watch.paths), watch.paths
+
+
+def test_status_wire_reads_a_renamed_distro_under_its_new_name(
+        tmp_path, monkeypatch, capsys):
+    """U20: `--wire` built its bus with no home, so its readers asked
+    claude_home.current() -- the record, under the old name -- and read
+    paths that lead nowhere, while plain status read the new name. The
+    bus is pinned to the home status found."""
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Work")]), running=True)
+    _recorded_wsl(tmp_path, name="Ubuntu")
+    watch = _UncWatch(monkeypatch)
+    cli.main(["status", "--wire"])
+    assert watch.paths
+    assert all("\\Work\\" in p and "Ubuntu" not in p
+               for p in watch.paths), watch.paths
 
 
 def _marked_drop(home, wsl_home):
