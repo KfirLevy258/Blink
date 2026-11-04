@@ -723,10 +723,37 @@ _CHANGED = 75
 # parsed. readlink -f fails on some systems for a file that does not exist
 # yet -- the first install on a fresh account -- and the path as given is
 # then the right answer, since there is no link to follow.
+#
+# Unless it IS a link: GNU readlink -f also fails for a link whose target's
+# folder does not exist yet, and falling back to the link itself made the
+# write's mv replace the link with a plain file -- the dotfiles loss _save's
+# comment describes, which natively realpath and makedirs avoid (review of
+# feat/enterprise-spend, U31). So a link is followed by hand, one level at
+# a time, and the write's mkdir -p makes the folder, as natively.
+#
+# $2 "install" also refuses a file on a Windows drive (exit _ON_WINDOWS).
+# A ~/.claude inside WSL linked into the Windows profile is the folder
+# Claude Code on Windows reads: an install wrote `sh /home/...` commands
+# into it, blanking the Windows status line and breaking its hooks, and
+# chained Windows' own `bash "$USERPROFILE/..."` command into Linux (U31).
+# wslpath -w of the folder says where it is whatever the automount root is
+# called. An uninstall reads with "any": it only ever takes Blink out.
 _READ = r"""p=$1
-t=$(readlink -f -- "$p" 2>/dev/null) && [ -n "$t" ] || t=$p
+t=$(readlink -f -- "$p" 2>/dev/null) && [ -n "$t" ] || {
+  t=$p n=0
+  while [ -L "$t" ] && [ "$n" -lt 40 ]; do
+    l=$(readlink -- "$t") && [ -n "$l" ] || exit 66
+    case $l in /*) t=$l ;; *) t=${t%/*}/$l ;; esac
+    n=$((n + 1))
+  done
+  [ -L "$t" ] && exit 66
+}
 case $t in *'
 '*) exit 65 ;; esac
+if [ "$2" = install ]; then
+  w=$(wslpath -w "${t%/*}" 2>/dev/null) || w=
+  case $w in [A-Za-z]:*) exit 67 ;; esac
+fi
 printf '%s\n' "$t"
 if [ -e "$t" ]; then
   printf 'present\n'
@@ -734,6 +761,9 @@ if [ -e "$t" ]; then
 fi
 printf 'absent\n'
 """
+
+# Exit status of the read script for "settings.json is on a Windows drive".
+_ON_WINDOWS = 67
 
 # Write stdin to $1, atomically, refusing if $1 is not what was read: $2 is
 # the SHA-256 of the bytes read, "absent" for a file that was not there, or
@@ -856,9 +886,17 @@ class _WslSettings:
         self.trailing_newline = trailing_newline
 
 
-def _wsl_read_settings(home, wsl_run) -> _WslSettings:
+def _wsl_read_settings(home, wsl_run, purpose="install") -> _WslSettings:
+    """settings.json inside the distribution. `purpose` "install" refuses
+    one on a Windows drive (_READ's comment); "any" is uninstall's."""
     linux = _linux_path(home, home.join(home.config_dir, "settings.json"))
-    rc, out, _ = wsl_run(["sh", "-c", _READ, "sh", linux])
+    rc, out, _ = wsl_run(["sh", "-c", _READ, "sh", linux, purpose])
+    if rc == _ON_WINDOWS:
+        raise WslInstallError(
+            "Claude Code inside WSL keeps its settings on the Windows drive"
+            " (its folder is a link into your Windows profile), so a Linux"
+            " status line there would break Claude Code on Windows. Give"
+            " it a folder inside Linux, or use a plain `blink install`.")
     head, _, rest = out.partition(b"\n")
     state, sep, body = rest.partition(b"\n")
     if rc != 0 or not sep or state not in (b"present", b"absent"):
@@ -1004,7 +1042,7 @@ def uninstall_from(home, wsl_run) -> str:
     quotes the customer's own command."""
     from pc import install_hooks
 
-    st = _wsl_read_settings(home, wsl_run)
+    st = _wsl_read_settings(home, wsl_run, "any")
     chain = wsl_shim_path(home, os.path.basename(CHAIN_PATH))
     rc, out, _ = wsl_run(["sh", "-c", _CAT_OR_NOTHING, "sh", chain])
     # _CAT_OR_NOTHING exits 0 for a missing chain file, so a non-zero rc is

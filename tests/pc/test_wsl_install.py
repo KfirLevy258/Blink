@@ -737,3 +737,85 @@ def test_a_hooks_section_it_cannot_edit_still_gets_the_status_line(
     assert install_hooks._read_marker(home) == set()
     assert (lin / ".blink" / "statusline-chain").read_text().strip() == \
         "echo MINE"
+
+
+# ------------------------------------ review of feat/enterprise-spend, U31
+
+_WSLPATH_WITH_A_DRIVE = r'''
+if [ "$1" = -w ]; then
+  case $2 in */mnt/c/*) printf 'C:\\Users\\zoe\\.claude\n' ;;
+             *) printf '\\\\wsl.localhost\\Ubuntu%s\n' "$2" ;; esac
+  exit 0
+fi
+[ "$1" = -u ] && shift
+printf '%s\n' "$1"
+'''
+
+
+@posix_only
+@pytest.mark.parametrize("shell", SHELLS)
+def test_install_refuses_settings_on_the_windows_drive(tmp_path, shell):
+    """(a) ~/.claude inside WSL linked into the Windows profile: the WSL
+    install wrote `sh /home/...` commands into the settings Claude Code on
+    Windows reads, blanking its status line and breaking its hooks, and
+    chained Windows' own `bash "$USERPROFILE/..."` command into Linux. It is
+    refused, with no path in the message; uninstall still works there, to
+    take out what an earlier install put in."""
+    lin = tmp_path / "lin"
+    lin.mkdir()
+    win = tmp_path / "mnt" / "c" / "Users" / "zoe" / ".claude"
+    win.mkdir(parents=True)
+    before = {"statusLine": {"type": "command",
+                             "command": 'bash "$USERPROFILE/.blink/x.sh"'}}
+    _write_json(str(win / "settings.json"), before)
+    (lin / ".claude").symlink_to(win)
+    home = _home(lin)
+    run = _runner(lin, _fake_bin(tmp_path, _WSLPATH_WITH_A_DRIVE),
+                  shell=shell)
+    with pytest.raises(install_statusline.WslInstallError) as e:
+        install_statusline.install_into(home, run)
+    assert "Windows" in str(e.value)
+    for secret in (str(tmp_path), "zoe"):
+        assert secret not in str(e.value)
+    assert json.loads((win / "settings.json").read_text()) == before
+    # The drift check reads the same way and so does nothing.
+    install_statusline._write_marker(_sl_cmd(lin), home)
+    assert install_statusline.drift_check("", "", home, wsl_run=run) is None
+    assert json.loads((win / "settings.json").read_text()) == before
+    # Uninstall is not refused: it only ever takes Blink out.
+    doc = {"statusLine": {"type": "command", "command": _sl_cmd(lin)}}
+    _write_json(str(win / "settings.json"), doc)
+    install_statusline.uninstall_from(home, run)
+    assert "statusLine" not in json.loads((win / "settings.json").read_text())
+
+
+@posix_only
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_dangling_link_into_a_missing_folder_stays_a_link(tmp_path, shell):
+    """(b) settings.json a link to a dotfiles path whose folder is not there
+    yet. GNU readlink -f fails on it, the script fell back to the link
+    itself, and the mv replaced the link with a plain file -- the dotfiles
+    loss _save's comment describes. Natively _save follows the link and
+    makes the folder; so does this now."""
+    lin = tmp_path / "lin"
+    (lin / ".claude").mkdir(parents=True)
+    target = lin / "dotfiles" / "claude" / "settings.json"
+    link = lin / ".claude" / "settings.json"
+    link.symlink_to(target)
+    home = _home(lin)
+    run = _runner(lin, _fake_bin(tmp_path), shell=shell)
+    real_readlink = shutil.which("readlink")
+    # macOS readlink -f resolves a missing parent; GNU's does not. Stand in
+    # for GNU: -f fails when the target's folder is absent.
+    fake = tmp_path / "fakebin" / "readlink"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = -f ]; then shift; [ "$1" = -- ] && shift\n'
+        '  t=$(' + real_readlink + ' "$1") || exit 1\n'
+        '  [ -d "${t%/*}" ] || exit 1\nfi\n'
+        'exec ' + real_readlink + ' "$@"\n')
+    fake.chmod(0o755)
+    install_statusline.install_into(home, run)
+    assert link.is_symlink()
+    assert json.loads(target.read_text())["statusLine"]["command"] == \
+        _sl_cmd(lin)
