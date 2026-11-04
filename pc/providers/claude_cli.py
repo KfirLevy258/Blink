@@ -1051,9 +1051,17 @@ def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None,
         weekly_pct=base.UNKNOWN, weekly_resets_at=None,
         # Exact only while no rise has been seen since the /usage at all,
         # counted or not: one inside the margin, or one straddling the
-        # /usage, is spend the figure does not have (round 6, item 6).
+        # /usage, is spend the figure does not have (round 6, item 6). On
+        # a WSL desk "since" reaches SKEW_S further back: a Windows clock
+        # running behind the distribution's dates a rise made after the
+        # /usage before it (final review of round 7, F2). `added == 0` is
+        # kept: rose_after asks for a render strictly after its time, and
+        # a rise counted from a sighting at the very second of the /usage
+        # can be dated that second too.
         spend_exact=(age is not None and age < SPEND_EXACT_S and added == 0
-                     and not counter.rose_after(a.fetched_at)),
+                     and not counter.rose_after(
+                         a.fetched_at - (spend_count.SKEW_S if wsl
+                                         else 0))),
         spend_hint=age is None or age > SPEND_HINT_S)
 
 

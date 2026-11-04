@@ -1034,3 +1034,20 @@ def test_a_wsl_desk_leaves_the_margin_to_the_next_usage():
     assert f.spend_usd == 10.00 and f.spend_exact is False
     g = claude_cli._spend_frame(_anchor(NOW - 60), c, NOW, NOW - 40)
     assert g.spend_usd == 10.50 and g.spend_exact is False
+
+
+def test_a_wsl_page_is_not_exact_over_a_windows_clock_behind():
+    """F2: a Windows clock running behind the distribution's dates a rise
+    made after the /usage before it, and rose_after(fetched_at) did not
+    see it: "exact" over spend the figure does not have. On a WSL home
+    the page is exact only with no rise seen after fetched_at - SKEW_S."""
+    from pc import spend_count
+    c = spend_count.SpendCounter(persist=False)
+    c.observe("a", 1.00, NOW - 200)
+    c.observe("a", 1.50, NOW - 90)             # made after, dated before
+    a = _anchor(NOW - 60)
+    assert claude_cli._spend_frame(a, c, NOW, NOW - 90,
+                                   wsl=True).spend_exact is False
+    # Natively one clock: a rise dated before the /usage is in it.
+    assert claude_cli._spend_frame(a, c, NOW, NOW - 90).spend_exact is True
+
