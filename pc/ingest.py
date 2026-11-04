@@ -88,8 +88,16 @@ DEFAULT_VERDICT = object()
 class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
                  now=time.time, burn=None, verdict=DEFAULT_VERDICT,
-                 account=None, counter=None):
-        """`counter` (a pc/spend_count.SpendCounter) is used only when the
+                 account=None, counter=None, plan_source=None):
+        """`plan_source`, when given, is where the bus's one reader of
+        Claude Code's config takes its view from instead of the file: a
+        WSL home's pc/wsl_watch.WslWatch.view, which answers from memory,
+        so the config -- a UNC path into the distribution -- is never
+        stat'ed or read on the serial loop (docs/plans/enterprise-spend.md,
+        section 4, "Reading"). None reads the file, as every native desk
+        does.
+
+        `counter` (a pc/spend_count.SpendCounter) is used only when the
         bus builds its own providers (`providers` None): it is handed to
         the status-line provider there. With `providers` given it feeds
         nothing -- those providers were built by the caller, who gives a
@@ -109,7 +117,7 @@ class IngestionBus:
         # a scenario's bus, for the reason above: it never asks.
         self._plan_reader = None
         if providers is None:
-            self._plan_reader = claude_plan.PlanReader()
+            self._plan_reader = claude_plan.PlanReader(source=plan_source)
             if account is None:
                 account = claude_account.AccountWatch(self._plan_reader.look)
         self._account = account
@@ -155,7 +163,10 @@ class IngestionBus:
         # transcripts: claude_usage_bridge.build_bus decides, the way it
         # decides the providers. One reader is the claude page's; a dict
         # gives each provider's page its own ({"claude": BurnReader(),
-        # "codex": CodexBurnReader()} on a desk).
+        # "codex": CodexBurnReader()} on a desk). A WSL home's claude page
+        # has its watch's burn_source() instead (pc/wsl_watch): answers
+        # from memory, read on the watch's thread, so it is not a
+        # BurnReader and burn() below asks it as it asks a scenario's.
         if burn is not None and not isinstance(burn, dict):
             burn = {claude_cli.PROVIDER_ID: burn}
         self._burn = burn or {}

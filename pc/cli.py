@@ -3486,11 +3486,27 @@ def _take_out_of(path, home):
     return lines
 
 
+class _NoWatchdog:
+    """drift_watchdog's answer for a WSL home: ticks, does nothing."""
+
+    def tick(self):
+        return None
+
+
 def drift_watchdog(home=None):
     """The daemon's DriftWatchdog, for `home` (claude_home.native() when
     None): its settings.json, its shims and its marker. Built here so the
-    daemon and the tests build the same one."""
+    daemon and the tests build the same one.
+
+    A WSL home gets one that does nothing. This watchdog ticks on the
+    daemon's main thread, beside the serial loop, and a WSL drift check
+    starts wsl.exe (30 s timeout) and reads through the distribution; its
+    shim check would write the shims through UNC paths. The WSL check runs
+    in pc/wsl_watch instead, on its own thread and only while the
+    distribution is in use (install_statusline.wsl_drift_watchdog)."""
     home = home or claude_home.native()
+    if home.kind == claude_home.WSL:
+        return _NoWatchdog()
     return install_statusline.DriftWatchdog(
         settings_path(home), shim_path(home),
         shims=((shim_path(home), "blink-statusline.sh"),

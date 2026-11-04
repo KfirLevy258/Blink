@@ -283,7 +283,25 @@ def build_bus():
     """
     scenario = os.environ.get("BLINK_SCENARIO")
     if not scenario:
+        from pc import claude_home
         from pc.burn_reader import BurnReader, CodexBurnReader
+        home = claude_home.current()
+        if home.kind == claude_home.WSL:
+            # Claude Code inside a WSL distribution: its config and its
+            # transcripts are UNC paths, read by the watch on its own
+            # thread and only while the distribution is in use, and handed
+            # to the bus from memory (pc/wsl_watch). Built only here, so a
+            # native desk never has one, and once per process: `blink
+            # install --wsl` restarts the service, which rebuilds the bus
+            # with it. The status line and the hook state stay with the
+            # providers, read from the Windows drop folder.
+            from pc import wsl_watch
+            watch = wsl_watch.WslWatch(home)
+            watch.start()
+            return ingest.IngestionBus(
+                burn={"claude": watch.burn_source(),
+                      "codex": CodexBurnReader()},
+                plan_source=watch.view)
         return ingest.IngestionBus(burn={"claude": BurnReader(),
                                          "codex": CodexBurnReader()})
     from pc.providers.scripted import ScriptedProvider
@@ -883,7 +901,10 @@ def main(argv=None):
     # For this computer's own Claude Code, in the folder `blink install`
     # recorded (pc/claude_home): a login service does not see the shell's
     # CLAUDE_CONFIG_DIR, so the watchdog guards the file install wrote.
-    watchdog = drift_watchdog()
+    # A WSL home's is checked by its pc/wsl_watch, off this thread, and
+    # drift_watchdog gives it one that does nothing here.
+    from pc import claude_home as _claude_home
+    watchdog = drift_watchdog(_claude_home.current())
 
     # Before the port is touched. The lock lives for the life of the process --
     # the file object is bound here so it is not garbage collected, which would

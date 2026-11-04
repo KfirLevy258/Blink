@@ -1250,3 +1250,23 @@ class DriftWatchdog:
                 found.append(stale)
 
         return "; ".join(found) if found else None
+
+
+def wsl_drift_watchdog(home, wsl_run=None):
+    """The DriftWatchdog for a WSL home, for pc/wsl_watch to tick on its
+    own thread while the distribution is in use -- never the daemon's main
+    thread, whose watchdog ticks on the serial loop, where a wsl.exe that
+    takes its 30 s timeout would hold the board's pongs past their window.
+
+    drift_check through `wsl_run` (default_wsl_run when None), and no
+    `shims`: shim_content_check rewrites a stale shim through cli._write_shim
+    at the path it is given, which for this home is a UNC path, and an
+    os.replace there writes over whatever is at that path inside Linux
+    (_wsl_drift's docstring). The settings and shim paths are unused on
+    this path -- _wsl_drift finds both inside the distribution -- and are
+    left empty so nothing can open them by mistake."""
+    run = wsl_run or default_wsl_run(home)
+
+    def check(settings_path, shim_path, h):
+        return drift_check(settings_path, shim_path, h, wsl_run=run)
+    return DriftWatchdog("", "", check=check, home=home)

@@ -1,0 +1,503 @@
+"""WslWatch: a WSL home read off the serial loop, only while it is in use.
+
+The 2 s poll reads only the Windows drop folder; Claude Code's config, the
+transcripts and the drift check are read from the distribution only while
+the drop folder changed in the last ten minutes and the distribution is
+running, on a worker thread (docs/plans/enterprise-spend.md rev 3, section
+4, "Reading").
+
+No real wsl.exe is started and no real UNC path is touched: `tmp_path/unc`
+stands in for \\\\?\\UNC\\wsl.localhost\\<name>, and every os.stat,
+os.lstat, os.scandir, os.listdir and os.open under it is counted, so "no
+UNC access" is measured rather than assumed.
+"""
+import dataclasses
+import json
+import os
+import threading
+import time
+
+import pytest
+
+from pc import (burn_reader, claude_home, claude_plan, cli, ingest,
+                install_statusline, wsl_watch)
+
+GUID = "{5C3D2B1A-0000-4000-8000-00000000ABCD}"
+SECRET = "do-not-keep-this-project-history"
+
+
+def _home(tmp_path):
+    """A WSL home whose UNC side is tmp_path/unc. config_dir_set, so the
+    config is <config_dir>\\.claude.json -- on POSIX a file whose name
+    holds a backslash, on Windows the real join; either way the path
+    claude_plan.config_path gives, which is what the watch reads."""
+    unc = tmp_path / "unc"
+    unc.mkdir()
+    h = claude_home.wsl(distro_guid=GUID, distro_name="Ubuntu",
+                        linux_user="zoe", linux_home="/home/zoe",
+                        config_dir=str(unc / "claude"), config_dir_set=True)
+    h = dataclasses.replace(h, transcripts=str(unc / "projects"))
+    os.makedirs(h.transcripts)
+    return h, str(unc)
+
+
+def _write_config(home, seat=False, extra=None):
+    doc = {"oauthAccount": {"accountUuid": "acct-1",
+                            "organizationUuid": "org-1",
+                            "organizationType": "claude_enterprise"
+                            if seat else "claude_max",
+                            "billingType": "usage_based" if seat
+                            else "stripe_subscription"},
+           "projects": {"/home/zoe/secret": {"history": [SECRET]}}}
+    doc.update(extra or {})
+    path = claude_plan.config_path(home)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(doc, f)
+    return path
+
+
+def _touch_drop(home, at):
+    os.makedirs(home.drop_dir, exist_ok=True)
+    p = os.path.join(home.drop_dir, "statusline.json")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("{}")
+    os.utime(p, (at, at))
+
+
+class _Clock:
+    def __init__(self, t):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+class _Running:
+    def __init__(self, answer=True):
+        self.answer = answer
+        self.calls = []
+
+    def __call__(self, name):
+        self.calls.append(name)
+        return self.answer
+
+
+class _Drift:
+    def __init__(self):
+        self.ticks = 0
+
+    def tick(self):
+        self.ticks += 1
+        return None
+
+
+def _count_unc(monkeypatch, root):
+    """Every filesystem call under `root`, by name."""
+    hits = []
+    for name in ("stat", "lstat", "scandir", "listdir", "open"):
+        real = getattr(os, name)
+
+        def wrap(*a, _real=real, _name=name, **k):
+            p = a[0] if a else k.get("path")
+            if isinstance(p, (str, bytes, os.PathLike)) and \
+                    os.fsdecode(p).startswith(root):
+                hits.append(_name)
+            return _real(*a, **k)
+        monkeypatch.setattr(os, name, wrap)
+    return hits
+
+
+def _watch(home, clock, running, drift=None, **kw):
+    return wsl_watch.WslWatch(home, running=running, clock=clock,
+                              drift=drift or _Drift(), **kw)
+
+
+def test_no_unc_access_when_not_live(tmp_path, monkeypatch):
+    home, unc = _home(tmp_path)
+    _write_config(home)
+    t0 = time.time()
+    clock = _Clock(t0)
+
+    # The drop folder is stale: the user is not using Claude Code.
+    _touch_drop(home, t0 - wsl_watch.LIVE_S - 1)
+    running = _Running(True)
+    drift = _Drift()
+    w = _watch(home, clock, running, drift)
+    hits = _count_unc(monkeypatch, unc)
+    for _ in range(5):
+        w.tick()
+        clock.t += 20
+    assert hits == []
+    assert drift.ticks == 0
+    assert w.view() is None
+
+    # Fresh drop folder, distribution stopped.
+    _touch_drop(home, clock.t)
+    running.answer = False
+    for _ in range(5):
+        w.tick()
+        clock.t += 1
+    assert hits == []
+    assert drift.ticks == 0
+    assert w.view() is None
+
+    # The control: live, and the counter does see the reads.
+    running.answer = True
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert hits
+    assert drift.ticks == 1
+    assert w.view() is not None
+
+
+def test_running_checked_at_most_every_15s(tmp_path):
+    home, _ = _home(tmp_path)
+    t0 = time.time()
+    clock = _Clock(t0)
+    running = _Running(True)
+    w = _watch(home, clock, running)
+    for dt in (0, 5, 10, 14.9):
+        clock.t = t0 + dt
+        _touch_drop(home, clock.t)
+        w.tick()
+    assert len(running.calls) == 1
+    clock.t = t0 + 15
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert len(running.calls) == 2
+    # A clock gone back is asked again, not trusted for "15 s".
+    clock.t = t0 + 2
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert len(running.calls) == 3
+    assert running.calls == ["Ubuntu"] * 3
+
+
+def test_idle_desk_never_runs_wsl(tmp_path, monkeypatch):
+    """A drop folder ten minutes stale -- or never written -- means
+    wsl.exe is never started, not even to ask whether it is running."""
+    home, unc = _home(tmp_path)
+    t0 = time.time()
+    clock = _Clock(t0)
+    running = _Running(True)
+    drift = _Drift()
+    w = _watch(home, clock, running, drift)
+    hits = _count_unc(monkeypatch, unc)
+    for _ in range(20):            # no drop folder at all
+        w.tick()
+        clock.t += 60
+    _touch_drop(home, clock.t - wsl_watch.LIVE_S - 1)
+    for _ in range(20):
+        w.tick()
+        clock.t += 60
+    assert running.calls == []
+    assert drift.ticks == 0
+    assert hits == []
+
+
+def test_live_reads_the_state_folder_too(tmp_path):
+    """A hook firing writes state/, not statusline.json: that is use too."""
+    home, _ = _home(tmp_path)
+    _write_config(home)
+    t0 = time.time()
+    clock = _Clock(t0)
+    os.makedirs(home.state_dir)
+    st = os.path.join(home.state_dir, "s1.state")
+    with open(st, "w") as f:
+        f.write("x")
+    os.utime(st, (t0, t0))
+    os.utime(home.state_dir, (t0, t0))
+    os.utime(home.drop_dir, (t0 - 3600, t0 - 3600))
+    w = _watch(home, clock, _Running(True))
+    w.tick()
+    assert w.view() is not None
+
+
+def test_stop_then_resume(tmp_path, monkeypatch):
+    """`wsl --shutdown` with the daemon running, then WSL opened again:
+    reads stop without a restart, and resume (wsl plan, Task 7 item 2)."""
+    home, unc = _home(tmp_path)
+    _write_config(home, seat=False)
+    t0 = time.time()
+    clock = _Clock(t0)
+    running = _Running(True)
+    w = _watch(home, clock, running)
+    _touch_drop(home, clock.t)
+    w.tick()
+    first = w.view()
+    assert first is not None and not first.spend_seat
+
+    running.answer = False                      # wsl --shutdown
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    _write_config(home, seat=True)              # changed while away
+    hits = _count_unc(monkeypatch, unc)
+    for _ in range(4):
+        w.tick()
+        clock.t += 5
+    assert hits == []
+    assert w.view() == first                    # the last good view kept
+
+    running.answer = True                       # opened again
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert hits
+    assert w.view().spend_seat
+
+
+def test_readers_never_block(tmp_path):
+    """A tick held for 5 s inside wsl.exe: the serial loop's readers
+    answer at once, from memory."""
+    home, _ = _home(tmp_path)
+    _write_config(home)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0)
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_running(name):
+        entered.set()
+        release.wait(5)
+        return True
+
+    w = _watch(home, clock, slow_running)
+    burn = w.burn_source()
+    t = threading.Thread(target=w.tick, daemon=True)
+    t.start()
+    try:
+        assert entered.wait(5)
+        began = time.monotonic()
+        assert w.view() is None
+        assert burn.poll(clock.t) is None
+        assert w.burn_snapshot() is None
+        assert time.monotonic() - began < 0.5
+    finally:
+        release.set()
+        t.join(10)
+    assert w.view() is not None
+
+
+def test_watch_keeps_no_document(tmp_path):
+    home, _ = _home(tmp_path)
+    _write_config(home, seat=True)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0)
+    w = _watch(home, clock, _Running(True))
+    w.tick()
+    assert isinstance(w.view(), claude_plan.ConfigView)
+
+    seen = set()
+
+    def walk(o, depth=0):
+        if id(o) in seen or depth > 8:
+            return
+        seen.add(id(o))
+        if isinstance(o, (str, bytes)):
+            assert SECRET not in (o if isinstance(o, str)
+                                  else o.decode("utf-8", "replace"))
+            assert "oauthAccount" not in (o if isinstance(o, str) else "")
+            return
+        if isinstance(o, dict):
+            assert "oauthAccount" not in o and "projects" not in o
+            for k, v in o.items():
+                walk(k, depth + 1)
+                walk(v, depth + 1)
+            return
+        if isinstance(o, (list, tuple, set, frozenset)):
+            for v in o:
+                walk(v, depth + 1)
+            return
+        if dataclasses.is_dataclass(o) and not isinstance(o, type):
+            for f in dataclasses.fields(o):
+                walk(getattr(o, f.name), depth + 1)
+            return
+        d = getattr(o, "__dict__", None)
+        if isinstance(d, dict) and not callable(o):
+            for v in d.values():
+                walk(v, depth + 1)
+
+    walk(vars(w))
+
+
+def test_burn_read_only_when_asked_and_live(tmp_path):
+    """The transcripts are read only when the bus asks for a burn line (a
+    page with no session window), and only while live. Pruning reads
+    nothing and goes on regardless (README "Privacy")."""
+    home, _ = _home(tmp_path)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0)
+
+    class Reader:
+        def __init__(self):
+            self.polls = []
+
+        def poll(self, now, budget=None):
+            self.polls.append(now)
+            return 7, [1] * 20
+
+        def held(self, now):
+            return (8, [0] * 20) if self.polls else None
+
+    r = Reader()
+    running = _Running(True)
+    w = _watch(home, clock, running, burn_reader=r)
+    src = w.burn_source()
+    w.tick()
+    assert r.polls == []                       # never asked: not read
+    assert src.poll(clock.t) is None           # asked now; nothing yet
+    w.tick()
+    assert r.polls == []        # the running check is 0 s old: no UNC
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert r.polls == [clock.t]
+    assert src.poll(clock.t) == (7, [1] * 20)
+
+    running.answer = False
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    src.poll(clock.t)
+    w.tick()
+    assert len(r.polls) == 1                   # not live: not read
+    assert src.poll(clock.t) == (8, [0] * 20)  # from memory, slid on
+
+    # Asked once, then not again for longer than WANT_TTL_S: not read.
+    running.answer = True
+    clock.t += wsl_watch.WANT_TTL_S + 1
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert len(r.polls) == 1
+
+
+def test_the_real_burn_reader_reads_the_wsl_transcripts(tmp_path):
+    home, _ = _home(tmp_path)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0)
+    proj = os.path.join(home.transcripts, "p")
+    os.makedirs(proj)
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t0))
+    line = {"type": "assistant", "timestamp": stamp, "requestId": "r1",
+            "message": {"id": "m1", "model": "claude-x",
+                        "usage": {"output_tokens": 42}}}
+    with open(os.path.join(proj, "s.jsonl"), "w") as f:
+        f.write(json.dumps(line) + "\n")
+    w = _watch(home, clock, _Running(True))
+    src = w.burn_source()
+    src.poll(clock.t)
+    w.tick()
+    got = src.poll(clock.t)
+    assert got is not None
+    assert sum(got[1]) == 42
+
+
+def test_default_drift_goes_through_wsl_run_and_skips_the_shim_check(
+        tmp_path, monkeypatch):
+    """The WSL drift check runs in the watch's tick, through wsl_run, and
+    never the shim-content check, which would write shims through UNC
+    paths (Task 4's note)."""
+    home, _ = _home(tmp_path)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0)
+    install_statusline._write_marker(
+        install_statusline.wsl_statusline_command(home), home)
+    calls = []
+
+    def run(argv, stdin=None):
+        calls.append(list(argv))
+        return 1, b"", b""
+
+    def no_shim_check(*a, **k):
+        raise AssertionError("shim_content_check ran for a WSL home")
+    monkeypatch.setattr(install_statusline, "shim_content_check",
+                        no_shim_check)
+    w = wsl_watch.WslWatch(home, running=_Running(True), clock=clock,
+                           wsl_run=run)
+    w.tick()
+    assert calls                                # read through wsl_run
+
+
+def test_bus_reads_the_watch_not_the_unc_path(tmp_path, monkeypatch):
+    home, unc = _home(tmp_path)
+    _write_config(home, seat=True)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0)
+    w = _watch(home, clock, _Running(True))
+    monkeypatch.setattr(claude_home, "current", lambda: home)
+    bus = ingest.IngestionBus(plan_source=w.view,
+                              burn={"claude": w.burn_source()})
+    hits = _count_unc(monkeypatch, unc)
+    assert bus._plan_reader.look(t0) == claude_plan.EMPTY_VIEW
+    assert hits == []
+    w.tick()
+    hits.clear()
+    assert bus._plan_reader.look(t0 + claude_plan.RECHECK_S).spend_seat
+    bus.prune_burn()
+    assert hits == []
+
+
+def test_native_home_builds_no_watch(tmp_path, monkeypatch):
+    import claude_usage_bridge as cub
+    built = []
+
+    class Recorder:
+        def __init__(self, home, **kw):
+            built.append(home)
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def view(self):
+            return None
+
+        def burn_source(self):
+            return object()
+
+    monkeypatch.setattr(wsl_watch, "WslWatch", Recorder)
+    monkeypatch.delenv("BLINK_SCENARIO", raising=False)
+    native = claude_home.native()
+    monkeypatch.setattr(claude_home, "current", lambda: native)
+    bus = cub.build_bus()
+    assert built == []
+    assert isinstance(bus._burn["claude"], burn_reader.BurnReader)
+    assert bus._plan_reader._source is None
+    assert isinstance(cli.drift_watchdog(native),
+                      install_statusline.DriftWatchdog)
+
+    # The control: a WSL home builds one, starts it, and the bus reads it.
+    home, _ = _home(tmp_path)
+    monkeypatch.setattr(claude_home, "current", lambda: home)
+    bus = cub.build_bus()
+    assert built == [home]
+    assert bus._plan_reader._source is not None
+    assert not isinstance(bus._burn["claude"], burn_reader.BurnReader)
+    assert isinstance(bus._burn["codex"], burn_reader.CodexBurnReader)
+    # And no DriftWatchdog for it on the main thread.
+    dog = cli.drift_watchdog(home)
+    assert not isinstance(dog, install_statusline.DriftWatchdog)
+    assert dog.tick() is None
+
+
+def test_a_failing_tick_is_said_once_by_kind(tmp_path, capsys):
+    home, _ = _home(tmp_path)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0)
+
+    def boom(name):
+        raise RuntimeError(home.config_dir)
+
+    w = _watch(home, clock, boom)
+    for _ in range(3):
+        w._tick_once()
+        clock.t += wsl_watch.RUNNING_EVERY_S
+    err = capsys.readouterr().err
+    assert err.count("RuntimeError") == 1
+    assert home.config_dir not in err and "unc" not in err

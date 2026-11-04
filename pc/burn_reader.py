@@ -376,10 +376,26 @@ class BurnReader:
         oldest = self.prune(now)
         read = self._drain(oldest, self._budget if budget is None
                            else budget)
-        behind = sum(f.size - f.looked for f in self._files.values()
-                     if f.size > f.looked and f.failures < READ_TRIES)
+        behind = self._behind()
         self.last = PollCost(walked, len(self._files), read, behind,
                              len(self._seen))
+        return self._answer(q, oldest, behind)
+
+    def held(self, now):
+        """poll()'s answer for `now` from what is already in memory: no
+        walk, no read, so a WSL home that has stopped being used still has
+        its bars slide on and empty, and prune()'s promise kept, without
+        the distribution being touched (pc/wsl_watch). None on the same
+        terms as poll()."""
+        oldest = self.prune(now)
+        return self._answer(protocol.burn_quarter(now), oldest,
+                            self._behind())
+
+    def _behind(self):
+        return sum(f.size - f.looked for f in self._files.values()
+                   if f.size > f.looked and f.failures < READ_TRIES)
+
+    def _answer(self, q, oldest, behind):
         if not self._listed or behind:
             return None
         return q, [self._buckets.get(oldest + i * protocol.BURN_BUCKET_S, 0)
