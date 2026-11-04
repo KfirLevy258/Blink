@@ -3341,11 +3341,14 @@ def _announce_spend_later() -> None:
     # One estimate a session, and its time: spend_count kept one per cost
     # ledger for a while in the 2026-11-04 review (K1, said here as "up to
     # eight" by D4) and went back to one mark, stamped only when it rises
-    # (fix/spend-r2core 0b3a8fa). The time is said because it is kept.
+    # (fix/spend-r2core 0b3a8fa). The time is said because it is kept:
+    # set at the first sighting and moved only by a rise, so "when that
+    # last rose" was wrong for a session that never rose (round 4).
     print("  a one-way fingerprint of the account and organisation ids, each")
-    print("  session's id with its highest cost estimate and when that last")
-    print("  rose, and the rises it counted, so the month's spend survives a")
-    print("  restart. Nothing in it leaves this computer.")
+    print("  session's id with its highest cost estimate and when it was")
+    print("  first seen or last rose, and the rises it counted, so the")
+    print("  month's spend survives a restart. Nothing in it leaves this")
+    print("  computer.")
 
 def _announce_wsl_files(home, name) -> None:
     """_announce's Claude Code lines for a WSL desk being set up again:
@@ -3408,9 +3411,9 @@ def _announce_spend_seat(home=None, seat=None) -> None:
         "month's spend and limit that Claude Code saved the last time /usage ran",
         "in a terminal. Between /usage runs it adds the cost Claude Code's status",
         "line estimates for each session, and keeps each session's id with",
-        "its highest estimate and when that last rose, what it counted in the",
-        "last five hours, the month's total and a one-way fingerprint of the",
-        "account in",
+        "its highest estimate and when it was first seen or last rose, what",
+        "it counted in the last five hours, the month's total and a one-way",
+        "fingerprint of the account in",
         f"{spend_count._default_path()}. Spend in",
         "Claude Desktop (chat and its Code tab), Cowork, claude.ai, claude -p,",
         "the Agent SDK or on other computers appears only after the next",

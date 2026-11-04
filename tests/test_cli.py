@@ -2981,9 +2981,9 @@ SPEND_NOTE = (
     " month's spend and limit that Claude Code saved the last time /usage ran"
     " in a terminal. Between /usage runs it adds the cost Claude Code's status"
     " line estimates for each session, and keeps each session's id with"
-    " its highest estimate and when that last rose, what it counted in the"
-    " last five hours, the month's total and a one-way fingerprint of the"
-    " account in {path}. Spend in"
+    " its highest estimate and when it was first seen or last rose, what it"
+    " counted in the last five hours, the month's total and a one-way"
+    " fingerprint of the account in {path}. Spend in"
     " Claude Desktop (chat"
     " and its Code tab), Cowork, claude.ai, claude -p, the Agent SDK or on"
     " other computers appears only after the next /usage, and a session's last"
@@ -3062,9 +3062,9 @@ SPEND_LATER = (
     "On a Claude seat billed by usage -- this one now, or one you /login to"
     " later -- it also keeps, in {path} a one-way fingerprint of the account"
     " and organisation ids, each session's id with its highest cost"
-    " estimate and when that last rose, and the rises it counted, so the"
-    " month's spend survives a restart. Nothing in it leaves this"
-    " computer.")
+    " estimate and when it was first seen or last rose, and the rises it"
+    " counted, so the month's spend survives a restart. Nothing in it"
+    " leaves this computer.")
 
 
 def test_disclosure_says_what_a_usage_seat_keeps_on_any_desk(
