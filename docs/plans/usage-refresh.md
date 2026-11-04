@@ -1,6 +1,6 @@
 # Usage refresh: keeping the figures fresh with Claude Code's own /usage
 
-Status: design agreed with the owner 2026-11-05. Plan:
+Status: built (tasks 1-8), 2026-11-05; Task 9, the desk check with the owner, is outstanding. Design agreed with the owner 2026-11-05. Plan:
 `docs/plans/2026-11-05-usage-refresh-plan.md`.
 
 ## Why
