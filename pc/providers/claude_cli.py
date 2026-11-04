@@ -699,7 +699,8 @@ class ClaudeCliProvider(base.ProviderParser):
         live = self._live
         if live is not None and live.plan == base.PLAN_SPEND:
             return None
-        return _spend_frame(view.anchor, counter, now_epoch, self._render_at)
+        return _spend_frame(view.anchor, counter, now_epoch, self._render_at,
+                            view.mtime)
 
     def _status_frames(self, now_epoch):
         """The frames the status line gives this poll; see the module
@@ -786,7 +787,7 @@ class ClaudeCliProvider(base.ProviderParser):
         return frames
 
 
-def _spend_frame(anchor, counter, now_epoch, render_at):
+def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None):
     """The spend page: the /usage figure plus what was counted since it.
 
     docs/plans/enterprise-spend.md, "The figure". The anchor is the cents
@@ -804,10 +805,15 @@ def _spend_frame(anchor, counter, now_epoch, render_at):
     are the page (base.has_usage).
 
     Dated by the newer of the last status-line render and the /usage,
-    whichever Claude Code did last; now when there is neither. Never after
-    now. A /usage run after the last render is the newest word on the
-    figure, and dating the page by the render would show it older than it
-    is.
+    whichever Claude Code did last; by the config's mtime (`config_at`,
+    ConfigView.mtime) when there is neither, and now only when that is
+    unknown too. Never after now. A /usage run after the last render is the
+    newest word on the figure, and dating the page by the render would show
+    it older than it is. The fallback was now until the final review of
+    2026-11-04, and active_at with it, so a seat with no status line and no
+    /usage this month looked active at every poll and the board never
+    dozed; the config is the last thing Claude Code wrote that the page
+    rests on.
     """
     period = claude_plan.month_start_utc(now_epoch)
     a = anchor
@@ -829,6 +835,8 @@ def _spend_frame(anchor, counter, now_epoch, render_at):
     age = None if a is None else now_epoch - a.fetched_at
     stamps = [t for t in (render_at, None if a is None else a.fetched_at)
               if t is not None]
+    if not stamps and config_at is not None:
+        stamps = [config_at]
     seen = min(max(stamps), now_epoch) if stamps else now_epoch
     return base.NormalizedUsageFrame(
         provider=PROVIDER_ID, src=SPEND_SRC_ID, observed_at=seen,

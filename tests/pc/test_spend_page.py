@@ -453,6 +453,23 @@ def test_a_usage_newer_than_the_last_render_dates_the_page(tmp_path):
     assert bus.claude_page().observed_at == NOW - 120
 
 
+def test_no_render_and_no_usage_dates_the_page_by_the_config(tmp_path):
+    """With no status line and no /usage this month there was nothing to
+    date the page by but now, so active_at was now at every poll and the
+    board never dozed (final review of 2026-11-04). The config's own mtime
+    is the last thing Claude Code did that the page rests on."""
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 3600, cache=False)
+    bus = bus_on(clock)
+    for step in (0, 600, 1200):
+        clock.t = NOW + step
+        bus.poll()
+        page = bus.claude_page()
+        assert page.plan == base.PLAN_SPEND
+        assert page.active_at == NOW - 3600
+        assert page.observed_at == NOW - 3600
+
+
 def test_a_remembered_gateway_figure_does_not_hide_the_config_page(tmp_path):
     """Only the file in front of us can carry a live gateway figure. One
     remembered from hours ago (the last payload with a figure) must not
