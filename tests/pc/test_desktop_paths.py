@@ -706,6 +706,12 @@ def test_an_old_indexeddb_does_not_beat_a_newer_cache(win, tmp_path):
 # (R must be strictly fresher to beat anything, as it always had to beat M).
 # Between M's the name decides; between P's the package name decides.
 # Nothing holding data at all: R, the default.
+#
+# One exclusion (review, 2026-11-04): a package folder that carries a MARKER
+# whose target exists is not a candidate. It is the copy Desktop moved away
+# from, and a directory mtime bumped by a cleanup must not let it beat the
+# live target. A package with no marker, or whose marker dangles, competes.
+# The marker in real Roaming says nothing about a package folder.
 
 PKG_A = "Claude_pzs8sxrjxfjjc"   # the shape measured
 PKG_B = "Claude_0000000000000"   # sorts before PKG_A
@@ -847,27 +853,27 @@ def test_a_usage_cache_that_is_a_folder_is_not_data(win, tmp_path):
 # "M", "A" or "B".
 
 ROWS = [
-    # id,                          R,    M,    A,    B,    want
-    ("package alone",              None, None, 5,    None, "A"),
-    ("roaming alone",              5,    None, None, None, "R"),
-    ("nothing at all",             None, None, None, None, "R"),
-    ("package fresher than R",     1,    None, 2,    None, "A"),
-    ("package stale beside R",     2,    None, 1,    None, "R"),
-    ("package ties R",             3,    None, 3,    None, "A"),
-    ("two packages, B fresher",    None, None, 1,    2,    "B"),
-    ("two packages, A fresher",    None, None, 2,    1,    "A"),
-    ("two packages tie",           None, None, 2,    2,    "B"),
-    ("M fresher than package",     None, 2,    1,    None, "M"),
-    ("package fresher than M",     None, 1,    2,    None, "A"),
-    ("M ties package",             None, 2,    2,    None, "M"),
-    ("M stale, R fresher",         3,    1,    None, None, "R"),
-    ("M fresh, R stale",           1,    3,    None, None, "M"),
-    ("M ties R",                   2,    2,    None, None, "M"),
-    ("R freshest of all three",    9,    2,    3,    None, "R"),
-    ("M freshest of all three",    1,    9,    3,    None, "M"),
-    ("package freshest of three",  1,    2,    9,    None, "A"),
-    ("R ties the best package",    4,    2,    4,    None, "A"),
-    ("B beats A beats M beats R",  1,    2,    3,    4,    "B"),
+    # id,                          R,    M,    A,    B,    want, want if the marker sits in A's folder
+    ("package alone",              None, None, 5,    None, "A",  "A"),
+    ("roaming alone",              5,    None, None, None, "R",  "R"),
+    ("nothing at all",             None, None, None, None, "R",  "R"),
+    ("package fresher than R",     1,    None, 2,    None, "A",  "A"),
+    ("package stale beside R",     2,    None, 1,    None, "R",  "R"),
+    ("package ties R",             3,    None, 3,    None, "A",  "A"),
+    ("two packages, B fresher",    None, None, 1,    2,    "B",  "B"),
+    ("two packages, A fresher",    None, None, 2,    1,    "A",  "A"),
+    ("two packages tie",           None, None, 2,    2,    "B",  "B"),
+    ("M fresher than package",     None, 2,    1,    None, "M",  "M"),
+    ("package fresher than M",     None, 1,    2,    None, "A",  "M"),
+    ("M ties package",             None, 2,    2,    None, "M",  "M"),
+    ("M stale, R fresher",         3,    1,    None, None, "R",  "R"),
+    ("M fresh, R stale",           1,    3,    None, None, "M",  "M"),
+    ("M ties R",                   2,    2,    None, None, "M",  "M"),
+    ("R freshest of all three",    9,    2,    3,    None, "R",  "R"),
+    ("M freshest of all three",    1,    9,    3,    None, "M",  "M"),
+    ("package freshest of three",  1,    2,    9,    None, "A",  "M"),
+    ("R ties the best package",    4,    2,    4,    None, "A",  "R"),
+    ("B beats A beats M beats R",  1,    2,    3,    4,    "B",  "B"),
 ]
 
 
@@ -893,7 +899,7 @@ def _expected(want, home):
 
 @pytest.mark.parametrize("row", ROWS, ids=[r[0] for r in ROWS])
 def test_the_freshest_candidate_wins(win, tmp_path, row):
-    _, r, m, a, b, want = row
+    _, r, m, a, b, want, _ = row
     _scene(tmp_path, r, m, a, b)
     assert dp.windows_data_dir() == _expected(want, tmp_path)
 
@@ -901,9 +907,11 @@ def test_the_freshest_candidate_wins(win, tmp_path, row):
 @pytest.mark.parametrize("row", ROWS, ids=[r[0] for r in ROWS])
 def test_the_same_contest_with_the_marker_in_the_package(win, tmp_path, row):
     """A marker may sit in the package's Roaming instead (Mor Gal's layout
-    had it in both). Where it sits does not change who wins -- and a package
-    folder holding data AND the marker competes as a package too."""
-    _, r, m, a, b, want = row
+    had it in both). Then package A is the copy Desktop moved away from, so
+    it does not compete while the marker's target exists: the last column
+    differs from the first table exactly where A used to win against M.
+    Package B has no marker and still competes."""
+    _, r, m, a, b, _, want = row
     _scene(tmp_path, r, m, a, b, marker_in="package")
     assert dp.windows_data_dir() == _expected(want, tmp_path)
 
@@ -945,16 +953,93 @@ def test_the_marker_alone_before_the_data_lands_keeps_the_package(win,
 @pytest.mark.parametrize("package_mtime,target_mtime,want", [
     (1_000_000, 2_000_000, "M"),    # copied: the target is the newer write
     (2_000_000, 2_000_000, "M"),    # moved with its mtime kept: a tie
-    (2_000_000, 1_000_000, "A"),    # a package copy written after the move
+    (2_000_000, 1_000_000, "M"),    # a leftover touched after the move
 ], ids=["target newer", "tie", "package newer"])
-def test_both_copies_at_once_pick_the_fresher(win, tmp_path, package_mtime,
-                                              target_mtime, want):
-    """(c) The instant of the move, both copies on disk: the fresher one
-    wins, and a tie goes to the folder the app pointed at."""
+def test_both_copies_at_once_the_marked_package_is_the_leftover(
+        win, tmp_path, package_mtime, target_mtime, want):
+    """(c) The instant of the move, both copies on disk, the marker in the
+    package's own folder: the package copy is what Desktop is leaving, so the
+    target answers however the mtimes fall."""
     _friends_layout(tmp_path, mtime=package_mtime)
     _marker(tmp_path, _pkg_roaming(tmp_path))
     _cache(tmp_path, _target(tmp_path), mtime=target_mtime)
     assert dp.windows_data_dir() == _expected(want, tmp_path)
+
+
+@pytest.mark.parametrize("package_mtime,target_mtime,want", [
+    (1_000_000, 2_000_000, "M"),
+    (2_000_000, 2_000_000, "M"),
+    (2_000_000, 1_000_000, "A"),
+], ids=["target newer", "tie", "package newer"])
+def test_both_copies_with_the_marker_only_in_roaming_pick_the_fresher(
+        win, tmp_path, package_mtime, target_mtime, want):
+    """The marker is in real Roaming and the package folder carries none, so
+    nothing says the package copy was left behind: freshness decides, and a
+    tie goes to the folder the app pointed at."""
+    _friends_layout(tmp_path, mtime=package_mtime)
+    _marker(tmp_path, _roaming(tmp_path))
+    _cache(tmp_path, _target(tmp_path), mtime=target_mtime)
+    assert dp.windows_data_dir() == _expected(want, tmp_path)
+
+
+def test_a_bumped_leftover_directory_does_not_beat_the_live_target(
+        win, tmp_path):
+    """The reviewer's reproduction (2026-11-04). Marker in the package's own
+    Roaming, target present with a usage cache; the leftover package copy has
+    an IndexedDB folder whose mtime was bumped after the move (a cleanup
+    deleting entries under it) so it is newer than anything in the target."""
+    _marker(tmp_path, _pkg_roaming(tmp_path))
+    _cache(tmp_path, _target(tmp_path), mtime=1_000_000)
+    _cache(tmp_path, _pkg_roaming(tmp_path), mtime=500_000)
+    idb = _mkdir(tmp_path, os.path.join(_pkg_roaming(tmp_path), "IndexedDB"))
+    os.utime(idb, (9_000_000, 9_000_000))
+    assert dp._freshness(_pkg_roaming(tmp_path)) > dp._freshness(
+        _target(tmp_path))
+    answer = dp.resolve()
+    assert (answer.path, answer.source) == (_target(tmp_path),
+                                            "marker:" + NAME)
+    assert answer.package_skipped == (_pkg_roaming(tmp_path),)
+    assert not answer.marker_passed_over
+
+
+def test_a_marker_that_dangles_does_not_exclude_its_package(win, tmp_path):
+    """The exclusion needs the target to EXIST: with the marker in the
+    package and no data folder yet, the package is the only copy."""
+    _marker(tmp_path, _pkg_roaming(tmp_path))
+    _cache(tmp_path, _pkg_roaming(tmp_path), mtime=1_000_000)
+    answer = dp.resolve()
+    assert answer.source == PKG_SOURCE_A
+    assert answer.package_skipped == ()
+
+
+def test_a_marker_in_one_package_does_not_exclude_another(win, tmp_path):
+    """The exclusion is per folder: A carries the marker, B does not."""
+    _marker(tmp_path, _pkg_roaming(tmp_path, PKG_A))
+    _cache(tmp_path, _target(tmp_path), mtime=1_000_000)
+    _cache(tmp_path, _pkg_roaming(tmp_path, PKG_A), mtime=9_000_000)
+    _cache(tmp_path, _pkg_roaming(tmp_path, PKG_B), mtime=2_000_000)
+    answer = dp.resolve()
+    assert answer.source == PKG_SOURCE_B
+    assert answer.package_skipped == (_pkg_roaming(tmp_path, PKG_A),)
+    assert answer.marker_passed_over
+
+
+def test_a_marker_with_a_different_case_still_excludes(win, tmp_path):
+    _marker(tmp_path, _pkg_roaming(tmp_path), name=NAME.upper())
+    _cache(tmp_path, _target(tmp_path, NAME.upper()), mtime=1_000_000)
+    _cache(tmp_path, _pkg_roaming(tmp_path), mtime=9_000_000)
+    assert dp.resolve().source == "marker:" + NAME.upper()
+
+
+def test_a_package_that_only_holds_the_marker_is_not_called_skipped(
+        win, tmp_path):
+    """The ordinary after state: the package folder keeps just the marker.
+    Nothing was left behind, so status has nothing to say about it."""
+    _marker(tmp_path, _pkg_roaming(tmp_path))
+    _cache(tmp_path, _target(tmp_path))
+    answer = dp.resolve()
+    assert answer.source == "marker:" + NAME
+    assert answer.package_skipped == ()
 
 
 def test_readme_in_claude_data_is_not_a_data_folder(win, tmp_path):
@@ -1175,3 +1260,101 @@ def test_status_is_unchanged_off_windows(monkeypatch, tmp_path, capsys):
     assert row[0].startswith("Desktop     no usage cache")
     assert sum(l.startswith("            looked at ") for l in row) == 1
     assert not any("also looked" in l or "package" in l for l in row)
+
+
+# --- review 2026-11-04: what status says when a package and a marker meet ----
+
+def test_status_says_when_a_package_beat_a_marker_target(win, tmp_path,
+                                                          capsys):
+    _marker(tmp_path, _roaming(tmp_path))
+    _cache(tmp_path, _target(tmp_path), mtime=1_000_000)
+    folder = _pkg_roaming(tmp_path)
+    _cache(tmp_path, folder, mtime=2_000_000)
+    row = _desktop_row(capsys)
+    assert ("            data found in the Store package folder: " + folder
+            ) in row
+    assert "            Store build marker ignored, package folder is newer" in row
+    assert not any("skipped" in l or "Roaming is newer" in l for l in row)
+
+
+def test_status_says_when_a_leftover_package_folder_was_skipped(
+        win, tmp_path, capsys):
+    _marker(tmp_path, _pkg_roaming(tmp_path))
+    _cache(tmp_path, _target(tmp_path), mtime=1_000_000)
+    _cache(tmp_path, _pkg_roaming(tmp_path), mtime=2_000_000)
+    row = _desktop_row(capsys)
+    assert ("            data moved by the Store build: " + _target(tmp_path)
+            ) in row
+    assert ("            Store package folder skipped, its marker says the"
+            " data moved") in row
+    assert not any("data found in" in l or "marker ignored" in l for l in row)
+
+
+def test_status_is_quiet_for_the_ordinary_after_state(win, tmp_path, capsys):
+    """The package folder holds only the marker: nothing was left behind."""
+    _marker(tmp_path, _pkg_roaming(tmp_path))
+    _cache(tmp_path, _target(tmp_path))
+    row = _desktop_row(capsys)
+    assert not any("skipped" in l or "ignored" in l or "data found" in l
+                   for l in row)
+
+
+def test_status_never_repeats_the_looked_at_path(win, tmp_path, capsys):
+    """`also looked at` is for the OTHER places. The first place, the one
+    `looked at` already printed, must not come back under it: nothing found
+    (that place is Roaming), and a package with no cache yet (that place is
+    the package folder)."""
+    cache = "plan-usage-history.json"
+    row = _desktop_row(capsys)
+    first = next(l for l in row if l.startswith("            looked at "))
+    assert first == "            looked at " + os.path.join(
+        _roaming(tmp_path), cache)
+    assert ("            also looked at " + first.split("looked at ", 1)[1]
+            ) not in row
+    assert sum(_roaming(tmp_path) in l for l in row) == 1
+
+    folder = _pkg_roaming(tmp_path)
+    _mkdir(tmp_path, os.path.join(folder, "Local Storage", "leveldb"))
+    row = _desktop_row(capsys)
+    first = next(l for l in row if l.startswith("            looked at "))
+    assert first == "            looked at " + os.path.join(folder, cache)
+    assert sum(os.path.join(folder, cache) in l for l in row) == 1
+    # And Roaming, now one of the other places, is listed exactly once.
+    assert ("            also looked at "
+            + os.path.join(_roaming(tmp_path), cache)) in row
+
+
+# --- review 2026-11-04: the looked-at list is for status alone ---------------
+
+def test_the_looked_at_list_is_not_built_by_a_resolve(win, tmp_path,
+                                                       monkeypatch):
+    """The daemon resolves every 2 s and only `blink status` reads the list.
+    A resolve does the marker work it always did (one _safe_component per
+    name and root); building `looked` costs another per name and root, and
+    must happen when asked for, not before."""
+    _marker(tmp_path, _roaming(tmp_path))
+    _mkdir(tmp_path, _pkg_roaming(tmp_path, PKG_A))
+    _mkdir(tmp_path, _pkg_roaming(tmp_path, PKG_B))
+    calls = []
+    real = dp._safe_component
+    monkeypatch.setattr(dp, "_safe_component",
+                        lambda *a, **k: calls.append(1) or real(*a, **k))
+    assert "looked" not in dp.Answer._fields
+    answer = dp.resolve()
+    after_resolve = len(calls)
+    assert after_resolve > 0
+    assert len(answer.looked) == 1 + 2 + 3     # Roaming, 2 packages, 3 roots
+    assert len(calls) == after_resolve + 3
+    assert dp.resolve().packages_root == os.path.join(_local(tmp_path),
+                                                      "Packages")
+
+
+def test_a_held_answer_lists_the_same_places_after_the_tree_changes(
+        win, tmp_path):
+    """one_answer() semantics: `looked` works from the held answer's own
+    fields, so a package that appears mid-run is not listed."""
+    _mkdir(tmp_path, _pkg_roaming(tmp_path, PKG_A))
+    with dp.one_answer() as held:
+        before = held.looked
+        _mkdir(tmp_path, _pkg_roaming(tmp_path, PKG_B))
+        assert dp.resolve().looked == before

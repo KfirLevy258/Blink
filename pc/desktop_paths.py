@@ -67,6 +67,12 @@ config file or a marker alone does not make it one. The rules:
   - Nothing holds data: R, the default, which is also what the old code
     answered when a marker named a folder that was gone (`dangling`).
   - A marker whose target is gone does not hide a package that holds data.
+  - A package folder that carries a marker whose target EXISTS is not a
+    candidate at all: it is what Desktop left behind when it moved, and a
+    cleanup that bumps one of its directory mtimes must not let it beat the
+    live target. Only a package with no marker (the 2026-11-04 "before"
+    state), or whose marker dangles, competes. `blink status` says when such
+    a folder was skipped, and when a marker-less package beat a target.
   - Two markers with both targets present are possible (an install, an
     uninstall, a reinstall under a new name), and sorted order would pick
     one for no reason. The one written to most recently -- usage cache,
@@ -292,21 +298,36 @@ class Answer(NamedTuple):
     ignored: a marker's data folder exists, but Roaming is fresher and won.
     package_ignored: a package folder holds data, but Roaming is fresher
         and won.
-    looked: every data folder tried, the answer's included, in the order
-        tried; empty off Windows. `blink status` lists them when nothing is
-        found, because naming Roaming alone sent us to the wrong place.
+    marker_passed_over: a marker's data folder exists, but a package folder
+        with no marker of its own is fresher and won.
+    package_skipped: package folders that hold data and were not
+        considered, because a marker in the same folder points at a data
+        folder that exists: what is left in them is the copy Desktop moved
+        away from.
     packages: the Claude_* package folders found, whether or not they hold
         data.
-    packages_root: where packages were looked for; "" off Windows.
+    roaming, local, names: what `looked` and `packages_root` are worked out
+        from, on demand. Empty off Windows.
+
+    `looked` is every data folder tried, the answer's included, in the order
+    tried; `blink status` lists them when nothing is found, because naming
+    Roaming alone sent us to the wrong place. It is a property and not a
+    field on purpose: only status reads it, and the daemon resolves every
+    2 s. A reviewer measured the eager list at about a third of what this
+    module added to a resolve (2026-11-04). It does no I/O, only string
+    work on the held fields, so a held answer still describes one moment.
     """
     path: str
     source: str
     dangling: bool = False
     ignored: bool = False
     package_ignored: bool = False
-    looked: tuple = ()
+    marker_passed_over: bool = False
+    package_skipped: tuple = ()
     packages: tuple = ()
-    packages_root: str = ""
+    roaming: str = ""
+    local: str = ""
+    names: tuple = ()
 
     @property
     def moved(self) -> bool:
@@ -316,41 +337,71 @@ class Answer(NamedTuple):
     def in_package(self) -> bool:
         return self.source.startswith(SOURCE_PACKAGE_PREFIX)
 
+    @property
+    def packages_root(self) -> str:
+        """Where packages were looked for; "" off Windows."""
+        return os.path.join(self.local, "Packages") if self.local else ""
+
+    @property
+    def looked(self) -> tuple:
+        if not self.roaming:
+            return ()
+        out = [self.roaming] + [_package_roaming(p) for p in self.packages]
+        for name in self.names:
+            for root in [os.path.join(self.local, RELOCATED_DIRNAME)] + [
+                    os.path.join(p, "LocalCache", "Local", RELOCATED_DIRNAME)
+                    for p in self.packages]:
+                if _safe_component(name, root):
+                    out.append(os.path.join(root, name))
+        return tuple(out)
+
 
 def _resolve_windows():
     roaming, local = _windows_roots()
     packages = _packages(local)
+    # Marker names, from real Roaming and from each package's Roaming. The
+    # package listings are kept: a package whose OWN folder carries a marker
+    # is handled differently below.
     names = []
     seen = set()
+    package_names = {}
     for folder in _marker_folders(roaming, packages):
-        for name in marker_names(folder):
+        found = marker_names(folder)
+        if folder != roaming:
+            package_names[folder] = found
+        for name in found:
             if name.lower() not in seen:
                 seen.add(name.lower())
                 names.append(name)
     targets = _candidate_targets(names, local, packages) if names else []
-    # Every place a data folder was looked for, for `blink status`: Roaming,
-    # each package's Roaming, and each place a marker name could point.
-    looked = [roaming] + [_package_roaming(p) for p in packages]
-    for name in names:
-        for root in [os.path.join(local, RELOCATED_DIRNAME)] + [
-                os.path.join(p, "LocalCache", "Local", RELOCATED_DIRNAME)
-                for p in packages]:
-            if _safe_component(name, root):
-                looked.append(os.path.join(root, name))
-    where = dict(looked=tuple(looked), packages=tuple(packages),
-                 packages_root=os.path.join(local, "Packages"))
+    live = {n.lower() for n, _ in targets}
+    where = dict(packages=tuple(packages), roaming=roaming, local=local,
+                 names=tuple(names))
     # (-freshness, kind, name, folder, source): freshest first; on a tie a
     # marker's target (kind 0) before a package (kind 1); then name, then
     # path, so one tree always gives one answer.
     ranked = [(-_freshness(f), 0, n, f, SOURCE_MARKER_PREFIX + n)
               for n, f in targets]
+    skipped = []
     for p in packages:
         folder = _package_roaming(p)
-        if _holds_data(folder):
-            name = os.path.basename(p)
-            ranked.append((-_freshness(folder), 1, name, folder,
-                           SOURCE_PACKAGE_PREFIX + name))
+        if not _holds_data(folder):
+            continue
+        # A marker in this very folder, whose data folder exists, is the
+        # app saying "my data left here". What is still in the folder is the
+        # copy it moved away from, and a directory mtime bumped by a cleanup
+        # (IndexedDB emptied after the move, say) must not make it outrank
+        # the live target (review, 2026-11-04). A marker whose
+        # target is not there (yet) says nothing of the kind: the data has
+        # not landed, and this folder is the only copy.
+        if any(n.lower() in live for n in package_names.get(folder, ())):
+            skipped.append(folder)
+            continue
+        name = os.path.basename(p)
+        ranked.append((-_freshness(folder), 1, name, folder,
+                       SOURCE_PACKAGE_PREFIX + name))
     ranked.sort()
+    where["package_skipped"] = tuple(skipped)
     dangling = bool(names) and not targets
     if not ranked:
         return Answer(roaming, SOURCE_ROAMING, dangling=dangling, **where)
@@ -362,7 +413,8 @@ def _resolve_windows():
                       ignored=bool(targets),
                       package_ignored=any(r[1] == 1 for r in ranked),
                       **where)
-    return Answer(folder, source, dangling=dangling, **where)
+    return Answer(folder, source, dangling=dangling,
+                  marker_passed_over=(kind == 1 and bool(targets)), **where)
 
 
 def _resolve():
@@ -377,7 +429,7 @@ def _resolve():
         # Never into the daemon. Roaming is where every build before the
         # relocation wrote, so it is the least surprising wrong answer.
         roaming = _windows_roots()[0]
-        return Answer(roaming, SOURCE_ROAMING, looked=(roaming,))
+        return Answer(roaming, SOURCE_ROAMING, roaming=roaming)
 
 
 _held = threading.local()

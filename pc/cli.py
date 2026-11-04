@@ -4342,6 +4342,18 @@ def _source_lines_desktop(desk, folder, now):
         # The same for a package folder with no marker: it holds data, but
         # Roaming is fresher, so Roaming is read.
         print("            Store package folder ignored, Roaming is newer")
+    if folder.marker_passed_over:
+        # A package folder beat a marker's data folder that exists. Without
+        # this line the report names the package and never mentions that a
+        # Claude-Data target is there (review, 2026-11-04).
+        print("            Store build marker ignored, package folder is"
+              " newer")
+    if folder.package_skipped:
+        # The mirror: a package folder still holds data, but a marker in it
+        # points at data that exists, so the folder is the copy Desktop
+        # moved away from and is not read.
+        print("            Store package folder skipped, its marker says the"
+              " data moved")
 
 
 def _print_other_places_looked(folder):

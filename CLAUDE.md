@@ -86,7 +86,7 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**3946 passing, 1 skipped** (os.startfile, Windows only) as of 2026-11-04, on
+**3960 passing, 1 skipped** (os.startfile, Windows only) as of 2026-11-05, on
 macOS. The same tree on Windows (ARM64 VM, a git-archive zip expanded into a
 fresh folder) the same day: 3531 passed and 408 skipped, none failing. Ubuntu
 (Docker, x86_64) was last run on 2026-11-01, on an earlier tree: 3661 passed
