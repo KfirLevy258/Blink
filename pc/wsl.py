@@ -336,6 +336,22 @@ def _usable(path):
             and not path.lower().endswith((".exe", ".cmd", ".bat")))
 
 
+# tcsh and csh accept -l only as the sole flag: `tcsh -lic ...` prints
+# "Unknown option" and exits 1, so for a csh user every probe came back
+# None and `install --wsl` said the distribution could not be read (review
+# of feat/enterprise-spend, W5, measured under tcsh). -ic reads ~/.cshrc,
+# which every csh reads and where csh users set PATH; ~/.login, read only
+# by a login shell, is missed, and a PATH set only there is not seen.
+_CSH = ("csh", "tcsh")
+
+
+def env_capture_args(shell):
+    """The flags and command after `shell` that print its environment."""
+    base = shell.rstrip("/").rsplit("/", 1)[-1]
+    flags = "-ic" if base in _CSH else "-lic"
+    return [flags, "exec env -0"]
+
+
 def probe(name, exe=None, runner=_bounded_run):
     """Find the Linux user, home, shell, Claude config folder and claude
     binary of a distribution, or None if it cannot be read. Starts the
@@ -349,8 +365,9 @@ def probe(name, exe=None, runner=_bounded_run):
 
     # The user's own login shell, interactive so ~/.zshrc and nvm-style
     # additions to PATH count; stdin is closed so nothing waits for a tty.
-    # `exec env -0` works in bash, zsh and fish, and zsh has no `type -P`.
-    rc, out, _ = run(name, [shell, "-lic", "exec env -0"],
+    # `exec env -0` works in bash, zsh, fish, tcsh and csh, and zsh has no
+    # `type -P`.
+    rc, out, _ = run(name, [shell, *env_capture_args(shell)],
                      user=user, timeout=20, **kw)
     captured = _parse_env0(out) if rc == 0 else {}
     path = captured.get("PATH")

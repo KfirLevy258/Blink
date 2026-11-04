@@ -213,7 +213,7 @@ def test_probe_none_when_unreadable():
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shells")
-@pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+@pytest.mark.parametrize("shell", ["bash", "zsh", "fish", "tcsh", "csh"])
 def test_probe_env_capture_under_real_shells(shell, tmp_path):
     """The step-2 command, `<shell> -lic 'exec env -0'`, under the real shell
     with a fake HOME whose rc files print a banner and add an nvm-like entry
@@ -229,12 +229,15 @@ def test_probe_env_capture_under_real_shells(shell, tmp_path):
         "export CLAUDE_CONFIG_DIR=/cfg\n")
     (home / ".bash_profile").write_text(". ~/.bashrc\n")
     (home / ".zshrc").write_text((home / ".bashrc").read_text())
+    (home / ".cshrc").write_text(
+        f"{banner}\nsetenv PATH \"$HOME/.nvm/bin:$PATH\"\n"
+        "setenv CLAUDE_CONFIG_DIR /cfg\n")
     (home / ".config" / "fish" / "config.fish").write_text(
         f"{banner}\nset -gx PATH $HOME/.nvm/bin $PATH\n"
         "set -gx CLAUDE_CONFIG_DIR /cfg\n")
     env = {"PATH": os.environ["PATH"], "HOME": str(home),
            "ZDOTDIR": str(home), "XDG_CONFIG_HOME": str(home / ".config")}
-    out = subprocess.run([exe, "-lic", "exec env -0"], env=env,
+    out = subprocess.run([exe, *wsl.env_capture_args(exe)], env=env,
                          stdin=subprocess.DEVNULL, capture_output=True,
                          timeout=20)
     got = wsl._parse_env0(out.stdout)
@@ -379,3 +382,33 @@ def test_bounded_run_round_trips():
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.DEVNULL, timeout=20)
     assert done.returncode == 0 and done.stdout.strip() == b"1"
+
+
+# --- review of feat/enterprise-spend, W5 ----------------------------------
+
+@pytest.mark.parametrize("shell,flags", [
+    ("/bin/bash", "-lic"), ("/usr/bin/zsh", "-lic"), ("/usr/bin/fish", "-lic"),
+    ("/bin/sh", "-lic"), ("/bin/tcsh", "-ic"), ("/usr/bin/csh", "-ic"),
+    ("/usr/local/bin/tcsh", "-ic"),
+])
+def test_the_csh_family_is_asked_without_l(shell, flags):
+    """tcsh and csh take -l only as the sole flag, so `tcsh -lic` exits 1
+    and every `install --wsl` for a csh user failed with "could not read
+    the distribution". -ic reads ~/.cshrc, where they set PATH."""
+    assert wsl.env_capture_args(shell) == [flags, "exec env -0"]
+
+
+def test_probe_works_for_a_tcsh_user():
+    def ans(argv):
+        tail = argv[argv.index("-k") + 3:]
+        if tail[0] == "sh" and "getent" in tail[2]:
+            return 0, b"bob:x:1:1::/home/bob:/bin/tcsh\n", b""
+        if tail == ["/bin/tcsh", "-ic", "exec env -0"]:
+            return 0, b"PATH=/home/bob/.nvm/bin:/usr/bin\0", b""
+        if tail[0] == "/bin/tcsh":
+            return 1, b"", b"Unknown option"
+        if tail[0] == "sh" and "command -v" in tail[2]:
+            return 0, b"/home/bob/.nvm/bin/claude\n", b""
+        return 1, b"", b""
+    p = wsl.probe("U", exe=EXE, runner=Rec(ans))
+    assert p is not None and p.claude_exe == "/home/bob/.nvm/bin/claude"
