@@ -335,6 +335,28 @@ def test_uninstall_forgets_whether_the_account_has_a_window(tmp_path):
     assert session_verdict.SessionVerdict().current() is None
 
 
+def test_uninstall_removes_the_spend_count(tmp_path):
+    """U36: the spend count is install's file -- written only because
+    Blink was installed on a seat billed by usage -- and it holds session
+    ids and a fingerprint of the account. Left behind, a reinstall in the
+    same month picked the old count up again. Its temp names go too: the
+    mkstemp `.spend-count.*` names and those theme._write_json writes."""
+    from pc import spend_count
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    path = inside(tmp_path, spend_count._default_path())
+    leftovers = [os.path.join(os.path.dirname(path), ".spend-count.ab12cd"),
+                 path + ".1234.0.blink-tmp"]
+    for p in [path] + leftovers:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("{}")
+
+    cli.main(["uninstall"])
+
+    for p in [path] + leftovers:
+        assert not os.path.exists(p), p
+
+
 def test_install_refuses_to_touch_a_settings_file_that_will_not_parse(
         tmp_path, capsys, monkeypatch):
     """Treating unparseable JSON as {} would write a fresh settings.json over

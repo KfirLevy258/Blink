@@ -4175,7 +4175,15 @@ def cmd_uninstall(_args) -> int:
               # fresh. Kept, an old "no window" verdict -- a misread one
               # included -- put the next install straight into the burn view
               # before it had seen any evidence of its own.
-              *_verdict_files()):
+              *_verdict_files(),
+              # The spend count (pc/spend_count) of a seat billed by usage:
+              # session ids, their cost estimates and a fingerprint of the
+              # account. Missing from this list until the review of
+              # feat/enterprise-spend (U36), so a reinstall in the same
+              # month counted on from the old file, and uninstall left
+              # session ids behind while the README's rows said what it
+              # removes.
+              *_spend_count_files()):
         _rm(p)
     # The per-session state directory, and everything under it. state.json
     # above is the single-slot file this replaced; it is still on the list so
@@ -4236,6 +4244,18 @@ def _verdict_files() -> list:
     from pc import session_verdict
     p = session_verdict.verdict_path()
     return [p, p + ".tmp", *install_statusline.temp_siblings(p)]
+
+
+def _spend_count_files() -> list:
+    """spend-count.json and every temp file a write of it may have left:
+    the `.spend-count.*` names tempfile.mkstemp gives it, and the sibling
+    names theme._write_json writes through, should the writer move to it.
+    Resolved now, never at import (tests/test_sandbox.py)."""
+    from pc import spend_count
+    p = spend_count._default_path()
+    d = glob.escape(os.path.dirname(p))
+    return [p, *install_statusline.temp_siblings(p),
+            *glob.glob(os.path.join(d, ".spend-count.*"))]
 
 
 def _uninstall_codex_hooks() -> None:
