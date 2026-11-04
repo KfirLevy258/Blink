@@ -66,12 +66,23 @@ def _fingerprint(ids):
 class AccountWatch:
     """Follows the profile, and remembers when the account in it changed.
 
-    The file's mtime is no clue to a login: Claude Code rewrites it for its
-    own bookkeeping all day. So a switch is dated by the poll on which this
-    watch first sees a different fingerprint. The view comes from
+    The file's mtime alone is no clue to a login: Claude Code rewrites it
+    for its own bookkeeping all day. So a switch is noticed by the poll on
+    which this watch first sees a different fingerprint. The view comes from
     pc/claude_plan's PlanReader, which looks at the file at most once every
     RECHECK_S (60 s), so a switch is seen within about a minute of /login,
     not on the next two-second tick.
+
+    But it is DATED by the file. /login writes the file, so the switch
+    happened no later than the mtime of the view that first carries the new
+    fingerprint, and after the mtime of the last view that carried the old
+    one. That mtime is `since` when it falls between the two and is not in
+    the future; otherwise the poll's own time, as before. Dated by the poll
+    alone, `since` was up to a minute late, and select() threw out the new
+    login's first readings as the old login's: "Not reported" on an
+    Enterprise page until its next render (/code-review max of 2026-11-04,
+    finding 9). A later rewrite between /login and the look can still put
+    the mtime after the switch; that is the old lateness, smaller.
 
     The fingerprint found on the first readable poll is a starting point, not
     a switch. A watch that has only just started has no idea when that login
@@ -91,6 +102,9 @@ class AccountWatch:
     def __init__(self, view_source):
         self._view_source = view_source
         self._fingerprint = None
+        # The mtime of the last view that carried self._fingerprint: the
+        # earliest a switch away from it can be dated (see above).
+        self._fp_mtime = None
         self._seen_mtime = None
         self.kind = ""
         self.since = None
@@ -106,9 +120,14 @@ class AccountWatch:
         fp = view.account_fp
         if not fp:
             return
+        at = view.mtime or None
         if self._fingerprint is not None and fp != self._fingerprint:
             self.since = now_epoch
+            if (at is not None and at <= now_epoch
+                    and (self._fp_mtime is None or at > self._fp_mtime)):
+                self.since = at
         self._fingerprint = fp
+        self._fp_mtime = at
         self.kind = view.org_kind
 
 
