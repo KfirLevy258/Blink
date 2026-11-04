@@ -402,6 +402,85 @@ void fmt_usd_limit(double lim, char *buf, size_t buflen)
 	snprintf(buf, buflen, "of %s", amount);
 }
 
+void fmt_spend_amount(double usd, bool est, char *buf, size_t buflen)
+{
+	char amount[FMT_USD_MAX];
+
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	fmt_usd(usd, amount, sizeof(amount));
+	snprintf(buf, buflen, "%s%s", est && amount[0] == '$' ? "~" : "",
+		 amount);
+}
+
+void fmt_spend_under(double lim, int32_t secs, char *buf, size_t buflen)
+{
+	char cap[FMT_USD_MAX + 3];
+	char when[FMT_COUNTDOWN_MAX];
+
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	fmt_usd_limit(lim, cap, sizeof(cap));
+	if (secs < 0) {
+		snprintf(buf, buflen, "%s", cap[0] ? cap : "--");
+		return;
+	}
+	fmt_countdown(secs, when, sizeof(when));
+	if (cap[0] == '\0') {
+		snprintf(buf, buflen, "%s", when);
+		return;
+	}
+	snprintf(buf, buflen, "%s " FMT_BULLET " %s", cap, when);
+}
+
+void fmt_focus_spend_line(double usd, bool est, double lim, char *buf,
+			  size_t buflen)
+{
+	char amount[FMT_USD_MAX + 1];
+	char cap[FMT_USD_MAX + 3];
+
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	fmt_spend_amount(usd, est, amount, sizeof(amount));
+	fmt_usd_limit(lim, cap, sizeof(cap));
+	if (cap[0] == '\0') {
+		snprintf(buf, buflen, "Spent %s", amount);
+		return;
+	}
+	snprintf(buf, buflen, "Spent %s %s", amount, cap);
+}
+
+void fmt_usd_rate(uint32_t cents, char *buf, size_t buflen)
+{
+	char amount[FMT_USD_MAX];
+
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	if (cents == 0) {
+		snprintf(buf, buflen, "$0/h");
+		return;
+	}
+	fmt_usd(cents / 100.0, amount, sizeof(amount));
+	snprintf(buf, buflen, "+%s/h", amount);
+}
+
+void fmt_usd_burn_line(uint32_t cents, const char *word, char *buf,
+		       size_t buflen)
+{
+	char rate[FMT_USD_MAX + 4];
+
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	fmt_usd_rate(cents, rate, sizeof(rate));
+	snprintf(buf, buflen, "%s " FMT_BULLET " %s", rate,
+		 word != NULL ? word : "");
+}
+
 const char *fmt_spend_caption(const char *period)
 {
 	if (period != NULL) {

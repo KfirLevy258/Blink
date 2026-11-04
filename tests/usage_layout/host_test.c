@@ -20,6 +20,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "usage_layout.h"
+#include "theme.h"
+#include "fmt.h"
 
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } \
@@ -203,6 +205,173 @@ static void check_focus(void)
 	      "focus: the ring sampler catches a caption pushed into the arc");
 }
 
+/*
+ * THE SPEND PAGE (docs/plans/enterprise-spend.md section 3), in pixels.
+ *
+ * Every width here is lv_text_get_size() on host LVGL -- the Zephyr 4.3.1
+ * checkout's LVGL 9, the one the firmware links -- measured on 2026-11-04,
+ * kerning included. Not the glyph advances summed by hand: Montserrat kerns
+ * digit pairs, and it is not always narrower -- '4' then '8' is a pixel
+ * wider at size 20, so "$44.8M" measures 77 where the advances say 76. The
+ * table holds the widest spellings: every shape fmt_usd() has with each
+ * digit a '4' (the widest digit at all three sizes), with and without the
+ * estimate's "~", and the worst cases a sweep found that the '4's miss.
+ * The sweep ran fmt_usd() from 0 to $1e9 and fmt_countdown() over every
+ * second up to the daemon's 32-day ceiling (SPEND_COUNTDOWN_MAX_S),
+ * through lv_text_get_size(). A string fmt_usd() starts producing that is
+ * not in the table fails the lookup below, which is the prompt to measure
+ * it.
+ */
+static const struct measured {
+	const char *s;
+	int m14, m16, m20;
+} spend_w[] = {
+	{ "$4.44", 40, 47, 57 },	{ "~$4.44", 48, 56, 69 },
+	{ "$44", 27, 32, 39 },		{ "~$44", 35, 41, 51 },
+	{ "$444", 36, 43, 52 },		{ "~$444", 44, 52, 64 },
+	{ "$4444", 45, 54, 65 },	{ "~$4444", 53, 63, 77 },
+	{ "$44.4k", 49, 57, 69 },	{ "~$44.4k", 57, 66, 81 },
+	{ "$444k", 45, 53, 64 },	{ "~$444k", 53, 62, 76 },
+	{ "$4.4M", 44, 51, 63 },	{ "~$4.4M", 52, 60, 75 },
+	{ "$44.4M", 53, 62, 76 },	{ "~$44.4M", 61, 71, 88 },
+	{ "$444M", 49, 58, 71 },	{ "~$444M", 57, 67, 83 },
+	/* The sweep's widest, past the '4's: kerning. */
+	{ "$44.8M", 0, 0, 77 },		{ "~$40.4M", 0, 71, 0 },
+};
+
+static const struct measured *spend_measured(const char *s)
+{
+	for (size_t i = 0; i < sizeof(spend_w) / sizeof(spend_w[0]); i++) {
+		if (strcmp(spend_w[i].s, s) == 0) {
+			return &spend_w[i];
+		}
+	}
+	return NULL;
+}
+
+/* Montserrat 14, the countdowns' and the status row's font: measured the
+ * same way. The sweep's widest line under the ring is a cap in the tens of
+ * millions on the last day of its period -- hours and minutes are wider
+ * than days and hours -- and under $100k it is 144. */
+#define W14_UNDER_32D		139	/* "of $44.4M <b> 32d 23h" */
+#define W14_UNDER_WIDEST	148	/* "of $44.0M <b> 20h 48m" */
+#define W14_FOCUS_WIDEST	184	/* "Spent ~$44.0M of $44.0M" */
+#define W14_RATE_WIDEST		131	/* "+$44.0k/h <b> steady" */
+#define W14_USAGE_HINT		198	/* "Run /usage in Claude Code" */
+#define W14_SPEND_HINT		202	/* "Spend limit almost used up" */
+#define W14_FOCUS_CAPTION	51	/* "SPEND" */
+#define W14_SPEND_MONTH		105	/* "SPEND month" */
+/* Montserrat 20, the burn view's total: twenty buckets at the ceiling,
+ * $19,999,999.80, "$20.0M", is the sweep's widest under $20M. */
+#define W20_BURN_TOTAL		72
+
+static void test_spend_page(void)
+{
+	/* The hollow at the THICKEST stroke any theme draws. GAUGE_ARC_W is
+	 * the default's 12; Bold is 22, and the dollars must clear it too. */
+	const int hollow = GAUGE_ARC_SZ - 2 * THEME_ARC_W_MAX;
+	static const double fours[] = {
+		4.44, 44.4, 444, 4444, 44444, 444444, 4444444, 44444444,
+		444444444,
+	};
+	char msg[96];
+
+	printf("\n-- the spend page --\n");
+	EXPECT_EQ(hollow, 76);
+	for (size_t i = 0; i < sizeof(fours) / sizeof(fours[0]); i++) {
+		for (int est = 0; est <= 1; est++) {
+			char b[FMT_USD_MAX];
+			const struct measured *m;
+
+			fmt_spend_amount(fours[i], est, b, sizeof(b));
+			m = spend_measured(b);
+			snprintf(msg, sizeof(msg),
+				 "\"%s\" is a spelling this test has measured",
+				 b);
+			CHECK(m != NULL, msg);
+			if (m == NULL) {
+				continue;
+			}
+			snprintf(msg, sizeof(msg),
+				 "\"%s\" fits the hollow at montserrat_16 "
+				 "(%d <= %d)", b, m->m16, hollow);
+			CHECK(m->m16 <= hollow, msg);
+			/*
+			 * usage_view.c draws it at 20 when lv_text_get_size()
+			 * says it fits and at 16 otherwise, so only the ones
+			 * that fit are drawn at 20. An exact '4' figure always
+			 * does: "$44.4M" is exactly the hollow.
+			 */
+			if (!est) {
+				snprintf(msg, sizeof(msg),
+					 "the exact \"%s\" stays at "
+					 "montserrat_20 (%d <= %d)",
+					 b, m->m20, hollow);
+				CHECK(m->m20 <= hollow, msg);
+			}
+		}
+	}
+	CHECK(spend_measured("~$40.4M")->m16 <= hollow,
+	      "the sweep's widest estimate fits the hollow at montserrat_16");
+	CHECK(spend_measured("$44.8M")->m20 > hollow,
+	      "a kerned exact figure can be too wide for 20 (so 16 decides)");
+	CHECK(hollow <= GAUGE_PCT_MAX_W,
+	      "the hollow's text sits inside the label's own box");
+
+	/* Under the ring: the cap and the period's reset, in the right
+	 * countdown label widened on a spend page and still centred at 240. */
+	{
+		struct box under = top_mid("spend line", GAUGE_CX, GAUGE_CD_Y,
+					   SPEND_CD_MAX_W, FONT_LINE_H);
+		struct box cd_l = top_mid("left countdown", -GAUGE_CX,
+					  GAUGE_CD_Y, GAUGE_CD_MAX_W,
+					  FONT_LINE_H);
+		struct box rate = top_mid("burn rate line", -GAUGE_CX,
+					  GAUGE_CD_Y, BURN_TEXT_W,
+					  FONT_LINE_H);
+		struct box pill = bottom_mid("provider pill", PILL_BOTTOM_OFF,
+					     PILL_MAX_W, PILL_H);
+
+		EXPECT_EQ(SCR_MID_X + GAUGE_CX, 240);
+		CHECK(W14_UNDER_32D <= SPEND_CD_MAX_W,
+		      "\"of $44.4M <b> 32d 23h\" fits under the ring");
+		CHECK(W14_UNDER_WIDEST <= SPEND_CD_MAX_W,
+		      "the widest line under the ring, measured, fits it");
+		CHECK(under.x1 <= SCR_W - SCR_RIGHT_MARGIN_MIN,
+		      "the line under the ring clears the right bezel");
+		CHECK(!overlaps(under, cd_l),
+		      "it clears the left gauge's countdown");
+		CHECK(!overlaps(under, rate),
+		      "it clears the dollar burn view's rate line");
+		CHECK(!overlaps(under, pill), "it clears the provider pill");
+		CHECK(W14_RATE_WIDEST <= BURN_TEXT_W,
+		      "the widest dollar rate line fits the burn view's row");
+		CHECK(W20_BURN_TOTAL + BURN_GLYPH_GAP + BURN_GLYPH_FONT_H <=
+			      BURN_TEXT_W,
+		      "the widest dollar total and its arrow fit the half");
+	}
+
+	/* Focus mode's caption in the big ring: "SPEND month" (105 px),
+	 * "SPEND today" (96) and "SPEND week" (94) all overrun the 85 px the
+	 * thick ring's hollow holds there, so Focus writes "SPEND" (51). */
+	CHECK(W14_FOCUS_CAPTION <= FOCUS_NAME_W,
+	      "Focus's spend caption fits inside the thick ring");
+	CHECK(W14_SPEND_MONTH > FOCUS_NAME_W,
+	      "and the period's caption would not, which is why it is cut");
+
+	/* Focus mode's dim line, and the status row's two spend sentences. */
+	CHECK(W14_FOCUS_WIDEST <= FOCUS_OTHER_MAX_W,
+	      "\"Spent ~$44.0M of $44.0M\" fits Focus mode's dim line");
+	CHECK(W14_USAGE_HINT <= STATUS_MAX_W,
+	      "\"Run /usage in Claude Code\" fits the status row");
+	CHECK(strlen(FMT_SPEND_USAGE_HINT) <= 47,
+	      "\"Run /usage in Claude Code\" fits the 47 characters kept");
+	CHECK(strcmp(FMT_SPEND_USAGE_HINT, "Run /usage in Claude Code") == 0,
+	      "the hint measured is the hint shown");
+	CHECK(W14_SPEND_HINT <= STATUS_MAX_W,
+	      "\"Spend limit almost used up\" fits the status row");
+}
+
 int main(void)
 {
 	/* The gauges. */
@@ -287,18 +456,7 @@ int main(void)
 	 */
 	CHECK(63 <= GAUGE_ARC_SZ - 2 * GAUGE_ARC_W,
 	      "the widest percentage this label ever shows clears the arc's stroke");
-	/*
-	 * On a spend page the hollow holds money instead (fmt_usd). Every
-	 * spelling fmt_usd() has was summed from that glyph table's adv_w
-	 * (1/16 px units): the widest is "$99.9M" at 73.1 px -- the 'M' and
-	 * the decimal point together outweigh "$999M" (68.5) and "$99.9k"
-	 * (66.2) -- and all of them are wider than "1000%". So the money gets
-	 * its own check, at the widest one.
-	 */
-	CHECK(74 <= GAUGE_ARC_SZ - 2 * GAUGE_ARC_W,
-	      "\"$99.9M\" sits inside the ring without touching its stroke");
-	CHECK(74 <= GAUGE_PCT_MAX_W,
-	      "\"$99.9M\" fits the hollow's label box");
+	/* The spend page's hollow: test_spend_page() below. */
 	/* --- one countdown per gauge --- */
 	CHECK(cd_l.x1 <= cd_r.x0,
 	      "the two gauges' countdowns do not meet in the middle");
@@ -449,10 +607,6 @@ int main(void)
 	      "\"Not reported\" is inside the countdown budget's range");
 	CHECK(93 <= GAUGE_CD_MAX_W,
 	      "\"Not reported\", measured, fits the countdown box");
-	CHECK(BUDGET_FITS(GAUGE_CD_MAX_W, "of $99.9M"),
-	      "the widest spend cap line fits under its gauge");
-	CHECK(69 <= GAUGE_CD_MAX_W,
-	      "\"of $99.9M\", measured, fits the countdown box");
 	/*
 	 * The captions are auto-sized and centred on each gauge, GAUGE_CX
 	 * either side of the middle, so the widest pair must not meet across
@@ -544,6 +698,7 @@ int main(void)
 	      "a pathological label overruns the card, so it must ellipsize");
 
 	check_focus();
+	test_spend_page();
 
 	printf(failures ? "\n%d FAILED\n" : "\nall layout checks passed\n",
 	       failures);

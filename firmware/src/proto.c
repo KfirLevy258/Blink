@@ -188,7 +188,11 @@ static void emit(const char *json)
  * blanks a spend share on the usage line rather than let it be drawn as
  * "SESSION 5h". A capability and not a version because 1.4.0 already means
  * "draws svc", and the two features need not ship together. */
-#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"burn\",\"plan\"]"
+/* spendburn: this firmware draws the spend page's dollar burn view from the
+ * daemon's `sburn` line, which goes only to a board that lists it -- a board
+ * with "plan" and not this, the first spend-page builds, draws the page
+ * without the view and is sent no line it would drop. */
+#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"burn\",\"plan\",\"spendburn\"]"
 
 /*
  * The board's id, as hello and pref both say it: hwinfo's device id in hex,
@@ -226,15 +230,14 @@ void proto_send_pref(void)
 	 * had nothing but board.json's memory to say which board it was --
 	 * and a remembered id must never decide whose theme wins.
 	 *
-	 * 133 bytes at its widest ("claude", a 32-digit id and the five
-	 * caps; 113 with this board's 12 digits), measured by
+	 * 145 bytes at its widest ("claude", a 32-digit id and the six
+	 * caps; 125 with this board's 12 digits), measured by
 	 * tests/pc/test_board_caps.py, which fails if it outgrows this. It was
 	 * 96 B for the 61 B line before the id, 107 before edit_done, 119
-	 * before burn and 126 before plan. A cap costs its name's length plus
-	 * 3 B (the comma and two quotes); the buffer was 128 B and "plan" alone
-	 * would have overrun it, so it is 160, which also holds the 145 B the
-	 * line will measure once the spend page's "spendburn" cap follows.
-	 * Both stay far under the daemon's 512.
+	 * before burn, 126 before plan and 133 before spendburn. A cap costs
+	 * its name's length plus 3 B (the comma and two quotes); the buffer was
+	 * 128 B and "plan" alone would have overrun it, so it is 160, with 15 B
+	 * to spare now. Both stay far under the daemon's 512.
 	 */
 	char buf[160];
 
@@ -254,13 +257,13 @@ static void send_hello(void)
 	uint32_t cause = 0;
 	(void)hwinfo_get_reset_cause(&cause);
 
-	/* 162 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
-	 * "1.4.0", the five caps), measured by tests/pc/test_board_caps.py,
+	/* 174 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
+	 * "1.4.0", the six caps), measured by tests/pc/test_board_caps.py,
 	 * which fails if it outgrows this; a truncated hello is not JSON. It
-	 * was 155 before "plan", in a 160 B buffer that had 4 B to spare, so
-	 * the buffer is 192: room for the 174 B it will measure with the spend
-	 * page's "spendburn" cap as well. A cap costs its name's length plus
-	 * 3 B and a two-digit minor in fw 1 B. */
+	 * was 155 before "plan" and 162 before "spendburn", in a 160 B buffer
+	 * that had 4 B to spare, so the buffer is 192, with 18 B to spare now.
+	 * A cap costs its name's length plus 3 B and a two-digit minor in fw
+	 * 1 B. */
 	char buf[192];
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
@@ -757,7 +760,8 @@ static void dispatch(const char *json)
 		 * will -- so a spend page must not outlive the daemon that
 		 * described it, captioning another app's figures.
 		 */
-		usage_view_set_plan(NULL, NULL, NULL, NULL, -1, -1);
+		usage_view_set_plan(NULL, NULL, NULL, NULL, -1, -1, false,
+				    false);
 		/*
 		 * Answer. The daemon sends `welcome` as a question -- "is a
 		 * Blink board on this port?" -- and decides whether to pull
@@ -956,30 +960,47 @@ static void dispatch(const char *json)
 			svc_note(prov, lvl, what, k_uptime_get());
 			usage_view_svc_changed();
 		}
-	} else if (strcmp(type, "burn") == 0) {
+	} else if (burn5h_line_of(type) != BURN5H_LINE_NONE) {
 		/*
-		 * Output tokens over the trailing five hours, for a page whose
-		 * account has no session window (docs/plans/burn-5h.md). Its
-		 * own line because `usage` has no room for twenty more numbers.
-		 * Sent only to a board whose caps say "burn", while the claude
-		 * page has no session window; when the window comes back the
-		 * daemon just stops, and the view lets go after 180 s of
-		 * silence -- or at once, on a usage line with a real
-		 * session_pct.
+		 * `burn`: output tokens over the trailing five hours, for a
+		 * page whose account has no session window
+		 * (docs/plans/burn-5h.md). Sent only to a board whose caps say
+		 * "burn", while the claude page has no session window; when
+		 * the window comes back the daemon just stops, and the view
+		 * lets go after 180 s of silence -- or at once, on a usage
+		 * line with a real session_pct.
 		 *
-		 * Validated whole before anything is kept, the theme line's
-		 * rule: one bad bucket and the line is refused entire, and the
-		 * view goes on showing the last good one. Nothing from it is
-		 * logged -- usage figures are exactly what the console must not
-		 * carry -- only that it was refused.
+		 * `sburn`: the same shape in whole cents, for a spend page's
+		 * dollar burn view (pc/protocol.spend_burn,
+		 * docs/plans/enterprise-spend.md section 3), sent only to a
+		 * board whose caps say "spendburn". Each goes to its own
+		 * record, by its whole type; burn5h_line_of() is the one
+		 * place that decides, and says why the two never mix.
+		 *
+		 * Their own lines because `usage` has no room for twenty more
+		 * numbers. Validated whole before anything is kept, the theme
+		 * line's rule: one bad bucket and the line is refused entire,
+		 * and the view goes on showing the last good one. Nothing from
+		 * either is logged -- usage figures, and what someone spent,
+		 * are exactly what the console must not carry -- only that it
+		 * was refused, by a fixed sentence pc/logbook.py allows.
 		 */
 		struct burn5h m;
+		bool dollars = burn5h_line_of(type) == BURN5H_LINE_DOLLARS;
 
 		if (!burn5h_parse(json, &m)) {
-			printk("[proto] burn line refused\n");
+			if (dollars) {
+				printk("[proto] sburn line refused\n");
+			} else {
+				printk("[proto] burn line refused\n");
+			}
 			return;
 		}
-		usage_view_set_burn5h(&m, k_uptime_get());
+		if (dollars) {
+			usage_view_set_sburn(&m, k_uptime_get());
+		} else {
+			usage_view_set_burn5h(&m, k_uptime_get());
+		}
 	} else if (strcmp(type, "plan") == 0) {
 		/*
 		 * Which allowance one page is showing: a dollar cap, a login
@@ -997,7 +1018,7 @@ static void dispatch(const char *json)
 		 */
 		char who[USAGE_TAG_MAX] = "-", kind[12] = "windows";
 		char period[12] = "", acct[12] = "";
-		double usd = -1, lim = -1;
+		double usd = -1, lim = -1, est = 0, hint = 0;
 
 		msg_get_str(json, "p", who, sizeof(who));
 		msg_get_str(json, "plan", kind, sizeof(kind));
@@ -1005,7 +1026,18 @@ static void dispatch(const char *json)
 		msg_get_str(json, "acct", acct, sizeof(acct));
 		num(json, "usd", &usd, 0, USD_MAX);
 		num(json, "lim", &lim, 0, USD_MAX);
-		usage_view_set_plan(who, kind, period, acct, usd, lim);
+		/*
+		 * Two flags, each 1 or absent (pc/protocol.plan omits a false
+		 * one so the common line does not grow): "est" when the
+		 * dollars are the last /usage figure plus what the status line
+		 * has counted since, "hint" when there is no /usage figure at
+		 * all. Anything but 1 is left at 0 -- a newer daemon's 2 is
+		 * not a reason to mark an exact figure as a guess.
+		 */
+		num(json, "est", &est, 0, 1);
+		num(json, "hint", &hint, 0, 1);
+		usage_view_set_plan(who, kind, period, acct, usd, lim,
+				    est == 1, hint == 1);
 		/*
 		 * One console line per plan received, which a scripted run
 		 * (tests/fleet/spend_board_run.py) matches against the steps

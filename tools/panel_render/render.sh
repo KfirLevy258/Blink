@@ -80,9 +80,29 @@ for scene in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; d
 	"$BUILD/render" "$OUT/panel-$scene.ppm" "$scene"
 done
 
-# The spend pages (45..47, render_main.c says what each is).
-for scene in 45 46 47; do
+# The spend pages (45..47, and 48..61 for the estimate mark, the dollar burn
+# view and Focus; render_main.c says what each is). Every theme on the exact
+# page, the dollar burn view and the near-cap red, since the ring wears the
+# theme's arc colour and the view its burn inks. Focus on both windows in
+# Dark, Light and Bold (the thickest ring): the share is the big gauge on a
+# spend page whichever window the owner chose, and 59/60 swipe off the page
+# and back, which moves the big gauge when the choice is the weekly one.
+for scene in 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61; do
 	"$BUILD/render" "$OUT/panel-$scene.ppm" "$scene"
+done
+for theme in 0 1 2 3 4 5 6 7 8 9 10 11 12; do
+	for scene in 48 49 52; do
+		"$BUILD/render" "$OUT/theme-$theme-$scene.ppm" "$scene" "$theme"
+	done
+done
+for theme in 0 9 2; do
+	for focus in 1 2; do
+		for scene in 48 49 50 52 54 59 60; do
+			"$BUILD/render" \
+				"$OUT/focus-$focus-theme-$theme-$scene.ppm" \
+				"$scene" "$theme" "$focus"
+		done
+	done
 done
 
 # The five-hour burn view (35..44, render_main.c says what each is), and

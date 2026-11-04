@@ -343,7 +343,8 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[proto] daemon resuming install of",                      # :859
     "[proto] ota failed",                                      # :889
     "[proto] host status",                                     # :896
-    "[proto] burn line refused",                               # :958
+    "[proto] burn line refused",                               # :995
+    "[proto] sburn line refused",                              # :993
     "[proto] rx ring overflow, dropped",                       # :1000
     "[proto] host went away",                                  # :1078
     # [fatal] -- firmware/src/fatal.c. The three "reason" lines differ only

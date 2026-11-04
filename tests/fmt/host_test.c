@@ -437,6 +437,11 @@ static const struct {
 	/* Whole dollars, half up. */
 	{ 9.996, "$10" }, { 314.12, "$314" }, { 314.5, "$315" },
 	{ 9999.4, "$9999" },
+	/* The four the spend page's plan names (2026-11-04): a small figure,
+	 * four whole digits rounded half up, the top of the M row, and a
+	 * figure that is all cents. */
+	{ 12, "$12" }, { 1234.5, "$1235" }, { 99.9e6, "$99.9M" },
+	{ 0.18, "$0.18" },
 	/* Each wider unit begins where rounding the narrower one would spill. */
 	{ 9999.6, "$10.0k" }, { 12500, "$12.5k" }, { 99949, "$99.9k" },
 	{ 99951, "$100k" }, { 314000, "$314k" }, { 999499, "$999k" },
@@ -494,6 +499,93 @@ static void test_fmt_spend(void)
 	/* Inside what the board keeps of a status line. */
 	check_true("spend hints fit 47 characters",
 		   strlen(fmt_spend_hint(96)) <= 47);
+}
+
+/*
+ * The spend page as docs/plans/enterprise-spend.md section 3 draws it: the
+ * dollars in the ring, with "~" in front when they are an estimate; the cap
+ * and the period's reset under the ring; Focus mode's dim line; the dollar
+ * burn view's rate; and the row's last resort, where to get an exact figure.
+ */
+static void test_fmt_spend_page(void)
+{
+	char b[FMT_FOCUS_MAX];
+
+	/* The ring's hollow. An estimate says so in front of the dollars; an
+	 * amount nobody has reported is "--" either way, because "~--" would
+	 * estimate a figure there is none of. */
+	fmt_spend_amount(314.12, false, b, sizeof(b));
+	EXPECT_STR(b, "$314");
+	fmt_spend_amount(314.12, true, b, sizeof(b));
+	EXPECT_STR(b, "~$314");
+	fmt_spend_amount(0.18, true, b, sizeof(b));
+	EXPECT_STR(b, "~$0.18");
+	fmt_spend_amount(-1, true, b, sizeof(b));
+	EXPECT_STR(b, "--");
+	fmt_spend_amount(-1, false, b, sizeof(b));
+	EXPECT_STR(b, "--");
+	{
+		char tiny[4];
+
+		fmt_spend_amount(314.12, true, tiny, sizeof(tiny));
+		EXPECT_STR(tiny, "~$3");
+	}
+
+	/* Under the ring: the cap and the period's reset, a bullet apart; one
+	 * alone when only one is known, "--" when neither is. */
+	fmt_spend_under(500, 27 * 86400 + 5 * 3600, b, sizeof(b));
+	EXPECT_STR(b, "of $500 " FMT_BULLET " 27d 5h");
+	fmt_spend_under(-1, 27 * 86400 + 5 * 3600, b, sizeof(b));
+	EXPECT_STR(b, "27d 5h");
+	fmt_spend_under(500, -1, b, sizeof(b));
+	EXPECT_STR(b, "of $500");
+	fmt_spend_under(-1, -1, b, sizeof(b));
+	EXPECT_STR(b, "--");
+	fmt_spend_under(44.4e6, 32 * 86400 + 23 * 3600, b, sizeof(b));
+	EXPECT_STR(b, "of $44.4M " FMT_BULLET " 32d 23h");
+	check_true("the widest line under the ring fits FMT_FOCUS_MAX",
+		   strlen("of $44.4M " FMT_BULLET " 20h 48m") <
+			   FMT_FOCUS_MAX);
+
+	/* Focus mode's dim line, under the share. */
+	fmt_focus_spend_line(314.12, false, 500, b, sizeof(b));
+	EXPECT_STR(b, "Spent $314 of $500");
+	fmt_focus_spend_line(314.12, true, 500, b, sizeof(b));
+	EXPECT_STR(b, "Spent ~$314 of $500");
+	fmt_focus_spend_line(12, true, -1, b, sizeof(b));
+	EXPECT_STR(b, "Spent ~$12");
+	fmt_focus_spend_line(-1, false, 500, b, sizeof(b));
+	EXPECT_STR(b, "Spent -- of $500");
+	fmt_focus_spend_line(44.4e6, true, 44.4e6, b, sizeof(b));
+	EXPECT_STR(b, "Spent ~$44.4M of $44.4M");
+
+	/* The dollar burn view's rate: the last complete hour, in cents. */
+	fmt_usd_rate(120, b, sizeof(b));
+	EXPECT_STR(b, "+$1.20/h");
+	fmt_usd_rate(123450, b, sizeof(b));
+	EXPECT_STR(b, "+$1235/h");
+	/* Nothing spent says nothing was, not "+$0.00", which reads as a
+	 * rounding of something. */
+	fmt_usd_rate(0, b, sizeof(b));
+	EXPECT_STR(b, "$0/h");
+	/* Four quarter-hours at the wire's ceiling, SBURN_MAX_CENTS each. */
+	fmt_usd_rate(4u * 99999999u, b, sizeof(b));
+	EXPECT_STR(b, "+$4.0M/h");
+	/* The line the view writes where the countdown sits: the rate and
+	 * which way it is going, as the token view's "1.1M/h <b> rising". */
+	fmt_usd_burn_line(120, "rising", b, sizeof(b));
+	EXPECT_STR(b, "+$1.20/h " FMT_BULLET " rising");
+	fmt_usd_burn_line(0, "idle", b, sizeof(b));
+	EXPECT_STR(b, "$0/h " FMT_BULLET " idle");
+	fmt_usd_burn_line(4440000, "steady", b, sizeof(b));
+	EXPECT_STR(b, "+$44.4k/h " FMT_BULLET " steady");
+	check_true("the widest dollar rate line fits FMT_FOCUS_MAX",
+		   strlen("+$44.4k/h " FMT_BULLET " steady") < FMT_FOCUS_MAX);
+
+	/* The row's last resort on a page with no /usage figure. */
+	EXPECT_STR(FMT_SPEND_USAGE_HINT, "Run /usage in Claude Code");
+	check_true("the /usage hint fits 47 characters",
+		   strlen(FMT_SPEND_USAGE_HINT) <= 47);
 }
 
 int main(void)
@@ -571,6 +663,7 @@ int main(void)
 	test_fmt_toast();
 	test_fmt_focus_line();
 	test_fmt_spend();
+	test_fmt_spend_page();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILURES" : "ALL TESTS PASSED",
 	       failures, failures == 1 ? "" : "s");
