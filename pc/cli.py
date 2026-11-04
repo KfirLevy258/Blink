@@ -3175,6 +3175,48 @@ def _announce(home=None, wsl_name=None):
     # tokens included, so this says exactly what happens to it. It follows
     # CLAUDE_CONFIG_DIR as the transcripts' folder does, through the same
     # record.
+    _announce_claude_reads(home, wsl_name)
+    if wsl_name is None:
+        # On a WSL desk the setup step says it, from the distribution's
+        # config, once the probe has started it (_setup_wsl).
+        _announce_spend_seat(home)
+    # The same for Codex (CodexBurnReader): an account whose Codex log
+    # reports a weekly limit and no five-hour one -- Codex Pro on the
+    # owner's desk, 2026-11-01 -- has its page fed from the same rollouts
+    # the gauges come from. It reads every token figure of a turn, the
+    # input and cache ones too, because together they are what recognises
+    # a turn written twice (burn_reader, "WHY last_token_usage"); only the
+    # output tokens are added up.
+    #
+    # Its folder is the service's for the same reason as Claude Code's:
+    # codex_cli honours CODEX_HOME, which a login service does not carry
+    # either (2026-11-01 third review). That folder is where the gauges,
+    # the project name and the activity light come from as well, so the
+    # caveat says so rather than "the folder above" for the token counts.
+    root, caveat = _service_folder(
+        "CODEX_HOME", _codex_sessions_root,
+        "so every Codex figure, the rate limits included, comes from the"
+        " folder above.")
+    print("  If Codex reports no five-hour limit, it also reads the token")
+    print("  counts of each Codex turn from its session log, and adds up the")
+    print("  output tokens:")
+    print(f"    {root}")
+    print("  It holds those counts in memory and sends the board only a total")
+    print("  per quarter-hour, never the conversation.")
+    for line in caveat:
+        print(line)
+    print()
+    print(f"  To undo all of it:  {command_to_type()} uninstall")
+    print()
+
+
+def _announce_claude_reads(home, wsl_name=None) -> None:
+    """_announce's paragraph on what is read out of Claude Code: the
+    transcripts on an account with no five-hour limit, and the config for
+    the plan and seat. With `wsl_name`, the folders are named by the
+    distribution rather than spelled out: they are Linux paths inside it,
+    and config_path would stat over UNC. Its own function so `blink install
+    --wsl` can say it before its probe starts the distribution."""
     from pc import claude_plan
     if wsl_name is not None:
         # Named, not spelled out: the folders are Linux paths inside the
@@ -3215,39 +3257,6 @@ def _announce(home=None, wsl_name=None):
         print("  CLAUDE_CONFIG_DIR is set in this shell, and install records")
         print("  its folder, so the background service reads the folder and")
         print("  the file above too.")
-    if wsl_name is None:
-        # On a WSL desk the setup step says it, from the distribution's
-        # config, once the probe has started it (_setup_wsl).
-        _announce_spend_seat(home)
-    # The same for Codex (CodexBurnReader): an account whose Codex log
-    # reports a weekly limit and no five-hour one -- Codex Pro on the
-    # owner's desk, 2026-11-01 -- has its page fed from the same rollouts
-    # the gauges come from. It reads every token figure of a turn, the
-    # input and cache ones too, because together they are what recognises
-    # a turn written twice (burn_reader, "WHY last_token_usage"); only the
-    # output tokens are added up.
-    #
-    # Its folder is the service's for the same reason as Claude Code's:
-    # codex_cli honours CODEX_HOME, which a login service does not carry
-    # either (2026-11-01 third review). That folder is where the gauges,
-    # the project name and the activity light come from as well, so the
-    # caveat says so rather than "the folder above" for the token counts.
-    root, caveat = _service_folder(
-        "CODEX_HOME", _codex_sessions_root,
-        "so every Codex figure, the rate limits included, comes from the"
-        " folder above.")
-    print("  If Codex reports no five-hour limit, it also reads the token")
-    print("  counts of each Codex turn from its session log, and adds up the")
-    print("  output tokens:")
-    print(f"    {root}")
-    print("  It holds those counts in memory and sends the board only a total")
-    print("  per quarter-hour, never the conversation.")
-    for line in caveat:
-        print(line)
-    print()
-    print(f"  To undo all of it:  {command_to_type()} uninstall")
-    print()
-
 
 def _announce_wsl_files(home, name) -> None:
     """_announce's Claude Code lines for a WSL desk being set up again:
@@ -3903,6 +3912,7 @@ def cmd_install_wsl(name) -> int:
         return 1
 
     print(f"Blink setup for Claude Code inside WSL ({d.name}).")
+    _announce_wsl_install(d)
     home = _setup_wsl(d)
     if home is None:
         return 1
@@ -3927,6 +3937,35 @@ def cmd_install_wsl(name) -> int:
     print(f"  Check:   {command_to_type()} status")
     print(f"  Undo:    {command_to_type()} uninstall")
     return 0
+
+
+def _announce_wsl_install(d) -> None:
+    """`blink install --wsl <name>`'s disclosure, said before the probe
+    starts the distribution and before anything is written, as _announce
+    is for a plain install (its docstring says why that is not optional).
+    Until the final branch review this command wrote the settings inside,
+    the shims and the drop folder first and listed them afterwards.
+
+    The home is built from the GUID alone: the drop folder is all of it
+    that is spelled out, and the Linux user and folders are not known
+    until the probe has run."""
+    home = claude_home.wsl(d.guid, d.name, "", "", "", False)
+    print("Here is everything it is about to do, before it does any of it.")
+    print()
+    _announce_wsl_files(home, d.name)
+    print(f"  Changes    {user_config.path(blink_home())}")
+    print(f"             records which WSL distribution ({d.name}) and Linux")
+    print("             account this is for, so the background service reads")
+    print("             the same one.")
+    rec = claude_home.recorded()
+    if rec is not None and (rec.distro_guid or "").lower() != d.guid.lower():
+        print("  Changes    the Claude Code Blink was set up for until now:")
+        print("             takes Blink's status line and hooks back out of it.")
+    print("  Restarts   the background service, so it reads the above.")
+    print()
+    _announce_claude_reads(home, d.name)
+    print()
+    print(f"  To undo all of it:  {command_to_type()} uninstall")
 
 
 def _setup_wsl(d):

@@ -3749,3 +3749,38 @@ def test_a_previous_distro_that_would_not_undo_keeps_its_folder(
     assert cli.main(["install", "--wsl", "Debian"]) == 0
     assert os.path.isdir(old.drop_dir)
     assert "inside Ubuntu remove ~/.blink/out" in capsys.readouterr().out
+
+
+def test_install_wsl_discloses_before_it_starts_anything(monkeypatch,
+                                                         capsys):
+    """Finding 4: what `install --wsl` writes, and what it reads, is said
+    before the probe starts the distribution and before install_into
+    writes inside it."""
+    from pc import claude_home, wsl
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe())
+    said = {}
+
+    def probe(name, *a, **k):
+        said["probe"] = capsys.readouterr().out
+        return _probe()
+
+    def into(home, wsl_run, **k):
+        said["install_into"] = capsys.readouterr().out
+        return "Statusline installed."
+    monkeypatch.setattr(wsl, "probe", probe)
+    monkeypatch.setattr(install_statusline, "install_into", into)
+    assert cli.main(["install", "--wsl", "Ubuntu"]) == 0
+    before = said["probe"]
+    drop = claude_home.wsl(WSL_GUID, "Ubuntu", "", "", "", False).drop_dir
+    assert "Changes    Claude Code's settings.json inside WSL (Ubuntu)" \
+        in before
+    assert f"Creates    {drop}" in before
+    assert "Claude Code's transcripts inside Ubuntu, while you use it" \
+        in before
+    assert "Claude Code's config inside Ubuntu, while you use it" in before
+    assert "To undo all of it:" in before
+    assert "zoe" not in before and "wsl.localhost" not in before
+    # Nothing of it waited for the write.
+    assert "Changes    Claude Code's settings.json" not in \
+        said["install_into"]
