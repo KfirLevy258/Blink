@@ -335,21 +335,33 @@ void fmt_usd(double usd, char *buf, size_t buflen)
 {
 	/*
 	 * One row per spelling past whole dollars, largest first: an amount
-	 * from `from` up is divided by `scale` and written with `decimals`
-	 * places and `unit`. Each `from` is where the row below it, rounded,
-	 * would first print something wider -- $9999.50 as "$10000", $99.95k
-	 * as "$100.0k" -- so the string never grows by more than the unit.
+	 * from `from` cents up is counted in `step`s of cents, rounded half
+	 * up, and written with `decimals` places and `unit`. Each `from` is
+	 * where the row below it, rounded, would first print something wider
+	 * -- $9999.50 as "$10000", $99.95k as "$100.0k" -- so the string never
+	 * grows by more than the unit.
+	 *
+	 * In whole cents and integers, not "%.*f" of a quotient. That rounded
+	 * an exact binary half to even and a decimal half that binary cannot
+	 * hold (12350 / 1e3 is 12.3499...) down, so a $1.25M cap read "of
+	 * $1.2M" and 450 of the 899 $x,x50 amounts from $10k to $99.95k came
+	 * out below half up -- while the whole dollars beside them round half
+	 * up by hand (review of feat/enterprise-spend, 2026-11-04). picolibc's
+	 * printf, on the board, does the same as the host's. The counts are
+	 * printed as int: 9999 at most, and "%lld" is not something to ask of
+	 * every printf this file may meet.
 	 */
 	static const struct {
-		double from, scale;
+		int64_t from, step;
 		int decimals;
 		char unit;
 	} steps[] = {
-		{ 99.95e6, 1e6, 0, 'M' },
-		{ 999.5e3, 1e6, 1, 'M' },
-		{ 99.95e3, 1e3, 0, 'k' },
-		{ 9999.5, 1e3, 1, 'k' },
+		{ 9995000000LL, 100000000LL, 0, 'M' },	/* from $99.95M, $1M */
+		{ 99950000LL, 10000000LL, 1, 'M' },	/* from $999.5k, $0.1M */
+		{ 9995000LL, 100000LL, 0, 'k' },	/* from $99.95k, $1k */
+		{ 999950LL, 10000LL, 1, 'k' },		/* from $9999.50, $0.1k */
 	};
+	int64_t cents;
 
 	if (buf == NULL || buflen == 0) {
 		return;
@@ -370,10 +382,20 @@ void fmt_usd(double usd, char *buf, size_t buflen)
 		snprintf(buf, buflen, "$999M");
 		return;
 	}
+	/* Under 1e11 after the bound above, so int64_t holds it exactly. */
+	cents = (int64_t)(usd * 100.0 + 0.5);
 	for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
-		if (usd >= steps[i].from) {
-			snprintf(buf, buflen, "$%.*f%c", steps[i].decimals,
-				 usd / steps[i].scale, steps[i].unit);
+		if (cents >= steps[i].from) {
+			int n = (int)((cents + steps[i].step / 2) /
+				      steps[i].step);
+
+			if (steps[i].decimals == 0) {
+				snprintf(buf, buflen, "$%d%c", n,
+					 steps[i].unit);
+			} else {
+				snprintf(buf, buflen, "$%d.%d%c", n / 10,
+					 n % 10, steps[i].unit);
+			}
 			return;
 		}
 	}

@@ -447,6 +447,17 @@ static const struct {
 	{ 99951, "$100k" }, { 314000, "$314k" }, { 999499, "$999k" },
 	{ 999501, "$1.0M" }, { 12.5e6, "$12.5M" }, { 99.94e6, "$99.9M" },
 	{ 314e6, "$314M" },
+	/*
+	 * And the k and M rows round half up, as the whole dollars do. They
+	 * were written with %.*f, which rounds an exact binary half to even
+	 * and a decimal half that binary cannot hold (12.35 is 12.3499...)
+	 * down: a $1.25M cap read "of $1.2M", and 450 of the 899 $x,x50
+	 * amounts from $10k to $99.95k came out below half up (review of
+	 * feat/enterprise-spend, 2026-11-04, FW5).
+	 */
+	{ 1.25e6, "$1.3M" }, { 2.75e6, "$2.8M" }, { 12250, "$12.3k" },
+	{ 12350, "$12.4k" }, { 10050, "$10.1k" }, { 100500, "$101k" },
+	{ 250500000, "$251M" }, { 12.45e6, "$12.5M" },
 	/* Past proto.c's own $1e9 bound: a ceiling, not a figure. */
 	{ 1e9, "$999M" }, { 1e300, "$999M" },
 };
@@ -479,6 +490,8 @@ static void test_fmt_spend(void)
 	EXPECT_STR(b, "of $500");
 	fmt_usd_limit(12500, b, sizeof(b));
 	EXPECT_STR(b, "of $12.5k");
+	fmt_usd_limit(1.25e6, b, sizeof(b));	/* the review's cap */
+	EXPECT_STR(b, "of $1.3M");
 	fmt_usd_limit(-1, b, sizeof(b));
 	EXPECT_STR(b, "");
 
