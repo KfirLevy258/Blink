@@ -1903,6 +1903,18 @@ static void morph_exec(void *unused, int32_t t)
 				render_plan_right();
 			} else if (plan_rec.tag[0] != '\0') {
 				lv_label_set_text(weekly.name, "WEEKLY 7d");
+				/*
+				 * And its figure back at 20 px. Dollars too
+				 * wide for the hollow ("~$4444") put the
+				 * label at 16 (fit_spent_pct), and the
+				 * arriving page's "61%" was drawn small for
+				 * the 190 ms until morph_done (review of
+				 * feat/enterprise-spend, 2026-11-04, FW4).
+				 */
+				if (!focus_on) {
+					set_pct_font(&weekly,
+						     &lv_font_montserrat_20);
+				}
 			}
 		}
 		return;
