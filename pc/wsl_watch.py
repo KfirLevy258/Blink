@@ -12,7 +12,9 @@ the drop folder written in the last LIVE_S and the distribution running.
 Two reasons for the gate, both on a real desk. Opening a path under
 \\\\wsl.localhost starts a distribution that is not running, so a reader that
 did not ask first would undo every `wsl --shutdown` and keep WSL holding its
-memory all day. And the serial loop must never wait on any of it: a stat
+memory all day. The one exception is the drift repair, which an idle desk
+also gets every IDLE_REPAIR_EVERY_S, and only when `wsl -l --running` says
+the distribution is up already (that constant says why). And the serial loop must never wait on any of it: a stat
 over 9P, or the wsl.exe that asks whether the distribution is running
 (wsl.running, 5 s timeout), held there, keeps the board's pongs past their
 30 s window and puts HOST LOST on the desk.
@@ -63,6 +65,21 @@ WANT_TTL_S = 180
 # How often the thread wakes. The work is gated by the constants above; a
 # tick that is not due does one stat and one listing of the drop folder.
 TICK_S = 5
+
+# How often an idle desk -- drop folder not fresh -- asks whether the
+# distribution is running, and runs the drift repair when it is. Without
+# it a repair came only on a live tick, and the faults it repairs are the
+# ones that stop a tick ever being live: a hook shim deleted inside WSL
+# makes dash exit 2, which Claude Code takes as "block", on every prompt,
+# and a deleted out file sends every payload into the Linux home, so the
+# drop folder never gets fresh again and nothing put either back until a
+# reinstall (review of feat/enterprise-spend, U30; natively the watchdog
+# restores both within 300 s). The same 300 s as DriftWatchdog. It keeps
+# the spec's promise because `wsl -l --running` starts nothing, the repair
+# runs only on a yes from it, and one short check every five minutes does
+# not keep a distribution up: WSL stops one seconds after its last process
+# ends, and the VM a minute after that.
+IDLE_REPAIR_EVERY_S = 300
 
 # How often the shims' abandoned temps are swept from the drop folder. On
 # NTFS, so not gated: a killed render's temp holds a payload either way.
@@ -157,9 +174,10 @@ class WslWatch:
     returning. `running` is wsl.running (name -> bool), `clock` wall time.
     `wsl_run`, `drift` and `burn_reader` are for the tests: the drift
     watchdog is install_statusline.wsl_drift_watchdog(home, wsl_run), the
-    reader a BurnReader of home.transcripts. The drift check runs only on
-    a live tick, and at most every 300 s of monotonic time even then
-    (DriftWatchdog's interval).
+    reader a BurnReader of home.transcripts. The drift check runs on a
+    live tick, and on an idle desk every IDLE_REPAIR_EVERY_S when the
+    distribution is running anyway; at most every 300 s of monotonic time
+    either way (DriftWatchdog's interval).
     """
 
     def __init__(self, home, running=wsl.running, clock=time.time,
@@ -192,6 +210,7 @@ class WslWatch:
         self._ran = False
         self._sig = None
         self._swept_at = None
+        self._idle_at = None
         self._said = None
 
     # -- the serial loop's side: memory only -------------------------------
@@ -239,9 +258,18 @@ class WslWatch:
         fresh = (newest is not None
                  and -FUTURE_SKEW_S <= now - newest <= LIVE_S)
         asked_now = False
+        idle_repair = False
         if not fresh:
             # Forgotten, so a desk coming back is asked at once.
             self._ran, self._ran_at = False, None
+            # The idle repair (IDLE_REPAIR_EVERY_S). Its clock starts at
+            # the first idle tick, not with an ask: a daemon started on a
+            # quiet desk has no reason to start wsl.exe that very second.
+            if self._idle_at is None:
+                self._idle_at = now
+            elif not (0 <= now - self._idle_at < IDLE_REPAIR_EVERY_S):
+                self._idle_at = now
+                idle_repair = bool(self._running(self._home.distro_name))
         elif (self._ran_at is None or not
                 (0 <= now - self._ran_at < RUNNING_EVERY_S)):
             # Stamped before the ask, so a check that raises is not
@@ -251,6 +279,10 @@ class WslWatch:
             self._ran = bool(self._running(self._home.distro_name))
             asked_now = True
         live = fresh and self._ran
+        if fresh:
+            # A live spell has its own drift check; the idle one waits a
+            # full interval after it.
+            self._idle_at = now
         with self._lock:
             self._live = live
             wanted_at = self._wanted_at
@@ -282,6 +314,13 @@ class WslWatch:
             else:
                 got = self._reader.held(now)
         else:
+            if idle_repair:
+                # Only the drift repair, on the tick just told the
+                # distribution is running: no config or transcript read,
+                # which the spec keeps for a desk in use.
+                msg = self._drift.tick()
+                if msg:
+                    notes.append(f"[watchdog] {msg}")
             got = self._reader.held(now)
         with self._lock:
             self._burn = got
