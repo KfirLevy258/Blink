@@ -898,7 +898,7 @@ def shown_where(where):
 _STATE_WORDS = {
     "scr": ("gauges", "settings", "connecting", "eyes"),
     "ov": ("none", "brightness", "theme", "focus", "confirm"),
-    "modal": ("none", "notice", "whatsnew", "prompt", "download"),
+    "modal": ("none", "notice", "whatsnew", "prompt", "ask", "download"),
     "focus": FOCUS_NAMES,
     "edit": ("name", "waiting", "opened", "run", "held"),
     "nt": ("none", "sleep", "ota", "other"),

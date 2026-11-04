@@ -113,6 +113,8 @@ run_one touch_inject ""                ""
 # Its widget listing's wire format: the worst page fits, a label needs no
 # escaping, the aim grid finds a strip beside a popup.
 run_one touch_widgets ""               ""
+# "Keep figures fresh?": never stacked, withdrawn on host loss, later at 60 s.
+run_one ask_prompt  "ask_prompt.c"    ""
 run_one upd_prompt  "upd_prompt.c"    ""
 run_one upd_row     "upd_row.c"       ""
 run_one upd_tap     "upd_tap.c"       ""

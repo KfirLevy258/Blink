@@ -37,7 +37,8 @@ import threading
 import time
 from dataclasses import asdict, dataclass, fields
 
-from . import claude_home, claude_plan, ota, theme, user_config, wsl
+from . import (claude_home, claude_plan, ota, protocol, theme, user_config,
+               wsl)
 from . import idle as idle_probe
 
 SETTING = "usage-refresh"
@@ -211,6 +212,174 @@ def due(now, *, enabled, native, board_alive, idle_s, cache_at, other_at,
         and (other_at is None or now - other_at >= FRESH_SOURCE_S)
         and (cache_at is None or now - cache_at >= REFRESH_AFTER_S)
         and now - state.last_run_at >= spacing(state))
+
+
+# --- asking on the board -----------------------------------------------------
+#
+# Someone updated automatically never sees `blink install`, where the
+# question is asked in the terminal, and the refresh never runs without a
+# yes. So a board that lists the "ask" cap is sent {"t":"ask","id":"refresh"}
+# and puts up "Keep figures fresh?" with Turn on / No thanks
+# (firmware/src/ask_prompt.h). The ask is counted when it goes out: a box
+# the board withdraws (host lost) or closes after a minute ("later") is one
+# of the ASK_AT_MOST, a day apart.
+
+ANSWERS = protocol.ASK_ANSWERS
+
+
+@dataclass
+class AskState:
+    times: int = 0
+    last_at: float = 0.0
+    declined: bool = False
+
+
+def load_ask(blink_home):
+    """The "ask" half of STATE_FILE; a fresh AskState for anything that is
+    not one, as load_state does for "run"."""
+    ask = _read(blink_home).get("ask")
+    if not isinstance(ask, dict):
+        return AskState()
+    try:
+        kw = {f.name: ask[f.name] for f in fields(AskState) if f.name in ask}
+        a = AskState(**kw)
+        if (not isinstance(a.times, int) or isinstance(a.times, bool)
+                or a.times < 0
+                or not isinstance(a.last_at, (int, float))
+                or isinstance(a.last_at, bool)
+                or not isinstance(a.declined, bool)):
+            return AskState()
+        return a
+    except (TypeError, ValueError):
+        return AskState()
+
+
+def save_ask(blink_home, ask):
+    """Replace "ask" and nothing else: "run" is RefreshWatch's, written from
+    its own thread, and save_state likewise keeps this half."""
+    doc = _read(blink_home)
+    doc["ask"] = asdict(ask)
+    theme._write_json(_path(blink_home), doc, tries=1)
+
+
+def should_ask(now, *, setting_absent, native, claude_found, work_login,
+               board_caps, idle_s, ask_state):
+    """Whether the board may ask "Keep figures fresh?" now.
+
+    Only while the person has not chosen (the key absent from config.json),
+    for a native Claude home (never WSL in this version), with Claude Code
+    there to run, never on a work login (asked only in the terminal, with No
+    as the default), only on a board that lists "ask", only while someone is
+    at the computer (`idle_s` None is an OS that cannot say, taken as in
+    use), at most ASK_AT_MOST times, a day apart, and never after a no."""
+    return bool(
+        setting_absent and native and claude_found and not work_login
+        and "ask" in board_caps
+        and (idle_s is None or idle_s < IDLE_LIMIT_S)
+        and ask_state.times < ASK_AT_MOST
+        and not ask_state.declined
+        and now - ask_state.last_at >= ASK_EVERY_S)
+
+
+class BoardAsk:
+    """The daemon's half of the board's question, for the Bridge.
+
+    `due(caps)` reads config files and starts the idle probe, so the Bridge
+    calls it off the serial thread (its run_async); `asked()` and
+    `answer(a)` write two small files and are called from the serial
+    thread. One lock keeps their reads and writes of the state apart. Built once for the life of the
+    process and handed to each connection's Bridge, so the copy held here
+    is a floor under the file, as RefreshWatch keeps one: save_ask is a
+    single try, and a write that failed must not put the box up again at
+    the next heartbeat.
+
+    `home()` is the claude_home record, `view(now)` the config
+    (config_view). Nothing here logs: the answer is the person's, and the
+    daemon's log names the message type alone."""
+
+    def __init__(self, blink_home, home, view, now=time.time, idle=None):
+        self._blink_home = blink_home
+        self._home = home
+        self._view = view
+        self._now = now
+        self._idle = idle if idle is not None else idle_probe.seconds_idle
+        self._lock = threading.Lock()
+        self._mem = None
+
+    def _state(self):
+        read = load_ask(self._blink_home)
+        mem = self._mem
+        if mem is None:
+            return read
+        return AskState(max(mem.times, read.times),
+                        max(mem.last_at, read.last_at),
+                        mem.declined or read.declined)
+
+    def _keep(self, state):
+        self._mem = state
+        try:
+            save_ask(self._blink_home, state)
+        except Exception:
+            pass
+
+    def due(self, board_caps):
+        """Never raises: a question is never worth the thread."""
+        try:
+            return self._due(frozenset(board_caps))
+        except Exception:
+            return False
+
+    def _due(self, caps):
+        now = self._now()
+        try:
+            absent = chosen(self._blink_home) is None
+        except (user_config.Unreadable, OSError):
+            return False                # a file that cannot be read: not now
+        # The lock for the state alone, not for the look: the serial thread
+        # takes it to count an ask or save an answer, and must not wait out
+        # a config parse or the idle probe to do so.
+        with self._lock:
+            state = self._state()
+        ask = dict(setting_absent=absent, board_caps=caps, ask_state=state)
+        # The cheap answers first; the config parse and the idle probe (a
+        # process on macOS) only once everything else already says yes.
+        if not should_ask(now, native=True, claude_found=True,
+                          work_login=False, idle_s=0.0, **ask):
+            return False
+        h = self._home()
+        if h.kind != claude_home.NATIVE:
+            return False                # before anything stats a UNC path
+        ask.update(native=True,
+                   claude_found=find_claude(h.user_dir()) is not None,
+                   work_login=is_work_login(self._view(now)))
+        if not should_ask(now, idle_s=0.0, **ask):
+            return False
+        return should_ask(now, idle_s=self._idle(), **ask)
+
+    def asked(self):
+        """Count one ask, sent just now."""
+        with self._lock:
+            st = self._state()
+            self._keep(AskState(st.times + 1, self._now(), st.declined))
+
+    def answer(self, a):
+        """The board's answer: "on" saves yes, "no" saves no and never asks
+        again, "later" changes nothing (asked() counted it). Never raises."""
+        if a not in ANSWERS or a == "later":
+            return
+        try:
+            with self._lock:
+                if a == "no":
+                    st = self._state()
+                    self._keep(AskState(st.times, st.last_at, True))
+                try:
+                    user_config.put(self._blink_home, SETTING, a == "on")
+                except Exception:
+                    # Not saved: an "on" is asked again tomorrow, a "no" is
+                    # held by `declined` above.
+                    pass
+        except Exception:
+            pass
 
 
 def is_work_login(view):

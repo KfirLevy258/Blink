@@ -1,5 +1,7 @@
 import ast
+import os
 import pathlib
+import sys
 import unittest
 
 import pytest
@@ -1155,3 +1157,196 @@ def test_a_protocol_number_that_is_not_a_number_is_not_the_daemons_end(t, v):
     assert b._board_proto is None
     b.on_message({"t": "ping", "v": 5, "up_ms": 10})
     assert b._board_proto == 5
+
+
+# --- asking on the board: "Keep figures fresh?" (usage refresh, Task 7) ----
+
+class _Ask:
+    """A stand-in for usage_refresh.BoardAsk: says due as told, records the
+    caps it was asked with, the asks counted and the answers handed on."""
+
+    def __init__(self, due=True):
+        self.due_now = due
+        self.caps_seen = []
+        self.asks = 0
+        self.answers = []
+
+    def due(self, caps):
+        self.caps_seen.append(caps)
+        return self.due_now and "ask" in caps
+
+    def asked(self):
+        self.asks += 1
+        self.due_now = False            # as BoardAsk: not again today
+
+    def answer(self, a):
+        self.answers.append(a)
+
+
+def _checked_writer(sent):
+    """The daemon's send() contract: through encode_checked, refused when
+    over the board's line limit."""
+    def write(m):
+        raw, why = protocol.encode_checked(m)
+        assert raw is not None, why
+        sent.append(m)
+        return True
+    return write
+
+
+def _ask_bridge(ask, caps=("svc", "ask"), run_async=lambda fn: fn()):
+    sent = []
+    b = Bridge(write_msg=_checked_writer(sent),
+               fetch_usage=lambda: protocol.usage(1.0, None, 2.0, None, []),
+               now=lambda: 1000.0, wall=lambda: (1752444000, 0),
+               refresh_ask=ask, run_async=run_async, **_NO_FEED)
+    msg = {"t": "hello", "v": 2, "fw": "1.5.0"}
+    if caps is not None:
+        msg["caps"] = list(caps)
+    b.on_message(msg)
+    return b, sent
+
+
+def _asks(sent):
+    return [m for m in sent if m["t"] == "ask"]
+
+
+def test_ask_is_sent_once_to_a_board_that_lists_it():
+    ask = _Ask()
+    b, sent = _ask_bridge(ask)
+    b.pump()
+    assert _asks(sent) == [protocol.ask("refresh")]
+    assert ask.asks == 1
+    for _ in range(3):
+        b.poll_once()
+        b.pump()
+    assert len(_asks(sent)) == 1
+
+
+def test_the_ask_line_is_what_the_board_reads():
+    m = protocol.ask("refresh")
+    assert m == {"t": "ask", "v": protocol.VERSION, "id": "refresh"}
+    raw, why = protocol.encode_checked(m)
+    assert raw is not None and len(raw) < 64, why
+
+
+def test_no_ask_for_a_board_without_the_cap():
+    for caps in (("svc", "theme"), None):
+        ask = _Ask()
+        b, sent = _ask_bridge(ask, caps=caps)
+        b.pump()
+        assert _asks(sent) == [] and ask.asks == 0
+        assert ask.caps_seen == []      # not even worked out
+
+
+def test_the_remembered_caps_never_send_an_ask():
+    """board.json names the LAST board; an ask is counted when it goes out,
+    so only this board's own word may send one."""
+    ask, sent = _Ask(), []
+    b = Bridge(write_msg=_checked_writer(sent),
+               fetch_usage=lambda: protocol.usage(1.0, None, 2.0, None, []),
+               now=lambda: 1000.0, wall=lambda: (1752444000, 0),
+               refresh_ask=ask, run_async=lambda fn: fn(),
+               board_caps_hint=["svc", "ask"], **_NO_FEED)
+    b.greet()
+    b.pump()
+    assert _asks(sent) == [] and ask.asks == 0
+
+
+def test_a_board_that_lost_the_cap_before_pump_is_not_sent_it():
+    ask = _Ask()
+    later = []
+    b, sent = _ask_bridge(ask, run_async=later.append)
+    b.on_message({"t": "pref", "v": 2, "provider": "claude", "caps": ["svc"]})
+    for fn in later:
+        fn()
+    b.pump()
+    assert _asks(sent) == [] and ask.asks == 0
+
+
+def test_the_work_is_done_off_the_serial_thread():
+    """due() reads Claude Code's config and starts the idle probe: never
+    on the serial loop, which answers the board's pings."""
+    ask = _Ask()
+    later = []
+    b, sent = _ask_bridge(ask, run_async=later.append)
+    assert ask.caps_seen == [] and len(later) == 1
+    b.poll_once()                       # one in flight: not a second
+    assert len(later) == 1
+    later.pop()()
+    assert _asks(sent) == []            # the serial thread writes it
+    b.pump()
+    assert len(_asks(sent)) == 1
+
+
+def test_a_due_that_raises_sends_nothing_and_asks_again_later():
+    class Boom(_Ask):
+        def due(self, caps):
+            raise RuntimeError("config gone")
+    ask = Boom()
+    b, sent = _ask_bridge(ask)
+    b.pump()
+    assert _asks(sent) == []
+    ask.__class__ = _Ask                # recovered
+    b.poll_once()
+    b.pump()
+    assert len(_asks(sent)) == 1
+
+
+@pytest.mark.parametrize("a", ["on", "no", "later"])
+def test_an_answer_is_handed_on(a):
+    ask = _Ask()
+    b, _ = _ask_bridge(ask)
+    b.on_message({"t": "answer", "v": 2, "id": "refresh", "a": a})
+    assert ask.answers == [a]
+
+
+@pytest.mark.parametrize("msg", [
+    {"t": "answer", "v": 2, "id": "other", "a": "on"},
+    {"t": "answer", "v": 2, "a": "on"},
+    {"t": "answer", "v": 2, "id": "refresh", "a": "yes"},
+    {"t": "answer", "v": 2, "id": "refresh", "a": 1},
+    {"t": "answer", "v": 2, "id": "refresh"},
+])
+def test_an_answer_this_daemon_did_not_ask_for_is_ignored(msg):
+    ask = _Ask()
+    b, _ = _ask_bridge(ask)
+    b.on_message(msg)
+    assert ask.answers == []
+
+
+def test_an_answer_writes_the_setting_end_to_end(tmp_path, monkeypatch):
+    import dataclasses
+
+    from pc import claude_home, claude_plan, user_config
+    from pc import usage_refresh as ur
+    blink = str(tmp_path / ".blink")
+    os.makedirs(blink)
+    rec = claude_home.from_environ({})
+    monkeypatch.setenv("PATH", "")
+    exe = os.path.join(os.environ["HOME"], ".local", "bin",
+                       "claude.exe" if sys.platform == "win32" else "claude")
+    os.makedirs(os.path.dirname(exe))
+    open(exe, "w").close()
+    ask = ur.BoardAsk(blink, lambda: rec, lambda now: claude_plan.EMPTY_VIEW,
+                      now=lambda: 1_800_000_000.0, idle=lambda: 5.0)
+    b, sent = _ask_bridge(ask)
+    b.pump()
+    assert len(_asks(sent)) == 1
+    assert ur.load_ask(blink).times == 1
+    b.on_message({"t": "answer", "v": 2, "id": "refresh", "a": "on"})
+    assert user_config.load(blink)[ur.SETTING] is True
+    b.poll_once()
+    b.pump()
+    assert len(_asks(sent)) == 1        # answered: never again
+
+
+def test_ask_and_answer_are_logged_by_type_alone(capsys):
+    assert protocol.log_name({"t": "ask", "id": "refresh"}) == "ask"
+    assert protocol.log_name({"t": "answer", "a": "on"}) == "answer"
+    ask = _Ask()
+    b, _ = _ask_bridge(ask)
+    b.pump()
+    b.on_message({"t": "answer", "v": 2, "id": "refresh", "a": "later"})
+    err = capsys.readouterr().err
+    assert "refresh" not in err and "later" not in err

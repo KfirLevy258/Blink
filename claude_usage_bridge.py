@@ -312,6 +312,23 @@ def start_usage_refresh(blink_home, bus, board_alive):
     return watch.start()
 
 
+def board_ask(blink_home):
+    """The board's "Keep figures fresh?" (usage_refresh.BoardAsk), or None.
+
+    Built once for the life of the process and handed to each connection's
+    Bridge, so its memory of the last ask outlives a nudged cable. None
+    under BLINK_SCENARIO for the reason start_usage_refresh gives: a fleet
+    desk replays invented usage, and a tap there would turn the refresh on
+    for the desk's own login. A WSL home is refused by BoardAsk itself, on
+    each look, because the record can change under a running daemon."""
+    from pc import claude_home
+    if os.environ.get("BLINK_SCENARIO"):
+        return None
+    return usage_refresh.BoardAsk(
+        blink_home, claude_home.current,
+        usage_refresh.config_view(claude_home.current))
+
+
 def build_bus():
     """The daemon's usage source: scripted when BLINK_SCENARIO says so.
 
@@ -1136,6 +1153,9 @@ def main(argv=None):
         b = live.get("bridge")
         return b is not None and b.board_alive()
     start_usage_refresh(blink_home, bus, _board_alive)
+    # And the question the board asks people who never ran `blink install`
+    # since the refresh existed, for every connection's Bridge.
+    refresh_ask = board_ask(blink_home)
 
     # Themes, for the life of the process like the watch above: what the
     # board is believed to hold outlives a reconnect, and the builder a
@@ -1490,6 +1510,7 @@ def main(argv=None):
                         # What the board can show, until it says again:
                         # its own pref to the probe when it gave one.
                         board_caps_hint=board_caps_hint(heard, known),
+                        refresh_ask=refresh_ask,
                         pending=update.PendingFirmware(
                             os.path.join(blink_home, "pending_fw.json")))
         live["bridge"] = bridge  # for the /usage refresh's board_alive

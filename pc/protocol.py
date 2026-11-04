@@ -188,10 +188,11 @@ WIRE_TYPES = frozenset({
     # board -> host
     "hello", "ping", "pref", "ota_query", "ota_flash", "theme_now",
     "theme_edit", "touch_done", "touch_refused", "ui_state", "widgets",
+    "answer",
     # host -> board
     "welcome", "bye", "pong", "time", "usage", "edition", "session",
     "status", "svc", "theme", "ota_avail", "ota_begin", "ota_resume",
-    "ota_none", "ota_error", "edit_state", "burn", "plan", "sburn",
+    "ota_none", "ota_error", "edit_state", "burn", "plan", "sburn", "ask",
 })
 
 UNKNOWN_TYPE = "(unknown type)"
@@ -1037,6 +1038,13 @@ BOARD_CAP_PLAN = "plan"
 # cap, not implied by "burn": a board that draws token burn lines has no
 # parser for cents, and the cap is how a build that has one says so.
 BOARD_CAP_SPENDBURN = "spendburn"
+# Puts up "Keep figures fresh?" for an `ask` line and answers it with an
+# `answer` line (docs/plans/usage-refresh.md, 1b; firmware/src/ask_prompt.h).
+# A board without it is never sent one: an ask is counted as made when it
+# goes out, and one a board drops would spend one of the three for nothing.
+BOARD_CAP_ASK = "ask"
+# The words an `answer` line may carry. Anything else is not an answer.
+ASK_ANSWERS = ("on", "no", "later")
 
 
 def board_caps(msg) -> frozenset:
@@ -1223,6 +1231,18 @@ def theme(op: str, t: dict = None) -> dict:
     if t is not None:
         msg.update(t)
     return msg
+
+
+def ask(question: str) -> dict:
+    """{"t":"ask","v":2,"id":...}: put a question up on the board's glass.
+    "refresh" is the only one so far: whether to keep the figures fresh with
+    the person's own /usage. Sent only to a board listing BOARD_CAP_ASK.
+
+    The board answers {"t":"answer","v":2,"id":"refresh","a":"on"|"no"|
+    "later"}, "later" when the box closed itself after a minute untouched,
+    and nothing at all when it withdrew the box because this computer went
+    quiet. The log names both by type alone (log_name)."""
+    return {"t": "ask", "v": VERSION, "id": question}
 
 
 def theme_edit_reply(ok: bool) -> dict:

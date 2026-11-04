@@ -33,6 +33,7 @@
 #include "ota.h"
 #include "proto.h"
 #include "upd_prompt.h"
+#include "ask_prompt.h"
 #include "upd_row.h"
 #include "usage_view.h"
 #include "mem_stats.h"
@@ -901,6 +902,119 @@ static void upd_prompt_draw(const struct ota_ui *snap)
 	lv_obj_align(no, LV_ALIGN_BOTTOM_MID, 70, -10);
 }
 
+/*
+ * "Keep figures fresh?" -- the daemon asking, once a day and three times at
+ * most, whether it may run the person's own `claude -p /usage` to keep the
+ * dials current (docs/plans/usage-refresh.md, 1b). On lv_layer_top() like
+ * the update offer, for the same reason: it is asked over the gauges.
+ * WHETHER it is up is ask_prompt_step() (ask_prompt.h), applied by
+ * ask_tick() from the same 250 ms timer as the offer; this draws it and
+ * sends the answer.
+ */
+static lv_obj_t *ask_box;
+static bool ask_pending;	/* an ask arrived and is not up yet */
+static int64_t ask_shown_ms;	/* uptime it went up; 60 s from here */
+
+static void ask_close(void)
+{
+	if (ask_box) {
+		lv_obj_del(ask_box);
+		ask_box = NULL;
+	}
+}
+
+/* Closed by a tap or by its minute running out: either way the daemon is
+ * told, and only that it was answered reaches the console -- which way the
+ * person went is theirs. */
+static void ask_answer(enum ask_answer a)
+{
+	ask_close();
+	proto_send_answer(a);
+	printk("[ask] answered\n");
+}
+
+static void ask_on_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	ask_answer(ASK_ANSWER_ON);
+}
+
+static void ask_no_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	ask_answer(ASK_ANSWER_NO);
+}
+
+/*
+ * The box, sized by its text like the titled notice rather than fixed: the
+ * body is two lines of montserrat_14 at 270 px on this panel, and a fixed
+ * height is what once ran a notice's fourth line under its button. Title,
+ * body and the button row, 12 px apart, in a 300 px box clamped to 230 of
+ * the panel's 240 -- so it fits 320x240 whatever the wrap comes to.
+ */
+static void ask_draw(void)
+{
+	ask_box = lv_obj_create(lv_layer_top());
+	lv_obj_set_width(ask_box, 300);
+	lv_obj_set_height(ask_box, LV_SIZE_CONTENT);
+	lv_obj_set_style_max_height(ask_box, 230, 0);
+	lv_obj_set_style_pad_all(ask_box, 12, 0);
+	lv_obj_set_style_pad_row(ask_box, 12, 0);
+	lv_obj_set_style_bg_color(ask_box, COL_BG, 0);
+	lv_obj_set_style_bg_opa(ask_box, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_color(ask_box, COL_GREEN, 0);
+	lv_obj_set_style_border_width(ask_box, 1, 0);
+	lv_obj_clear_flag(ask_box, LV_OBJ_FLAG_SCROLLABLE);
+	/* A swipe that drifts off a button must not slide the screen out from
+	 * under the question (see the update offer's 2026-09-09 report). */
+	lv_obj_clear_flag(ask_box, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_set_flex_flow(ask_box, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(ask_box, LV_FLEX_ALIGN_CENTER,
+			      LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+	lv_obj_t *h = lv_label_create(ask_box);
+
+	lv_label_set_text(h, "Keep figures fresh?");
+	lv_obj_set_width(h, 270);
+	lv_label_set_long_mode(h, LV_LABEL_LONG_WRAP);
+	lv_obj_set_style_text_font(h, &lv_font_montserrat_16, 0);
+	lv_obj_set_style_text_color(h, COL_TEXT, 0);
+	lv_obj_set_style_text_align(h, LV_TEXT_ALIGN_CENTER, 0);
+
+	lv_obj_t *l = lv_label_create(ask_box);
+
+	lv_label_set_text(l, "Blink can ask Claude Code's /usage now and "
+			  "then. No messages, no quota.");
+	lv_obj_set_width(l, 270);
+	lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+	lv_obj_set_style_text_color(l, COL_DIM, 0);
+	lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+
+	/* The update offer's buttons, at its sizes: two 132 px buttons on a
+	 * 272 px row, 8 px between them. */
+	lv_obj_t *row = lv_obj_create(ask_box);
+
+	lv_obj_set_size(row, 272, 36);
+	lv_obj_set_style_pad_all(row, 0, 0);
+	lv_obj_set_style_border_width(row, 0, 0);
+	lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+	lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(row, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+	lv_obj_t *yes = mk_btn(row, "Turn on", COL_GREEN, ask_on_cb, NULL);
+
+	lv_obj_set_size(yes, 132, 36);
+	lv_obj_align(yes, LV_ALIGN_LEFT_MID, 0, 0);
+
+	lv_obj_t *no = mk_btn(row, "No thanks", COL_TRACK, ask_no_cb, NULL);
+
+	lv_obj_set_size(no, 132, 36);
+	lv_obj_align(no, LV_ALIGN_RIGHT_MID, 0, 0);
+
+	lv_obj_update_layout(ask_box);
+	lv_obj_center(ask_box);
+}
+
 /* The version the install confirm names, so it can be held to it. */
 static char confirm_ver[sizeof(((struct ota_ui *)0)->version)];
 
@@ -1246,6 +1360,47 @@ static void set_upd_row(lv_obj_t *lbl, enum upd_row row)
 	}
 }
 
+/*
+ * One turn of ask_prompt_step(), applied verbatim. `busy` is everything else
+ * that asks this person something or owns the glass: the settings panel,
+ * the install confirm, a notice, What's new, the update offer and the
+ * download screen. The computer is gone when proto says no host has been
+ * heard inside its timeout -- HOST LOST, or the silence after a bye.
+ */
+static void ask_tick(void)
+{
+	struct ask_prompt_turn at = ask_prompt_step(
+		ask_pending, ask_box != NULL,
+		panel || confirm || notice || wn || upd_prompt || dl_overlay,
+		!proto_host_seen(), k_uptime_get(), ask_shown_ms);
+
+	ask_pending = at.pending;
+	switch (at.act) {
+	case ASK_PROMPT_SHOW:
+		ask_draw();
+		ask_shown_ms = k_uptime_get();
+		printk("[ask] shown\n");
+		break;
+	case ASK_PROMPT_WITHDRAW:
+		ask_close();
+		printk("[ask] withdrawn: the computer went away\n");
+		break;
+	case ASK_PROMPT_EXPIRE:
+		ask_close();
+		proto_send_answer(ask_prompt_timeout_answer());
+		printk("[ask] closed unanswered\n");
+		break;
+	case ASK_PROMPT_NOTHING:
+	default:
+		break;
+	}
+}
+
+void ui_settings_ask(void)
+{
+	ask_pending = true;
+}
+
 static void upd_timer_cb(lv_timer_t *t)
 {
 	ARG_UNUSED(t);
@@ -1312,9 +1467,11 @@ static void upd_timer_cb(lv_timer_t *t)
 		printk("[ota] offer withdrawn: a different version is on offer\n");
 	}
 	{
+		/* The ask box counts as busy here, as the offer does for it
+		 * below: neither is ever stacked on the other. */
 		struct upd_prompt_turn pt = upd_prompt_step(
 			snap.st, upd_prompt != NULL, upd_prompt_done,
-			panel || confirm || notice || dl_overlay);
+			panel || confirm || notice || dl_overlay || ask_box);
 
 		if (pt.act == UPD_PROMPT_WITHDRAW) {
 			upd_prompt_close();
@@ -1334,6 +1491,10 @@ static void upd_timer_cb(lv_timer_t *t)
 			upd_prompt_show(&snap);
 		}
 	}
+
+	/* "Keep figures fresh?", after the offer: an update on offer takes the
+	 * glass first, and the ask waits for it to clear. */
+	ask_tick();
 
 	/* The install confirm, by the same rule (upd_prompt.h,
 	 * upd_confirm_withdraw). Here, before the switch below raises a
@@ -3354,6 +3515,12 @@ static void repaint_top_cb(void *unused)
 		upd_prompt_close();
 		upd_prompt_draw(&snap);	/* a repaint, not a new offer */
 	}
+	if (ask_box) {
+		/* A repaint, not a new ask: ask_shown_ms stands, so the box
+		 * still closes a minute after it first went up. */
+		ask_close();
+		ask_draw();
+	}
 	if (dl_overlay) {
 		dl_overlay_hide();
 		upd_timer_cb(NULL);	/* the state that showed it shows it again */
@@ -3366,7 +3533,7 @@ void ui_settings_apply_theme(void)
 	if (panel != NULL && lv_async_call(rebuild_cb, NULL) != LV_RESULT_OK) {
 		rebuild_owed = true;
 	}
-	if ((wn || upd_prompt || dl_overlay) &&
+	if ((wn || upd_prompt || ask_box || dl_overlay) &&
 	    lv_async_call(repaint_top_cb, NULL) != LV_RESULT_OK) {
 		repaint_top_owed = true;
 	}
@@ -3524,7 +3691,7 @@ BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 static bool modal_up(void)
 {
 	return notice != NULL || wn != NULL || upd_prompt != NULL ||
-	       dl_overlay != NULL;
+	       ask_box != NULL || dl_overlay != NULL;
 }
 
 static void swipe_progress_cb(enum ui_swipe_dir dir, int pct)
@@ -3916,7 +4083,8 @@ void ui_settings_bench_state(struct ui_settings_bench *out)
 	out->sub = confirm ? "confirm" : bright_ov ? "brightness" :
 		   theme_ov ? "theme" : focus_ov ? "focus" : "none";
 	out->modal = wn ? "whatsnew" : dl_overlay ? "download" :
-		     upd_prompt ? "prompt" : notice ? "notice" : "none";
+		     upd_prompt ? "prompt" : ask_box ? "ask" :
+		     notice ? "notice" : "none";
 	out->busy = want_open || want_close || want_page != 0 || closing ||
 		    sub_closing || theme_closing;
 	out->theme_page = theme_page;

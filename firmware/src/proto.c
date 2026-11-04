@@ -25,6 +25,7 @@
 #include "ui_settings.h"
 #include "touch_inject.h"
 #include "burn5h.h"
+#include "ask_prompt.h"
 
 #define PROTO_VERSION BLINK_PROTO_VERSION
 #define PING_INTERVAL_MS 10000
@@ -219,7 +220,12 @@ static void emit(const char *json)
  * daemon's `sburn` line, which goes only to a board that lists it -- a board
  * with "plan" and not this, the first spend-page builds, draws the page
  * without the view and is sent no line it would drop. */
-#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"burn\",\"plan\",\"spendburn\"]"
+/* ask: this firmware puts up "Keep figures fresh?" for the daemon's `ask`
+ * line and answers it with an `answer` line (ask_prompt.h). The daemon
+ * counts an ask as made when it sends one, so it sends one only to a board
+ * that lists this: an older board would drop it and spend one of the three
+ * the daemon allows itself for nothing. */
+#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"burn\",\"plan\",\"spendburn\",\"ask\"]"
 
 /*
  * The board's id, as hello and pref both say it: hwinfo's device id in hex,
@@ -257,14 +263,15 @@ void proto_send_pref(void)
 	 * had nothing but board.json's memory to say which board it was --
 	 * and a remembered id must never decide whose theme wins.
 	 *
-	 * 145 bytes at its widest ("claude", a 32-digit id and the six
-	 * caps; 125 with this board's 12 digits), measured by
+	 * 151 bytes at its widest ("claude", a 32-digit id and the seven
+	 * caps; 131 with this board's 12 digits), measured by
 	 * tests/pc/test_board_caps.py, which fails if it outgrows this. It was
 	 * 96 B for the 61 B line before the id, 107 before edit_done, 119
-	 * before burn, 126 before plan and 133 before spendburn. A cap costs
-	 * its name's length plus 3 B (the comma and two quotes); the buffer was
-	 * 128 B and "plan" alone would have overrun it, so it is 160, with 15 B
-	 * to spare now. Both stay far under the daemon's 512.
+	 * before burn, 126 before plan, 133 before spendburn and 145 before
+	 * ask. A cap costs its name's length plus 3 B (the comma and two
+	 * quotes); the buffer was 128 B and "plan" alone would have overrun
+	 * it, so it is 160, with 9 B to spare now: the next cap longer than
+	 * five letters grows it again. Both stay far under the daemon's 512.
 	 */
 	char buf[160];
 
@@ -284,13 +291,13 @@ static void send_hello(void)
 	uint32_t cause = 0;
 	(void)hwinfo_get_reset_cause(&cause);
 
-	/* 174 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
-	 * "1.4.0", the six caps), measured by tests/pc/test_board_caps.py,
+	/* 180 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
+	 * "1.4.0", the seven caps), measured by tests/pc/test_board_caps.py,
 	 * which fails if it outgrows this; a truncated hello is not JSON. It
-	 * was 155 before "plan" and 162 before "spendburn", in a 160 B buffer
-	 * that had 4 B to spare, so the buffer is 192, with 18 B to spare now.
-	 * A cap costs its name's length plus 3 B and a two-digit minor in fw
-	 * 1 B. */
+	 * was 155 before "plan", 162 before "spendburn" and 174 before "ask";
+	 * the first two in a 160 B buffer that had 4 B to spare, so the buffer
+	 * is 192, with 12 B to spare now. A cap costs its name's length plus
+	 * 3 B and a two-digit minor in fw 1 B. */
 	char buf[192];
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
@@ -341,6 +348,17 @@ void proto_send_theme_now(const char *why)
 			 PROTO_VERSION, id, why);
 	}
 	emit(buf);
+}
+
+void proto_send_answer(enum ask_answer a)
+{
+	/* 50 bytes at its widest ("later"); ask_prompt_line refuses rather
+	 * than cut a line short. */
+	char buf[64];
+
+	if (ask_prompt_line(buf, sizeof(buf), PROTO_VERSION, a) > 0) {
+		emit(buf);
+	}
 }
 
 void proto_send_theme_edit(void)
@@ -863,6 +881,17 @@ static void dispatch(const char *json)
 			ui_settings_theme_edit_builder_seen();
 		}
 		ui_theme_wire(&m);
+	} else if (strcmp(type, "ask") == 0) {
+		/* "Keep figures fresh?" (ask_prompt.h). Only a question this
+		 * firmware knows: an id it does not would be a box with nothing
+		 * in it. Whether and when it goes up is ui_settings' to decide
+		 * -- never on top of anything, withdrawn on HOST LOST. */
+		char id[16];
+
+		if (msg_get_str(json, "id", id, sizeof(id)) &&
+		    ask_prompt_known(id)) {
+			ui_settings_ask();
+		}
 	} else if (strcmp(type, "theme_edit") == 0) {
 		/* The daemon's answer to ours: ok 1 once a browser is open,
 		 * ok 0 when it has no display to open one on. Absent reads as

@@ -1,0 +1,72 @@
+#include <stdio.h>
+#include <string.h>
+#include "ask_prompt.h"
+
+struct ask_prompt_turn ask_prompt_step(bool pending, bool open, bool busy,
+				       bool host_gone, int64_t now_ms,
+				       int64_t shown_ms)
+{
+	struct ask_prompt_turn t = { ASK_PROMPT_NOTHING, pending };
+
+	if (open) {
+		/* The same question, already on the glass. */
+		t.pending = false;
+		/* Before the timeout: a "later" into a wire nobody reads is a
+		 * line for nothing, and the daemon counted the ask already. */
+		if (host_gone) {
+			t.act = ASK_PROMPT_WITHDRAW;
+		} else if (now_ms - shown_ms >= ASK_PROMPT_OPEN_MS) {
+			t.act = ASK_PROMPT_EXPIRE;
+		}
+		return t;
+	}
+	if (!pending) {
+		return t;
+	}
+	if (host_gone) {
+		t.pending = false;	/* not kept for the next computer */
+		return t;
+	}
+	/* Never stack on top of something the person is already answering;
+	 * still owed, so the next clear tick asks. */
+	if (!busy) {
+		t.act = ASK_PROMPT_SHOW;
+		t.pending = false;
+	}
+	return t;
+}
+
+const char *ask_prompt_word(enum ask_answer a)
+{
+	switch (a) {
+	case ASK_ANSWER_ON:
+		return "on";
+	case ASK_ANSWER_NO:
+		return "no";
+	case ASK_ANSWER_LATER:
+	default:
+		return "later";
+	}
+}
+
+enum ask_answer ask_prompt_timeout_answer(void)
+{
+	return ASK_ANSWER_LATER;
+}
+
+int ask_prompt_line(char *buf, size_t n, int proto, enum ask_answer a)
+{
+	int len = snprintf(buf, n,
+			   "{\"t\":\"answer\",\"v\":%d,\"id\":\"refresh\","
+			   "\"a\":\"%s\"}", proto, ask_prompt_word(a));
+
+	if (len < 0 || (size_t)len >= n) {
+		return -1;
+	}
+	return len;
+}
+
+bool ask_prompt_known(const char *id)
+{
+	return strcmp(id, "refresh") == 0;
+}

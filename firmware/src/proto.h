@@ -2,6 +2,7 @@
 #define PROTO_H
 
 #include "ota_parse.h"
+#include "ask_prompt.h"
 
 #include <stdbool.h>
 
@@ -69,6 +70,10 @@ void proto_send_theme_now(const char *why);
 
 /* {"t":"theme_edit","v":2}: Settings > Theme > "Edit on computer". */
 void proto_send_theme_edit(void);
+
+/* {"t":"answer","v":2,"id":"refresh","a":"on"|"no"|"later"}: the answer to
+ * the daemon's "Keep figures fresh?" (ask_prompt.h). */
+void proto_send_answer(enum ask_answer a);
 
 /* Did the last welcome advertise the theme builder ("caps":["theme"])? */
 bool proto_host_can_theme(void);

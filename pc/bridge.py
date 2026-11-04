@@ -105,7 +105,7 @@ class Bridge:
                  status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
                  edit_answers=None, builder_ended=None, builder_open=None,
-                 sleep=time.sleep):
+                 sleep=time.sleep, refresh_ask=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
@@ -251,6 +251,16 @@ class Bridge:
         self._loop_passes = False
         self._burn_pass = None
         self._burn_asked = set()
+        # "Keep figures fresh?" on the board (usage_refresh.BoardAsk), or
+        # None on a Bridge wired without it -- every older test -- which
+        # then never asks. Whether to ask is worked out on run_async's
+        # thread, because it reads Claude Code's config and starts the idle
+        # probe, and the answer comes back through _ask_ready for pump() to
+        # write: only the serial thread writes to the port. _ask_busy keeps
+        # one look in flight at a time.
+        self._ask = refresh_ask
+        self._ask_ready = queue.SimpleQueue()
+        self._ask_busy = False
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -403,6 +413,8 @@ class Bridge:
                 self._theme.board_now(msg, board_id=self._board_id)
         elif t == "theme_edit":
             self._on_theme_edit()
+        elif t == "answer":
+            self._on_answer(msg)
         # unknown types ignored
 
     # --- OTA, for a board with no network of its own -------------------
@@ -849,7 +861,8 @@ class Bridge:
         self.pump()
 
     def pump(self):
-        """Write any theme_edit answers that are ready. Called by the daemon
+        """Write any theme_edit answers that are ready, and an ask a look
+        on run_async's thread found due. Called by the daemon
         on every pass of its serial loop, so an answer goes out within one
         read timeout of the browser opening -- well inside the board's 5 s."""
         while True:
@@ -876,6 +889,8 @@ class Bridge:
             print("[theme] the builder ended; told the board",
                   file=sys.stderr)
         self._restate_edit()
+        # "Keep figures fresh?", once _consider_ask's look has said yes.
+        self._send_ask_if_ready()
 
     def _edit_after_silence(self):
         """On every ping, before it is counted: if the board was silent long
@@ -945,6 +960,70 @@ class Bridge:
         self._write(protocol.edit_state(editing))
         self._edit_said_at = now
 
+    # --- "Keep figures fresh?" (docs/plans/usage-refresh.md, 1b) ---------
+
+    def _ask_caps(self):
+        """The board's OWN caps, never board_caps_hint. The hint is
+        board.json's, which names the last board that spoke, and an ask is
+        counted when it goes out: one sent to an older board on the same
+        port is dropped there and spends one of the three for nothing."""
+        caps = self._board_caps
+        if caps is None or protocol.BOARD_CAP_ASK not in caps:
+            return None
+        return caps
+
+    def _consider_ask(self):
+        """Once a heartbeat: work out, off this thread, whether to ask."""
+        caps = self._ask_caps()
+        if self._ask is None or caps is None or self._ask_busy:
+            return
+        self._ask_busy = True
+
+        def work():
+            try:
+                if self._ask.due(caps):
+                    self._ask_ready.put(True)
+            except Exception:
+                pass            # BoardAsk never raises; a fake might
+            finally:
+                self._ask_busy = False
+
+        try:
+            self._run_async(work)
+        except Exception:
+            self._ask_busy = False
+
+    def _send_ask_if_ready(self):
+        ready = False
+        while True:
+            try:
+                self._ask_ready.get_nowait()
+            except queue.Empty:
+                break
+            ready = True
+        # Asked again here: the board may have said otherwise since the
+        # look began (a pref from a different board on the same port).
+        if not ready or self._ask_caps() is None:
+            return
+        self._write(protocol.ask("refresh"))
+        try:
+            self._ask.asked()
+        except Exception:
+            pass
+
+    def _on_answer(self, msg):
+        """The board's answer to "Keep figures fresh?". Logged by the read
+        loop as `<- answer` and nowhere else: which way the person went is
+        theirs (CLAUDE.md, serial buffers)."""
+        a = msg.get("a")
+        if (self._ask is None or msg.get("id") != "refresh"
+                or a not in protocol.ASK_ANSWERS):
+            return
+        try:
+            self._ask.answer(a)
+        except Exception:
+            pass
+
     def board_alive(self) -> bool:
         return (self._last_ping is not None
                 and self._now() - self._last_ping <= LIVENESS_WINDOW_S)
@@ -980,6 +1059,7 @@ class Bridge:
         self._store_until = None
         self._heartbeat()
         self._send_theme()
+        self._consider_ask()
 
     def _heartbeat(self):
         # Time rides along with every heartbeat so the board's clock re-anchors

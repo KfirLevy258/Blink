@@ -761,3 +761,286 @@ def test_a_post_run_view_that_raises_is_a_failure(tmp_path, monkeypatch):
     t.clock[0] = NOW + 60
     t.w.tick_once()
     assert ran == []
+
+
+# --- asking on the board (Task 7) ------------------------------------------
+
+from pc.usage_refresh import (ASK_AT_MOST, ASK_EVERY_S, IDLE_LIMIT_S,  # noqa: E402
+                              AskState, load_ask, save_ask, should_ask)
+
+_YES = dict(setting_absent=True, native=True, claude_found=True,
+            work_login=False, board_caps=frozenset({"svc", "ask"}),
+            idle_s=60.0, ask_state=AskState())
+
+
+def test_should_ask_when_everything_says_yes():
+    assert should_ask(NOW, **_YES) is True
+
+
+@pytest.mark.parametrize("key,value", [
+    ("setting_absent", False),          # already answered, either way
+    ("native", False),                  # a WSL home: never
+    ("claude_found", False),            # nothing to run
+    ("work_login", True),               # asked only in the terminal
+    ("board_caps", frozenset({"svc"})),  # an older board: terminal only
+    ("board_caps", frozenset()),
+    ("idle_s", float(IDLE_LIMIT_S)),    # nobody at the computer
+    ("ask_state", AskState(times=ASK_AT_MOST, last_at=0.0)),
+    ("ask_state", AskState(declined=True)),
+    ("ask_state", AskState(times=1, last_at=NOW - ASK_EVERY_S + 1)),
+])
+def test_each_condition_alone_stops_the_ask(key, value):
+    assert should_ask(NOW, **dict(_YES, **{key: value})) is False
+
+
+def test_an_os_that_cannot_say_idle_counts_as_in_use():
+    assert should_ask(NOW, **dict(_YES, idle_s=None)) is True
+
+
+def test_a_day_after_the_last_ask_it_asks_again():
+    st = AskState(times=1, last_at=NOW - ASK_EVERY_S)
+    assert should_ask(NOW, **dict(_YES, ask_state=st)) is True
+
+
+def test_three_laters_then_never():
+    st = AskState()
+    t = NOW
+    for _ in range(ASK_AT_MOST):
+        assert should_ask(t, **dict(_YES, ask_state=st)) is True
+        st = AskState(times=st.times + 1, last_at=t)   # sent; "later"
+        t += ASK_EVERY_S
+    for _ in range(5):
+        assert should_ask(t, **dict(_YES, ask_state=st)) is False
+        t += ASK_EVERY_S
+
+
+def test_ask_state_lives_beside_the_run_state(tmp_path):
+    home = str(tmp_path)
+    save_state(home, State(last_run_at=5.0))
+    save_ask(home, AskState(times=2, last_at=7.0, declined=False))
+    assert load_state(home).last_run_at == 5.0     # "run" left alone
+    assert load_ask(home) == AskState(2, 7.0, False)
+    save_state(home, State(last_run_at=9.0))       # and the other way round
+    assert load_ask(home) == AskState(2, 7.0, False)
+    with open(os.path.join(home, ur.STATE_FILE), encoding="utf-8") as f:
+        doc = json.load(f)
+    assert set(doc) == {"run", "ask"}
+
+
+@pytest.mark.parametrize("ask", [
+    None, "x", [], {"times": "2"}, {"times": True}, {"last_at": "y"},
+    {"declined": 1}, {"times": -1}])
+def test_a_bad_ask_record_is_a_fresh_one(tmp_path, ask):
+    home = str(tmp_path)
+    with open(os.path.join(home, ur.STATE_FILE), "w", encoding="utf-8") as f:
+        json.dump({"ask": ask}, f)
+    assert load_ask(home) == AskState()
+
+
+class _Asker:
+    """A BoardAsk over tmp_path with every input a test can turn."""
+
+    def __init__(self, tmp_path, *, kind=None, idle_s=60.0, work=False,
+                 claude=True, clock=NOW):
+        import dataclasses
+
+        from pc import claude_home, claude_plan
+        self.blink = tmp_path / ".blink"
+        self.blink.mkdir(exist_ok=True)
+        self.clock = [clock]
+        self.idle_s = [idle_s]
+        self.idle_asked = 0
+        self.views = 0
+        rec = dataclasses.replace(claude_home.from_environ({}),
+                                  kind=kind or claude_home.NATIVE)
+        if claude:
+            b = pathlib.Path(os.environ["HOME"]) / ".local" / "bin"
+            b.mkdir(parents=True, exist_ok=True)
+            exe = b / ("claude.exe" if sys.platform == "win32" else "claude")
+            exe.write_text("")
+        view = dataclasses.replace(claude_plan.EMPTY_VIEW, spend_seat=work)
+
+        def look(now):
+            self.views += 1
+            return view
+
+        def idle():
+            self.idle_asked += 1
+            return self.idle_s[0]
+
+        self.a = ur.BoardAsk(str(self.blink), lambda: rec, look,
+                             now=lambda: self.clock[0], idle=idle)
+
+    def ask(self):
+        return load_ask(str(self.blink))
+
+    def setting(self):
+        from pc import user_config
+        return user_config.load(str(self.blink)).get(ur.SETTING)
+
+
+CAPS = frozenset({"svc", "ask"})
+
+
+def test_board_ask_due_and_counted_when_sent(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+    assert k.a.due(CAPS) is True
+    k.a.asked()
+    assert k.ask() == AskState(1, NOW, False)
+    assert k.a.due(CAPS) is False                  # not again today
+    k.clock[0] += ASK_EVERY_S
+    assert k.a.due(CAPS) is True
+
+
+def test_board_ask_never_for_a_board_without_the_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+    assert k.a.due(frozenset({"svc"})) is False
+    assert k.idle_asked == 0 and k.views == 0      # nothing costly asked
+
+
+def test_board_ask_never_on_a_work_login(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    assert _Asker(tmp_path, work=True).a.due(CAPS) is False
+
+
+def test_board_ask_never_on_a_wsl_home(tmp_path, monkeypatch):
+    from pc import claude_home
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path, kind=claude_home.WSL)
+    assert k.a.due(CAPS) is False
+    assert k.views == 0                            # no UNC config read
+
+
+def test_board_ask_never_without_claude_code(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    assert _Asker(tmp_path, claude=False).a.due(CAPS) is False
+
+
+def test_board_ask_never_to_an_empty_room(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path, idle_s=IDLE_LIMIT_S + 1)
+    assert k.a.due(CAPS) is False
+
+
+def test_board_ask_never_once_the_setting_exists(tmp_path, monkeypatch):
+    from pc import user_config
+    monkeypatch.setenv("PATH", "")
+    for value in (True, False):
+        k = _Asker(tmp_path)
+        user_config.put(str(k.blink), ur.SETTING, value)
+        assert k.a.due(CAPS) is False
+        assert k.idle_asked == 0
+
+
+def test_board_ask_never_when_config_cannot_be_read(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+    (k.blink / "config.json").write_text("{not json")
+    assert k.a.due(CAPS) is False
+
+
+def test_the_idle_probe_is_asked_last(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path, work=True)
+    k.a.due(CAPS)
+    assert k.idle_asked == 0
+
+
+def test_answer_on_turns_it_on(tmp_path, monkeypatch):
+    k = _Asker(tmp_path)
+    k.a.asked()
+    k.a.answer("on")
+    assert k.setting() is True
+    assert k.ask().declined is False
+
+
+def test_answer_no_turns_it_off_for_good(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+    k.a.asked()
+    k.a.answer("no")
+    assert k.setting() is False
+    assert k.ask().declined is True
+    # Even were the setting removed by hand, a no stays a no on the board.
+    os.remove(k.blink / "config.json")
+    k.clock[0] += 10 * ASK_EVERY_S
+    assert k.a.due(CAPS) is False
+
+
+def test_answer_later_counts_one_ask_and_writes_nothing_else(tmp_path,
+                                                            monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+    for _ in range(ASK_AT_MOST):
+        assert k.a.due(CAPS) is True
+        k.a.asked()
+        k.a.answer("later")
+        assert k.setting() is None
+        k.clock[0] += ASK_EVERY_S
+    assert k.ask().times == ASK_AT_MOST
+    assert k.a.due(CAPS) is False
+
+
+@pytest.mark.parametrize("junk", ["yes", "", None, 1, "ON"])
+def test_an_unknown_answer_changes_nothing(tmp_path, junk):
+    k = _Asker(tmp_path)
+    k.a.answer(junk)
+    assert k.setting() is None and k.ask() == AskState()
+
+
+def test_a_failed_save_still_holds_the_day(tmp_path, monkeypatch):
+    """save_ask is one try; the copy held in memory is the floor, so a disk
+    that refuses the write does not put the box up at every heartbeat."""
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+
+    def refuse(*a, **kw):
+        raise OSError("read-only")
+    monkeypatch.setattr(ur, "save_ask", refuse)
+    k.a.asked()
+    assert k.a.due(CAPS) is False
+
+
+def test_board_ask_never_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+
+    def boom():
+        raise RuntimeError("x")
+    k.a._idle = boom
+    assert k.a.due(CAPS) is False
+    monkeypatch.setattr(ur.user_config, "put", lambda *a: boom())
+    k.a.answer("on")                               # swallowed, not raised
+
+
+def test_the_daemon_builds_one_board_ask_and_hands_it_to_the_bridge():
+    import ast
+
+    import claude_usage_bridge as cub
+    src = pathlib.Path(cub.__file__).resolve().with_name(
+        "claude_usage_bridge.py")
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    main = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                and n.name == "main")
+    parents = {c: p for p in ast.walk(main) for c in ast.iter_child_nodes(p)}
+    built = [n for n in ast.walk(main) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", None) == "board_ask"]
+    assert len(built) == 1
+    node = built[0]
+    while node in parents:              # once, not per connection
+        node = parents[node]
+        assert not isinstance(node, (ast.While, ast.For)), "in a loop"
+    bridges = [n for n in ast.walk(main) if isinstance(n, ast.Call)
+               and getattr(n.func, "id", None) == "Bridge"]
+    assert bridges and all(any(k.arg == "refresh_ask" for k in c.keywords)
+                           for c in bridges)
+
+
+def test_no_board_ask_under_a_scenario(monkeypatch, tmp_path):
+    import claude_usage_bridge as cub
+    monkeypatch.setenv("BLINK_SCENARIO", "x.json")
+    assert cub.board_ask(str(tmp_path)) is None
+    monkeypatch.delenv("BLINK_SCENARIO")
+    assert isinstance(cub.board_ask(str(tmp_path)), ur.BoardAsk)

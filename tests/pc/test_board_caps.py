@@ -282,7 +282,10 @@ def _fw_line(name, buf_name="buf"):
 # caps say so, so a board built without the view must never claim it, and
 # one built with it must never forget to. "plan" is the spend page
 # (docs/plans/enterprise-spend.md), on the same terms for `plan` lines.
-FW_CAPS = {"svc", "theme", "edit_done", "burn", "plan", "spendburn"}
+# "ask" is the touch prompt that asks someone already running BLINK whether
+# to keep the figures fresh with /usage (docs/plans/usage-refresh.md, 1b):
+# the daemon sends `ask` only to a board that lists it.
+FW_CAPS = {"svc", "theme", "edit_done", "burn", "plan", "spendburn", "ask"}
 
 
 def test_the_boards_hello_carries_its_caps_and_fits_its_buffer():
@@ -304,13 +307,21 @@ def test_the_boards_pref_carries_its_caps_and_fits_its_buffer():
     assert protocol.board_caps(msg) == FW_CAPS
     # snprintf truncates silently, and a truncated pref is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
-    # Measured 145 B in the 160 B buffer (hello: 174 in 192) with
-    # "spendburn"; 133 (162) with "plan" alone, and 126 in 128 (155 in 160)
+    # Measured 151 B in the 160 B buffer (hello: 180 in 192) with "ask";
+    # 145 (174) with "spendburn"; 133 (162) with "plan" alone, and 126 in 128 (155 in 160)
     # before it, which is why both buffers grew. A cap costs its name's
     # length plus 3 B. The daemon reads
     # 512 and the board itself drops a longer inbound line whole; a pref
     # anywhere near that is a mistake.
     assert len(line) <= 160, len(line)
+    assert len(line) == 151, len(line)
+
+
+def test_the_boards_hello_is_measured_at_its_widest():
+    """The figure the comment in send_hello quotes, held to it: a cap that
+    grows the hello moves this number and the comment with it."""
+    line, size = _fw_line("send_hello")
+    assert (len(line), size) == (180, 192)
 
 
 def test_the_caps_are_appended_never_reordered():
@@ -321,7 +332,7 @@ def test_the_caps_are_appended_never_reordered():
     assert caps, "BOARD_CAPS is gone from proto.c"
     names = re.findall(r'\\"([a-z_]+)\\"', caps.group(1))
     assert names == ["svc", "theme", "edit_done", "burn", "plan",
-                     "spendburn"], names
+                     "spendburn", "ask"], names
 
 
 def test_the_boards_pref_names_the_board_as_hello_does():

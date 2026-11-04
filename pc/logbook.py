@@ -390,6 +390,12 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[boot] logo: none",                                       # logo.c:53
     "[boot] unknown edition",                                  # bootclip.c:64
     "[boot] edition",                                          # bootclip.c:68
+    # [ask] -- firmware/src/ui_settings.c: "Keep figures fresh?". Never
+    # which way it was answered; that is the person's.
+    "[ask] shown",
+    "[ask] answered",
+    "[ask] closed unanswered",
+    "[ask] withdrawn: the computer went away",
     # the rest
     "[sleep] dozing",                                          # ui_sleep.c:183
     "[sleep] waking",                                          # ui_sleep.c:201
@@ -412,8 +418,8 @@ CONSOLE_RENDERED = ("[ota] update landed", "[ota] update REVERTED")
 # banners, the touch tracer's #TT rows -- is a fixed placeholder, because
 # its first word is the board's text too.
 CONSOLE_TAGS = frozenset({
-    "bl", "boot", "cfg", "fatal", "focus", "mem", "ota", "plan", "proto",
-    "sleep", "slide", "swipe", "theme", "time", "touch", "usage",
+    "ask", "bl", "boot", "cfg", "fatal", "focus", "mem", "ota", "plan",
+    "proto", "sleep", "slide", "swipe", "theme", "time", "touch", "usage",
 })
 
 BOARD_LINE = "(board line)"
