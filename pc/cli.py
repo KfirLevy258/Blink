@@ -4013,8 +4013,9 @@ def _take_blink_out_of_previous(old, new) -> None:
     if old.kind == claude_home.WSL:
         if (old.distro_guid or "").lower() == (new.distro_guid or "").lower():
             return
-        _uninstall_wsl(old)
-        _rm_wsl_drop(old)
+        # Kept when it could not be undone: its shims still write there.
+        if _uninstall_wsl(old):
+            _rm_wsl_drop(old)
         return
     paths = []
     own = settings_path(old)
@@ -4071,8 +4072,9 @@ def cmd_uninstall(_args) -> int:
     for old in olds:
         for line in _take_out_of(old, home):
             print(f"      {old}: {line}")
+    wsl_left = False
     if wsl_home is not None:
-        _uninstall_wsl(wsl_home)
+        wsl_left = not _uninstall_wsl(wsl_home)
 
     print("[4/5] Codex hooks:")
     _uninstall_codex_hooks()
@@ -4118,8 +4120,15 @@ def cmd_uninstall(_args) -> int:
     # above is the single-slot file this replaced; it is still on the list so
     # an install that predates the directory leaves nothing behind.
     _rm_state_dir()
-    if wsl_home is not None:
+    if wsl_home is not None and not wsl_left:
         _rm_wsl_drop(wsl_home)
+    elif wsl_left:
+        # config.json went with the rest above; the record goes back, so
+        # the next uninstall still knows which distribution to undo.
+        try:
+            claude_home.save(wsl_home)
+        except (user_config.Unreadable, OSError):
+            pass
     done, message = _remove_bin_dir()
     print(message)
     if refused:
@@ -4129,6 +4138,11 @@ def cmd_uninstall(_args) -> int:
             " at a program that is not there.")
         return 1
     print()
+    if wsl_left:
+        print(f"Blink is still set up inside {wsl_home.distro_name}: see"
+              " above.")
+        if done:
+            return 1
     if done:
         print("Done. Nothing of Blink's is left running.")
         return 0
@@ -4307,19 +4321,32 @@ def _wsl_under(home, name):
                            home.config_dir_set)
 
 
-def _uninstall_wsl(home) -> None:
+def _uninstall_wsl(home) -> bool:
     """Take the status line, hooks and shims out of a recorded WSL
     distribution, the same way install put them in. A distribution that is
     gone is said so and skipped: there is nothing left to edit, and asking
     wsl.exe for it would only fail. Started if it is not running, since the
     person is here. The text is for them and never logged: it can quote
-    their own status line command."""
+    their own status line command.
+
+    True when nothing of Blink's is left inside it, or nothing can be: the
+    caller may then forget the record and remove the drop folder. False
+    when it could not be checked or not undone: the shims there are still
+    live and write into the drop folder, so the caller keeps the record,
+    the folder and the markers in it, and a later uninstall can finish.
+    Until the final branch review a failure here still lost all three,
+    and nothing could undo the distribution afterwards."""
     d = _wsl_distro(home)
     if d is None:
         print(f"      Claude Code inside WSL ({home.distro_name}): that"
               " distribution is no longer on this computer, so there is"
               " nothing to take out of it.")
-        return
+        return True
+    if d is WSL_UNCHECKED:
+        print(f"      Claude Code inside WSL ({home.distro_name}): could not"
+              " check WSL, so it was left as it was.")
+        _say_wsl_manual_undo(home.distro_name, home)
+        return False
     try:
         home = _wsl_under(home, d.name)
         said = install_statusline.uninstall_from(
@@ -4327,8 +4354,33 @@ def _uninstall_wsl(home) -> None:
     except (install_statusline.WslInstallError,
             install_statusline.SettingsUnreadable) as e:
         print(f"      Claude Code inside WSL ({d.name}), left alone: {e}")
-        return
+        _say_wsl_manual_undo(d.name, home)
+        return False
+    except OSError as e:
+        # A marker in the drop folder that would not go: by type, since
+        # the text names the folder.
+        print(f"      Claude Code inside WSL ({d.name}): {_said_partly(e)}")
+        _say_wsl_manual_undo(d.name, home)
+        return False
     print(f"      Claude Code inside WSL ({d.name}): {said}")
+    return True
+
+
+def _said_partly(e) -> str:
+    return ("Blink's own files on this computer could not be updated"
+            f" ({type(e).__name__}).")
+
+
+def _say_wsl_manual_undo(name, home) -> None:
+    """What to do by hand when uninstall could not reach inside `name`."""
+    print(f"      Blink is still set up inside {name}, so its record and")
+    print(f"      {home.drop_dir} are kept.")
+    print(f"      Run `{command_to_type()} uninstall` again once {name}"
+          " starts, or")
+    print(f"      inside {name} remove ~/.blink/out and ~/.blink/blink-*.sh,")
+    print("      and the statusLine and hooks entries in Claude Code's")
+    print("      settings.json that name them (a status line of yours Blink")
+    print("      had kept is in ~/.blink/statusline-chain).")
 
 
 def hook_shim_status_note():

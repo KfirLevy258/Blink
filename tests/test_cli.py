@@ -3680,3 +3680,72 @@ def test_status_says_a_distro_was_renamed(monkeypatch, capsys):
             in out)
     assert watch.paths
     assert all("\\Work\\" in p and "Ubuntu" not in p for p in watch.paths), watch.paths
+
+
+def _marked_drop(home):
+    """A drop folder as install leaves it: state/, a payload, a marker."""
+    os.makedirs(home.state_dir, exist_ok=True)
+    for name in ("statusline.json", "statusline-installed-command"):
+        with open(os.path.join(home.drop_dir, name), "w") as f:
+            f.write("x")
+
+
+def test_a_failed_wsl_uninstall_keeps_what_can_undo_it(monkeypatch, capsys):
+    """Finding 2: the shims inside are still live and write into the drop
+    folder, so the record, that folder and its markers stay, and the
+    person is told how to finish by hand."""
+    from pc import claude_home
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]))
+    home = _recorded_wsl()
+    _marked_drop(home)
+
+    def fails(home, wsl_run, **k):
+        raise install_statusline.WslInstallError(
+            "Could not read Claude Code's settings inside WSL.")
+    monkeypatch.setattr(install_statusline, "uninstall_from", fails)
+    assert cli.main(["uninstall"]) == 1
+    out = capsys.readouterr().out
+    assert claude_home.recorded() == home
+    assert os.path.exists(os.path.join(home.drop_dir, "statusline-installed-command"))
+    assert "remove ~/.blink/out and ~/.blink/blink-*.sh" in out
+    assert "statusLine and hooks entries" in out
+    assert "Done. Nothing of Blink's is left running." not in out
+    # And a second uninstall, once it works, finishes the job.
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]))
+    assert cli.main(["uninstall"]) == 0
+    assert claude_home.recorded() is None
+    assert not os.path.exists(home.drop_dir)
+
+
+def test_an_unchecked_wsl_uninstall_keeps_the_record(monkeypatch, capsys):
+    """Finding 1, uninstall's half: a registry that cannot be read is not
+    a distribution gone."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg(broken=True))
+    home = _recorded_wsl()
+    _marked_drop(home)
+    assert cli.main(["uninstall"]) == 1
+    out = capsys.readouterr().out
+    assert "could not check WSL" in out
+    assert "no longer on this computer" not in out
+    assert "remove ~/.blink/out and ~/.blink/blink-*.sh" in out
+    assert claude_home.recorded() == home
+    assert os.path.isdir(home.drop_dir)
+    assert calls == []
+
+
+def test_a_previous_distro_that_would_not_undo_keeps_its_folder(
+        monkeypatch, capsys):
+    """`--wsl Debian` over Ubuntu, with Ubuntu's undo failing: Ubuntu's
+    shims still write into its drop folder, which is not deleted."""
+    _wsl_desk(monkeypatch, _FakeReg(
+        [(WSL_GUID, "Ubuntu"), (OTHER_GUID, "Debian")]), probe=_probe())
+    old = _recorded_wsl()
+    _marked_drop(old)
+
+    def fails(home, wsl_run, **k):
+        raise install_statusline.WslInstallError("nope")
+    monkeypatch.setattr(install_statusline, "uninstall_from", fails)
+    assert cli.main(["install", "--wsl", "Debian"]) == 0
+    assert os.path.isdir(old.drop_dir)
+    assert "inside Ubuntu remove ~/.blink/out" in capsys.readouterr().out
