@@ -247,10 +247,12 @@ Blink has to change.
 **Claude Code inside WSL.** A plain install never looks into WSL on a desk
 that has not been set up for it. `blink
 install --wsl` lists the distributions (from the Windows registry; nothing is
-started), and `blink install --wsl <name>` sets one up. That starts the
-distribution if it is not running and runs your login shell there once, to
-find `claude` and `CLAUDE_CONFIG_DIR`; nothing from that shell's environment
-is kept. Then:
+started), and `blink install --wsl <name>` sets one up. It is the whole
+install, as above (the program, the Codex hook and the background service),
+with Claude Code's settings written inside the distribution instead of on
+Windows. That starts the distribution if it is not running and runs your
+login shell there once, to find `claude` and `CLAUDE_CONFIG_DIR`; nothing from
+that shell's environment is kept. Then:
 
 | | |
 |---|---|
@@ -263,9 +265,11 @@ is kept. Then:
 Once a distribution is set up, running the installer again (a new download,
 a repair) sets the same distribution up again rather than moving back to
 Claude Code on Windows; if that distribution has been removed, it says so and
-sets up Claude Code on Windows instead. Setting up a second distribution, or
-one after Claude Code on Windows, first takes Blink out of the one set up
-before.
+sets up Claude Code on Windows instead. If Claude Code's folder or your
+Linux user inside it has changed since, Blink is taken out of the old folder
+first. Setting up a second distribution, or one after Claude Code on Windows,
+takes Blink out of the one set up before; if that one cannot be reached, the
+install stops and leaves Blink where it was.
 
 `blink status` names the distribution and says whether it is running, asking
 `wsl -l --running` only: it never opens a file inside one that is not
