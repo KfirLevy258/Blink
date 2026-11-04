@@ -786,8 +786,7 @@ def main(argv=None):
     # a path that does not exist -- and would go on doing so at every boot,
     # silently. This is the one moment that can notice.
     from pc.cli import (_frozen, _self_path, blink_home as _blink_home,
-                        hook_shim_path, installed_bin, settings_path,
-                        shim_path)
+                        drift_watchdog, installed_bin)
     self_bin = installed_bin()
     # Decided once, and everything that replaces this program keys off it:
     # the daily check below and the board-tapped update the Bridge runs. The
@@ -881,10 +880,10 @@ def main(argv=None):
     burn_frames = logbook.RepeatsBy("p", ("q",), "burn lines")
     _REPEATED = {"usage": usage_frames, "time": time_frames,
                  "svc": svc_frames, "burn": burn_frames}
-    watchdog = install_statusline.DriftWatchdog(
-        settings_path(), shim_path(),
-        shims=((shim_path(), "blink-statusline.sh"),
-               (hook_shim_path(), "blink-hook.sh")))
+    # For this computer's own Claude Code, in the folder `blink install`
+    # recorded (pc/claude_home): a login service does not see the shell's
+    # CLAUDE_CONFIG_DIR, so the watchdog guards the file install wrote.
+    watchdog = drift_watchdog()
 
     # Before the port is touched. The lock lives for the life of the process --
     # the file object is bound here so it is not garbage collected, which would

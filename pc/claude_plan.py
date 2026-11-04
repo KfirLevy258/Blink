@@ -83,7 +83,7 @@ import os
 import stat
 import time
 
-from pc import claude_account
+from pc import claude_account, claude_home
 
 # How often the file is looked at, at most. The plan changes only on an
 # upgrade or a downgrade, and a minute late on either is nothing against
@@ -112,29 +112,21 @@ ULTRA_TIER_SUFFIX = "max_20x"
 LEGACY_NAME = ".config.json"
 
 
-def config_path(environ=None) -> str:
+def config_path(home=None) -> str:
     """Where Claude Code keeps its global config, worked out now, by
     Claude Code 2.1.316's rule (module docstring, WHERE): a non-empty
     regular `.config.json` in $CLAUDE_CONFIG_DIR, or in ~/.claude when that
     is unset; else `.claude.json` in $CLAUDE_CONFIG_DIR, or in the home
-    folder. `environ` is os.environ when None, as in
-    burn_reader.transcripts_root. Costs one stat."""
-    base = (os.environ if environ is None else environ).get(
-        "CLAUDE_CONFIG_DIR")
-    if base:
-        base = os.path.expanduser(base)
-        legacy_dir = base
-    else:
-        base = os.path.expanduser("~")
-        legacy_dir = os.path.join(base, ".claude")
-    legacy = os.path.join(legacy_dir, LEGACY_NAME)
-    try:
-        st = os.stat(legacy)
-        if stat.S_ISREG(st.st_mode) and st.st_size > 0:
-            return legacy
-    except (OSError, ValueError):
-        pass
-    return os.path.join(base, ".claude.json")
+    folder. The folder and whether the variable chose it are those of
+    `home` (claude_home.current() when None), so the rule is applied to
+    the folder `blink install` recorded; which file wins is decided here,
+    on every call, and never stored. Costs one stat."""
+    home = home or claude_home.current()
+    base = (home.config_dir if home.config_dir_set else home.user_dir())
+    legacy = home.join(home.config_dir, LEGACY_NAME)
+    if claude_home.regular_nonempty(legacy):
+        return legacy
+    return home.join(base, ".claude.json")
 
 
 def _tier_is_ultra(tier):

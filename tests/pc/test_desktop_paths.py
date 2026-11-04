@@ -450,7 +450,7 @@ def test_status_names_the_folder_desk_read(win, tmp_path, capsys,
     from, even if the tree changes before the row prints."""
     # shutil.which under a simulated win32 reaches for _winapi, which a
     # posix host does not have; PATH is not what this test is about.
-    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a, **k: False)
     target = _store_layout(tmp_path)
     desk = cli.read_desk(version=(None, None))
     assert desk.desktop_paths.path == target
@@ -466,7 +466,7 @@ def test_read_desk_resolves_the_folder_once(win, tmp_path, monkeypatch):
     """Every Desktop reader in read_desk under its one hold: the cache,
     Local Storage and the weekly sources. A reader moved outside the hold
     resolves again, and could describe a different folder."""
-    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a, **k: False)
     # No cache, so read_desk also asks desktop_app_installed (Local
     # Storage); a signed-in reading would skip that reader.
     _marker(tmp_path, _roaming(tmp_path))
@@ -484,7 +484,7 @@ def test_read_desk_resolves_the_folder_once(win, tmp_path, monkeypatch):
 def test_read_desk_resolves_once_with_a_reading(win, tmp_path, monkeypatch):
     """The signed-in path: the cache, then the weekly sources."""
     import time
-    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a, **k: False)
     _marker(tmp_path, _roaming(tmp_path))
     _cache(tmp_path, _target(tmp_path), content=_dc.doc(
         [_dc.sample(int(time.time() * 1000))]))

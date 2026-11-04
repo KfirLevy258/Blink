@@ -8,18 +8,6 @@ each one predates the branch or could not be measured here. The reviewers'
 repro scripts were scratch files and are gone; each entry says enough to
 rebuild one.
 
-## `blink install` writes to the wrong settings.json when CLAUDE_CONFIG_DIR is set
-
-`settings_path()` is `~/.claude/settings.json` whatever `CLAUDE_CONFIG_DIR`
-says, but Claude Code 2.1.316 reads its user settings from
-`$CLAUDE_CONFIG_DIR/settings.json` (read in its bundle, not run). On such a
-desk Blink's status line and hooks are installed where Claude Code never
-looks: no `statusline.json`, no Claude Code figures, no activity light and no
-status-line evidence for the Ultra verdict, while `blink status` says both are
-installed. Older than the branch. The fix has to agree with the service
-environment question below: the shell may set the variable that the login
-service never sees.
-
 ## `blink status` reads CODEX_HOME from the shell, the service does not
 
 `_source_lines_codex` and `_wire_line` resolve `CODEX_HOME` in the shell
@@ -54,7 +42,7 @@ now plus a slack in `_observed_at` for the contest too.
 From the review of PR #6 (the Ultra fast path, 2026-11-01), found plausible
 and left. `statusline.json` is shared by every Claude Code process on the
 desk, but `pc/claude_plan` reads one config: the daemon's
-(`$CLAUDE_CONFIG_DIR` as the service sees it, else `~/.claude.json`). A
+(the folder `blink install` recorded, `pc/claude_home`). A
 second account used in one terminal under its own `CLAUDE_CONFIG_DIR` -- a
 Pro account beside the owner's Ultra one -- renders into the same file, and
 its weekly-only replies around a reset take the fast path on the Ultra
@@ -78,3 +66,32 @@ on one machine, one of them Ultra.
 - Windows: the walk takes size and mtime from `DirEntry.stat()`, which can be
   stale for a file another process holds open (Codex holds its rollout open
   for the session). Unmeasured.
+
+## Fixed
+
+### `blink install` writes to the wrong settings.json when CLAUDE_CONFIG_DIR is set
+
+Fixed 2026-11-04 by `pc/claude_home`. `blink install` records the Claude
+Code folder its shell names (`claude_home` in `~/.blink/config.json`), and
+every reader and writer asks that record: `settings_path()` is
+`<folder>/settings.json`, and the daemon -- which as a login service never
+sees the shell's variable -- reads the transcripts and `.claude.json` from
+the same folder, and its drift check guards the same file. When the folder
+moves, install takes Blink's entries back out of `~/.claude/settings.json`
+(restoring a status line it had kept), and uninstall cleans that file too.
+A desk installed by an earlier release has no record until its next
+`blink install`, and is read from the environment as before.
+
+The original entry:
+
+> `blink install` writes to the wrong settings.json when CLAUDE_CONFIG_DIR is set
+>
+> `settings_path()` is `~/.claude/settings.json` whatever `CLAUDE_CONFIG_DIR`
+> says, but Claude Code 2.1.316 reads its user settings from
+> `$CLAUDE_CONFIG_DIR/settings.json` (read in its bundle, not run). On such a
+> desk Blink's status line and hooks are installed where Claude Code never
+> looks: no `statusline.json`, no Claude Code figures, no activity light and no
+> status-line evidence for the Ultra verdict, while `blink status` says both are
+> installed. Older than the branch. The fix has to agree with the service
+> environment question below: the shell may set the variable that the login
+> service never sees.

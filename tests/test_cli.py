@@ -194,7 +194,7 @@ def test_status_and_uninstall_ask_where_the_payload_is(tmp_path, capsys,
     from pc import statusline_source
     moved = tmp_path / "elsewhere" / "payload.json"
     moved.parent.mkdir()
-    monkeypatch.setattr(statusline_source, "payload_path", lambda: str(moved))
+    monkeypatch.setattr(statusline_source, "payload_path", lambda *a, **k: str(moved))
     _settings(tmp_path, {})
     cli.main(["install"])
     moved.write_text("{}")
@@ -220,7 +220,7 @@ def test_the_shim_it_writes_is_the_one_in_the_tree(tmp_path):
 
 def test_too_old_claude_warns_rather_than_refusing(tmp_path, capsys, monkeypatch):
     """Everything installed stays correct, so it works the moment they update."""
-    monkeypatch.setattr(cli, "claude_version", lambda: ("2.1.0 (Claude Code)", (2, 1, 0)))
+    monkeypatch.setattr(cli, "claude_version", lambda *a, **k: ("2.1.0 (Claude Code)", (2, 1, 0)))
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
     out = capsys.readouterr().out
@@ -493,8 +493,8 @@ def _no_cli(monkeypatch, desktop=True, codex=False, desktop_installed=None):
     """A machine with no command-line Claude Code. claude_on_path is patched
     too: claude_version fails the same way for a broken install that IS on
     PATH, and a developer's own `claude` would otherwise leak in."""
-    monkeypatch.setattr(cli, "claude_version", lambda: (None, None))
-    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    monkeypatch.setattr(cli, "claude_version", lambda *a, **k: (None, None))
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a, **k: False)
     monkeypatch.setattr(cli, "desktop_reading",
                         lambda: _desktop_reporting() if desktop else None)
     monkeypatch.setattr(cli, "codex_present", lambda: codex)
@@ -624,7 +624,7 @@ def test_a_claude_on_path_that_does_not_answer_is_not_called_absent(
     shim too. Telling that person Claude Code is not installed sends them to
     reinstall something that is there."""
     _no_cli(monkeypatch)
-    monkeypatch.setattr(cli, "claude_on_path", lambda: True)
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a, **k: True)
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
     out = capsys.readouterr().out
@@ -899,8 +899,8 @@ def test_status_on_a_cli_and_desktop_desk_still_asks_for_the_status_line(
     the first status line. It was told "no Claude Code status line on this
     machine" right under "Claude Code 2.1.300"."""
     monkeypatch.setattr(cli, "claude_version",
-                        lambda: ("2.1.300 (Claude Code)", (2, 1, 300)))
-    monkeypatch.setattr(cli, "claude_on_path", lambda: True)
+                        lambda *a, **k: ("2.1.300 (Claude Code)", (2, 1, 300)))
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a, **k: True)
     monkeypatch.setattr(cli, "desktop_reading", _desktop_reporting)
     monkeypatch.setattr(cli, "codex_present", lambda: False)
     _settings(tmp_path, {})
@@ -954,8 +954,8 @@ def test_a_silent_claude_is_asked_once_and_desktop_still_described(
     calls = []
     _no_cli(monkeypatch)
     monkeypatch.setattr(cli, "claude_version",
-                        lambda: calls.append(1) or (None, None))
-    monkeypatch.setattr(cli, "claude_on_path", lambda: True)
+                        lambda *a, **k: calls.append(1) or (None, None))
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a, **k: True)
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
     out = capsys.readouterr().out
@@ -997,7 +997,7 @@ def test_claude_on_path_finds_one_that_is_there(tmp_path, monkeypatch):
 def test_a_working_claude_code_says_none_of_it(tmp_path, capsys, monkeypatch):
     """The common machine pays nothing for this."""
     monkeypatch.setattr(cli, "claude_version",
-                        lambda: ("2.1.245 (Claude Code)", (2, 1, 245)))
+                        lambda *a, **k: ("2.1.245 (Claude Code)", (2, 1, 245)))
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
     out = capsys.readouterr().out
@@ -1011,7 +1011,7 @@ def test_the_disclosure_counts_the_hooks_it_actually_writes(tmp_path, capsys,
     added and nothing failed -- and this text is the only consent the customer
     is asked for before we edit a file they own."""
     monkeypatch.setattr(cli, "claude_version",
-                        lambda: ("2.1.245 (Claude Code)", (2, 1, 245)))
+                        lambda *a, **k: ("2.1.245 (Claude Code)", (2, 1, 245)))
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
     out = capsys.readouterr().out
@@ -1428,8 +1428,8 @@ def _desk_with_cache(home, monkeypatch, content, codex=False,
                      local_storage=False):
     """read_desk() over a real cache file, with the command-line side
     stubbed: no `claude` is run."""
-    monkeypatch.setattr(cli, "claude_version", lambda: (None, None))
-    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    monkeypatch.setattr(cli, "claude_version", lambda *a, **k: (None, None))
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a, **k: False)
     monkeypatch.setattr(cli, "codex_present", lambda: codex)
     monkeypatch.setattr(cli, "desktop_app_installed", lambda: local_storage)
     if content is not None:
@@ -1477,7 +1477,7 @@ def test_a_waiting_desktop_is_never_told_to_sign_in(
                             _dc.UNFILLED["an empty object"],
                             codex=codex, local_storage=True)
     cli._note_if_no_claude_code(desk)
-    monkeypatch.setattr(cli, "read_desk", lambda version=None: desk)
+    monkeypatch.setattr(cli, "read_desk", lambda *a, **k: desk)
     cli.main(["status"])
     out = capsys.readouterr().out
     assert "sign in" not in out
@@ -1485,7 +1485,7 @@ def test_a_waiting_desktop_is_never_told_to_sign_in(
 
 
 def _status_rows(monkeypatch, capsys, desk):
-    monkeypatch.setattr(cli, "read_desk", lambda version=None: desk)
+    monkeypatch.setattr(cli, "read_desk", lambda *a, **k: desk)
     cli.main(["status"])
     return capsys.readouterr().out.splitlines()
 
@@ -2426,10 +2426,12 @@ def test_the_disclosure_names_every_usage_source_the_daemon_reads(capsys):
 # only PYTHONUNBUFFERED, and the Windows task gets the account's registry
 # environment, not this window's. So on a desk that exports the variable in
 # .zshrc the note named a folder the daemon never reads (2026-11-01
-# re-review). It names the service's folder now, and says so when the shell
-# would have named another.
+# re-review), and then named the service's folder with a caveat. Since
+# 2026-11-04 install records the shell's folder (pc/claude_home) and the
+# daemon reads the record, so the folder is the shell's whatever the service
+# sees, and the one thing said about the variable is that it was recorded.
 
-SHELL_ONLY = "  CLAUDE_CONFIG_DIR is set in this shell, but the background"
+RECORDED = "  CLAUDE_CONFIG_DIR is set in this shell, and install records"
 
 
 def _burn_folder(out):
@@ -2440,11 +2442,11 @@ def _burn_folder(out):
 
 
 def _caveat(after):
-    """The CLAUDE_CONFIG_DIR caveat's lines among `after`: the lines from
-    the plan paragraph's last up to the Codex paragraph. It is said once,
-    after both the transcripts' folder and the plan file (the review of
-    PR #6, 2026-11-01: said twice, a test of the first was satisfied by
-    the second, and deleting the first print failed nothing)."""
+    """The lines among `after` from the plan paragraph's last up to the
+    Codex paragraph: where the CLAUDE_CONFIG_DIR note is said, once, after
+    both the transcripts' folder and the plan file (the review of PR #6,
+    2026-11-01: said twice, a test of the first was satisfied by the
+    second, and deleting the first print failed nothing)."""
     end = after.index("  break of over an hour.")
     out = []
     for l in after[end + 1:]:
@@ -2472,20 +2474,30 @@ def _with_a_service(monkeypatch, service_sees=None, codex_sees=None):
     monkeypatch.setattr(kind, "shell_until_logon", lambda self: False)
 
 
-def test_the_burn_folder_is_the_one_the_service_reads(tmp_path, capsys,
-                                                      monkeypatch):
+def _no_service_caveat(out):
+    """None of the old lines that explained a folder the service would
+    read instead of the shell's."""
+    for said in ("does not see it", "sees a different CLAUDE_CONFIG_DIR",
+                 "set for the background service but not in",
+                 "keeps this window's CLAUDE_CONFIG_DIR"):
+        assert said not in out
+
+
+def test_the_burn_folder_is_the_recorded_one(tmp_path, capsys,
+                                             monkeypatch):
     as_checkout(monkeypatch)
     _with_a_service(monkeypatch)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
     cli._announce()
     out = capsys.readouterr().out
     folder, after = _burn_folder(out)
-    assert folder == str(tmp_path / ".claude" / "projects")
+    assert folder == str(tmp_path / "work-config" / "projects")
     caveat = _caveat(after)
-    assert caveat and caveat[0].startswith(SHELL_ONLY), after
-    assert ("so it reads the folder and the file above."
-            in " ".join(l.strip() for l in caveat))
-    assert out.count(SHELL_ONLY) == 1
+    assert caveat and caveat[0] == RECORDED, after
+    assert ("so the background service reads the folder and the file above"
+            " too." in " ".join(l.strip() for l in caveat))
+    assert out.count(RECORDED) == 1
+    _no_service_caveat(out)
 
 
 def test_without_claude_config_dir_nothing_more_is_said(tmp_path, capsys,
@@ -2498,10 +2510,10 @@ def test_without_claude_config_dir_nothing_more_is_said(tmp_path, capsys,
     assert "CLAUDE_CONFIG_DIR" not in out
 
 
-def test_a_service_that_sees_claude_config_dir_reads_it(tmp_path, capsys,
-                                                         monkeypatch):
-    """Windows, where it is a user environment variable (setx): the task
-    starts with it, so the folder is the shell's and nothing more is said."""
+def test_a_service_that_sees_claude_config_dir_reads_the_same_folder(
+        tmp_path, capsys, monkeypatch):
+    """Windows, where it is a user environment variable (setx): the same
+    folder either way, recorded."""
     as_checkout(monkeypatch)
     work = str(tmp_path / "work-config")
     _with_a_service(monkeypatch, service_sees=work)
@@ -2509,20 +2521,20 @@ def test_a_service_that_sees_claude_config_dir_reads_it(tmp_path, capsys,
     cli._announce()
     out = capsys.readouterr().out
     assert _burn_folder(out)[0] == os.path.join(work, "projects")
-    assert "CLAUDE_CONFIG_DIR" not in out
+    assert out.count(RECORDED) == 1
+    _no_service_caveat(out)
 
 
 def test_with_no_service_the_folder_is_this_shells(tmp_path, capsys,
                                                    monkeypatch):
     """No service is registered (conftest's BLINK_SKIP_SERVICE, a Windows
-    checkout): the daemon is started by hand from a shell, which does see
-    the variable."""
+    checkout): the daemon is started by hand, and reads the record too."""
     as_checkout(monkeypatch)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
     cli._announce()
     out = capsys.readouterr().out
     assert _burn_folder(out)[0] == str(tmp_path / "work-config" / "projects")
-    assert SHELL_ONLY not in out
+    _no_service_caveat(out)
 
 
 def test_launchd_and_systemd_hand_the_service_no_claude_config_dir(
@@ -2534,36 +2546,27 @@ def test_launchd_and_systemd_hand_the_service_no_claude_config_dir(
         assert cli._SystemdBackend().service_environ(name) is None
 
 
-def test_a_service_that_sees_another_value_is_not_said_to_miss_it(
+def test_a_service_that_sees_another_value_reads_this_shells(
         tmp_path, capsys, monkeypatch):
     """A `setx` to a new folder, typed in a window that still has the old
-    one: the service sees the variable, just not this window's value, and
-    "does not see it" was false (2026-11-01 third review)."""
+    one: install records this window's, and the service reads that."""
     as_checkout(monkeypatch)
-    new = str(tmp_path / "new")
-    _with_a_service(monkeypatch, service_sees=new)
+    _with_a_service(monkeypatch, service_sees=str(tmp_path / "new"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "old"))
     cli._announce()
-    folder, after = _burn_folder(capsys.readouterr().out)
-    said = " ".join(l.strip() for l in after)
-    assert folder == os.path.join(new, "projects")
-    assert ("The background service sees a different CLAUDE_CONFIG_DIR"
-            " from this shell's, so it reads the folder and the file"
-            " above.") in said
-    assert "does not see it" not in said
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == str(tmp_path / "old" / "projects")
+    _no_service_caveat(out)
 
 
-def test_a_service_that_sees_what_this_shell_does_not_says_so(
+def test_a_service_that_sees_what_this_shell_does_not_reads_this_shells(
         tmp_path, capsys, monkeypatch):
     as_checkout(monkeypatch)
-    work = str(tmp_path / "work-config")
-    _with_a_service(monkeypatch, service_sees=work)
+    _with_a_service(monkeypatch, service_sees=str(tmp_path / "work-config"))
     cli._announce()
-    folder, after = _burn_folder(capsys.readouterr().out)
-    said = " ".join(l.strip() for l in after)
-    assert folder == os.path.join(work, "projects")
-    assert ("CLAUDE_CONFIG_DIR is set for the background service but not in"
-            " this shell, so it reads the folder and the file above.") in said
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == str(tmp_path / ".claude" / "projects")
+    assert "CLAUDE_CONFIG_DIR" not in out
 
 
 def _plan_file(out):
@@ -2603,20 +2606,16 @@ def test_the_install_note_says_what_is_taken_from_claude_json(
     assert "It keeps no credential and no token" in said
 
 
-def test_the_plan_file_is_the_one_the_service_reads(tmp_path, capsys,
-                                                    monkeypatch):
+def test_the_plan_file_is_the_recorded_one(tmp_path, capsys, monkeypatch):
     as_checkout(monkeypatch)
     _with_a_service(monkeypatch)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
     cli._announce()
     out = capsys.readouterr().out
     folder, after = _plan_file(out)
-    assert folder == str(tmp_path / ".claude.json")
-    said = " ".join(l.strip() for l in _caveat(after))
-    assert ("CLAUDE_CONFIG_DIR is set in this shell, but the background"
-            " service does not see it, so it reads the folder and the file"
-            " above.") in said
-    assert out.count(SHELL_ONLY) == 1
+    assert folder == str(tmp_path / "work-config" / ".claude.json")
+    assert out.count(RECORDED) == 1
+    _no_service_caveat(out)
 
 
 def test_with_no_service_the_plan_file_follows_claude_config_dir(
@@ -2704,11 +2703,14 @@ def test_linux_without_systemctl_names_this_shells_folders(tmp_path, capsys,
     out = capsys.readouterr().out
     assert _burn_folder(out)[0] == str(tmp_path / "work-config" / "projects")
     assert _codex_folder(out)[0] == str(tmp_path / "work-codex" / "sessions")
-    assert "background service" not in out
+    assert "CODEX_HOME is set" not in out
+    _no_service_caveat(out)
 
 
 def test_linux_with_systemd_names_the_units_folders(tmp_path, capsys,
                                                     monkeypatch):
+    """The unit is handed no CODEX_HOME, so its folder is ~/.codex and the
+    note says why; Claude Code's folder is the recorded one."""
     as_checkout(monkeypatch)
     monkeypatch.setattr(cli, "_skip_service", lambda: False)
     monkeypatch.setattr(cli, "backend", lambda: cli._SystemdBackend())
@@ -2717,14 +2719,17 @@ def test_linux_with_systemd_names_the_units_folders(tmp_path, capsys,
     monkeypatch.setattr(cli._SystemdBackend, "_booted",
                         staticmethod(lambda: True))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "work-codex"))
     cli._announce()
     out = capsys.readouterr().out
     folder, after = _burn_folder(out)
-    assert folder == str(tmp_path / ".claude" / "projects")
-    caveat = _caveat(after)
-    assert caveat and caveat[0].startswith(SHELL_ONLY), after
-    assert out.count(SHELL_ONLY) == 1
-    assert not any("Run key" in l for l in after)
+    assert folder == str(tmp_path / "work-config" / "projects")
+    assert out.count(RECORDED) == 1
+    _no_service_caveat(out)
+    codex, said = _codex_folder(out)
+    assert codex == str(tmp_path / ".codex" / "sessions")
+    assert "CODEX_HOME is set in this shell, but the background" in said
+    assert "Run key" not in out
 
 
 def test_a_windows_checkout_names_this_shells_folders(tmp_path, capsys,
@@ -2736,10 +2741,13 @@ def test_a_windows_checkout_names_this_shells_folders(tmp_path, capsys,
     monkeypatch.setattr(cli, "backend", lambda: cli._SchtasksBackend())
     monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg({}))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "work-config"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "work-codex"))
     cli._announce()
     out = capsys.readouterr().out
     assert _burn_folder(out)[0] == str(tmp_path / "work-config" / "projects")
-    assert "background service" not in out
+    assert _codex_folder(out)[0] == str(tmp_path / "work-codex" / "sessions")
+    assert "CODEX_HOME is set" not in out
+    _no_service_caveat(out)
 
 
 def test_the_windows_run_key_start_is_said_to_keep_this_window(
@@ -2747,24 +2755,29 @@ def test_the_windows_run_key_start_is_said_to_keep_this_window(
     """When schtasks refuses the task, install starts the launcher itself
     (_start_launcher's Popen has no env=), so until the next logon the
     daemon has this window's variable, not the registry's. Install cannot
-    know beforehand which way Windows goes, so it says both."""
+    know beforehand which way Windows goes, so it says both. Said of
+    CODEX_HOME only: Claude Code's folder is recorded, and the same either
+    way."""
     as_frozen(monkeypatch)
     monkeypatch.setattr(cli, "_skip_service", lambda: False)
     monkeypatch.setattr(cli, "backend", lambda: cli._SchtasksBackend())
     reg = str(tmp_path / "reg")
     monkeypatch.setattr(cli, "_winreg", lambda: _FakeWinreg(
-        {("HKCU", "CLAUDE_CONFIG_DIR"): (reg, 1)}))
+        {("HKCU", "CODEX_HOME"): (reg, 1),
+         ("HKCU", "CLAUDE_CONFIG_DIR"): (reg, 1)}))
     window = str(tmp_path / "window")
+    monkeypatch.setenv("CODEX_HOME", window)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", window)
     cli._announce()
-    folder, after = _burn_folder(capsys.readouterr().out)
-    said = " ".join(l.strip() for l in after)
-    assert folder == os.path.join(reg, "projects")
+    out = capsys.readouterr().out
+    assert _burn_folder(out)[0] == os.path.join(window, "projects")
+    _no_service_caveat(out)
+    folder, said = _codex_folder(out)
+    assert folder == os.path.join(reg, "sessions")
     assert ("If Windows refuses the task and the Run key is used instead,"
-            " the bridge started now keeps this window's CLAUDE_CONFIG_DIR"
-            " until you next log in, and reads this folder and this file"
-            " until then: " + os.path.join(window, "projects") + " "
-            + os.path.join(window, ".claude.json")) in said
+            " the bridge started now keeps this window's CODEX_HOME"
+            " until you next log in, and reads this folder until then: "
+            + os.path.join(window, "sessions")) in said
     assert said.count("Run key") == 1
 
 

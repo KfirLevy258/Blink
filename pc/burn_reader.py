@@ -84,7 +84,7 @@ import stat
 import sys
 import typing
 
-from pc import protocol
+from pc import claude_home, protocol
 from pc.cowork_audit import iso_to_epoch
 
 # The contract's buckets -- protocol.BURN_BUCKETS quarter-hours of
@@ -192,27 +192,18 @@ _NEEDLE = b'"output_tokens"'
 _GONE = (FileNotFoundError, NotADirectoryError)
 
 
-def transcripts_root(environ=None) -> str:
-    """Where Claude Code keeps its transcripts, worked out now.
+def transcripts_root(home=None) -> str:
+    """Where Claude Code keeps its transcripts, worked out now: the
+    `transcripts` of `home`, claude_home.current() when None.
 
     Inside a function and never at import, so tests/conftest.py's sandbox
     applies (tests/test_sandbox.py fails on the other shape). CLAUDE_CONFIG_
-    DIR outranks HOME, as it does for Claude Code. A login service does not
-    run in the shell that exported it, though, so on a desk that sets it in
-    .zshrc the daemon still looks under ~/.claude. `environ` (os.environ when
-    None) is for the install disclosure, which has to name the folder as the
-    service will see it rather than as its own shell does.
-
-    Joined from the home directory rather than expanded from "~/.claude":
-    on Windows expanduser keeps the slash it was given, and the Windows VM
-    suite (2026-10-31) measured the root as "...\\dir0/.claude\\projects",
-    one forward slash among backslashes.
+    DIR outranks HOME, as it does for Claude Code -- but as `blink install`
+    recorded it, not as this process sees it: a login service does not run
+    in the shell that exported it, so on a desk that sets it in .zshrc the
+    daemon looked under ~/.claude until the record (pc/claude_home).
     """
-    base = (os.environ if environ is None else environ).get(
-        "CLAUDE_CONFIG_DIR")
-    base = (os.path.expanduser(base) if base
-            else os.path.join(os.path.expanduser("~"), ".claude"))
-    return os.path.join(base, "projects")
+    return (home or claude_home.current()).transcripts
 
 
 def _transcripts(root, refused, depth=0):

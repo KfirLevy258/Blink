@@ -88,14 +88,17 @@ import os
 import sys
 import time
 
+from pc import claude_home
 from pc.providers import base
 
 PROVIDER_ID = "claude"
 SRC_ID = "cli"
 
-# Expanded when a provider is built, not here: a module-level expanduser is
-# evaluated at import, before a test can move HOME, and this provider DELETES
-# files under it. See tests/conftest.py and the note that names this constant.
+# The native home's slot folder, as the hook shim spells it. Not expanded
+# here: a module-level expanduser is evaluated at import, before a test can
+# move HOME, and this provider DELETES files under it (tests/conftest.py).
+# A provider built with no path asks claude_home.current().state_dir, which
+# is this folder natively and the drop folder's for Claude Code in WSL.
 STATE_DIR = "~/.blink/state"
 
 # Past this, assume the session is gone rather than that it has been idle
@@ -524,8 +527,11 @@ class ClaudeStateProvider(base.ProviderParser):
     """
 
     def __init__(self, path=None, now=time.time, sweep=True):
-        self._dir = (path if path is not None
-                     else os.path.expanduser(STATE_DIR))
+        # None: the state folder of claude_home.current() -- ~/.blink/state
+        # (STATE_DIR) natively, the drop folder's for Claude Code in WSL.
+        if path is None:
+            path = claude_home.current().state_dir
+        self._dir = path
         self._now = now
         self._sweep = sweep
 

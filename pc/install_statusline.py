@@ -91,17 +91,33 @@ def windows_bash_path(path: str) -> str:
     return shlex.quote(p)
 
 
-def _chain_path():
-    return os.path.expanduser(CHAIN_PATH)
+def _blink_dir(home):
+    """The folder the marker and chain file of `home` live in. With no home,
+    ~/.blink: the native home's marker_dir, which no record moves, so the
+    no-argument callers need not read config.json to learn it."""
+    if home is None:
+        return os.path.join(os.path.expanduser("~"), ".blink")
+    return home.marker_dir
 
 
-def _marker_path():
-    return os.path.expanduser(INSTALLED_MARKER_PATH)
+def _chain_path(home=None):
+    """The command install() displaced, kept for uninstall() to put back.
+
+    Natively ~/.blink/statusline-chain, as it always was. For a WSL home it
+    is the copy inside the distribution, which the shim there runs."""
+    if home is not None and home.kind == "wsl":
+        return home.inside(".blink", os.path.basename(CHAIN_PATH))
+    return os.path.join(_blink_dir(home), os.path.basename(CHAIN_PATH))
 
 
-def _read_marker() -> str:
+def _marker_path(home=None):
+    return os.path.join(_blink_dir(home),
+                        os.path.basename(INSTALLED_MARKER_PATH))
+
+
+def _read_marker(home=None) -> str:
     try:
-        with open(_marker_path(), encoding="utf-8") as f:
+        with open(_marker_path(home), encoding="utf-8") as f:
             return f.read().strip()
     except (OSError, UnicodeDecodeError):
         # UnicodeDecodeError is a ValueError, not an OSError, so a marker
@@ -115,15 +131,15 @@ def _read_marker() -> str:
         return ""
 
 
-def _write_marker(command: str) -> None:
-    os.makedirs(os.path.dirname(_marker_path()), exist_ok=True)
-    with open(_marker_path(), "w", encoding="utf-8") as f:
+def _write_marker(command: str, home=None) -> None:
+    os.makedirs(os.path.dirname(_marker_path(home)), exist_ok=True)
+    with open(_marker_path(home), "w", encoding="utf-8") as f:
         f.write(command + "\n")
 
 
-def _remove_marker() -> None:
+def _remove_marker(home=None) -> None:
     try:
-        os.remove(_marker_path())
+        os.remove(_marker_path(home))
     except OSError:
         pass
 
@@ -361,7 +377,7 @@ def _current_command(data: dict) -> str:
     return cmd if isinstance(cmd, str) else ""
 
 
-def _is_ours(current: str, expected: str = None) -> bool:
+def _is_ours(current: str, expected: str = None, home=None) -> bool:
     """Is this statusLine.command one WE wrote?
 
     Two ways to be ours, and both are needed:
@@ -384,11 +400,15 @@ def _is_ours(current: str, expected: str = None) -> bool:
     """
     if not current:
         return False
-    return current == _read_marker() or (expected is not None
-                                         and current == expected)
+    return current == _read_marker(home) or (expected is not None
+                                             and current == expected)
 
 
-def install(settings_path: str, shim_path: str) -> str:
+def install(settings_path: str, shim_path: str, home=None) -> str:
+    """Point statusLine at the shim, chaining whatever was there.
+
+    `home` (claude_home.ClaudeHome) names the marker and chain file; None
+    is the native home's, ~/.blink, as it always was."""
     indent, trailing_newline = _sniff_format(settings_path)
     data = _load(settings_path)
     previous = _current_command(data)
@@ -401,7 +421,7 @@ def install(settings_path: str, shim_path: str) -> str:
     # shell so the two sides never drift apart.
     new_command = statusline_command(shim_path)
 
-    os.makedirs(os.path.dirname(_chain_path()), exist_ok=True)
+    os.makedirs(os.path.dirname(_chain_path(home)), exist_ok=True)
     # Guard against chaining the shim to itself. `previous` counts as ours
     # if EITHER check holds, never by pattern-matching the text:
     #   - stateless: it equals the command THIS call is about to write.
@@ -415,9 +435,9 @@ def install(settings_path: str, shim_path: str) -> str:
     # A foreign command can equal neither (short of an adversarial customer
     # literally choosing our exact former command text, which is the same
     # irreducible edge every exact-match scheme has) and is always chained.
-    marker = _read_marker()
-    if previous and not _is_ours(previous, new_command):
-        with open(_chain_path(), "w", encoding="utf-8") as f:
+    marker = _read_marker(home)
+    if previous and not _is_ours(previous, new_command, home):
+        with open(_chain_path(home), "w", encoding="utf-8") as f:
             f.write(previous + "\n")
         chained = f"chained previous statusline: {previous}"
     elif not previous and not marker:
@@ -436,7 +456,7 @@ def install(settings_path: str, shim_path: str) -> str:
         # alone as proof of "nothing to protect" deleted exactly that
         # original in the reproduction this comment is guarding against.
         try:
-            os.remove(_chain_path())
+            os.remove(_chain_path(home))
         except OSError:
             pass
         chained = "no previous statusline to chain"
@@ -449,11 +469,11 @@ def install(settings_path: str, shim_path: str) -> str:
 
     data["statusLine"] = {"type": "command", "command": new_command}
     _save(settings_path, data, indent, trailing_newline)
-    _write_marker(new_command)
+    _write_marker(new_command, home)
     return f"Blink statusline installed ({chained})."
 
 
-def uninstall(settings_path: str, shim_path: str = None) -> str:
+def uninstall(settings_path: str, shim_path: str = None, home=None) -> str:
     """Undo install(), but only when it is safe to.
 
     install() has an is_ours guard before it touches statusLine; uninstall()
@@ -472,6 +492,8 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
     the caller passes shim_path, as the CLI does) it equals the command
     install() would write for that path today. Anything else is left
     completely alone; we say so rather than guessing.
+
+    `home` names the marker and chain file, as for install().
     """
     indent, trailing_newline = _sniff_format(settings_path)
     data = _load(settings_path)
@@ -481,7 +503,7 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
         return "No Blink statusline installed; nothing to do."
 
     expected = statusline_command(shim_path) if shim_path else None
-    if not _is_ours(current, expected):
+    if not _is_ours(current, expected, home):
         # Do not touch settings.json, the chain file, or the marker: we
         # cannot tell what this command is, and guessing wrong here is the
         # unrecoverable failure mode this function exists to avoid.
@@ -490,7 +512,7 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
 
     previous = ""
     try:
-        with open(_chain_path(), encoding="utf-8") as f:
+        with open(_chain_path(home), encoding="utf-8") as f:
             previous = f.read().strip()
     except OSError:
         pass
@@ -504,10 +526,10 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
 
     _save(settings_path, data, indent, trailing_newline)
     try:
-        os.remove(_chain_path())
+        os.remove(_chain_path(home))
     except OSError:
         pass
-    _remove_marker()
+    _remove_marker(home)
     return msg
 
 
@@ -605,19 +627,21 @@ MAX_REINSTATEMENTS = 3
 WATCHDOG_DISABLE_ENV = "BLINK_NO_WATCHDOG"
 
 
-def drift_check(settings_path: str, shim_path: str):
+def drift_check(settings_path: str, shim_path: str, home=None):
     """Put our statusLine hook back if something removed it.
 
     Returns a description of what it did, or None when there was nothing to
     do. Never raises: this runs inside the daemon's poll loop, and a daemon
     that dies because settings.json was briefly unreadable is a worse outcome
     than a hook that stays missing for another sixty seconds.
+
+    `home` is the install whose marker decides; None is the native one.
     """
     if os.environ.get(WATCHDOG_DISABLE_ENV):
         return None
 
     # Never installed, or deliberately uninstalled. Both mean hands off.
-    if not _read_marker():
+    if not _read_marker(home):
         return None
 
     try:
@@ -643,7 +667,7 @@ def drift_check(settings_path: str, shim_path: str):
     # program creates every single time it moves the binary.
     if not current:
         what = "statusline hook had been removed; restored it"
-    elif _is_ours(current, expected):
+    elif _is_ours(current, expected, home):
         # Ours by the marker but not the command we would write now -- the
         # shim moved, which is what an update to this program does.
         what = "statusline hook pointed at an old shim path; repointed it"
@@ -652,13 +676,13 @@ def drift_check(settings_path: str, shim_path: str):
                 f" the replacement: {current}")
 
     try:
-        install(settings_path, shim_path)
+        install(settings_path, shim_path, home)
     except Exception as e:
         return f"statusline hook is missing and could not be restored: {e}"
     return what
 
 
-def shim_content_check(shims):
+def shim_content_check(shims, home=None):
     """Rewrite any installed shim whose CONTENTS have fallen behind.
 
     A different fault from drift_check above, and the one that shipped.
@@ -681,7 +705,7 @@ def shim_content_check(shims):
     # Same rule as drift_check: a missing marker means the user uninstalled,
     # and that is never overridden. Without it a daemon still winding down
     # would put back the shims `blink uninstall` had just removed.
-    if not _read_marker():
+    if not _read_marker(home):
         return None
 
     from . import cli
@@ -710,10 +734,13 @@ class DriftWatchdog:
     """
 
     def __init__(self, settings_path, shim_path, interval_s=300.0,
-                 now=None, check=drift_check, *, shims=()):
+                 now=None, check=drift_check, *, shims=(), home=None):
         import time as _time
         self._settings = settings_path
         self._shim = shim_path
+        # The install this watchdog guards, whose marker decides whether to
+        # act; None is the native one (claude_home).
+        self._home = home
         self._interval = interval_s
         self._now = now or _time.monotonic
         self._check = check
@@ -746,7 +773,7 @@ class DriftWatchdog:
         # that argument: it does not count towards the cap, and giving up on
         # the statusLine hook must not leave the shims rotting.
         if not self._gave_up:
-            msg = self._check(self._settings, self._shim)
+            msg = self._check(self._settings, self._shim, self._home)
             if msg is not None:
                 self._reinstatements += 1
                 if self._reinstatements >= MAX_REINSTATEMENTS:
@@ -758,7 +785,7 @@ class DriftWatchdog:
                 found.append(msg)
 
         if self._shims:
-            stale = shim_content_check(self._shims)
+            stale = shim_content_check(self._shims, self._home)
             if stale:
                 found.append(stale)
 

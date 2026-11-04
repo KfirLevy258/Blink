@@ -82,7 +82,7 @@ from pc import install_hooks, install_statusline
 def test_a_stale_shim_is_rewritten(tmp_path, monkeypatch):
     p = tmp_path / "blink-hook.sh"
     _write(str(p), "#!/bin/sh\n# old\n")
-    monkeypatch.setattr(install_statusline, "_read_marker", lambda: "installed")
+    monkeypatch.setattr(install_statusline, "_read_marker", lambda *a, **k: "installed")
 
     what = install_statusline.shim_content_check([(str(p), "blink-hook.sh")])
 
@@ -96,7 +96,7 @@ def test_a_current_shim_is_left_alone(tmp_path, monkeypatch):
     p = tmp_path / "blink-hook.sh"
     _write(str(p), cli._shim_source("blink-hook.sh"))
     before = p.stat().st_mtime_ns
-    monkeypatch.setattr(install_statusline, "_read_marker", lambda: "installed")
+    monkeypatch.setattr(install_statusline, "_read_marker", lambda *a, **k: "installed")
 
     assert install_statusline.shim_content_check([(str(p), "blink-hook.sh")]) is None
     assert p.stat().st_mtime_ns == before
@@ -111,7 +111,7 @@ def test_no_marker_means_hands_off(tmp_path, monkeypatch):
     """
     p = tmp_path / "blink-hook.sh"
     _write(str(p), "#!/bin/sh\n# old\n")
-    monkeypatch.setattr(install_statusline, "_read_marker", lambda: "")
+    monkeypatch.setattr(install_statusline, "_read_marker", lambda *a, **k: "")
 
     assert install_statusline.shim_content_check([(str(p), "blink-hook.sh")]) is None
     assert p.read_text(encoding="utf-8") == "#!/bin/sh\n# old\n"
@@ -120,7 +120,7 @@ def test_no_marker_means_hands_off(tmp_path, monkeypatch):
 def test_the_disable_switch_is_honoured(tmp_path, monkeypatch):
     p = tmp_path / "blink-hook.sh"
     _write(str(p), "#!/bin/sh\n# old\n")
-    monkeypatch.setattr(install_statusline, "_read_marker", lambda: "installed")
+    monkeypatch.setattr(install_statusline, "_read_marker", lambda *a, **k: "installed")
     monkeypatch.setenv(install_statusline.WATCHDOG_DISABLE_ENV, "1")
 
     assert install_statusline.shim_content_check([(str(p), "blink-hook.sh")]) is None
@@ -146,7 +146,7 @@ def test_an_unwritable_shim_reports_and_does_not_raise(tmp_path, monkeypatch):
     _write(str(p), "#!/bin/sh\n# old\n")
     os.chmod(p, 0o400)
     os.chmod(d, 0o500)
-    monkeypatch.setattr(install_statusline, "_read_marker", lambda: "installed")
+    monkeypatch.setattr(install_statusline, "_read_marker", lambda *a, **k: "installed")
     try:
         what = install_statusline.shim_content_check([(str(p), "blink-hook.sh")])
         assert what is not None
@@ -162,7 +162,7 @@ def test_a_second_stale_shim_is_also_repaired(tmp_path, monkeypatch):
     b = tmp_path / "blink-statusline.sh"
     _write(str(a), "#!/bin/sh\n# old\n")
     _write(str(b), "#!/bin/sh\n# old\n")
-    monkeypatch.setattr(install_statusline, "_read_marker", lambda: "installed")
+    monkeypatch.setattr(install_statusline, "_read_marker", lambda *a, **k: "installed")
 
     what = install_statusline.shim_content_check(
         [(str(a), "blink-hook.sh"), (str(b), "blink-statusline.sh")])
@@ -184,10 +184,20 @@ def test_the_daemon_hands_the_watchdog_both_shims():
     only that the constructor works -- which is what let the original gap
     through.
     """
+    # The daemon builds it through cli.drift_watchdog (so that the folder
+    # `blink install` recorded is the one it guards, pc/claude_home): one
+    # call there, and one DriftWatchdog inside that function.
     src = open("claude_usage_bridge.py", encoding="utf-8").read()
-    tree = ast.parse(src)
+    built = [n for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Call)
+             and getattr(n.func, "id", getattr(n.func, "attr", None))
+             == "drift_watchdog"]
+    assert len(built) == 1, "expected the daemon to build one watchdog"
 
-    calls = [n for n in ast.walk(tree)
+    tree = ast.parse(open("pc/cli.py", encoding="utf-8").read())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "drift_watchdog")
+    calls = [n for n in ast.walk(fn)
              if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Attribute)
              and n.func.attr == "DriftWatchdog"]
@@ -209,7 +219,7 @@ def test_status_reports_a_stale_shim(tmp_path, monkeypatch):
     """
     p = tmp_path / "blink-hook.sh"
     _write(str(p), "#!/bin/sh\n# old\n")
-    monkeypatch.setattr(cli, "hook_shim_path", lambda: str(p))
+    monkeypatch.setattr(cli, "hook_shim_path", lambda *a, **k: str(p))
 
     assert cli.hook_shim_status_note() == "the activity hook shim is out of date"
 
@@ -217,7 +227,7 @@ def test_status_reports_a_stale_shim(tmp_path, monkeypatch):
 def test_status_is_quiet_when_the_shim_is_current(tmp_path, monkeypatch):
     p = tmp_path / "blink-hook.sh"
     _write(str(p), cli._shim_source("blink-hook.sh"))
-    monkeypatch.setattr(cli, "hook_shim_path", lambda: str(p))
+    monkeypatch.setattr(cli, "hook_shim_path", lambda *a, **k: str(p))
 
     assert cli.hook_shim_status_note() is None
 
@@ -419,7 +429,8 @@ def test_read_marker_survives_a_non_utf8_marker_file(tmp_path, monkeypatch):
     """
     marker = tmp_path / "marker"
     marker.write_bytes(b"\xff\xfe not valid utf-8 \x80")
-    monkeypatch.setattr(install_statusline, "_marker_path", lambda: str(marker))
+    monkeypatch.setattr(install_statusline, "_marker_path",
+                        lambda *a, **k: str(marker))
 
     assert install_statusline._read_marker() == ""
 

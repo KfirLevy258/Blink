@@ -19,6 +19,12 @@ Read fresh on every call rather than cached: the file is a few dozen bytes,
 the daemon reads it every few seconds at most, and reading it fresh is what
 lets `blink config` take effect without restarting the login service.
 
+Keys so far: "status_page" (status_page.SETTING), and CLAUDE_HOME, which
+`blink install` writes: where Claude Code's files are, as the install found
+them (pc/claude_home). It is a record rather than a choice, and it is here
+because the background service has to read it and does not see the
+installing shell's environment.
+
 `blink_home` is passed in, never computed here. A path resolved at import
 reads the real ~ before tests/conftest.py has redirected it.
 """
@@ -27,6 +33,10 @@ import os
 from pc import install_statusline
 
 FILE_NAME = "config.json"
+
+# {"kind": "native"|"wsl", "config_dir", "config_dir_set": bool, ...}: see
+# claude_home.to_record for the whole shape.
+CLAUDE_HOME = "claude_home"
 
 # Raised by load() for a file that is there and is not a JSON object. The
 # same type install_statusline already raises for settings.json, so a caller

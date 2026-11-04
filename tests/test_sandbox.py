@@ -727,7 +727,7 @@ def test_claude_version_is_stubbed_but_claude_on_path_is_real():
 
 def test_a_test_may_patch_claude_version_itself(monkeypatch):
     from pc import cli
-    monkeypatch.setattr(cli, "claude_version", lambda: ("9.9.9", (9, 9, 9)))
+    monkeypatch.setattr(cli, "claude_version", lambda *a, **k: ("9.9.9", (9, 9, 9)))
     assert cli.claude_version() == ("9.9.9", (9, 9, 9))
 
 

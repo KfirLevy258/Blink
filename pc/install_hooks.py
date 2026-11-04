@@ -76,31 +76,36 @@ def hook_command(shim_path: str, event: str) -> str:
     return f"sh {shlex.quote(shim_path)} {event}"
 
 
-def _marker_path():
-    return os.path.expanduser(INSTALLED_MARKER_PATH)
+def _marker_path(home=None):
+    """Beside the status line's marker, in the marker_dir of `home`
+    (claude_home): ~/.blink natively, the drop folder for a WSL home, so
+    the two installs never read each other's record."""
+    base = (os.path.join(os.path.expanduser("~"), ".blink") if home is None
+            else home.marker_dir)
+    return os.path.join(base, os.path.basename(INSTALLED_MARKER_PATH))
 
 
-def _read_marker() -> set:
+def _read_marker(home=None) -> set:
     try:
-        with open(_marker_path(), encoding="utf-8") as f:
+        with open(_marker_path(home), encoding="utf-8") as f:
             return {ln.strip() for ln in f if ln.strip()}
     except OSError:
         return set()
 
 
-def _write_marker(commands) -> None:
-    os.makedirs(os.path.dirname(_marker_path()), exist_ok=True)
+def _write_marker(commands, home=None) -> None:
+    os.makedirs(os.path.dirname(_marker_path(home)), exist_ok=True)
     # encoding= because the commands carry the shim's path, which carries the
     # user's home directory -- and a Windows locale cannot encode every name a
     # home directory can have. _load() in install_statusline says the same.
-    with open(_marker_path(), "w", encoding="utf-8") as f:
+    with open(_marker_path(home), "w", encoding="utf-8") as f:
         for c in sorted(commands):
             f.write(c + "\n")
 
 
-def _remove_marker() -> None:
+def _remove_marker(home=None) -> None:
     try:
-        os.remove(_marker_path())
+        os.remove(_marker_path(home))
     except OSError:
         pass
 
@@ -137,13 +142,14 @@ def _entries_for(data, event):
     return lst
 
 
-def install(settings_path: str, shim_path: str) -> str:
-    """Add our hook to each lifecycle event. Idempotent."""
+def install(settings_path: str, shim_path: str, home=None) -> str:
+    """Add our hook to each lifecycle event. Idempotent. `home` names the
+    marker, as in install_statusline.install."""
     indent, trailing_newline = _sniff_format(settings_path)
     data = _load(settings_path)
 
     expected = {hook_command(shim_path, ev) for ev, _ in HOOK_EVENTS}
-    marker = _read_marker()
+    marker = _read_marker(home)
     added = 0
     repointed = 0
     for event, matcher in HOOK_EVENTS:
@@ -204,7 +210,7 @@ def install(settings_path: str, shim_path: str) -> str:
         added += 1
 
     _save(settings_path, data, indent, trailing_newline)
-    _write_marker(expected)
+    _write_marker(expected, home)
     if added == 0 and repointed == 0:
         return "Blink state hooks already installed."
     if added == 0:
@@ -215,7 +221,7 @@ def install(settings_path: str, shim_path: str) -> str:
     return f"Blink state hooks installed ({added} events)."
 
 
-def uninstall(settings_path: str, shim_path: str = None) -> str:
+def uninstall(settings_path: str, shim_path: str = None, home=None) -> str:
     """Remove only our hook entries, and only the ones we can prove are ours.
 
     Symmetric with install by construction: it drops exactly the commands the
@@ -231,10 +237,10 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
 
     expected = ({hook_command(shim_path, ev) for ev, _ in HOOK_EVENTS}
                 if shim_path else set())
-    marker = _read_marker()
+    marker = _read_marker(home)
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
-        _remove_marker()
+        _remove_marker(home)
         return "No Blink state hooks to remove."
 
     removed = 0
@@ -271,7 +277,7 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
 
     indent, trailing_newline = _sniff_format(settings_path)
     _save(settings_path, data, indent, trailing_newline)
-    _remove_marker()
+    _remove_marker(home)
     if removed == 0:
         return "No Blink state hooks to remove."
     return f"Blink state hooks removed ({removed})."

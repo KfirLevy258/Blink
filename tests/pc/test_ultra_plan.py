@@ -23,7 +23,7 @@ import os
 
 import pytest
 
-from pc import claude_plan, ingest, protocol, session_verdict
+from pc import claude_home, claude_plan, ingest, protocol, session_verdict
 from pc.providers import claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
 from tests.pc.test_claude_cli import write
@@ -59,7 +59,8 @@ def put_config(home, doc=None, raw=None, environ=None):
     """Write Claude Code's .claude.json where claude_plan.config_path()
     looks (under CLAUDE_CONFIG_DIR when `environ` sets it), inside the
     caller's `home` or not at all. `raw` is written as bytes instead."""
-    path = inside(home, claude_plan.config_path(environ))
+    path = inside(home, claude_plan.config_path(
+        None if environ is None else claude_home.from_environ(environ)))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     data = raw if raw is not None else json.dumps(doc).encode("utf-8")
     with open(path, "wb") as f:
@@ -445,8 +446,8 @@ def test_a_read_that_raises_never_leaves_poll(tmp_path, monkeypatch):
 def test_the_file_is_beside_the_config_folder_by_default(tmp_path):
     assert claude_plan.config_path() == os.path.join(str(tmp_path),
                                                      ".claude.json")
-    assert claude_plan.config_path({}) == os.path.join(str(tmp_path),
-                                                       ".claude.json")
+    assert claude_plan.config_path(claude_home.from_environ({})) == (
+        os.path.join(str(tmp_path), ".claude.json"))
 
 
 def test_claude_config_dir_moves_the_file(tmp_path, monkeypatch):
@@ -455,7 +456,8 @@ def test_claude_config_dir_moves_the_file(tmp_path, monkeypatch):
     folder, which Claude Code is not using, does not get a say."""
     cfg = str(tmp_path / "work-config")
     env = {"CLAUDE_CONFIG_DIR": cfg}
-    assert claude_plan.config_path(env) == os.path.join(cfg, ".claude.json")
+    assert claude_plan.config_path(claude_home.from_environ(env)) == (
+        os.path.join(cfg, ".claude.json"))
     put_config(tmp_path, plan_doc(name="Pro", tier="default_claude_pro"))
     put_config(tmp_path, plan_doc(), environ=env)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", cfg)

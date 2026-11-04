@@ -12,7 +12,7 @@ import json
 import math
 import os
 
-from pc import protocol
+from pc import claude_home, protocol
 from pc.providers import base
 
 # Who we are on the ingestion bus. The board and the normalizer both key off
@@ -21,7 +21,7 @@ PROVIDER_ID = "claude"
 SRC_ID = "cli"
 
 
-def payload_path() -> str:
+def payload_path(home=None) -> str:
     """Where the shim writes the payload, resolved now rather than at import.
 
     This was a module constant, expanduser'd when the module was imported,
@@ -39,8 +39,13 @@ def payload_path() -> str:
     status` and `blink uninstall` all ask here. Only the shell shim
     (tools/blink-statusline.sh) writes it out separately, because it cannot
     import this.
+
+    In the drop folder of `home` (claude_home.current() when None): ~/.blink
+    natively, and for Claude Code inside WSL the Windows folder its shim
+    writes into, so the poll never reads across into the distribution.
     """
-    return os.path.expanduser("~/.blink/statusline.json")
+    return os.path.join((home or claude_home.current()).drop_dir,
+                        "statusline.json")
 
 
 # How old the payload may get before we stop vouching for it.

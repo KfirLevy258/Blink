@@ -30,9 +30,9 @@ import sys
 import time
 from typing import NamedTuple
 
-from pc import (install_codex_hooks, install_hooks, install_statusline, ota,
-                protocol, status_page, statusline_source, update,
-                user_config, win_driver)
+from pc import (claude_home, install_codex_hooks, install_hooks,
+                install_statusline, ota, protocol, status_page,
+                statusline_source, update, user_config, win_driver)
 from pc import theme as theme_mod
 from pc import theme_server
 # Eagerly, unlike the other providers, which are imported inside the functions
@@ -70,12 +70,22 @@ def installed_bin():
     return os.path.join(bin_dir(), name)
 
 
-def shim_path():
-    return os.path.join(blink_home(), "blink-statusline.sh")
+def _shim(home, name):
+    """Where install puts shim `name` for `home` (claude_home), None being
+    the native one: ~/.blink natively -- no record moves it, so this asks
+    none -- and the Linux home's .blink inside a WSL distribution, which is
+    where Claude Code there can run it."""
+    if home is not None and home.kind == claude_home.WSL:
+        return home.inside(".blink", name)
+    return os.path.join(blink_home(), name)
 
 
-def hook_shim_path():
-    return os.path.join(blink_home(), "blink-hook.sh")
+def shim_path(home=None):
+    return _shim(home, "blink-statusline.sh")
+
+
+def hook_shim_path(home=None):
+    return _shim(home, "blink-hook.sh")
 
 
 def log_path():
@@ -127,8 +137,17 @@ def pid_path():
     return os.path.join(blink_home(), "bridge.pid")
 
 
-def settings_path():
-    return os.path.join(_home(), ".claude", "settings.json")
+def settings_path(home=None):
+    """Claude Code's user settings for `home` (claude_home.native() when
+    None): settings.json in its config folder. That folder is
+    $CLAUDE_CONFIG_DIR when it is set, as Claude Code 2.1.316 reads it --
+    this was ~/.claude/settings.json whatever the variable said until
+    2026-11-04, so on a desk exporting it install wrote where Claude Code
+    never looks -- and it is the folder `blink install` recorded, so the
+    daemon's drift check, which does not see the shell's variables, guards
+    the same file."""
+    home = home or claude_home.native()
+    return home.join(home.config_dir, "settings.json")
 
 
 def plist_path():
@@ -465,8 +484,15 @@ def shim_is_current(path: str, name: str) -> bool:
 # ---------------------------------------------------------------- Claude Code
 
 
-def claude_version():
-    """(text, tuple) for the Claude Code on PATH, or (None, None)."""
+def claude_version(home=None):
+    """(text, tuple) for the Claude Code on PATH, or (None, None).
+
+    For `home` (claude_home.current() when None). A WSL home's Claude Code
+    is inside the distribution, where nothing on this PATH can ask it; the
+    install probe there is what finds it, so here it is (None, None)."""
+    home = home or claude_home.current()
+    if home.kind == claude_home.WSL:
+        return None, None
     exe = shutil.which("claude")
     if not exe:
         return None, None
@@ -602,7 +628,7 @@ def codex_present() -> bool:
         return False
 
 
-def claude_on_path() -> bool:
+def claude_on_path(home=None) -> bool:
     """Is there a `claude` on PATH, whether or not it answered --version?
 
     claude_version() returns (None, None) on ANY failure -- a 30 s timeout, an
@@ -610,7 +636,13 @@ def claude_on_path() -> bool:
     version" is not "not installed". Telling someone with a broken but present
     CLI that Claude Code "is not installed" sends them to reinstall the wrong
     thing (found by review, 2026-09-30, with three fake `claude`s on PATH).
+
+    False for a WSL home (claude_home.current() when None), for the reason
+    claude_version gives: this PATH says nothing about the distribution's.
     """
+    home = home or claude_home.current()
+    if home.kind == claude_home.WSL:
+        return False
     return shutil.which("claude") is not None
 
 
@@ -641,8 +673,9 @@ class ClaudeHooks(NamedTuple):
                 and self.wired == self.total)
 
 
-def claude_hooks():
-    """Read Blink's Claude Code hooks out of settings.json, once.
+def claude_hooks(home=None):
+    """Read Blink's Claude Code hooks out of settings.json, once: the
+    settings and hook shim of `home`, claude_home.current() when None.
 
     Counted from settings.json rather than from the shim's presence on disk:
     the file existing proves an install ran once, not that Claude Code is
@@ -652,10 +685,11 @@ def claude_hooks():
     Code tab" three lines above "hooks not installed -- the busy/idle pip
     will stay dark" (review, 2026-09-30).
     """
+    home = home or claude_home.current()
     total = len(install_hooks.HOOK_EVENTS)
-    shim = os.path.exists(hook_shim_path())
+    shim = os.path.exists(hook_shim_path(home))
     try:
-        data = install_statusline._load(settings_path())
+        data = install_statusline._load(settings_path(home))
     except install_statusline.SettingsUnreadable:
         return ClaudeHooks(0, total, False, False, shim)
     hooks = data.get("hooks")
@@ -668,7 +702,7 @@ def claude_hooks():
         hooks = {}
 
     def wired(event):
-        command = install_hooks.hook_command(hook_shim_path(), event)
+        command = install_hooks.hook_command(hook_shim_path(home), event)
         groups = hooks.get(event)
         for group in groups if isinstance(groups, list) else []:
             inner = group.get("hooks") if isinstance(group, dict) else None
@@ -747,6 +781,9 @@ class Desk(NamedTuple):
     # desktop_paths.Answer the Desktop lines above were read under, so the
     # status rows explaining the folder name the one actually read.
     desktop_paths: object = None
+    # The claude_home.ClaudeHome the Claude Code fields were read from, so
+    # a note about them can say which.
+    home: object = None
 
     @property
     def cli_answers(self) -> bool:
@@ -789,15 +826,18 @@ class Desk(NamedTuple):
                 and not self.desktop_waiting)
 
 
-def read_desk(version=None) -> Desk:
+def read_desk(version=None, home=None) -> Desk:
     """Read the machine once. `version` is a claude_version() result the
     caller already has: `blink install` used to ask twice, and a `claude`
     that hangs costs its 30 s timeout per ask (measured 60.0 s, review
     2026-10-19). The weekly question is only asked where a desk can need it
-    -- it may read Desktop's IndexedDB, and a CLI desk has no use for it."""
+    -- it may read Desktop's IndexedDB, and a CLI desk has no use for it.
+    The Claude Code questions are asked of `home`, claude_home.current()
+    when None, read once here so that every answer describes one home."""
     from pc import desktop_paths
     from pc.providers import claude_desktop
-    text, ver = claude_version() if version is None else version
+    home = home or claude_home.current()
+    text, ver = claude_version(home) if version is None else version
     # Every Desktop question below under one folder answer: the cache, Local
     # Storage and the weekly sources must describe the same folder.
     with desktop_paths.one_answer() as folder:
@@ -809,15 +849,16 @@ def read_desk(version=None) -> Desk:
         installed = reading is not None or desktop_app_installed()
         weekly = text is None and desktop and weekly_countdown_known()
     return Desk(claude_text=text, claude_ver=ver,
-                on_path=text is not None or claude_on_path(),
+                on_path=text is not None or claude_on_path(home),
                 desktop=desktop,
                 # The cache in any state is the app's own file.
                 desktop_installed=installed,
                 desktop_reading=reading,
                 codex=codex_present(),
-                hooks=claude_hooks(),
+                hooks=claude_hooks(home),
                 weekly=weekly,
-                desktop_paths=folder)
+                desktop_paths=folder,
+                home=home)
 
 
 def _announce_codex_hooks() -> None:
@@ -2926,14 +2967,18 @@ def _schedule_windows_cleanup():
 # -------------------------------------------------------------------- install
 
 
-def _announce():
+def _announce(home=None):
     """Say what is about to change, before changing it.
 
     Install is deliberately unattended -- it asks nothing, because plugging the
     board in is meant to be the whole setup. That makes disclosure the only
     thing standing between us and silently editing a file the customer owns,
     so it is not optional and it runs before the first write.
+
+    `home` is the claude_home.ClaudeHome being installed: from this shell's
+    environment when None, which is what cmd_install records.
     """
+    home = home or claude_home.from_environ()
     print("Blink setup. Here is everything it is about to do, before it does any of it.")
     print()
     if _frozen():
@@ -2957,7 +3002,7 @@ def _announce():
         else:
             print(pad + "Every command printed below starts from this")
             print(pad + "folder, so leave it where it is.")
-    print(f"  Creates    {shim_path()}")
+    print(f"  Creates    {shim_path(home)}")
     print("             the small script Claude Code runs to hand over the")
     # What the daemon reads out of that payload, said field by field. This
     # said "Only the usage figures are read out of it" for the whole of
@@ -2976,16 +3021,16 @@ def _announce():
     print("             logged or saved.")
     print("             Nothing in it leaves this machine, and it is readable")
     print("             by you alone.")
-    print(f"  Creates    {hook_shim_path()}")
+    print(f"  Creates    {hook_shim_path(home)}")
     print("             a second small script, run when Claude Code starts and")
     print("             finishes work, so the panel can show whether it is busy.")
     print("             It records the event name, the time, and the session and")
     print("             agent ids Claude Code generates -- used to tell concurrent")
     print("             sessions apart, and for nothing else. No prompt, no tool")
     print("             arguments, no file paths, no message text.")
-    print(f"  Creates    {os.path.join(blink_home(), 'state')}")
+    print(f"  Creates    {home.state_dir}")
     print("             one small file per open session, deleted when it ends.")
-    print(f"  Changes    {settings_path()}")
+    print(f"  Changes    {settings_path(home)}")
     # This list has to stay exactly true. Install asks nothing, so the
     # disclosure is the only thing standing between us and silently editing a
     # file the customer owns -- and it said "statusLine.command, and nothing
@@ -3003,10 +3048,25 @@ def _announce():
           " events. Nothing else in")
     print("             the file is touched, and your own hooks are left in place.")
     prev_cmd = install_statusline._current_command(
-        install_statusline._load(settings_path()))
+        install_statusline._load(settings_path(home)))
     if prev_cmd:
         print(f"             Your current status line is kept and still runs:")
         print(f"               {prev_cmd}")
+    old = _old_settings(home)
+    if old:
+        # The file every release before the record wrote, whatever
+        # CLAUDE_CONFIG_DIR said. Claude Code does not read it while the
+        # variable is set, and leaving our entries in it would leave its
+        # chain file describing the wrong settings.json.
+        print(f"  Changes    {old}")
+        print("             takes Blink's status line and hooks back out of it:")
+        print("             with CLAUDE_CONFIG_DIR set, Claude Code reads the")
+        print("             file above instead. A status line of yours that")
+        print("             Blink had kept is put back.")
+    print(f"  Changes    {user_config.path(blink_home())}")
+    print("             records which Claude Code folder this is for, so the")
+    print("             background service, which does not see this shell's")
+    print("             variables, reads the same one.")
     created = backend().creates()
     if created:
         print(f"  Creates    {created}")
@@ -3053,15 +3113,14 @@ def _announce():
     # them what is read has to say so. Conditional in fact, not in print:
     # install cannot know the verdict yet, so it says when it happens.
     #
-    # The folder is the one the daemon will read, which is not always the
-    # one this shell would: the reader honours CLAUDE_CONFIG_DIR, but a
-    # login service does not start from this shell. launchd and systemd
-    # hand it none of the variable, and the Windows task gets the account's
-    # registry environment (service_environ). Printed as this shell
-    # resolved it, the note named a folder the daemon never reads on any
-    # desk that exports the variable in its shell profile (2026-11-01
-    # re-review). Where the daemon is started by hand from a shell, the
-    # shell's folder is the true one: see _service_folder.
+    # The folder is the one install records (pc/claude_home), which the
+    # daemon reads whatever its own environment says. Until 2026-11-04 the
+    # daemon honoured CLAUDE_CONFIG_DIR as the login service saw it --
+    # launchd and systemd hand it none, the Windows task gets the account's
+    # registry environment -- and this note worked out which folder that
+    # would be and said why it was not the shell's (2026-11-01 re-review).
+    # With the folder recorded the two cannot differ, so there is nothing to
+    # explain but the record itself.
     #
     # The plan (pc/claude_plan), read since 2026-11-01 so that an Ultra
     # desk switches to the burn view on its first reply with no five-hour
@@ -3069,19 +3128,10 @@ def _announce():
     # Claude Code's own config, which also holds the account's email
     # address and name, every project path and the MCP servers' settings,
     # tokens included, so this says exactly what happens to it. It follows
-    # CLAUDE_CONFIG_DIR as the transcripts' folder does, and is the
-    # service's for the same reason, so one caveat covers both: asked
-    # twice, the note printed the caveat and the Windows Run-key paragraph
-    # twice, the second "this folder" above a file (the review of PR #6,
-    # 2026-11-01).
-    from pc import burn_reader, claude_plan
-    (root, plan_file), caveat = _service_folder(
-        "CLAUDE_CONFIG_DIR",
-        lambda v: (burn_reader.transcripts_root(
-            {"CLAUDE_CONFIG_DIR": v} if v else {}),
-            claude_plan.config_path({"CLAUDE_CONFIG_DIR": v} if v else {})),
-        "so it reads the folder and the file above.",
-        "this folder and this file")
+    # CLAUDE_CONFIG_DIR as the transcripts' folder does, through the same
+    # record.
+    from pc import claude_plan
+    root, plan_file = home.transcripts, claude_plan.config_path(home)
     # On a line of its own, like the paths above: a home folder's length is
     # unbounded, and inline it ran the paragraph off its margin.
     print("  On an account with no five-hour limit, it also reads the")
@@ -3110,9 +3160,11 @@ def _announce():
     print("  five-hour one switches on the burn view; other plans need five")
     print("  and a quarter hours of them, longer after a")
     print("  break of over an hour.")
-    for line in caveat:
-        print(line)
-    _announce_spend_seat()
+    if home.config_dir_set:
+        print("  CLAUDE_CONFIG_DIR is set in this shell, and install records")
+        print("  its folder, so the background service reads the folder and")
+        print("  the file above too.")
+    _announce_spend_seat(home)
     # The same for Codex (CodexBurnReader): an account whose Codex log
     # reports a weekly limit and no five-hour one -- Codex Pro on the
     # owner's desk, 2026-11-01 -- has its page fed from the same rollouts
@@ -3143,16 +3195,19 @@ def _announce():
     print()
 
 
-def _announce_spend_seat() -> None:
+def _announce_spend_seat(home=None) -> None:
     """The extra paragraph a usage-billed Claude seat gets. Install asks the
     config now, rather than saying "if" for a thing it can see: on a seat
     billed by usage BLINK keeps per-session cost estimates in a file, and
     that is not true of any other desk, so it is said only where it is
     true. A config that cannot be read means no paragraph; the daemon
-    would not show the page either."""
+    would not show the page either. The config is that of `home`, the one
+    being installed (claude_home.from_environ() when None)."""
     from pc import claude_plan, spend_count
+    home = home or claude_home.from_environ()
     try:
-        spend = claude_plan.PlanReader().look(time.time()).spend_seat
+        spend = claude_plan.PlanReader(
+            path=claude_plan.config_path(home)).look(time.time()).spend_seat
     except Exception:
         return
     if not spend:
@@ -3338,13 +3393,82 @@ def cmd_driver(_args) -> int:
     return 1
 
 
+def _old_settings(home):
+    """~/.claude/settings.json when it is not `home`'s settings file and
+    still holds a status line or hook of ours, else None.
+
+    Every release before claude_home wrote there whatever CLAUDE_CONFIG_DIR
+    said. Once the recorded folder moves, install takes our entries back
+    out of it and uninstall cleans it too: left in, its chain file would be
+    restored into the new file at uninstall, and a later terminal without
+    the variable would keep feeding the panel from an account the daemon
+    is not reading. "Ours" by the commands this home's shims would have and
+    by the markers, the same evidence install and uninstall act on. None
+    for an unreadable file: there is nothing we could safely do to it."""
+    if home.kind != claude_home.NATIVE:
+        return None
+    old = claude_home.legacy_settings_path()
+    norm = lambda p: os.path.normcase(os.path.abspath(p))  # noqa: E731
+    if norm(old) == norm(settings_path(home)):
+        return None
+    try:
+        data = install_statusline._load(old)
+    except (install_statusline.SettingsUnreadable, OSError):
+        return None
+    if install_statusline._is_ours(
+            install_statusline._current_command(data),
+            install_statusline.statusline_command(shim_path(home))):
+        return old
+    ours = install_hooks._read_marker() | {
+        install_hooks.hook_command(hook_shim_path(home), ev)
+        for ev, _ in install_hooks.HOOK_EVENTS}
+    hooks = data.get("hooks")
+    for groups in (hooks.values() if isinstance(hooks, dict) else ()):
+        for group in groups if isinstance(groups, list) else ():
+            inner = group.get("hooks") if isinstance(group, dict) else None
+            for h in inner if isinstance(inner, list) else ():
+                if isinstance(h, dict) and h.get("command") in ours:
+                    return old
+    return None
+
+
+def _take_out_of(path, home):
+    """Remove our status line and hooks from `path`, restoring a kept
+    status line; one line of report for each. Never raises: the file was
+    readable a moment ago, and if it no longer is it is left alone."""
+    lines = []
+    for undo, shim in ((install_statusline.uninstall, shim_path(home)),
+                       (install_hooks.uninstall, hook_shim_path(home))):
+        try:
+            lines.append(undo(path, shim))
+        except (install_statusline.SettingsUnreadable, OSError) as e:
+            lines.append(f"Left alone: {e}")
+    return lines
+
+
+def drift_watchdog(home=None):
+    """The daemon's DriftWatchdog, for `home` (claude_home.native() when
+    None): its settings.json, its shims and its marker. Built here so the
+    daemon and the tests build the same one."""
+    home = home or claude_home.native()
+    return install_statusline.DriftWatchdog(
+        settings_path(home), shim_path(home),
+        shims=((shim_path(home), "blink-statusline.sh"),
+               (hook_shim_path(home), "blink-hook.sh")),
+        home=home)
+
+
 def cmd_install(_args) -> int:
+    # The Claude Code folder this install is for: this shell's, which is
+    # the one the person installing means, and which is recorded below so
+    # the background service reads it too (pc/claude_home).
+    home = claude_home.from_environ()
     # Before anything is written, and before the disclosure: if the file we are
     # about to edit does not parse, the honest move is to change nothing at all
     # and say why. The alternative -- treating it as empty -- writes a fresh
     # settings.json over whatever the customer was halfway through editing.
     try:
-        install_statusline._load(settings_path())
+        install_statusline._load(settings_path(home))
     except install_statusline.SettingsUnreadable as e:
         print(f"Blink setup stopped. {e}")
         print()
@@ -3352,7 +3476,7 @@ def cmd_install(_args) -> int:
         print("this again.")
         return 1
 
-    _announce()
+    _announce(home)
 
     # Windows gets one extra step -- the USB driver -- and the numbering has
     # to agree with it, so it is counted rather than written out. macOS and
@@ -3403,20 +3527,35 @@ def cmd_install(_args) -> int:
     # state files in here. Both shims create with umask 077, but a directory
     # from an earlier install was made at the default umask, so this
     # tightens it once rather than leaving it to the next mkdir.
-    for d in (blink_home(), os.path.join(blink_home(), "state")):
+    for d in (blink_home(), home.state_dir):
         try:
             os.chmod(d, 0o700)
         except OSError:
             pass          # absent (state/ appears on the first hook), or Windows
-    _write_shim(shim_path(), "blink-statusline.sh")
-    install_statusline._announce(settings_path(), shim_path(),
+    # Before settings.json, so a daemon that restarts in between already
+    # reads the folder the entries are going into. A config.json that does
+    # not parse is not ours to overwrite (user_config.put refuses), and
+    # costs only the record: the daemon then reads the folder its own
+    # environment names, as every release before this did.
+    try:
+        claude_home.save(home)
+    except (user_config.Unreadable, OSError) as e:
+        print(f"      Could not record the Claude Code folder: {e}")
+    old = _old_settings(home)
+    if old:
+        for line in _take_out_of(old, home):
+            print(f"      {old}: {line}")
+    _write_shim(shim_path(home), "blink-statusline.sh")
+    install_statusline._announce(settings_path(home), shim_path(home),
                                  undo_hint=f"{command_to_type()} uninstall")
-    print("      " + install_statusline.install(settings_path(), shim_path()))
+    print("      " + install_statusline.install(settings_path(home),
+                                                shim_path(home), home))
 
     step("Activity hooks")
-    _write_shim(hook_shim_path(), "blink-hook.sh")
+    _write_shim(hook_shim_path(home), "blink-hook.sh")
     try:
-        print(install_hooks.install(settings_path(), hook_shim_path()))
+        print(install_hooks.install(settings_path(home), hook_shim_path(home),
+                                    home))
     except install_statusline.SettingsUnreadable as e:
         # The status line is the product; the activity light is a nicety. A
         # hooks section we cannot safely edit costs the user a pulsing dot,
@@ -3473,13 +3612,20 @@ def cmd_install(_args) -> int:
     # One read for both: each used to run `claude --version` itself, and a
     # hanging `claude` cost its 30 s timeout twice after "Done." (review,
     # 2026-10-19).
-    desk = read_desk()
+    desk = read_desk(home=home)
     _note_if_no_claude_code(desk)
     _warn_if_claude_too_old(desk)
     return 0
 
 
 def cmd_uninstall(_args) -> int:
+    # The home install recorded, read before step 5 deletes the record;
+    # with none, this environment's, as before the record existed.
+    home = claude_home.native()
+    # And ~/.claude/settings.json, when the recorded folder is elsewhere and
+    # that file still holds an entry of ours. Asked now, while the markers
+    # that help recognise them are still there.
+    old = _old_settings(home)
     print("Blink uninstall.")
     print()
     print("[1/5] Background service ... ", end="", flush=True)
@@ -3489,7 +3635,8 @@ def cmd_uninstall(_args) -> int:
 
     print("[2/5] Claude Code setting:")
     try:
-        print("      " + install_statusline.uninstall(settings_path(), shim_path()))
+        print("      " + install_statusline.uninstall(settings_path(home),
+                                                      shim_path(home), home))
     except install_statusline.SettingsUnreadable as e:
         # Keep going. The login service is already gone by this point, so
         # stopping here would leave the machine half-undone -- and the one
@@ -3500,12 +3647,17 @@ def cmd_uninstall(_args) -> int:
 
     print("[3/5] Activity hooks:")
     try:
-        print("      " + install_hooks.uninstall(settings_path(),
-                                                 hook_shim_path()))
+        print("      " + install_hooks.uninstall(settings_path(home),
+                                                 hook_shim_path(home), home))
     except install_statusline.SettingsUnreadable as e:
         # Same reasoning as the step above: keep going, and never "repair" a
         # file we cannot parse by writing a fresh one over it.
         print(f"      Left alone: {e}")
+    if old:
+        # After the recorded file, whose chain file is the one uninstall
+        # restores from; the old file's own was put back when install moved.
+        for line in _take_out_of(old, home):
+            print(f"      {old}: {line}")
 
     print("[4/5] Codex hooks:")
     _uninstall_codex_hooks()
@@ -3515,7 +3667,7 @@ def cmd_uninstall(_args) -> int:
     # signing keys, which cannot be regenerated -- every board flashed with the
     # first one's public half, and every app carrying the second one's, would
     # stop accepting updates.
-    for p in (shim_path(), hook_shim_path(), launcher_path(),
+    for p in (shim_path(home), hook_shim_path(home), launcher_path(),
               # Spelled once, in statusline_source.payload_path, and asked
               # for here rather than rebuilt from blink_home().
               statusline_source.payload_path(),
@@ -3655,7 +3807,7 @@ def _live_sessions() -> int:
     from pc.providers import claude_state
     try:
         counts, _, _ = claude_state.ClaudeStateProvider(
-            path=os.path.join(blink_home(), "state"), sweep=False
+            path=claude_home.current().state_dir, sweep=False
         ).scan(time.time())
     except Exception:
         return 0
