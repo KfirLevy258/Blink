@@ -1,7 +1,7 @@
 # Usage refresh: keeping the figures fresh with Claude Code's own /usage
 
-Status: draft, 2026-11-04. Not built. The legal review (bottom) comes before
-any code.
+Status: design agreed with the owner 2026-11-05. Plan:
+`docs/plans/2026-11-05-usage-refresh-plan.md`.
 
 ## Why
 
@@ -65,39 +65,47 @@ weekly window and monthly dollars, each with its reset time.
 
 ### 1. Install: one-time setup (`blink install`)
 
-After the service step, on macOS, Linux and native Windows:
+After the service step, on macOS, Linux and native Windows (never for a WSL
+home in this version):
 
 1. Find Claude Code: `claude` on PATH, then `~/.local/bin/claude`
    (`%USERPROFILE%\.local\bin\claude.exe`). Desktop's private copy is not
    used.
-2. Missing: print the official install command for the platform and stop
-   this step (BLINK does not pipe a script into a shell for the person).
-   Re-running `blink install` or `blink refresh on` picks it up.
-3. Found: ask
+2. Missing: say how to install it (the official command for the platform)
+   and leave the refresh off. BLINK does not pipe a script into a shell.
+3. Found: ask once
 
-   > BLINK can keep your usage figures current by running Claude Code's
-   > /usage every 15 minutes while you're at the computer. It sends no
-   > messages and uses no quota. Turn on? [y/N]
+   > BLINK can keep your figures current when Claude Code isn't running,
+   > by asking Claude Code's /usage now and then. It sends no messages and
+   > uses no quota. Turn on? [Y/n]
 
-   Default No. A non-interactive install leaves it off.
-4. Yes: run one probe (section 3). Not logged in: say "Run `claude`, then
-   `/login`, then `blink refresh on`." Logged in: save `on` and say so.
+   Default Yes. On a work login (a usage-billed seat, or an Enterprise or
+   Team organization) the default is No and the prompt says `[y/N]`,
+   because the employer's rules apply. A non-interactive install (stdin
+   not a terminal) asks nothing and leaves it off.
+4. The answer is saved; `blink config usage-refresh on|off` changes it later
+   and `blink status` shows it. A re-install does not ask again once there is
+   an answer.
 
-`blink refresh on|off|status` changes or shows it later. `blink status` shows
-one line: on/off, last run, last result. Uninstall removes the setting and
-the working folder.
+### 2. Daemon: when it runs (fallback only)
 
-### 2. Daemon: when it runs
+It runs only when all of these hold:
 
-- Only while on, only while the board is connected, only while the computer
-  is in use: skipped after 30 minutes without keyboard or mouse input where
-  the OS reports it (macOS `HIDIdleTime`, Windows `GetLastInputInfo`; Linux
-  has no reliable stdlib source, so Linux runs on the timer alone).
-- Every 15 minutes, and skipped when `fetchedAtMs` is already younger than
-  that (the person ran `/usage`, or Claude Code refreshed it).
-- One at a time, on its own thread, never the serial thread. A 60-second
-  limit; a run that overruns is killed.
-- After 3 failures in a row, back off to hourly until one succeeds.
+- the setting is on and the Claude home is native (not WSL);
+- the board is answering (`board_alive()`);
+- the computer is in use: input within the last 30 minutes where the OS
+  reports it (macOS, Windows); Linux has no stdlib source and counts as in
+  use;
+- the `/usage` cache (`fetchedAtMs`) is older than 25 minutes, and either
+  no status-line window reading is younger than 25 minutes or the login is
+  a spend seat (the status line never carries exact dollars). 25, not 30,
+  so the figure is refreshed before the dial calls it stale at 30;
+- BLINK's own last run started more than 25 minutes ago.
+
+So a person who lives in the Claude Code terminal never triggers it, and a
+Desktop- or browser-only person gets one check about every half hour while
+they are at the computer. After 3 failures in a row it waits an hour between
+tries; after 24 hours of nothing but failures it turns itself off.
 
 ### 3. Daemon: how it runs
 
@@ -114,16 +122,18 @@ claude -p /usage --output-format json --no-session-persistence
 - Environment: the person's, plus `BLINK_REFRESH=1` so BLINK's own
   status-line script and hooks ignore the run even if a setting slips.
 
-### 4. The cost guard
+### 4. The cost guard and the failure guard
 
-The JSON answer must say `type "result"`, `num_turns 0`,
-`total_cost_usd 0` and an empty `modelUsage`. Anything else, including an
-answer that does not parse, counts as "may have reached the model":
+Cost guard: if the JSON answer shows any model use -- `num_turns` above 0,
+`total_cost_usd` above 0, or a non-empty `modelUsage` -- the refresh turns
+itself off at once, saves the reason `cost`, logs one line and stays off
+until the person turns it on again. `blink status` says
+"off: Claude Code's /usage used the model".
 
-- the refresh turns itself off and saves why;
-- `blink status` and the board's error line say
-  "Usage refresh turned off: Claude Code changed";
-- it stays off until the person turns it on again.
+Failure guard: an answer that is not that JSON, `is_error` true, a non-zero
+exit, or the 60-second limit is a failure. 3 in a row stretch the spacing to
+an hour; failures only, for 24 hours, turn it off with the reason `failing`
+("off: /usage kept failing; run claude and /login, then turn it on again").
 
 The `result` text is never read for figures and never logged.
 
@@ -150,33 +160,41 @@ carries.
 
 ## Tasks
 
-0. Measure (no code): a login with a 5-hour window fills `five_hour`;
-   Windows and Linux give the same zero-cost answer; how long the reuse
-   window is.
-1. `pc/usage_refresh.py`: finding Claude Code, building the command, the
-   cost guard, the saved setting. Unit tests with a scripted fake `claude`
-   generated by the test.
-2. The scheduler in the daemon: activity check per OS, interval, skip when
-   fresh, back-off, timeout, thread.
-3. The cache source: five_hour / seven_day frames from
-   `cachedUsageUtilization`, account check, precedence by time.
-4. CLI: the install question, `blink refresh`, `blink status` line,
-   uninstall cleanup.
-5. BLINK's own hooks and status-line script ignore `BLINK_REFRESH=1`.
-6. Docs: README (what it does, how to turn it off), privacy section,
-   CLAUDE.md rules (the "never call Anthropic" rule reworded to "BLINK never
-   holds a token or calls Anthropic itself; the opt-in refresh runs the
-   person's own Claude Code"), release notes.
-7. Fleet scenario with the scripted fake: on/off, cost guard trips, stale vs
-   fresh cache.
+See `docs/plans/2026-11-05-usage-refresh-plan.md`.
 
 ## Open questions
 
-- Interval: 15 minutes is a guess; it trades freshness for load.
-- Whether to offer it on usage-billed Enterprise seats by default
-  differently (their admin may have rules about automation).
+- What a logged-out or blocked Claude Code answers to `-p /usage` (plan
+  Task 0); the failure guard is built to those strings.
+- Whether a login with a 5-hour window fills `five_hour` in the cache
+  (Task 0). Until seen, a null `five_hour` leaves the session dial unknown.
 
-## Legal review
+## Legal review (owner discussion, 2026-11-04/05; not legal advice)
 
-To be written with the owner before Task 1. See the discussion of
-2026-11-04.
+What Anthropic's pages say:
+
+- Claude Code's legal page allows "an end user signing in to the unmodified
+  Claude Code binary with their own Claude subscription", and forbids
+  developers to "collect, store, or intermediate Claude.ai credentials or
+  session tokens". BLINK runs the unmodified binary and never touches a
+  token.
+- The Consumer Terms forbid access "through automated or non-human means,
+  whether through a bot, script, or otherwise" except with an API key or
+  "where we otherwise explicitly permit it", and harvesting data from the
+  Services. A scheduled `claude -p /usage` is automated use; nothing
+  explicitly permits it. That is the open risk.
+- Anthropic's 2026 enforcement (January errors, February docs, April
+  statement) was against tools that used subscription logins for model
+  work. No public action against read-only usage monitors was found, and
+  issue #81768 asking for a usage API got no staff answer.
+
+What other open-source monitors do: most read Claude Code's token and call
+the usage endpoint directly (riskier than this); CodexBar also runs the real
+`claude` and sends `/usage`, which is this design.
+
+Who carries the risk: mostly the customer (their account could be flagged
+for automated use; a work seat answers to the employer), and the seller
+through them. Hence: off unless the person answers yes, default No on work
+logins, fallback only, a cost guard, and turning itself off on repeated
+failure. Owner to also ask Anthropic through support/sales; shipping does
+not wait for the answer.
