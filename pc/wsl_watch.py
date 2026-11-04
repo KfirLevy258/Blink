@@ -32,13 +32,20 @@ import sys
 import threading
 import time
 
-from pc import burn_reader, claude_plan, install_statusline, wsl
+from pc import burn_reader, claude_home, claude_plan, install_statusline, wsl
 
 # The drop folder must have changed this recently for the distribution to
 # count as in use: the spec's ten minutes. A status line renders on every
 # message and a hook fires on every prompt, so ten quiet minutes is a user
 # who has walked away, and their account's figures do not move meanwhile.
 LIVE_S = 600
+
+# How far in the future the newest drop-folder file may be and still count.
+# The shims stamp it with Linux's clock, which WSL syncs to Windows' but can
+# lag after a sleep; a file stamped hours ahead (a clock set wrong, a copy
+# from elsewhere) would otherwise count as fresh until the wall clock caught
+# up, and keep the distribution read all that while (final branch review).
+FUTURE_SKEW_S = 5
 
 # The least time between two `wsl -l --running` asks. Each is a wsl.exe
 # start; the UNC reads ride on the tick that has just asked (see tick()),
@@ -156,15 +163,23 @@ class WslWatch:
     """
 
     def __init__(self, home, running=wsl.running, clock=time.time,
-                 wsl_run=None, drift=None, burn_reader=None):
+                 wsl_run=None, drift=None, burn_reader=None, distros=None):
         self._home = home
         self._running = running
         self._clock = clock
+        # Built from `home` unless a test handed one in; rebuilt by
+        # resolve_name() when the distribution has been renamed.
+        self._wsl_run = wsl_run
+        self._own_drift = drift is None
+        self._own_reader = burn_reader is None
         self._drift = (drift if drift is not None
                        else install_statusline.wsl_drift_watchdog(home,
                                                                   wsl_run))
         self._reader = (burn_reader if burn_reader is not None
                         else _burn_reader_for(home))
+        # () -> [wsl.Distro], the registry's list; None reads the real one
+        # on Windows (and nothing elsewhere, where there is no registry).
+        self._distros = distros
         self._lock = threading.Lock()
         # Read by the serial loop, under the lock.
         self._view = None
@@ -221,7 +236,8 @@ class WslWatch:
             self._swept_at = now
             _sweep_shim_temps(self._home.drop_dir, now)
         newest = _drop_newest(self._home)
-        fresh = newest is not None and now - newest <= LIVE_S
+        fresh = (newest is not None
+                 and -FUTURE_SKEW_S <= now - newest <= LIVE_S)
         asked_now = False
         if not fresh:
             # Forgotten, so a desk coming back is asked at once.
@@ -253,13 +269,18 @@ class WslWatch:
             if view is not None:
                 with self._lock:
                     self._view = view
+            # The drift check before the burn poll: it runs wsl.exe -d,
+            # which starts a stopped distribution, so it goes while the
+            # running answer is seconds old. After a poll of a large
+            # transcript backlog, a `wsl --shutdown` meanwhile would have
+            # been undone by it (final branch review, finding 8).
+            msg = self._drift.tick()
+            if msg:
+                notes.append(f"[watchdog] {msg}")
             if wanted:
                 got = self._reader.poll(now)
             else:
                 got = self._reader.held(now)
-            msg = self._drift.tick()
-            if msg:
-                notes.append(f"[watchdog] {msg}")
         else:
             got = self._reader.held(now)
         with self._lock:
@@ -288,6 +309,32 @@ class WslWatch:
         self._sig = None if got is None else sig
         return got
 
+    def resolve_name(self):
+        """Follow a rename: find the distribution by its GUID and, when it
+        is called something else now, read it under that name. The drop
+        folder is named for the GUID and stays; the config and transcripts
+        are UNC paths that name the distribution, and the old name leads
+        nowhere. Asked once, from start()'s thread (a registry read is
+        quick, but it is not the serial loop's). Status says "renamed --
+        run blink install", which writes the new name into the record."""
+        found = self._distros() if self._distros is not None \
+            else _registry_distros()
+        want = (self._home.distro_guid or "").lower()
+        d = next((x for x in found or () if x.guid.lower() == want), None)
+        if d is None or d.name == self._home.distro_name:
+            return
+        home = claude_home.renamed(self._home, d.name)
+        if home is self._home:
+            return
+        self._home = home
+        if self._own_drift:
+            self._drift = install_statusline.wsl_drift_watchdog(
+                home, self._wsl_run)
+        if self._own_reader:
+            self._reader = _burn_reader_for(home)
+        # The last look was of the old path.
+        self._sig = None
+
     def _tick_once(self):
         try:
             self.tick()
@@ -308,6 +355,11 @@ class WslWatch:
         return t
 
     def _run(self):
+        try:
+            self.resolve_name()
+        except Exception as e:
+            print(f"[wsl] could not check the distribution's name:"
+                  f" {type(e).__name__}", file=sys.stderr)
         while True:
             self._tick_once()
             time.sleep(TICK_S)
@@ -324,6 +376,14 @@ class _BurnSource:
 
     def poll(self, now, budget=None):
         return self._watch._asked()
+
+
+def _registry_distros():
+    """wsl.distros() on Windows; [] elsewhere, where there is no registry
+    and winreg will not import."""
+    if sys.platform != "win32":
+        return []
+    return wsl.distros()
 
 
 def _burn_reader_for(home):

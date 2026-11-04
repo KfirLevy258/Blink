@@ -547,3 +547,96 @@ def test_a_new_view_survives_a_tick_that_raises_after_it(tmp_path):
     with pytest.raises(OSError):
         w.tick()
     assert w.view().spend_seat
+
+
+# --- the final branch review --------------------------------------------
+
+def test_a_future_drop_file_is_not_fresh(tmp_path, monkeypatch):
+    """Finding 6: a payload stamped in the future -- a clock set wrong, a
+    copy from elsewhere -- does not keep the distribution being read; a
+    few seconds of skew between Linux's clock and Windows' still counts."""
+    home, unc = _home(tmp_path)
+    _write_config(home)
+    clock = _Clock(time.time())
+    running = _Running(True)
+    w = _watch(home, clock, running)
+    _touch_drop(home, clock.t + 3600)
+    w.tick()
+    assert running.calls == [] and not w.live()
+    _touch_drop(home, clock.t + wsl_watch.FUTURE_SKEW_S)
+    w.tick()
+    assert running.calls == ["Ubuntu"] and w.live()
+
+
+def test_drift_runs_before_the_burn_poll(tmp_path):
+    """Finding 8: the drift check starts wsl.exe -d, which starts a
+    stopped distribution; it runs while the running answer is fresh, not
+    after a burn poll that may take a long while."""
+    home, _ = _home(tmp_path)
+    clock = _Clock(time.time())
+    _touch_drop(home, clock.t)
+    order = []
+
+    class Drift:
+        def tick(self):
+            order.append("drift")
+
+    class Reader:
+        def poll(self, now, budget=None):
+            order.append("poll")
+            return None
+
+        def held(self, now):
+            return None
+    w = _watch(home, clock, _Running(True), drift=Drift(),
+               burn_reader=Reader())
+    w.burn_source().poll(clock.t)
+    w.tick()
+    assert order == ["drift", "poll"]
+
+
+def _unc_home(name="Ubuntu"):
+    from pc import wsl
+    return claude_home.wsl(distro_guid=GUID, distro_name=name,
+                           linux_user="zoe", linux_home="/home/zoe",
+                           config_dir=wsl.unc(name, "/home/zoe/.claude"),
+                           config_dir_set=False)
+
+
+def test_a_renamed_distro_is_read_under_its_new_name(monkeypatch):
+    """Finding 7: found by its GUID under another name, the watch reads
+    the config, transcripts and drift check under the name it has now.
+    Nothing is read until resolve_name(), which start()'s thread asks."""
+    from pc import wsl
+    asked = []
+
+    def distros():
+        asked.append(1)
+        return [wsl.Distro(GUID.lower(), "Work", 2, True)]
+    built = []
+    real = install_statusline.wsl_drift_watchdog
+    monkeypatch.setattr(install_statusline, "wsl_drift_watchdog",
+                        lambda h, run=None: built.append(h) or real(h, run))
+    w = wsl_watch.WslWatch(_unc_home(), running=_Running(True),
+                           distros=distros)
+    assert asked == []
+    w.resolve_name()
+    assert asked == [1]
+    assert w._home.distro_name == "Work"
+    assert w._home.config_dir == wsl.unc("Work", "/home/zoe/.claude")
+    assert w._home.drop_dir == _unc_home().drop_dir
+    assert "\\Work\\" in w._reader.root()
+    assert built[-1].distro_name == "Work"
+    assert "\\Work\\" in claude_plan.config_path(w._home)
+
+
+def test_resolve_name_leaves_the_same_name_and_a_missing_distro():
+    from pc import wsl
+    home = _unc_home()
+    for found in ([wsl.Distro(GUID, "Ubuntu", 2, True)], [], None):
+        w = wsl_watch.WslWatch(home, running=_Running(True),
+                               distros=lambda found=found: found,
+                               drift=_Drift())
+        reader = w._reader
+        w.resolve_name()
+        assert w._home is home and w._reader is reader

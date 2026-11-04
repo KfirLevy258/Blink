@@ -146,6 +146,22 @@ def wsl(distro_guid, distro_name, linux_user, linux_home, config_dir,
     return dataclasses.replace(h, transcripts=h.join(config_dir, "projects"))
 
 
+def renamed(home, name):
+    """`home` with its distribution called `name`: the GUID finds it after
+    a rename, but its config folder's UNC path names it. `home` itself
+    when nothing changes, or when its config folder is not a UNC path
+    into the old name and so cannot be moved to the new one."""
+    if home.kind != WSL or name == home.distro_name:
+        return home
+    old = _UNC_ROOT + home.distro_name
+    cfg = home.config_dir
+    if cfg[:len(old)].lower() != old.lower() or (
+            len(cfg) > len(old) and cfg[len(old)] != "\\"):
+        return home
+    return wsl(home.distro_guid, name, home.linux_user, home.linux_home,
+               _UNC_ROOT + name + cfg[len(old):], home.config_dir_set)
+
+
 def to_record(home):
     """What user_config keeps: the fields a home cannot be rebuilt without.
     The rest are derived again on every read, so a record cannot disagree
