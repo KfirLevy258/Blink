@@ -95,6 +95,20 @@ def _proto_for_log(proto) -> str:
     return "a newer protocol"
 
 
+def _page_shares(usage, page):
+    """The shares a usage line gives `page` -- the figures
+    protocol.blank_page takes down -- or None when the line does not name
+    it. The countdowns are left out: they move on every line by themselves
+    (protocol.VOLATILE_USAGE_KEYS), and it is the share that misleads."""
+    if not isinstance(usage, dict) or usage.get("t") != "usage":
+        return None
+    if usage.get("provider") == page:
+        return ("main", usage.get("session_pct"), usage.get("weekly_pct"))
+    if usage.get("p2") == page:
+        return ("p2", usage.get("p2_session_pct"), usage.get("p2_weekly_pct"))
+    return None
+
+
 class Bridge:
     def __init__(self, write_msg, fetch_usage, now=time.monotonic,
                  set_preferred=None,
@@ -183,6 +197,9 @@ class Bridge:
         # And the line itself, whole: what _take_down_spend blanks a page
         # out of, so the other page keeps what the board was last told.
         self._last_usage = None
+        # (page, its shares) of a spend page taken down, while the reading
+        # still carries those shares: see _hide_taken_down.
+        self._taken_down = None
         # Themes (pc/theme.py). theme_sync owns the files and what the
         # board is believed to hold; open_builder starts the builder and a
         # browser on it, returning whether one opened, and is rate-limited
@@ -1105,7 +1122,12 @@ class Bridge:
         # Likewise the plan: the dollar figures arrive from Claude Code on a
         # timer of their own, several minutes after the share they belong
         # to, so the cost can move with every usage field standing still.
-        self._send_plan_if_changed()
+        # A spend page's plan going takes its share down here too (K3 in
+        # round 2 of the 2026-11-04 review): this branch is where the bus's
+        # remembered spend reading, unchanged, meets the plan of the login
+        # that replaced it, and dropping what the plan replaced left the
+        # dollars' share under "SESSION 5h".
+        self._take_down_spend(self._send_plan_if_changed())
         self._send_session_if_changed()
         # And the status level, which changes on the watch's own thread and
         # would otherwise wait for the next usage change to be noticed.
@@ -1131,8 +1153,35 @@ class Bridge:
         usage = protocol.cap_overage_for_fw(usage, self._board_fw)
         # And a spend share is withheld from firmware that would draw it as
         # "SESSION 5h" -- see protocol.BOARD_CAP_PLAN.
-        return protocol.hide_plan_for_board(
+        usage = protocol.hide_plan_for_board(
             usage, self._plan_msg(), self._board_can(protocol.BOARD_CAP_PLAN))
+        return self._hide_taken_down(usage)
+
+    def _hide_taken_down(self, usage):
+        """The reading with a taken-down spend page kept down.
+
+        After _take_down_spend the bus may go on offering the spend login's
+        last reading -- the payload it remembers, until the new login
+        renders -- and every fast tick found it different from the blank
+        and sent it again, share and all, under the new plan's captions
+        (K3 in round 2 of the 2026-11-04 review). While that page's shares
+        on the reading are still the ones taken down, they go out blank.
+        The first reading with other shares is the new login's and ends
+        it, and so does the page becoming a spend page again, on which
+        those shares are right."""
+        held = self._taken_down
+        if held is None or not isinstance(usage, dict):
+            return usage
+        page, shares = held
+        plan = self._last_plan
+        if (isinstance(plan, dict) and plan.get("p") == page
+                and plan.get("plan") == protocol.PLAN_SPEND):
+            self._taken_down = None
+            return usage
+        if _page_shares(usage, page) != shares:
+            self._taken_down = None
+            return usage
+        return protocol.blank_page(usage, page)
 
     def _plan_msg(self):
         """Asked of the fetch when it can answer; None otherwise. A plain
@@ -1145,8 +1194,17 @@ class Bridge:
         """Put a usage message on the wire and remember what was in it."""
         # The plan FIRST: it says what the figures on the usage line are,
         # and the other order would draw a spend share under the old
-        # captions until the next message.
-        self._send_plan_if_changed()
+        # captions until the next message. A spend page's plan going is
+        # followed by this line, which replaces the share -- unless it is
+        # the same share, the spend login's remembered reading with only
+        # the light moved (K3), which is taken down on the way out.
+        replaced = self._send_plan_if_changed()
+        page = self._spend_page_gone(replaced)
+        if page is not None:
+            shares = _page_shares(self._last_usage, page)
+            if shares is not None and _page_shares(usage, page) == shares:
+                usage = protocol.blank_page(usage, page)
+                self._taken_down = (page, shares)
         self._write(usage)
         # Recorded here, once, so that no path can push without moving the
         # baseline -- a push that forgot to would leave the fast tick
@@ -1417,19 +1475,33 @@ class Bridge:
         a reading in hand none of this runs: the usage line that follows
         the plan carries the new figures.
         """
-        if not isinstance(replaced, dict):
+        page = self._spend_page_gone(replaced)
+        if page is None:
             return
-        if replaced.get("plan") != protocol.PLAN_SPEND:
-            return
-        page = replaced.get("p")
-        if self._last_plan is not None and \
-                self._last_plan.get("plan") == protocol.PLAN_SPEND and \
-                self._last_plan.get("p") == page:
-            return                       # still a spend page: dollars moved
+        shares = _page_shares(self._last_usage, page)
+        if shares is not None:
+            # Kept down while the reading still carries them
+            # (_hide_taken_down).
+            self._taken_down = (page, shares)
         blank = protocol.blank_page(self._last_usage, page)
         self._write(blank)
         self._last_pushed = protocol.meaningful_usage(blank)
         self._last_usage = blank
+
+    def _spend_page_gone(self, replaced):
+        """The page `replaced` -- the plan _send_plan_if_changed just took
+        off the wire -- held as a spend page and the plan now on the wire
+        does not, or None."""
+        if not isinstance(replaced, dict):
+            return None
+        if replaced.get("plan") != protocol.PLAN_SPEND:
+            return None
+        page = replaced.get("p")
+        if self._last_plan is not None and \
+                self._last_plan.get("plan") == protocol.PLAN_SPEND and \
+                self._last_plan.get("p") == page:
+            return None                  # still a spend page: dollars moved
+        return page
 
     def _send_svc_if_changed(self):
         """Put each page's status-page level on the wire, on change only.
