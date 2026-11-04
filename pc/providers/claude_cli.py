@@ -813,7 +813,10 @@ class ClaudeCliProvider(base.ProviderParser):
             # dated before an unrelated rewrite of the config. The switch
             # is seen on the poll after /login (claude_plan.PlanReader
             # .look), so a new render read before it is at most one poll's.
-            self._old_render = _file_sig(self.path())
+            # A stat that fails here marks the file as the first one that
+            # succeeds finds it (_UNSTATED): unmarked, the old render was
+            # offered again (round 6 of the review, item 2).
+            self._old_render = _file_sig(self.path()) or _UNSTATED
             self._remembered = self._any = None
             # And what the old login's renders taught: the newest render's
             # time, the last five_hour seen, the reply baselines
@@ -841,8 +844,13 @@ class ClaudeCliProvider(base.ProviderParser):
         self._polled_at = now_epoch
         self._live = None
         if self._old_render is not None:
-            if _file_sig(self.path()) == self._old_render:
-                payload, mtime = None, None     # the old login's: _note_login
+            sig = _file_sig(self.path())
+            if self._old_render is _UNSTATED and sig is not None:
+                self._old_render = sig
+            if sig is None or sig == self._old_render:
+                # The old login's, or not known not to be: a failed stat
+                # leaves the mark standing (round 6, item 2).
+                payload, mtime = None, None     # see _note_login
             else:
                 self._old_render = None
         if self._old_render is None:
@@ -915,11 +923,25 @@ class ClaudeCliProvider(base.ProviderParser):
         return frames
 
 
+# The mark _note_login sets when the status-line file could not be stat'ed
+# at the switch: whatever the first stat that succeeds finds is the old
+# login's.
+_UNSTATED = ("unstated",)
+
+
+# _file_sig's answer for a status-line file that is not there: no render
+# to mark, so whatever appears next is the new login's.
+_ABSENT = ("absent",)
+
+
 def _file_sig(path):
     """The status-line file's identity as a stat gives it -- inode, mtime,
-    size, claude_plan.signature -- or None when it cannot be stat'ed."""
+    size, claude_plan.signature -- _ABSENT when there is no such file, or
+    None when it cannot be stat'ed (a lock, a share that dropped)."""
     try:
         return claude_plan.signature(os.stat(path))
+    except FileNotFoundError:
+        return _ABSENT
     except (OSError, ValueError):
         return None
 

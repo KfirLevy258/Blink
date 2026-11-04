@@ -929,3 +929,49 @@ def test_a_switch_forgets_what_the_old_logins_renders_taught(tmp_path):
     assert p._render_at is None and p._five_seen is None
     assert p._costs == {} and p._chain is None
     assert p._remembered is None and p._any is None
+
+
+def test_a_failed_stat_never_lifts_the_old_logins_mark(tmp_path,
+                                                       monkeypatch):
+    """Round 6 of the 2026-11-04 review, item 2: the mark is the status
+    file's signature, and a stat that failed -- at the switch, or while
+    the mark stood -- set it to None or cleared it, and the old login's
+    render was offered again. A failed stat leaves the mark as it is; one
+    that fails at the switch marks the file as the first stat that
+    succeeds finds it."""
+    from pc.providers import claude_cli as cc
+    clock = Clock(NOW)
+    max_config(tmp_path, NOW - 3600)
+    render(tmp_path, NOW - 30, 1.00, rate_limits=WINDOWS)
+    p = cc.ClaudeCliProvider()
+    assert any(f.session_pct == 41.0 for f in p.poll(NOW))
+    real = cc._file_sig
+    failing = [True]
+    monkeypatch.setattr(cc, "_file_sig",
+                        lambda path: None if failing[0] else real(path))
+    _other_login(tmp_path, NOW + 1)
+    for t in (NOW + 2, NOW + 4):                 # stat fails at the switch
+        assert not any(f.session_pct == 41.0 for f in p.poll(t))
+    failing[0] = False
+    assert not any(f.session_pct == 41.0 for f in p.poll(NOW + 6))
+    failing[0] = True                            # and while it stands
+    assert not any(f.session_pct == 41.0 for f in p.poll(NOW + 8))
+    failing[0] = False
+    assert not any(f.session_pct == 41.0 for f in p.poll(NOW + 10))
+    five = {"five_hour": {"used_percentage": 3.0, "resets_at": NOW + 3600}}
+    render(tmp_path, NOW + 11, 0.10, rate_limits=five)
+    assert any(f.session_pct == 3.0 for f in p.poll(NOW + 12))
+
+
+def test_no_status_file_at_the_switch_marks_nothing(tmp_path):
+    """No render in the file when the switch is seen: the first one that
+    appears is the new login's."""
+    from pc.providers import claude_cli as cc
+    max_config(tmp_path, NOW - 3600)
+    p = cc.ClaudeCliProvider()
+    p.poll(NOW)
+    _other_login(tmp_path, NOW + 1)
+    p.poll(NOW + 2)
+    five = {"five_hour": {"used_percentage": 3.0, "resets_at": NOW + 3600}}
+    render(tmp_path, NOW + 3, 0.10, rate_limits=five)
+    assert any(f.session_pct == 3.0 for f in p.poll(NOW + 4))
