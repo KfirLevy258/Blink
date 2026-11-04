@@ -2985,7 +2985,7 @@ def _schedule_windows_cleanup():
 # -------------------------------------------------------------------- install
 
 
-def _announce(home=None):
+def _announce(home=None, wsl_name=None):
     """Say what is about to change, before changing it.
 
     Install is deliberately unattended -- it asks nothing, because plugging the
@@ -2994,7 +2994,14 @@ def _announce(home=None):
     so it is not optional and it runs before the first write.
 
     `home` is the claude_home.ClaudeHome being installed: from this shell's
-    environment when None, which is what cmd_install records.
+    environment when None, which is what cmd_install records. With
+    `wsl_name`, `home` is the recorded WSL home a plain install is setting
+    up again in that distribution: the Claude Code lines then describe what
+    is written inside it and in its Windows drop folder, and nothing on
+    Windows' own Claude Code side is read, so a native settings.json that
+    does not parse cannot stop this install. Nothing inside the
+    distribution is read here either, and no Linux path or user is
+    printed: the probe has not run yet, and starts it.
     """
     home = home or claude_home.from_environ()
     print("Blink setup. Here is everything it is about to do, before it does any of it.")
@@ -3020,67 +3027,70 @@ def _announce(home=None):
         else:
             print(pad + "Every command printed below starts from this")
             print(pad + "folder, so leave it where it is.")
-    print(f"  Creates    {shim_path(home)}")
-    print("             the small script Claude Code runs to hand over the")
-    # What the daemon reads out of that payload, said field by field. This
-    # said "Only the usage figures are read out of it" for the whole of
-    # feat/ultra-burn while pc/providers/claude_cli read session_id and
-    # cost.total_cost_usd on every poll, to tell a reply that came back
-    # without a five-hour window (pc/session_verdict) -- the /code-review max
-    # of 2026-11-01 found it. Both stay in the daemon's memory, 64 sessions
-    # at most, and are never logged, saved or sent.
-    print("             usage figures. It keeps the last status line payload")
-    print("             Claude Code sent, which also names the session, the")
-    print("             working directory and the transcript file. The bridge")
-    print("             reads three things from it: the usage figures, the")
-    print("             session id and the session's running cost. The last")
-    print("             two only tell it whether Claude Code's replies keep")
-    print("             coming back without a five-hour limit, and are never")
-    print("             logged or saved.")
-    print("             Nothing in it leaves this machine, and it is readable")
-    print("             by you alone.")
-    print(f"  Creates    {hook_shim_path(home)}")
-    print("             a second small script, run when Claude Code starts and")
-    print("             finishes work, so the panel can show whether it is busy.")
-    print("             It records the event name, the time, and the session and")
-    print("             agent ids Claude Code generates -- used to tell concurrent")
-    print("             sessions apart, and for nothing else. No prompt, no tool")
-    print("             arguments, no file paths, no message text.")
-    print(f"  Creates    {home.state_dir}")
-    print("             one small file per open session, deleted when it ends.")
-    print(f"  Changes    {settings_path(home)}")
-    # This list has to stay exactly true. Install asks nothing, so the
-    # disclosure is the only thing standing between us and silently editing a
-    # file the customer owns -- and it said "statusLine.command, and nothing
-    # else in the file" for one release after the hooks key started being
-    # written too. A disclosure that is merely mostly right is worse than none,
-    # because it is the thing people rely on instead of reading the diff.
-    # Counted, not spelled. This said "six" while the code wrote ten: the
-    # number drifted when StopFailure, SubagentStart and SubagentStop were
-    # added, and nothing failed. The comment above says this list has to stay
-    # exactly true because it is the thing people rely on instead of reading
-    # the diff -- so it now reads itself off the list it describes, and a test
-    # pins the two together.
-    print("             two keys: statusLine.command, and an entry under hooks")
-    print(f"             for each of {len(install_hooks.HOOK_EVENTS)} Claude Code"
-          " events. Nothing else in")
-    print("             the file is touched, and your own hooks are left in place.")
-    prev_cmd = install_statusline._current_command(
-        install_statusline._load(settings_path(home)))
-    if prev_cmd:
-        print(f"             Your current status line is kept and still runs:")
-        print(f"               {prev_cmd}")
-    for old in _old_settings(home):
-        # A settings.json an earlier install wrote into -- the previously
-        # recorded folder, or ~/.claude, which every release before the
-        # record wrote whatever CLAUDE_CONFIG_DIR said. Claude Code does not
-        # read it for this install, and our entries left in it would leave
-        # the one chain file describing the wrong settings.json.
-        print(f"  Changes    {old}")
-        print("             takes Blink's status line and hooks back out of it:")
-        print("             Claude Code reads the file above for this install")
-        print("             instead. A status line of yours that Blink had kept")
-        print("             is put back.")
+    if wsl_name is not None:
+        _announce_wsl_files(home, wsl_name)
+    else:
+        print(f"  Creates    {shim_path(home)}")
+        print("             the small script Claude Code runs to hand over the")
+        # What the daemon reads out of that payload, said field by field. This
+        # said "Only the usage figures are read out of it" for the whole of
+        # feat/ultra-burn while pc/providers/claude_cli read session_id and
+        # cost.total_cost_usd on every poll, to tell a reply that came back
+        # without a five-hour window (pc/session_verdict) -- the /code-review max
+        # of 2026-11-01 found it. Both stay in the daemon's memory, 64 sessions
+        # at most, and are never logged, saved or sent.
+        print("             usage figures. It keeps the last status line payload")
+        print("             Claude Code sent, which also names the session, the")
+        print("             working directory and the transcript file. The bridge")
+        print("             reads three things from it: the usage figures, the")
+        print("             session id and the session's running cost. The last")
+        print("             two only tell it whether Claude Code's replies keep")
+        print("             coming back without a five-hour limit, and are never")
+        print("             logged or saved.")
+        print("             Nothing in it leaves this machine, and it is readable")
+        print("             by you alone.")
+        print(f"  Creates    {hook_shim_path(home)}")
+        print("             a second small script, run when Claude Code starts and")
+        print("             finishes work, so the panel can show whether it is busy.")
+        print("             It records the event name, the time, and the session and")
+        print("             agent ids Claude Code generates -- used to tell concurrent")
+        print("             sessions apart, and for nothing else. No prompt, no tool")
+        print("             arguments, no file paths, no message text.")
+        print(f"  Creates    {home.state_dir}")
+        print("             one small file per open session, deleted when it ends.")
+        print(f"  Changes    {settings_path(home)}")
+        # This list has to stay exactly true. Install asks nothing, so the
+        # disclosure is the only thing standing between us and silently editing a
+        # file the customer owns -- and it said "statusLine.command, and nothing
+        # else in the file" for one release after the hooks key started being
+        # written too. A disclosure that is merely mostly right is worse than none,
+        # because it is the thing people rely on instead of reading the diff.
+        # Counted, not spelled. This said "six" while the code wrote ten: the
+        # number drifted when StopFailure, SubagentStart and SubagentStop were
+        # added, and nothing failed. The comment above says this list has to stay
+        # exactly true because it is the thing people rely on instead of reading
+        # the diff -- so it now reads itself off the list it describes, and a test
+        # pins the two together.
+        print("             two keys: statusLine.command, and an entry under hooks")
+        print(f"             for each of {len(install_hooks.HOOK_EVENTS)} Claude Code"
+              " events. Nothing else in")
+        print("             the file is touched, and your own hooks are left in place.")
+        prev_cmd = install_statusline._current_command(
+            install_statusline._load(settings_path(home)))
+        if prev_cmd:
+            print(f"             Your current status line is kept and still runs:")
+            print(f"               {prev_cmd}")
+        for old in _old_settings(home):
+            # A settings.json an earlier install wrote into -- the previously
+            # recorded folder, or ~/.claude, which every release before the
+            # record wrote whatever CLAUDE_CONFIG_DIR said. Claude Code does not
+            # read it for this install, and our entries left in it would leave
+            # the one chain file describing the wrong settings.json.
+            print(f"  Changes    {old}")
+            print("             takes Blink's status line and hooks back out of it:")
+            print("             Claude Code reads the file above for this install")
+            print("             instead. A status line of yours that Blink had kept")
+            print("             is put back.")
     config = user_config.path(blink_home())
     try:
         user_config.load(blink_home())
@@ -3094,9 +3104,14 @@ def _announce(home=None):
         print("             environment names.")
     else:
         print(f"  Changes    {config}")
-        print("             records which Claude Code folder this is for, so")
-        print("             the background service, which does not see this")
-        print("             shell's variables, reads the same one.")
+        if wsl_name is not None:
+            print(f"             keeps which WSL distribution ({wsl_name}) and")
+            print("             Linux account this is for, so the background")
+            print("             service reads the same one.")
+        else:
+            print("             records which Claude Code folder this is for, so")
+            print("             the background service, which does not see this")
+            print("             shell's variables, reads the same one.")
     created = backend().creates()
     if created:
         print(f"  Creates    {created}")
@@ -3161,7 +3176,13 @@ def _announce(home=None):
     # CLAUDE_CONFIG_DIR as the transcripts' folder does, through the same
     # record.
     from pc import claude_plan
-    root, plan_file = home.transcripts, claude_plan.config_path(home)
+    if wsl_name is not None:
+        # Named, not spelled out: the folders are Linux paths inside the
+        # distribution (and asking config_path would stat over UNC).
+        root = f"Claude Code's transcripts inside {wsl_name}, while you use it"
+        plan_file = f"Claude Code's config inside {wsl_name}, while you use it"
+    else:
+        root, plan_file = home.transcripts, claude_plan.config_path(home)
     # On a line of its own, like the paths above: a home folder's length is
     # unbounded, and inline it ran the paragraph off its margin.
     print("  On an account with no five-hour limit, it also reads the")
@@ -3190,11 +3211,14 @@ def _announce(home=None):
     print("  five-hour one switches on the burn view; other plans need five")
     print("  and a quarter hours of them, longer after a")
     print("  break of over an hour.")
-    if home.config_dir_set:
+    if wsl_name is None and home.config_dir_set:
         print("  CLAUDE_CONFIG_DIR is set in this shell, and install records")
         print("  its folder, so the background service reads the folder and")
         print("  the file above too.")
-    _announce_spend_seat(home)
+    if wsl_name is None:
+        # On a WSL desk the setup step says it, from the distribution's
+        # config, once the probe has started it (_setup_wsl).
+        _announce_spend_seat(home)
     # The same for Codex (CodexBurnReader): an account whose Codex log
     # reports a weekly limit and no five-hour one -- Codex Pro on the
     # owner's desk, 2026-11-01 -- has its page fed from the same rollouts
@@ -3223,6 +3247,32 @@ def _announce(home=None):
     print()
     print(f"  To undo all of it:  {command_to_type()} uninstall")
     print()
+
+
+def _announce_wsl_files(home, name) -> None:
+    """_announce's Claude Code lines for a WSL desk being set up again:
+    what goes inside distribution `name`, and the Windows folder its
+    scripts write into."""
+    print(f"  Changes    Claude Code's settings.json inside WSL ({name})")
+    print("             two keys, written as your Linux user: statusLine.command,")
+    print(f"             and an entry under hooks for each of"
+          f" {len(install_hooks.HOOK_EVENTS)} Claude Code")
+    print("             events. Nothing else in the file is touched, your own")
+    print("             hooks are left in place, and a status line of yours is")
+    print("             kept and still runs.")
+    print(f"  Creates    two small scripts inside {name}, in your Linux home")
+    print("             folder: the one Claude Code runs to hand over the usage")
+    print("             figures, and one run when it starts and finishes work;")
+    print("             and a file naming the folder below.")
+    print(f"  Creates    {home.drop_dir}")
+    print("             where those scripts write: the last status line payload")
+    print("             Claude Code sent (it also names the session, the")
+    print("             working directory and the transcript file; the bridge")
+    print("             reads the usage figures, the session id and the")
+    print("             session's running cost, never logged), and one small")
+    print("             file per open session (event name, time, session and")
+    print("             agent ids). Nothing in it leaves this machine.")
+    print("  Leaves     Claude Code on Windows itself alone: it is not read.")
 
 
 def _announce_spend_seat(home=None) -> None:
@@ -3549,12 +3599,6 @@ def cmd_install(args) -> int:
     rec = claude_home.recorded()
     if rec is not None and rec.kind == claude_home.WSL:
         kept_wsl = _wsl_distro(rec)
-        if kept_wsl is None:
-            print(f"Claude Code inside WSL ({rec.distro_name}): that"
-                  " distribution is no longer on this computer, so Blink is"
-                  " set up for Claude Code on Windows instead.")
-            print()
-            _rm_wsl_drop(rec)
     # Before anything is written, and before the disclosure: if the file we are
     # about to edit does not parse, the honest move is to change nothing at all
     # and say why. The alternative -- treating it as empty -- writes a fresh
@@ -3569,8 +3613,20 @@ def cmd_install(args) -> int:
         print("Nothing was changed. Fix the file, or move it aside, and run")
         print("this again.")
         return 1
+    if rec is not None and rec.kind == claude_home.WSL and kept_wsl is None:
+        # After the check above, so a stop there leaves the record and its
+        # drop folder as they were, together; the native save below then
+        # replaces the record.
+        print(f"Claude Code inside WSL ({rec.distro_name}): that"
+              " distribution is no longer on this computer, so Blink is"
+              " set up for Claude Code on Windows instead.")
+        print()
+        _rm_wsl_drop(rec)
 
-    _announce(home)
+    if kept_wsl is not None:
+        _announce(rec, wsl_name=kept_wsl.name)
+    else:
+        _announce(home)
 
     # Windows gets one extra step -- the USB driver -- and the numbering has
     # to agree with it, so it is counted rather than written out. macOS and

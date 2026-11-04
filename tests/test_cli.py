@@ -3552,3 +3552,52 @@ def test_status_says_a_failed_read_is_not_a_parse_error(monkeypatch,
     cli.main(["status"])
     out = capsys.readouterr().out
     assert "Activity    unknown -- settings.json could not be read" in out
+
+
+def test_plain_install_on_a_wsl_desk_discloses_the_wsl_files(
+        tmp_path, monkeypatch, capsys):
+    """The disclosure a WSL desk reads describes what is written inside
+    the distribution and in its drop folder, not the Windows settings.json
+    this path never edits; and it names no Linux path or user, since the
+    probe that finds them has not run when it prints."""
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
+    home = _recorded_wsl()
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    out = capsys.readouterr().out
+    disclosure = out.split("To undo all of it:")[0]
+    assert "Changes    Claude Code's settings.json inside WSL (Ubuntu)" \
+        in disclosure
+    assert f"Creates    {home.drop_dir}" in disclosure
+    native = cli.settings_path(cli.claude_home.from_environ())
+    assert f"Changes    {native}" not in out
+    assert f"Creates    {cli.shim_path()}" not in out
+    assert "/home/zoe" not in disclosure and "zoe" not in disclosure
+    assert "wsl.localhost" not in disclosure
+
+
+def test_plain_install_on_a_wsl_desk_ignores_a_broken_native_settings(
+        tmp_path, monkeypatch, capsys):
+    """The Windows settings.json is not this desk's, so one that does not
+    parse neither stops the install nor raises out of the disclosure."""
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe())
+    home = _recorded_wsl()
+    _settings(tmp_path).write_text("{ not json")
+    assert cli.main(["install"]) == 0
+    assert ("install_into", home) in calls
+    assert _settings(tmp_path).read_text() == "{ not json"
+
+
+def test_gone_distro_keeps_its_drop_folder_when_native_check_stops(
+        tmp_path, monkeypatch, capsys):
+    """The native pre-check refuses an unparseable settings.json: then the
+    record and the drop folder are both left as they were, together."""
+    from pc import claude_home
+    _wsl_desk(monkeypatch, _FakeReg([(OTHER_GUID, "Debian")]))
+    home = _recorded_wsl()
+    os.makedirs(home.state_dir)
+    _settings(tmp_path).write_text("{ not json")
+    assert cli.main(["install"]) == 1
+    assert claude_home.recorded() == home
+    assert os.path.isdir(home.drop_dir)
