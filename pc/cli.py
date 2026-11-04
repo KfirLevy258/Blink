@@ -3599,6 +3599,15 @@ def cmd_install(args) -> int:
     rec = claude_home.recorded()
     if rec is not None and rec.kind == claude_home.WSL:
         kept_wsl = _wsl_distro(rec)
+    if kept_wsl is WSL_UNCHECKED:
+        # Not "gone": that would delete the drop folder and record Windows'
+        # own Claude Code over a desk whose distribution is still there.
+        # Stopped before the disclosure, so nothing it promises is skipped.
+        print("Blink setup stopped. Could not check WSL; left it as it was.")
+        print()
+        print(f"Nothing was changed. Check that `wsl --list` shows"
+              f" {rec.distro_name}, then run this again.")
+        return 1
     # Before anything is written, and before the disclosure: if the file we are
     # about to edit does not parse, the honest move is to change nothing at all
     # and say why. The alternative -- treating it as empty -- writes a fresh
@@ -3815,18 +3824,31 @@ def _wsl_registry():
     return wsl._WinReg() if _windows() else None
 
 
+# _wsl_distro's answer when the registry could not say whether the
+# distribution is there. Not None, which is "gone": until the final branch
+# review one unreadable subkey made every distribution look gone, and a plain
+# install then deleted the drop folder and moved the desk back to Windows.
+WSL_UNCHECKED = object()
+
+
 def _wsl_distro(home):
     """The distribution a WSL home was recorded for, found by its GUID
-    (which survives a rename, the name does not), or None when it is no
-    longer installed. Reads the registry only: nothing is started."""
+    (which survives a rename, the name does not); None when it is no
+    longer installed; WSL_UNCHECKED when the registry could not be read, or
+    its key for that GUID could not (wsl.scan). Reads the registry only:
+    nothing is started."""
     reg = _wsl_registry()
     if reg is None:
         return None
     want = (home.distro_guid or "").lower()
-    for d in wsl.distros(reg):
+    try:
+        found, unsure = wsl.scan(reg)
+    except wsl.Unreadable:
+        return WSL_UNCHECKED
+    for d in found:
         if d.guid.lower() == want:
             return d
-    return None
+    return WSL_UNCHECKED if want in unsure else None
 
 
 def _wsl_list(found) -> None:
@@ -4418,12 +4440,26 @@ def cmd_status(args) -> int:
     # unless it is running, because opening one starts it -- a status run
     # would undo the person's `wsl --shutdown` (section 4).
     wsl_name, wsl_state = None, None
+    recorded_name = home.distro_name
     if home.kind == claude_home.WSL:
         d = _wsl_distro(home)
-        wsl_name = d.name if d is not None else home.distro_name
-        wsl_state = ("gone" if d is None
-                     else "running" if wsl.running(d.name) else "stopped")
+        if d is WSL_UNCHECKED:
+            wsl_name, wsl_state = home.distro_name, "unchecked"
+        elif d is None:
+            wsl_name, wsl_state = home.distro_name, "gone"
+        else:
+            wsl_name = d.name
+            wsl_state = "running" if wsl.running(d.name) else "stopped"
+            # Read under the name it has now: the record's UNC paths name
+            # the old one, which no longer leads anywhere.
+            try:
+                home = _wsl_under(home, d.name)
+            except install_statusline.WslInstallError:
+                pass
     reachable = wsl_state in (None, "running")
+    # What the rows below say for a distribution they did not look inside.
+    unread = {"stopped": "is not running", "gone": "is not on this computer",
+              "unchecked": "could not be checked"}.get(wsl_state, "")
     desk = read_desk(home=home, hooks=None if reachable else ClaudeHooks(
         0, len(install_hooks.HOOK_EVENTS), False, False, False))
     text, ver = desk.claude_text, desk.claude_ver
@@ -4431,7 +4467,16 @@ def cmd_status(args) -> int:
         print(f"Claude Code WSL ({wsl_name}), " + {
             "running": "running",
             "stopped": "not running",
-            "gone": "not found -- removed or reinstalled?"}[wsl_state])
+            "gone": "not found -- removed or reinstalled?",
+            "unchecked": "could not check -- Windows did not list WSL's"
+                         " distributions"}[wsl_state])
+        if wsl_state in ("running", "stopped") and \
+                wsl_name != recorded_name:
+            # Found by its GUID under another name. The panel still works
+            # (the drop folder is named for the GUID), but the record and
+            # the commands it prints name the old one.
+            print(f"            renamed from {recorded_name}"
+                  f" -- run `{_repair_command()} install`")
         # One home per page: with the WSL one recorded, the native one is
         # not read at all, which someone with both needs to be told.
         if claude_on_path(claude_home.native()):
@@ -4503,8 +4548,7 @@ def cmd_status(args) -> int:
         # asked; their contents are the WSL drift check's (pc/wsl_watch),
         # and the native shim notes below say nothing about them.
         if not reachable:
-            print(f"Status line inside {wsl_name}, not checked while it is"
-                  " not running")
+            print(f"Status line inside {wsl_name}, not checked: it {unread}")
         elif os.path.exists(shim_path(home)):
             print(f"Status line installed inside {wsl_name}")
         else:
@@ -4529,7 +4573,7 @@ def cmd_status(args) -> int:
     # answers a different question.
     hooks = desk.hooks
     if not reachable:
-        print(f"Activity    not checked -- {wsl_name} is not running")
+        print(f"Activity    not checked -- {wsl_name} {unread}")
     elif not hooks.readable and hooks.unreachable:
         print("Activity    unknown -- settings.json could not be read")
     elif not hooks.readable:
@@ -4619,9 +4663,15 @@ def cmd_status(args) -> int:
         _wire_line(home, reachable)
     else:
         from pc import claude_plan, normalizer
-        _session_window_line(*_claude_page(
-            desk, None if reachable
-            else claude_plan.PlanReader(source=lambda: None)))
+        if not reachable:
+            plan = claude_plan.PlanReader(source=lambda: None)
+        elif home.kind == claude_home.WSL:
+            # This home's config, under the name the distribution has now
+            # (a default reader asks the record, which names the old one).
+            plan = claude_plan.PlanReader(path=claude_plan.config_path(home))
+        else:
+            plan = None
+        _session_window_line(*_claude_page(desk, plan))
         _codex_session_line(normalizer.merge(codex) if codex else None)
     return 0
 

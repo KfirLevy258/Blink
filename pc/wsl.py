@@ -129,26 +129,59 @@ def policy_blocks(reg=None):
     return any(values.get(k) == 0 for k in ("AllowWSL", "AllowInboxWSL"))
 
 
-def distros(reg=None):
-    """Installed distributions (State == 1; a half-installed one is skipped),
-    from the registry. On any registry error: [] -- the caller says to check
-    WSL. No fallback to `wsl -l -q`, whose names carry no GUID."""
+class Unreadable(Exception):
+    """The registry's list of distributions could not be read at all. Not
+    the same answer as a distribution that is not in it: a caller that
+    took one for the other would move a desk off WSL, or leave its shims
+    behind, because a registry read failed once."""
+
+
+def scan(reg=None):
+    """(installed, unsure) from the registry. `installed` are the
+    distributions with State == 1. `unsure` are the GUIDs whose own key is
+    there but was not read, or names a state other than installed (half
+    installed, converting, being removed): neither proves the distribution
+    gone. Raises Unreadable when the Lxss key itself cannot be listed;
+    a Lxss key that does not exist is WSL with no distributions, and gives
+    ([], set()).
+
+    One subkey that will not read costs that subkey alone. Until the final
+    branch review it emptied the whole list, and a plain install then took
+    the recorded distribution for removed."""
     reg = reg or _WinReg()
     try:
         default = str(reg.values(HKCU, LXSS).get("DefaultDistribution", ""))
-        found = []
-        for sub in reg.subkeys(HKCU, LXSS):
-            if not sub.startswith("{"):
-                continue
+        subs = list(reg.subkeys(HKCU, LXSS))
+    except FileNotFoundError:
+        return [], set()
+    except (OSError, ValueError, TypeError) as e:
+        raise Unreadable(type(e).__name__) from None
+    found, unsure = [], set()
+    for sub in subs:
+        if not isinstance(sub, str) or not sub.startswith("{"):
+            continue
+        try:
             v = reg.values(HKCU, LXSS + "\\" + sub)
             name = v.get("DistributionName")
             if v.get("State") != _STATE_INSTALLED or not name:
+                unsure.add(sub.lower())
                 continue
             found.append(Distro(guid=sub, name=str(name),
                                 version=int(v.get("Version", 0) or 0),
                                 default=sub.lower() == default.lower()))
-        return found
-    except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, AttributeError):
+            unsure.add(sub.lower())
+    return found, unsure
+
+
+def distros(reg=None):
+    """Installed distributions (State == 1; a half-installed one is skipped),
+    from the registry. [] when the list cannot be read -- the caller says to
+    check WSL; scan() tells that apart from none. No fallback to
+    `wsl -l -q`, whose names carry no GUID."""
+    try:
+        return scan(reg)[0]
+    except Unreadable:
         return []
 
 

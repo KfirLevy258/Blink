@@ -236,3 +236,81 @@ def test_probe_env_capture_under_real_shells(shell, tmp_path):
     got = wsl._parse_env0(out.stdout)
     assert got["CLAUDE_CONFIG_DIR"] == "/cfg"
     assert got["PATH"].startswith(f"{home}/.nvm/bin")
+
+
+# --- the final branch review, finding 1 -----------------------------------
+
+class _OneBadKey(FakeReg):
+    """A registry whose key for one GUID raises on read."""
+    def __init__(self, tree, bad, exc=OSError):
+        super().__init__(tree)
+        self.bad, self.exc = bad, exc
+
+    def values(self, hive, path):
+        if path.endswith("\\" + self.bad):
+            raise self.exc("denied")
+        return super().values(hive, path)
+
+
+def test_one_bad_subkey_costs_that_subkey_alone():
+    tree = {("HKCU", L): {"DefaultDistribution": "{B}"},
+            ("HKCU", L + "\\{A}"): {"DistributionName": "Old", "State": 1},
+            ("HKCU", L + "\\{B}"): {"DistributionName": "Ubuntu", "State": 1,
+                                    "Version": 2}}
+    for exc in (OSError, ValueError, TypeError):
+        reg = _OneBadKey(tree, "{A}", exc)
+        assert wsl.distros(reg) == [wsl.Distro("{B}", "Ubuntu", 2, True)]
+        found, unsure = wsl.scan(reg)
+        assert [d.name for d in found] == ["Ubuntu"] and unsure == {"{a}"}
+
+
+def test_scan_tells_unreadable_from_none():
+    class Broken(FakeReg):
+        def subkeys(self, hive, path):
+            raise PermissionError("denied")
+    with pytest.raises(wsl.Unreadable):
+        wsl.scan(Broken({("HKCU", L): {}}))
+
+    class Absent(FakeReg):
+        def values(self, hive, path):
+            raise FileNotFoundError("no Lxss key")
+    # No Lxss key at all is WSL with nothing installed, not "cannot say".
+    assert wsl.scan(Absent({})) == ([], set())
+    # A key that is there but not installed (converting, being removed)
+    # is not proof the distribution is gone.
+    reg = FakeReg({("HKCU", L): {},
+                   ("HKCU", L + "\\{C}"): {"DistributionName": "X",
+                                           "State": 4}})
+    assert wsl.scan(reg) == ([], {"{c}"})
+
+
+def test_wsl_exe_falls_back(monkeypatch):
+    monkeypatch.setenv("SystemRoot", "S:\\Win")
+    monkeypatch.setenv("windir", "W:\\Other")
+    assert wsl.wsl_exe() == (os.path.join("S:\\Win", "System32", "wsl.exe"),)
+    monkeypatch.delenv("SystemRoot")
+    assert wsl.wsl_exe() == (os.path.join("W:\\Other", "System32",
+                                          "wsl.exe"),)
+    monkeypatch.delenv("windir")
+    assert wsl.wsl_exe() == (os.path.join("C:\\Windows", "System32",
+                                          "wsl.exe"),)
+
+
+def test_policy_unreadable_means_allowed():
+    class Denied(FakeReg):
+        def values(self, hive, path):
+            raise PermissionError("denied")
+    assert not wsl.policy_blocks(Denied({}))
+
+
+@pytest.mark.parametrize("path,ok", [
+    ("/home/bob/.local/bin/claude", True),
+    ("/usr/bin/claude", True),
+    ("/mnt/c/Users/bob/AppData/Roaming/npm/claude", False),
+    ("/home/bob/bin/claude.exe", False),
+    ("/home/bob/bin/claude.CMD", False),
+    ("/opt/claude.bat", False),
+    ("claude", False),
+])
+def test_usable_rejects_windows_claudes(path, ok):
+    assert wsl._usable(path) is ok

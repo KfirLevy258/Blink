@@ -3295,6 +3295,7 @@ class _UncWatch:
         import builtins
         import io
         self.seen = []
+        self.paths = []
         for mod, name in ((os, "stat"), (os, "lstat"), (os, "scandir"),
                           (os, "listdir"), (os, "open"), (builtins, "open"),
                           (io, "open")):
@@ -3307,6 +3308,7 @@ class _UncWatch:
                 else ""
             if isinstance(p, str) and "wsl.localhost" in p.lower():
                 self.seen.append(name)
+                self.paths.append(p)
                 raise OSError("UNC touched")
             return real(path, *a, **k)
         return call
@@ -3601,3 +3603,80 @@ def test_gone_distro_keeps_its_drop_folder_when_native_check_stops(
     assert cli.main(["install"]) == 1
     assert claude_home.recorded() == home
     assert os.path.isdir(home.drop_dir)
+
+
+# --- the final branch review of Plan B ------------------------------------
+
+class _BadKeyReg(_FakeReg):
+    """The fake registry with the key of `bad` unreadable."""
+
+    def __init__(self, distros, bad):
+        super().__init__(distros)
+        self.bad = bad
+
+    def values(self, hive, path):
+        if path.endswith("\\" + self.bad):
+            raise PermissionError("denied")
+        return super().values(hive, path)
+
+
+def test_plain_install_leaves_an_unchecked_wsl_desk_alone(tmp_path,
+                                                          monkeypatch,
+                                                          capsys):
+    """Finding 1: one unreadable key -- the recorded distribution's -- is
+    not that distribution gone. The install stops with the record, the drop
+    folder and the Windows settings exactly as they were."""
+    from pc import claude_home
+    for reg in (_BadKeyReg([(OTHER_GUID, "Debian"), (WSL_GUID, "Ubuntu")],
+                           WSL_GUID),
+                _FakeReg(broken=True)):
+        calls = _wsl_desk(monkeypatch, reg, probe=_probe())
+        home = _recorded_wsl()
+        os.makedirs(home.state_dir, exist_ok=True)
+        _settings(tmp_path, {})
+        assert cli.main(["install"]) == 1
+        out = capsys.readouterr().out
+        assert "Could not check WSL; left it as it was." in out
+        assert claude_home.recorded() == home
+        assert os.path.isdir(home.drop_dir)
+        assert _read(tmp_path) == {}
+        assert calls == []
+
+
+def test_a_bad_neighbour_key_does_not_hide_the_distro(tmp_path,
+                                                      monkeypatch, capsys):
+    """Another distribution's unreadable key costs that one alone."""
+    calls = _wsl_desk(monkeypatch, _BadKeyReg(
+        [(OTHER_GUID, "Debian"), (WSL_GUID, "Ubuntu")], OTHER_GUID),
+        probe=_probe())
+    home = _recorded_wsl()
+    _settings(tmp_path, {})
+    assert cli.main(["install"]) == 0
+    assert ("install_into", home) in calls
+
+
+def test_status_says_it_could_not_check_wsl(monkeypatch, capsys):
+    calls = _wsl_desk(monkeypatch, _FakeReg(broken=True))
+    _recorded_wsl()
+    watch = _UncWatch(monkeypatch)
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "Claude Code WSL (Ubuntu), could not check" in out
+    assert "not found" not in out
+    assert "Activity    not checked -- Ubuntu could not be checked" in out
+    assert calls == [] and not watch.seen
+
+
+def test_status_says_a_distro_was_renamed(monkeypatch, capsys):
+    """Finding 7: found by GUID under another name, status says so and
+    reads it under the name it has now."""
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Work")]), running=True)
+    _recorded_wsl(name="Ubuntu")
+    watch = _UncWatch(monkeypatch)
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "Claude Code WSL (Work), running" in out
+    assert (f"renamed from Ubuntu -- run `{cli._repair_command()} install`"
+            in out)
+    assert watch.paths
+    assert all("\\Work\\" in p and "Ubuntu" not in p for p in watch.paths), watch.paths
