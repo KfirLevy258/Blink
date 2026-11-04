@@ -169,6 +169,47 @@ def test_a_source_replaces_the_file(tmp_path):
     assert r.look(NOW + claude_plan.RECHECK_S) == seat      # None: last good
 
 
+def test_no_answer_yet_is_not_held_for_a_minute(tmp_path):
+    """/code-review max of 2026-11-04, U18: a WSL home's source answers
+    None until its watch's first tick, and the first look stamped its time
+    all the same, so EMPTY_VIEW -- "no seat" -- was held for RECHECK_S
+    after every daemon start. A spend desk then showed Claude Desktop's
+    windows figures, the saved Ultra verdict's mark and the token burn
+    view for most of a minute. Until a first answer the source is asked on
+    every look; after one, a None keeps it and the pacing, as before."""
+    seat = dataclasses.replace(claude_plan.EMPTY_VIEW, spend_seat=True)
+    answers = [None, None, seat]
+    asked = []
+
+    def source():
+        asked.append(1)
+        return answers.pop(0) if answers else None
+
+    r = claude_plan.PlanReader(path=str(tmp_path / "nope"), source=source)
+    assert r.look(NOW) == claude_plan.EMPTY_VIEW
+    assert r.look(NOW + 2) == claude_plan.EMPTY_VIEW
+    assert r.look(NOW + 4) == seat
+    assert r.look(NOW + 6) == seat and len(asked) == 3     # paced again
+    assert r.look(NOW + 4 + claude_plan.RECHECK_S) == seat  # None: kept
+
+
+def test_a_file_not_read_yet_is_tried_again_at_the_next_look(tmp_path,
+                                                              monkeypatch):
+    """Likewise a native config locked at the first look (Windows), or
+    caught mid-write: no answer yet, so no minute of "no seat"."""
+    p = tmp_path / ".claude.json"
+    p.write_text(json.dumps(doc()), encoding="utf-8")
+    real = claude_plan.parse
+    fails = [1]
+    monkeypatch.setattr(claude_plan, "parse", lambda path, st=None:
+                        None if fails and fails.pop() else real(path, st))
+    r = claude_plan.PlanReader(path=str(p))
+    assert r.look(NOW).spend_seat is False
+    assert r.look(NOW + 2).spend_seat is False        # not every poll
+    assert r.look(NOW + claude_plan.FIRST_ANSWER_RETRY_S).spend_seat is True
+    assert claude_plan.FIRST_ANSWER_RETRY_S < claude_plan.RECHECK_S
+
+
 def test_ultra_and_read_still_answer(tmp_path):
     d = doc()
     d["oauthAccount"].update(organizationRateLimitTier="default_claude_max_20x",
