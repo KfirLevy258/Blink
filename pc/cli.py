@@ -32,7 +32,8 @@ from typing import NamedTuple
 
 from pc import (claude_home, install_codex_hooks, install_hooks,
                 install_statusline, ota, protocol, status_page,
-                statusline_source, update, user_config, win_driver, wsl)
+                statusline_source, update, usage_refresh, user_config,
+                win_driver, wsl)
 from pc import theme as theme_mod
 from pc import theme_server
 # Eagerly, unlike the other providers, which are imported inside the functions
@@ -3496,7 +3497,7 @@ def _service_folder(name, folder, consequence, these="this folder"):
 
 def _install_steps() -> int:
     """How many numbered steps `blink install` prints on this platform."""
-    return 6 if sys.platform == "win32" else 5
+    return 7 if sys.platform == "win32" else 6
 
 
 def _stepper(total):
@@ -3713,6 +3714,91 @@ def drift_watchdog(home=None):
         home=home)
 
 
+REFRESH_QUESTION = (
+    "BLINK can keep your figures current when Claude Code isn't running, by"
+    " asking Claude Code's /usage now and then. It sends no messages and"
+    " uses no quota. Turn on? ")
+REFRESH_OFF_HINT = "off (turn on with: blink config usage-refresh on)"
+_ASK_TRIES = 3
+
+
+def _ask_yes(question: str, default: bool):
+    """Ask a yes/no question on the terminal. True or False for the answer;
+    None, without asking, when nobody is there to answer.
+
+    "Nobody" is a stdin that is not a terminal: an installer run from a
+    script, a pipe or CI, where a prompt would hang or read whatever was
+    piped. Enter is the default, y/yes/n/no in any case are the answers, and
+    anything else asks again, three times in all, then takes the default
+    rather than looping on a person who is typing something else."""
+    try:
+        if not sys.stdin.isatty():
+            return None
+    except (AttributeError, ValueError):
+        return None
+    tail = "[Y/n] " if default else "[y/N] "
+    for _ in range(_ASK_TRIES):
+        print(question + tail, end="", flush=True)
+        try:
+            got = input().strip().lower()
+        except EOFError:
+            return default
+        if got == "":
+            return default
+        if got in ("y", "yes"):
+            return True
+        if got in ("n", "no"):
+            return False
+    return default
+
+
+def _refresh_view(home):
+    """The config view of `home` for the install question, or None when it
+    cannot be read: an unreadable config is a personal login, as
+    _spend_seat takes it."""
+    from pc import claude_plan
+    try:
+        return claude_plan.PlanReader(
+            path=claude_plan.config_path(home)).look(time.time())
+    except Exception:
+        return None
+
+
+def _install_refresh_step(home) -> str:
+    """The text after "[n/N] Usage refresh ... ": asks, once, whether to run
+    the person's own `claude -p /usage` to keep the figures fresh.
+
+    Asked only when the key is absent, so a reinstall never asks twice, and
+    never for a WSL home (the refresh does not reach into a distribution
+    yet). The question's own line is printed here; the return value is the
+    outcome. A non-interactive run leaves the key absent so that a later
+    interactive install, or update, still asks."""
+    if home.kind == claude_home.WSL:
+        return "not available for WSL yet"
+    try:
+        have = usage_refresh.chosen(blink_home())
+    except (user_config.Unreadable, OSError):
+        return "left as it was (config.json cannot be read)"
+    if have is not None:
+        return "on" if have else "off"
+    if not usage_refresh.find_claude(_home()):
+        return ("off (Claude Code isn't installed; see"
+                " docs/README-full.md#keeping-figures-fresh)")
+    view = _refresh_view(home)
+    default = not (view is not None and usage_refresh.is_work_login(view))
+    if sys.stdin is not None and getattr(sys.stdin, "isatty", None) \
+            and sys.stdin.isatty():
+        print()
+    answer = _ask_yes(REFRESH_QUESTION, default)
+    if answer is None:
+        return REFRESH_OFF_HINT
+    try:
+        user_config.put(blink_home(), usage_refresh.SETTING, answer)
+    except (user_config.Unreadable, OSError):
+        return "not saved (config.json cannot be written)"
+    return "on" if answer else REFRESH_OFF_HINT
+
+
 def cmd_install(args) -> int:
     # `blink install --wsl <name>` is this install, for that distribution.
     # Until the review of feat/enterprise-spend (U28) it was a command of
@@ -3915,13 +4001,22 @@ def cmd_install(args) -> int:
     else:
         print(_install_codex_hooks())
 
-    if steps == 6:
+    if sys.platform == "win32":
         step("USB driver")
         print(_install_driver_step())
 
     step("Background service")
     service = _install_service()
     print(service)
+
+    step("Usage refresh")
+    if named is not None:
+        refresh_home = _unprobed(named)
+    elif kept_wsl is not None:
+        refresh_home = rec
+    else:
+        refresh_home = home
+    print(_install_refresh_step(refresh_home))
 
     if _home_refusal():
         _say_home_refused(
@@ -4717,8 +4812,15 @@ def cmd_uninstall(_args) -> int:
               # month counted on from the old file, and uninstall left
               # session ids behind while the README's rows said what it
               # removes.
-              *_spend_count_files()):
+              *_spend_count_files(),
+              # The usage refresh's state (when it last ran, why it turned
+              # itself off) and any temp name a write of it left.
+              *_usage_refresh_files()):
         _rm(p)
+    # The folder `claude -p /usage` runs in. Empty unless Claude Code left
+    # something there, so a flat sweep and an rmdir that refuses a folder
+    # holding a subdirectory.
+    _rm_tree(os.path.join(blink_home(), "refresh"))
     # The per-session state directory, and everything under it. state.json
     # above is the single-slot file this replaced; it is still on the list so
     # an install that predates the directory leaves nothing behind.
@@ -4795,6 +4897,13 @@ def _verdict_files() -> list:
     (tests/test_sandbox.py)."""
     from pc import session_verdict
     p = session_verdict.verdict_path()
+    return [p, p + ".tmp", *install_statusline.temp_siblings(p)]
+
+
+def _usage_refresh_files() -> list:
+    """usage-refresh.json and the temp files a write of it may leave
+    (theme._write_json's names). Resolved now, never at import."""
+    p = os.path.join(blink_home(), usage_refresh.STATE_FILE)
     return [p, p + ".tmp", *install_statusline.temp_siblings(p)]
 
 
@@ -5341,6 +5450,7 @@ def cmd_status(args) -> int:
     else:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
+    print("Usage refresh " + _refresh_status(home.kind == claude_home.WSL))
     codex = _source_lines(desk)
     if getattr(args, "wire", False):
         # The Session rows come out of the same poll as the wire line.
@@ -5358,6 +5468,32 @@ def cmd_status(args) -> int:
         _session_window_line(*_claude_page(desk, plan))
         _codex_session_line(normalizer.merge(codex) if codex else None)
     return 0
+
+
+def _refresh_status(wsl_home) -> str:
+    """The value of status's Usage refresh row. Says nothing about a figure:
+    only whether it is on, and when it last ran or why it is not."""
+    if wsl_home:
+        return "not available for WSL yet"
+    home = blink_home()
+    try:
+        have = usage_refresh.chosen(home)
+    except (user_config.Unreadable, OSError):
+        return "unreadable"
+    state = usage_refresh.load_state(home)
+    if state.off_reason == "cost":
+        return "off: Claude Code's /usage used the model"
+    if state.off_reason == "failing":
+        return ("off: /usage kept failing; run claude and /login, then turn"
+                " it on again")
+    if have is None:
+        return "not set up"
+    if not have:
+        return "off"
+    if state.last_run_at > 0:
+        mins = max(0, int((time.time() - state.last_run_at) // 60))
+        return f"on, last ran {mins} min ago"
+    return "on"
 
 
 def _session_window_line(page, verdict):
@@ -5902,7 +6038,32 @@ def cmd_update(_args) -> int:
         print("not running, so the board will stay on \"Link the PC daemon\".")
         print(f"Run `{_repair_command()} install` to finish.")
         return 1
+    # Last, and only after an update that worked: the question is about
+    # something this release brings. Whoever never answered it is asked here
+    # (a person who updates by hand is at a terminal); the daemon's own
+    # automatic updates ask on the board instead.
+    refresh = _update_refresh_question()
+    if refresh:
+        print()
+        print("Usage refresh ... " + refresh)
     return 0
+
+
+def _update_refresh_question() -> str:
+    """`blink update`'s one question, or "" when there is nothing to say:
+    not interactive, already answered, or a WSL home. Nothing is saved when
+    nobody could answer, so the next interactive run asks."""
+    try:
+        if usage_refresh.chosen(blink_home()) is not None:
+            return ""
+        home = claude_home.current()
+        if home.kind == claude_home.WSL:
+            return ""
+        if not sys.stdin.isatty():
+            return ""
+    except Exception:
+        return ""
+    return _install_refresh_step(home)
 
 
 def cmd_provision(args) -> int:
@@ -6116,6 +6277,16 @@ _CONFIG = {
          "Board firmware 1.3.4 and earlier does not show it; update the"
          " board to see it."),
         ("The bridge makes no status-page requests.",)),
+    # Asked at install and update; this is the switch afterwards. Turning it
+    # on also clears why it went off by itself (see _clear_refresh_off).
+    "usage-refresh": _Setting(
+        usage_refresh.SETTING, usage_refresh.enabled,
+        "run Claude Code's own /usage now and then, to keep figures fresh"
+        " when it isn't running",
+        ("The bridge will run `claude -p /usage` about every 25 minutes when",
+         "nothing else has fresh figures and someone is at the computer. It",
+         "sends no messages and uses no quota."),
+        ("The bridge will not run Claude Code.",)),
 }
 
 
@@ -6148,6 +6319,15 @@ def cmd_config(args) -> int:
         except OSError as e:
             print(f"Could not save the setting: {e}")
             return 1
+        if name == "usage-refresh" and value == "on":
+            # Turning it on is a fresh start: the daemon turned it off for a
+            # reason (cost, or a day of failures) that is on disk as well,
+            # and the watch would otherwise stay off for it.
+            try:
+                usage_refresh.clear_off(home)
+            except OSError as e:
+                print(f"Could not clear the earlier reason it was off: {e}")
+                return 1
     print(f"{name}: {state(setting)}")
     if value is not None:
         for line in (setting.said_on if value == "on" else setting.said_off):

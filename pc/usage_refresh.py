@@ -213,6 +213,43 @@ def due(now, *, enabled, native, board_alive, idle_s, cache_at, other_at,
         and now - state.last_run_at >= spacing(state))
 
 
+def is_work_login(view):
+    """Whether the config names a login an employer pays for: a usage-billed
+    seat, or an Enterprise or Team organization. Install asks those people
+    with No as the default, since the quota is not theirs alone."""
+    return bool(view.spend_seat or view.org_kind in ("enterprise", "team"))
+
+
+def enabled(blink_home):
+    """True or False for the person's choice; None when the file cannot be
+    read, which is not "off" (status_page.enabled gives the reason)."""
+    try:
+        return user_config.load(blink_home).get(SETTING) is True
+    except (user_config.Unreadable, OSError):
+        return None
+
+
+def chosen(blink_home):
+    """True or False once the person has answered, None while the key is
+    absent. Raises what user_config.load raises for a file it cannot read."""
+    v = user_config.load(blink_home).get(SETTING)
+    return v if isinstance(v, bool) else None
+
+
+def clear_off(blink_home):
+    """Forget why the refresh turned itself off, so that turning it on again
+    is a fresh start: no off_reason, no failure count. Nothing is written
+    when there is no state file to correct."""
+    state = load_state(blink_home)
+    if state.off_reason == "" and state.fails == 0 \
+            and state.failing_since is None:
+        return
+    state.off_reason = ""
+    state.fails = 0
+    state.failing_since = None
+    save_state(blink_home, state)
+
+
 def _cache_at(view):
     """When this login's /usage cache was fetched, or None. The anchor and
     the windows come from one cache (claude_plan._cache), so either will
