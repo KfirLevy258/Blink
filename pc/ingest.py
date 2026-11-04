@@ -405,8 +405,13 @@ class IngestionBus:
                 wait = (min(sitting_out["wait"] * 2, MAX_RETRY_AFTER_S)
                         if sitting_out is not None else FIRST_RETRY_AFTER_S)
                 if sitting_out is None:
-                    print(f"[ingest] {name} failed and will be skipped: {e}",
-                          file=sys.stderr)
+                    # By type, never the message: it can carry what the
+                    # provider was reading ("int too large to convert to
+                    # float" off a damaged status line, a path, a character
+                    # of Claude Code's config), into the file customers send
+                    # us (CLAUDE.md).
+                    print(f"[ingest] {name} failed and will be skipped"
+                          f" ({type(e).__name__})", file=sys.stderr)
                 self._broken[key] = {"since": now, "retry_at": now + wait,
                                      "wait": wait}
             else:

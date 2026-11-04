@@ -796,3 +796,20 @@ def test_the_boards_plan_echo_is_collapsed():
     out = e.feed(b"[plan] claude windows\n")
     assert out == ["[plan] (99 more not logged)"]
     assert e.feed(b"[plan] claude windows\n") == []
+
+
+def test_a_benched_provider_is_logged_by_type_only(capsys):
+    """The message of an exception out of a provider can carry what it was
+    reading -- "int too large to convert to float" from a damaged status
+    line, a path, a character of Claude Code's config -- and the bench line
+    put it in bridge.log. The type is enough to say what broke."""
+    class Broken:
+        def poll(self, now):
+            raise ValueError("secret /Users/someone/.claude.json 31412")
+
+    bus = ingest.IngestionBus(providers=[Broken()], now=lambda: NOW,
+                              verdict=None)
+    bus.poll()
+    err = capsys.readouterr().err
+    assert "Broken failed and will be skipped (ValueError)" in err
+    assert "secret" not in err and "31412" not in err
