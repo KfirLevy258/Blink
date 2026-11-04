@@ -208,11 +208,30 @@ def is_spend_seat(doc) -> bool:
             or acct.get("billingType") == SPEND_BILLING_TYPE)
 
 
+# The largest figure an anchor carries, in cents: ten million dollars, the
+# bound pc/spend_count and statusline_source put on the same money. A fetch
+# time is milliseconds up to 2100-01-01, statusline_source's ceiling on a
+# reset stamp. Past either, the cache is not believed: json reads an int of
+# any length and a float up to 1e308, and the figure went to the page and
+# the wire as it was (the final review of 2026-11-04).
+MAX_CENTS = 10 ** 9
+MAX_FETCHED_MS = 4_102_444_800 * 1000
+
+
 def _number(v):
-    """A finite int or float that is not a bool, else None."""
+    """A finite int or float that is not a bool, else None.
+
+    The try: math.isfinite converts to float, and an int of 309 digits or
+    more raises OverflowError there instead of answering. parse() says it
+    never raises, and a used_credits that long made it raise, out of
+    PlanReader.look and with it a WSL watch tick and the Ultra check (the
+    final review of 2026-11-04, U1)."""
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    return v if math.isfinite(v) else None
+    try:
+        return v if math.isfinite(v) else None
+    except OverflowError:
+        return None
 
 
 def _anchor(doc):
@@ -233,7 +252,8 @@ def _anchor(doc):
     fetched_ms = _number(cache.get("fetchedAtMs"))
     util = cache.get("utilization")
     extra = util.get("extra_usage") if isinstance(util, dict) else None
-    if fetched_ms is None or fetched_ms < 0 or not isinstance(extra, dict):
+    if (fetched_ms is None or not 0 <= fetched_ms <= MAX_FETCHED_MS
+            or not isinstance(extra, dict)):
         return None
     currency = extra.get("currency")
     if currency is None:
@@ -242,12 +262,13 @@ def _anchor(doc):
         return None
     used = _number(extra.get("used_credits"))
     enabled = extra.get("is_enabled")
-    if used is None or used < 0 or not isinstance(enabled, bool):
+    if (used is None or not 0 <= used <= MAX_CENTS
+            or not isinstance(enabled, bool)):
         return None
     limit = extra.get("monthly_limit")
     if limit is not None:
         limit = _number(limit)
-        if limit is None or limit < 0:
+        if limit is None or not 0 <= limit <= MAX_CENTS:
             return None
         limit = int(round(limit))
     return SpendAnchor(int(round(used)), limit, enabled, fetched_ms / 1000.0)
@@ -324,7 +345,15 @@ def parse(path, st=None):
         # Ultra" would flip the page until the file next changed. Retry
         # at the next look and keep the last good view meanwhile.
         return None
-    view = _view(doc, st.st_mtime)
+    try:
+        view = _view(doc, st.st_mtime)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        # The backstop for "never raises": every field _view reads is
+        # checked for its type, but this is a file anyone can write, and a
+        # value no check foresaw must cost the view, not the poll. An
+        # answer, like JSON that is not an object: held until the file
+        # changes, not read again once a minute.
+        view = bare
     del doc         # the rest of the file is not kept, not even here
     return view
 

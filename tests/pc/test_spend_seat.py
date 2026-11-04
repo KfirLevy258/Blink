@@ -210,3 +210,62 @@ def test_half_written_config_keeps_the_last_view(tmp_path):
     p.write_text("[1, 2]", encoding="utf-8")
     os.utime(p, (NOW + 50, NOW + 50))
     assert r.look(NOW + 300).spend_seat is False
+
+
+# -- parse() never raises (final review of 2026-11-04, U1's siblings) --------
+
+HUGE = 10 ** 400        # json reads it; math.isfinite raises OverflowError
+
+
+def _with_cache(**over):
+    d = doc()
+    extra = d["cachedUsageUtilization"]["utilization"]["extra_usage"]
+    for k, v in over.items():
+        if k == "fetchedAtMs":
+            d["cachedUsageUtilization"][k] = v
+        else:
+            extra[k] = v
+    return d
+
+
+@pytest.mark.parametrize("over", [
+    {"used_credits": HUGE}, {"monthly_limit": HUGE}, {"fetchedAtMs": HUGE},
+    # Finite but absurd: past ten million dollars in cents, or a fetch
+    # time past 2100. Refused, not carried to the page and the wire.
+    {"used_credits": 10 ** 300}, {"monthly_limit": 1e300},
+    {"used_credits": 10 ** 9 + 1}, {"fetchedAtMs": 1e300},
+])
+def test_an_absurd_figure_is_no_anchor_and_does_not_raise(tmp_path, over):
+    v = view(tmp_path, _with_cache(**over))
+    assert v is not None
+    assert v.anchor is None
+    assert v.spend_seat is True
+
+
+def test_an_id_that_will_not_encode_does_not_raise(tmp_path):
+    """json reads a lone surrogate ("\\ud800") into a str that .encode
+    ("utf-8") refuses with UnicodeEncodeError, and _fingerprint encodes
+    the ids: parse() raised, though it says it never does, and with it
+    PlanReader.look, a WSL watch tick and the Ultra check."""
+    p = tmp_path / ".claude.json"
+    d = doc()
+    d["oauthAccount"]["accountUuid"] = "\ud800-x"
+    p.write_text(json.dumps(d), encoding="utf-8")
+    v = claude_plan.parse(str(p))
+    assert v is not None and v.spend_seat is True
+    assert len(v.account_fp) == 64
+    d["oauthAccount"]["accountUuid"] = "\udc00-x"
+    p.write_text(json.dumps(d), encoding="utf-8")
+    assert claude_plan.parse(str(p)).account_fp != v.account_fp
+
+
+def test_a_cache_id_nested_deep_does_not_raise(tmp_path):
+    p = tmp_path / ".claude.json"
+    d = doc()
+    nest = []
+    for _ in range(900):
+        nest = [nest]
+    d["cachedUsageUtilization"]["accountUuid"] = nest
+    p.write_text(json.dumps(d), encoding="utf-8")
+    v = claude_plan.parse(str(p))
+    assert v is not None and v.anchor is None

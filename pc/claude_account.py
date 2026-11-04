@@ -60,7 +60,13 @@ def _fingerprint(ids):
     if not present:
         return None
     joined = "\x1f".join(i if isinstance(i, str) else "" for i in ids)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    # surrogatepass: json reads a lone surrogate ("\ud800") into a str
+    # that plain UTF-8 refuses with UnicodeEncodeError, and that made
+    # claude_plan.parse, which never raises, raise (the final review of
+    # 2026-11-04). Real ids are ASCII and digest exactly as before; a
+    # surrogate digests to its own stable value.
+    raw = joined.encode("utf-8", "surrogatepass")
+    return hashlib.sha256(raw).hexdigest()
 
 
 class AccountWatch:

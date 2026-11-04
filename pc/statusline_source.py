@@ -166,16 +166,36 @@ _secs_until = protocol.secs_until
 # case DevOceanIT brought from their own desk.
 
 
-def _amount(v):
-    """A finite, non-negative number from the payload, else None.
+# The largest dollar figure the spend page believes: ten million, as
+# pc/spend_count's MAX_CENTS. No developer's monthly cap or spend is near
+# it, and a figure json reads -- an int of any length, a float up to 1e308
+# -- reached the wire unbounded.
+MAX_USD = 10_000_000
+# A spend share is bounded like a window's percentage in _window above:
+# 0..1000, 1000 and not 100 because overage carries a share past its cap.
+MAX_SHARE = 1000
+
+
+def _amount(v, ceiling=MAX_USD):
+    """A finite number from 0 to `ceiling` from the payload, else None.
 
     bool is refused by name because it is an int: `"used_usd": true` is a
     malformed field, not one dollar. A negative or infinite amount would
     reach the panel as "$-4" or "$inf", and "not reported" is the honest
     reading of either.
+
+    The try: math.isfinite converts to float, and an int of 309 digits or
+    more raises OverflowError there instead of answering. It came out of
+    every poll and benched the provider, spend page and all (the final
+    review of 2026-11-04, U2). Unreadable, so not reported, like the rest.
     """
     # type() rather than isinstance(): bool passes isinstance(v, int).
-    usable = type(v) in (int, float) and math.isfinite(v) and v >= 0
+    if type(v) not in (int, float):
+        return None
+    try:
+        usable = math.isfinite(v) and 0 <= v <= ceiling
+    except OverflowError:
+        return None
     return float(v) if usable else None
 
 
@@ -213,14 +233,22 @@ def _spend_frame(rate_limits: dict, now_epoch: float, mtime_epoch: float):
     obj = rate_limits.get("spend_limit")
     if not isinstance(obj, dict):
         return None
-    pct = _amount(obj.get("used_percentage"))
+    pct = _amount(obj.get("used_percentage"), MAX_SHARE)
     if pct is None:
-        # Not a percentage, or a negative or NaN one. Without it there is
+        # Not a percentage, or a negative, NaN or out-of-bound one (5000
+        # went to the board as it was until U2). Without it there is
         # nothing to put on a gauge, and an object we cannot read is not
         # evidence of an allowance -- so the payload is read the old way.
         return None
     resets = obj.get("resets_at")
-    if isinstance(resets, bool) or not isinstance(resets, (int, float)):
+    # Bounded like a window's stamp (_window). Unbounded, 10**400 reached
+    # protocol.secs_until, which raised out of every poll and froze both
+    # pages behind "showing last known", and the remembered payload offered
+    # it again on the next (U2). Out of bounds is unknown, like a stamp
+    # that is absent; what an unknown reset costs the page after five hours
+    # and ten minutes is pc/providers/claude_cli's _frame.
+    if (isinstance(resets, bool) or not isinstance(resets, (int, float))
+            or not (RESET_EPOCH_MIN <= resets <= RESET_EPOCH_MAX)):
         resets = None
     period = obj.get("period")
     if period not in base.SPEND_PERIODS:

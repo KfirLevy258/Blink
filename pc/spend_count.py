@@ -23,6 +23,21 @@ Rules, each from a way the raw number misleads:
   payload can, and a negative "high-water mark" would count the next real
   figure twice over.
 
+* A residual, kept rather than fixed (U10 in the final review of
+  2026-11-04). Two processes on one session id -- `claude --continue` in
+  a second terminal -- render different totals, and any sighting at or
+  after the last one moves the session's stamp. If the leading process's
+  render just before a /usage is lost (another session wrote
+  statusline.json over it before the poll read it), the lagging one's
+  figure, equal to the high-water mark, stamps the session after the
+  anchor, and the leader's next rise is counted in full although part of
+  it was spent before /usage measured: 30 cents counted for 20. Only a
+  sighting below the mark could be told apart, and the lost render makes
+  the lagging one's equal to it, so no rule on the figures alone fixes
+  it; the status line carries no process id. It needs two processes on
+  one session, a lost render and a /usage together, and the next /usage
+  makes the figure exact again.
+
 What the file keeps, and why it stays small. Until the final review of
 2026-11-04 every rise of the month was kept one by one, so the file grew
 all month and was rewritten on nearly every render. Now:
@@ -50,11 +65,23 @@ all month and was rewritten on nearly every render. Now:
   forward within a login and a month, and bind() empties everything when
   either changes.
 * Each session's highest estimate, so a resumed session's past cost is
-  never counted as new.
+  never counted as new. These are kept until the month turns or the login
+  changes, and they are what the file's size follows: about 70 bytes a
+  session, so 2 KB a day at thirty sessions a day and 66 KB by the 31st
+  (tests/pc/test_spend_count.py's busy month, U13b in the final review of
+  2026-11-04, which found the README's "a few kilobytes" untrue). Not
+  pruned: a session dropped while its terminal stood idle would take its
+  next render for a first sighting and count nothing from it.
 * A save writes a rise on a session already in the file at most once a
-  minute (SAVE_EVERY_S). Nothing is lost by that: a rise not yet written is
-  counted again after a restart, from the saved high-water mark, stamped
-  with the saved sighting before it. A session's first sighting and an
+  minute (SAVE_EVERY_S). A rise not yet written is counted again after a
+  restart, from the saved high-water mark and stamped with the saved
+  sighting before it -- but only when that session renders again. One that
+  had closed never does, so until the final review of 2026-11-04 (U12) a
+  restart lost the last minute of a closed session's rises ($10.70 on the
+  page fell to $10.20). An ordinary exit now writes whatever the pacing
+  held back (_flush_at_exit; the daemon's SIGTERM is an ordinary exit).
+  What a crash or a kill -9 loses is still at most the last minute of rises
+  on sessions that do not render again. A session's first sighting and an
   emptied count (bind()) are written at once. A restart that missed the
   first sighting would take the session's next render for its first and
   count nothing from it, and one that missed the emptying would carry the
@@ -64,17 +91,18 @@ all month and was rewritten on nearly every render. Now:
 Integer cents throughout. State is per session UUID (a per-session total is
 all the spec allows) and is never printed or logged.
 """
+import atexit
 import json
 import math
 import os
-import tempfile
 import time
+import weakref
 
 # As a package import, like every other module under pc/. A bare
 # `import protocol` worked only where pc/ itself was on sys.path (its own
 # test put it there), and `from pc import spend_count` -- the bus's import,
 # and the daemon's -- raised ModuleNotFoundError.
-from pc import protocol
+from pc import protocol, theme
 
 _BUCKETS = 20
 # Rises newer than this, measured back from the newest render, are kept one
@@ -89,9 +117,67 @@ SAVE_EVERY_S = 60
 _VERSION = 2
 
 
+# The largest figure the counter believes, in cents: ten million dollars.
+# Every bound below is this one. No Claude Code session costs that much, and
+# without a bound a status-line total of 10**307 passed observe(), was saved
+# as a 309-digit cent figure a minute later, and every start after it died in
+# _load, where math.isfinite raises OverflowError on an int that large (the
+# final review of 2026-11-04, U1). 1.8e306 dollars did not get as far:
+# times 100 it rounds to infinity, and round() raised out of observe().
+# A carried total sums many sessions' rises, so it is allowed a thousand
+# times more; that is still exact as a float and as a cent figure on the
+# page.
+MAX_CENTS = 10 ** 9
+_MAX_FOLDED_CENTS = MAX_CENTS * 1000
+# A time is a render's mtime: the epoch up to 2100-01-01, the ceiling
+# statusline_source puts on a reset stamp. Anything past it is not a time.
+_MAX_TIME = 4_102_444_800
+
+
 def _num(x) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool) \
-        and math.isfinite(x)
+    """A finite int or float that is not a bool.
+
+    The try: math.isfinite converts to float, and an int of 309 digits or
+    more raises OverflowError there instead of answering False."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return False
+    try:
+        return math.isfinite(x)
+    except OverflowError:
+        return False
+
+
+def _time(x) -> bool:
+    return _num(x) and 0 <= x <= _MAX_TIME
+
+
+def _cents(x, ceiling=MAX_CENTS) -> bool:
+    return _num(x) and 0 <= x <= ceiling
+
+
+# Every counter that has written its file, for the exit flush (U12 in the
+# final review of 2026-11-04). A WeakSet, so a counter dropped by its owner
+# (a test's, a bus replaced) is not kept alive by this, and registered with
+# atexit on the first one rather than at import: importing a module of ours
+# does nothing (CLAUDE.md).
+_WRITTEN = weakref.WeakSet()
+_HOOKED = []
+
+
+def _flush_at_exit():
+    """Write what the pacing held back, at an ordinary exit.
+
+    The daemon's SIGTERM is an ordinary exit (claude_usage_bridge's
+    exit_on_sigterm), so this runs when launchd or systemd stops it. Each
+    counter writes to the file it last wrote and nowhere else: by exit the
+    test sandbox has handed HOME back, and resolving the default path again
+    then would name the real ~/.blink. A failure is ignored; there is no
+    later save to hand it to."""
+    for counter in list(_WRITTEN):
+        try:
+            counter._flush()
+        except Exception:
+            pass
 
 
 def _default_path() -> str:
@@ -100,12 +186,62 @@ def _default_path() -> str:
     return os.path.join(os.path.expanduser("~"), ".blink", "spend-count.json")
 
 
+def _parse(d):
+    """(fp, period, sessions, adds, fold, anchor) from a loaded file, or
+    None for one not to believe. Every figure must be finite, at or above
+    zero and within its bound: json reads Infinity, NaN and ints of any
+    length, and a high-water mark below zero would count the next real
+    figure on top of it (-100000 then $1.00 counted $1001)."""
+    if not isinstance(d, dict) or d.get("v") != _VERSION:
+        return None
+    fp, period = d.get("fp"), d.get("period")
+    if fp is not None and not isinstance(fp, str):
+        return None
+    if period is not None and not _time(period):
+        return None
+    if not isinstance(d["sessions"], dict) or not isinstance(d["adds"], list):
+        return None
+    sessions = {}
+    for sid, v in d["sessions"].items():
+        if not isinstance(v, list) or len(v) != 2:
+            return None
+        hw, seen = v
+        if isinstance(hw, bool) or not isinstance(hw, int) \
+                or not _cents(hw) or not _time(seen):
+            return None
+        sessions[sid] = [hw, seen]
+    adds = []
+    for a in d["adds"]:
+        if not isinstance(a, list) or len(a) != 3:
+            return None
+        prev, at, cents = a
+        if not (_time(prev) and _time(at) and _cents(cents)):
+            return None
+        adds.append([prev, at, int(cents)])
+    fold = d.get("fold")
+    if fold is not None:
+        if not isinstance(fold, list) or len(fold) != 5:
+            return None
+        b, after, total, first, last = fold
+        if not (_time(b) and _time(first) and _time(last)
+                and _cents(after, _MAX_FOLDED_CENTS)
+                and _cents(total, _MAX_FOLDED_CENTS)):
+            return None
+        fold = [b, int(after), int(total), first, last]
+    anchor = d.get("anchor")
+    if anchor is not None and not _time(anchor):
+        return None
+    return fp, period, sessions, adds, fold, anchor
+
+
 class SpendCounter:
     def __init__(self, path=None, persist=True, clock=time.monotonic):
         self._path = path
         self._persist = persist
         self._clock = clock
         self._saved_at = None  # self._clock() at the last write
+        self._failed_at = None  # self._clock() at the last refused write
+        self._written_to = None  # the file the last write went to
         self._fp = None
         self._period = None
         self._sessions = {}   # sid -> [high_water_cents, last_seen]
@@ -134,44 +270,24 @@ class SpendCounter:
         self._dirty = self._urgent = True
 
     def _load(self):
+        """The saved state, or nothing: any file this cannot read whole and
+        believe is read as empty, as the module docstring promises. It held
+        an estimate, which the next /usage makes exact; a daemon that will
+        not start because of it (a raise here comes out of SpendCounter(),
+        and so out of build_bus(), at every start) shows nothing at all."""
         try:
             with open(self._file(), "r", encoding="utf-8") as f:
                 d = json.load(f)
-            if not isinstance(d, dict) or d.get("v") != _VERSION:
-                return
-            fp, period = d.get("fp"), d.get("period")
-            if fp is not None and not isinstance(fp, str):
-                return
-            if period is not None and not isinstance(period, (int, float)):
-                return
-            if not isinstance(d["sessions"], dict) \
-                    or not isinstance(d["adds"], list):
-                return
-            sessions = {}
-            for sid, v in d["sessions"].items():
-                hw, seen = v
-                if not isinstance(sid, str) or isinstance(hw, bool) \
-                        or not isinstance(hw, int) or not _num(seen):
-                    return
-                sessions[sid] = [hw, seen]
-            adds = []
-            for prev, at, cents in d["adds"]:
-                # json accepts Infinity and NaN; int(inf) would raise.
-                if not all(_num(x) for x in (prev, at, cents)):
-                    return
-                adds.append([prev, at, int(cents)])
-            fold = d.get("fold")
-            if fold is not None:
-                if not isinstance(fold, list) or len(fold) != 5 \
-                        or not all(_num(x) for x in fold):
-                    return
-                b, after, total, first, last = fold
-                fold = [b, int(after), int(total), first, last]
-            anchor = d.get("anchor")
-            if anchor is not None and not _num(anchor):
-                return
-        except (OSError, ValueError, KeyError, TypeError):
+            got = _parse(d)
+        except (OSError, ValueError, KeyError, TypeError, OverflowError,
+                RecursionError):
+            # RecursionError: json's answer to an array nested thousands
+            # deep, as in session_verdict.load. OverflowError: a number
+            # too large for a float, met by any arithmetic on it.
             return
+        if got is None:
+            return
+        fp, period, sessions, adds, fold, anchor = got
         self._fp, self._period = fp, period
         self._sessions, self._adds = sessions, adds
         self._fold, self._anchor = fold, anchor
@@ -195,7 +311,9 @@ class SpendCounter:
     def observe(self, session_id, cost_usd, at) -> bool:
         # The counter owns the guard: a NaN, infinity, string or bool from
         # a damaged payload must not touch the state.
-        if not _num(cost_usd) or not _num(at) or cost_usd < 0:
+        # And a cost past MAX_CENTS or a time that is not one: see there.
+        if (not _num(cost_usd) or not _time(at) or cost_usd < 0
+                or cost_usd > MAX_CENTS / 100):
             return False
         cents = int(round(cost_usd * 100))
         s = self._sessions.get(session_id)
@@ -281,33 +399,61 @@ class SpendCounter:
     def save(self) -> None:
         """Write the file if anything changed: a rise at most once a
         minute (SAVE_EVERY_S), a new session or an emptied count at once,
-        and the first save of a process at once."""
+        and the first save of a process at once.
+
+        After a refused write, nothing is tried again for SAVE_EVERY_S,
+        urgent or not. This runs on every poll, every two seconds, and a
+        folder that refuses the file refused it each time: a temp created,
+        the whole document dumped into it and the temp removed, forever
+        (the final review of 2026-11-04, U8). The count stays in memory
+        meanwhile; what a restart in that minute loses is what any unsaved
+        rise loses (the module docstring)."""
         if not self._persist or not self._dirty:
             return
         tick = self._clock()
+        if (self._failed_at is not None and tick >= self._failed_at
+                and tick - self._failed_at < SAVE_EVERY_S):
+            return
         if (not self._urgent and self._saved_at is not None
                 and tick >= self._saved_at
                 and tick - self._saved_at < SAVE_EVERY_S):
             return
+        self._write(self._file(), tick)
+
+    def _flush(self):
+        """The exit flush (_flush_at_exit): whatever is unwritten, to the
+        file the last write went to, pacing and back-off aside."""
+        if self._persist and self._dirty and self._written_to is not None:
+            self._write(self._written_to, self._clock())
+
+    def _write(self, target, tick):
         doc = {"v": _VERSION, "fp": self._fp, "period": self._period,
                "sessions": self._sessions, "adds": self._adds,
                "fold": self._fold, "anchor": self._anchor}
-        target = self._file()
-        tmp = None
         try:
-            d = os.path.dirname(target) or "."
-            os.makedirs(d, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(prefix=".spend-count.", dir=d)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(doc, f, separators=(",", ":"))
-            os.replace(tmp, target)
-            tmp = None
-            self._dirty = self._urgent = False
-            self._saved_at = tick
+            # theme._write_json and not tempfile.mkstemp. On Python 3.11,
+            # the interpreter the Windows build ships, mkstemp takes a
+            # PermissionError for "that name is taken" and tries the next,
+            # up to os.TMP_MAX, about two billion on Windows; a ~/.blink
+            # that refuses new files (antivirus, a folder policy) held the
+            # serial thread inside this save, pongs stopped and the board
+            # went to HOST LOST (the final review of 2026-11-04, U7; the
+            # same fault theme._write_json documents from review S4). One
+            # os.replace attempt, as session_verdict.save makes, for the
+            # same reason: Windows' nine retry sleeps of 0.3 s would hold
+            # the serial thread 2.7 s. Its temps are named the way
+            # install_statusline.temp_siblings finds them, so a killed
+            # write is swept by the next one.
+            theme._write_json(target, doc, tries=1)
         except OSError:
-            # Keep the count in memory and try again at the next save.
-            if tmp:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
+            # Kept in memory and tried again after the back-off (save).
+            self._failed_at = tick
+            return
+        self._dirty = self._urgent = False
+        self._saved_at = tick
+        self._failed_at = None
+        self._written_to = target
+        _WRITTEN.add(self)
+        if not _HOOKED:
+            _HOOKED.append(True)
+            atexit.register(_flush_at_exit)

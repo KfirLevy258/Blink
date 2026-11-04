@@ -5,6 +5,8 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "pc"))
 
 import protocol  # noqa: E402
@@ -327,3 +329,195 @@ def test_a_negative_cost_changes_nothing():
     assert c.since(0) == 0
     c.observe("a", 1.10, 300)
     assert c.since(0) == 10
+
+
+# -- the save on the serial thread (review of 2026-11-04, U7 and U8) ----------
+
+def test_save_does_not_use_mkstemp(tmp_path, monkeypatch):
+    """tempfile.mkstemp on Python 3.11, the Windows build's interpreter,
+    takes a PermissionError for a taken name and tries the next, up to
+    os.TMP_MAX (about two billion): a ~/.blink that refuses new files held
+    the serial thread inside the first save and the board went to HOST
+    LOST. The temp comes from install_statusline's _open_temp instead."""
+    import tempfile
+
+    def no_mkstemp(*a, **k):
+        raise AssertionError("mkstemp on the serial thread")
+    monkeypatch.setattr(tempfile, "mkstemp", no_mkstemp)
+    c = mk(tmp_path)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    c.save()
+    assert json.loads((tmp_path / "spend-count.json").read_text())["fp"] \
+        == "fp"
+    assert os.listdir(tmp_path) == ["spend-count.json"]
+
+
+def test_a_refused_save_tries_once_and_backs_off(tmp_path, monkeypatch):
+    """A folder that refuses the write costs one attempt, not a retry on
+    every two-second poll; the count stays in memory and is written once
+    the back-off has passed."""
+    from pc import install_statusline
+    calls = []
+    real = install_statusline._open_temp
+
+    def refuse(path):
+        calls.append(path)
+        raise PermissionError(13, "refused")
+    monkeypatch.setattr(install_statusline, "_open_temp", refuse)
+    tick = Tick()
+    c = mk(tmp_path, clock=tick)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    c.save()
+    assert len(calls) == 1
+    for i in range(20):                  # forty seconds of polls
+        tick.t += 2
+        c.observe("b", 1.00, 200 + i)    # a new session is urgent
+        c.save()
+    assert len(calls) == 1
+    monkeypatch.setattr(install_statusline, "_open_temp", real)
+    tick.t += 30
+    c.save()
+    doc = json.loads((tmp_path / "spend-count.json").read_text())
+    assert set(doc["sessions"]) == {"a", "b"}
+    assert [n for n in os.listdir(tmp_path)] == ["spend-count.json"]
+
+
+# -- what _load survives (review of 2026-11-04, U1) ---------------------------
+
+def _v2(**kw):
+    d = {"v": 2, "fp": "fp", "period": 0, "sessions": {"a": [100, 50]},
+         "adds": [[10, 20, 5]], "fold": None, "anchor": None}
+    d.update(kw)
+    return d
+
+
+@pytest.mark.parametrize("doc", [
+    # 309 digits: json reads it, math.isfinite raises OverflowError on it.
+    _v2(sessions={"a": [100, 10 ** 400]}),
+    _v2(adds=[[10 ** 400, 20, 5]]),
+    _v2(adds=[[10, 20, 10 ** 400]]),
+    _v2(fold=[0, 1, 2, 10 ** 400, 4]),
+    _v2(anchor=10 ** 400),
+    _v2(period=10 ** 400),
+    # A high-water mark below zero: the next $1.00 would count $1001.
+    _v2(sessions={"a": [-100000, 50]}),
+    _v2(adds=[[10, 20, -5]]),
+    _v2(fold=[0, -1, 2, 3, 4]),
+    _v2(fold=[0, 1, -2, 3, 4]),
+    _v2(anchor=-1),
+    # Absurd but finite: refused like the observe() that could write it.
+    _v2(sessions={"a": [10 ** 300, 50]}),
+    _v2(adds=[[10, 20, 10 ** 300]]),
+    _v2(fold=[0, 1, 10 ** 300, 3, 4]),
+    _v2(sessions={"a": [100, 1e300]}),
+    _v2(sessions={"a": [100, 50, 7]}),
+    _v2(sessions={"a": "xy"}),
+])
+def test_a_malformed_file_loads_empty(tmp_path, doc):
+    (tmp_path / "spend-count.json").write_text(json.dumps(doc))
+    c = mk(tmp_path)
+    assert c.since(0) == 0
+    c.bind("fp", 0)
+    # Empty: "a" is a first sighting again, and $1.00 counts nothing.
+    assert c.observe("a", 1.00, 60) is True
+    assert c.since(0) == 0
+
+
+def test_a_file_nested_past_the_recursion_limit_loads_empty(tmp_path):
+    (tmp_path / "spend-count.json").write_text("[" * 100000 + "]" * 100000)
+    c = mk(tmp_path)
+    assert c.since(0) == 0
+
+
+def test_a_good_v2_file_still_loads(tmp_path):
+    (tmp_path / "spend-count.json").write_text(json.dumps(_v2()))
+    c = mk(tmp_path)
+    c.bind("fp", 0)
+    assert c.since(0) == 5
+    c.observe("a", 1.10, 60)
+    assert c.since(0) == 15
+
+
+@pytest.mark.parametrize("cost", [10 ** 307, 1e307, 1.8e306, 10 ** 400,
+                                  2e7])
+def test_an_absurd_cost_is_refused_not_saved(tmp_path, cost):
+    """A status-line total of 10**307 passed observe(), was saved as a
+    309-digit cent figure a minute later, and every start after that died
+    reading it (1.8e306 * 100 rounds to infinity and raised there and
+    then). No session costs ten million dollars."""
+    c = mk(tmp_path)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    assert c.observe("a", cost, 200) is False
+    assert c.observe("b", cost, 200) is False
+    c.save()
+    d = mk(tmp_path)
+    d.bind("fp", 0)
+    assert d.observe("a", 1.25, 300) is True
+    assert d.since(0) == 25
+
+
+# -- a restart after a closed session (U12) -----------------------------------
+
+def test_a_paced_rise_is_written_at_exit(tmp_path):
+    """A rise held back by the one-a-minute pacing used to be recovered
+    only from the session's next render after a restart; a session that
+    had closed never renders again, so it was lost. The exit flush writes
+    it, to the file this counter last wrote and nowhere else."""
+    import spend_count
+    tick = Tick()
+    c = mk(tmp_path, clock=tick)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    c.save()
+    c.observe("a", 1.70, 110)
+    tick.t += 5
+    c.save()                                 # paced: not written
+    spend_count._flush_at_exit()
+    d = mk(tmp_path)
+    d.bind("fp", 0)
+    assert d.since(0) == 70
+
+
+def test_the_exit_flush_writes_only_where_the_counter_wrote(tmp_path,
+                                                            monkeypatch):
+    """One that never saved writes nothing at exit: by then the test
+    sandbox has handed HOME back, and the default path would name the real
+    ~/.blink."""
+    import spend_count
+    monkeypatch.setenv("HOME", str(tmp_path))
+    c = SpendCounter()
+    c.observe("a", 1.00, 100)
+    spend_count._flush_at_exit()
+    assert not (tmp_path / ".blink").exists()
+
+
+
+def test_the_file_at_the_end_of_a_busy_month(tmp_path):
+    """docs/README-full.md said the file "stays a few kilobytes all month".
+    The rises do, but every session's high-water mark is kept until the
+    month turns, so it grows by about 2 KB a day at thirty sessions a day:
+    66 KB on the 31st, measured with this generator (U13b, final review of
+    2026-11-04). The README now gives that figure; this keeps it true."""
+    import random
+    import uuid
+    r = random.Random(1)
+    t0 = 1_800_000_000.0
+    c = mk(tmp_path)
+    c.bind("f" * 64, t0)
+    t, sizes = t0, []
+    for day in range(31):
+        for _s in range(30):
+            sid = str(uuid.UUID(int=r.getrandbits(128)))
+            for k in range(20):
+                t += r.uniform(10, 200) + 0.123456
+                c.observe(sid, 0.37 * (k + 1), t)
+                c.since(t0)
+        c._urgent = True
+        c.save()
+        sizes.append((tmp_path / "spend-count.json").stat().st_size)
+    assert 50_000 < sizes[-1] < 72_000
+    # Roughly linear: a day's sessions, not the month's rises.
+    assert 1_500 < (sizes[-1] - sizes[0]) / 30 < 2_500

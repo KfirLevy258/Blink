@@ -188,3 +188,57 @@ def test_nothing_here_is_a_float_the_wire_cannot_carry():
     f = frame_of(spend_payload())
     for v in (f.session_pct, f.spend_usd, f.spend_limit_usd):
         assert math.isfinite(v)
+
+
+# -- numbers json reads and nothing else can (final review 2026-11-04, U2) ---
+
+HUGE = 10 ** 400        # 401 digits: json reads it, float() refuses it
+
+
+@pytest.mark.parametrize("value", [HUGE, 1e300, 10_000_001])
+@pytest.mark.parametrize("field", ["used_usd", "limit_usd"])
+def test_a_huge_dollar_figure_is_not_reported(field, value):
+    """math.isfinite raises OverflowError on an int this long; it came out
+    of every poll and the provider was benched, spend page and all. A
+    finite one past ten million dollars is no developer's figure either."""
+    f = frame_of(spend_payload(**{field: value}))
+    assert f.plan == base.PLAN_SPEND
+    assert f.session_pct == 62.8
+    assert getattr(f, {"used_usd": "spend_usd",
+                       "limit_usd": "spend_limit_usd"}[field]) is None
+
+
+@pytest.mark.parametrize("pct", [HUGE, 5000, 1000.5])
+def test_a_spend_share_past_the_windows_bound_is_not_drawn(pct):
+    """0..1000, the bound statusline_source._window puts on a window's
+    percentage (overage carries one past 100). 5000 went to the board as
+    it was."""
+    assert frame_of(spend_payload(used_percentage=pct)).plan \
+        == base.PLAN_WINDOWS
+
+
+@pytest.mark.parametrize("resets", [HUGE, 1e300, -1e300, -1])
+def test_a_reset_that_is_not_a_time_is_unknown(resets):
+    """Bounded like a window's stamp. 10**400 reached the countdown, which
+    raised out of every poll; 1e300 and -1e300 were read as a period that
+    never ends and one that ended in prehistory."""
+    f = frame_of(spend_payload(resets_at=resets))
+    assert f.plan == base.PLAN_SPEND
+    assert f.session_resets_at is None
+    assert f.session_rolled_at is None
+    assert f.session_pct == 62.8
+
+
+def test_a_huge_figure_does_not_take_the_poll_down(tmp_path):
+    import json
+    from pc import ingest
+    from pc.providers.claude_cli import ClaudeCliProvider
+    p = tmp_path / "statusline.json"
+    p.write_text(json.dumps(spend_payload(
+        used_usd=HUGE, limit_usd=HUGE, resets_at=HUGE)), encoding="utf-8")
+    import os
+    os.utime(p, (NOW, NOW))
+    bus = ingest.IngestionBus(providers=[ClaudeCliProvider(path=str(p))],
+                              now=lambda: NOW)
+    msg = bus.poll()
+    assert msg is not None and msg["session_pct"] == 62.8
