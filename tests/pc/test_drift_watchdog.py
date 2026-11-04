@@ -198,3 +198,49 @@ def test_a_stale_shim_is_still_repaired_after_it_gave_up(monkeypatch):
     assert m == "blink-hook.sh was out of date"
     # And the shim rewrites never counted towards the cap on their way there.
     assert w._reinstatements == isl.MAX_REINSTATEMENTS
+
+
+# --- review of feat/enterprise-spend, U6 ---------------------------------
+#
+# These messages are printed as `[watchdog] ...` into bridge.log, the file
+# customers send us. The replacement is the customer's own command, with
+# their paths and arguments in it, and an OSError's text names the
+# settings file, whose path holds their user name.
+
+def test_a_replacement_is_not_quoted_into_the_log(settings):
+    isl.install(settings, SHIM)
+    data = json.loads(open(settings).read())
+    data["statusLine"] = {"type": "command",
+                          "command": "/home/zoe/secret-bar --token abc"}
+    open(settings, "w").write(json.dumps(data))
+    msg = isl.drift_check(settings, SHIM)
+    assert "chained" in msg
+    assert "secret-bar" not in msg and "abc" not in msg
+
+
+def test_a_failed_restore_says_no_path(settings, monkeypatch):
+    isl.install(settings, SHIM)
+    data = json.loads(open(settings).read())
+    del data["statusLine"]
+    open(settings, "w").write(json.dumps(data))
+
+    def boom(*a, **k):
+        raise PermissionError(13, "Permission denied", settings)
+    monkeypatch.setattr(isl, "install", boom)
+    msg = isl.drift_check(settings, SHIM)
+    assert msg and "could not be restored" in msg
+    assert settings not in msg and os.path.dirname(settings) not in msg
+
+
+def test_a_failed_shim_rewrite_says_no_path(tmp_path, monkeypatch):
+    from pc import cli
+    isl.install(str(tmp_path / "settings.json"), SHIM)
+    target = str(tmp_path / "zoe-private" / "blink-hook.sh")
+    monkeypatch.setattr(cli, "shim_is_current", lambda p, n: False)
+
+    def boom(path, name):
+        raise PermissionError(13, "Permission denied", path)
+    monkeypatch.setattr(cli, "_write_shim", boom)
+    msg = isl.shim_content_check([(target, "blink-hook.sh")])
+    assert msg and "could not be replaced" in msg
+    assert "zoe-private" not in msg

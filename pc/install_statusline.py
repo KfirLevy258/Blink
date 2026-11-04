@@ -1090,13 +1090,21 @@ def drift_check(settings_path: str, shim_path: str, home=None, wsl_run=None):
         # shim moved, which is what an update to this program does.
         what = "statusline hook pointed at an old shim path; repointed it"
     else:
+        # Not quoted. This goes into bridge.log, the file customers send
+        # us, and the replacement is the customer's own command, with their
+        # paths and arguments in it; until the review of
+        # feat/enterprise-spend (U6) it was printed whole. `blink status`
+        # and the chain file are where they find it.
         what = ("statusline hook had been replaced; restored it and chained"
-                f" the replacement: {current}")
+                " the replacement")
 
     try:
         install(settings_path, shim_path, home)
     except Exception as e:
-        return f"statusline hook is missing and could not be restored: {e}"
+        # By type alone, for the same reason: an OSError's text names the
+        # settings file, whose path holds the account's user name.
+        return ("statusline hook is missing and could not be restored"
+                f" ({type(e).__name__})")
     return what
 
 
@@ -1255,7 +1263,10 @@ def shim_content_check(shims, home=None):
         try:
             cli._write_shim(path, name)
         except Exception as e:
-            repaired.append(f"{name} is out of date and could not be replaced: {e}")
+            # The type, not the text: an OSError's names the path, and
+            # this goes into bridge.log (drift_check says the same).
+            repaired.append(f"{name} is out of date and could not be"
+                            f" replaced ({type(e).__name__})")
             continue
         repaired.append(f"{name} was out of date; replaced it")
 
