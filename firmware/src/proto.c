@@ -91,7 +91,8 @@ static size_t line_len;
  * past its limit. The ceiling used to be 100, and num() does not clamp -- it
  * refuses -- so 102 left the caller's `double wp = 0` untouched and the panel
  * drew an empty ring at the moment the user went over. Accept the real number
- * and let usage_view saturate the ring.
+ * and let usage_view saturate the ring -- and past this ceiling too, hold the
+ * figure at it (num_pct below) rather than refuse it, for the same reason.
  */
 #define PCT_MAX 1000.0
 /*
@@ -113,6 +114,29 @@ static void num(const char *json, const char *key, double *out,
 		return;
 	}
 	*out = v;
+}
+/*
+ * A percentage on the usage line: as num(), except that a reading past
+ * PCT_MAX is held at it rather than refused. Refused, it left the caller's
+ * `double sp = 0` standing, and a spend seat whose cap was cut below what it
+ * had already spent -- $300 of $20, share 1500 -- drew an empty 0% ring with
+ * no "used up", the opposite of the truth (review of feat/enterprise-spend,
+ * 2026-11-04, U3). The ring saturates and the display holds "1000%" either
+ * way; NaN and anything below `lo` are still refused, because those are not
+ * a lot of usage but no reading.
+ */
+static void num_pct(const char *json, const char *key, double *out,
+		    double lo)
+{
+	double v;
+
+	if (!msg_get_double(json, key, &v)) {
+		return;
+	}
+	if (v != v || v < lo) {
+		return;
+	}
+	*out = v > PCT_MAX ? PCT_MAX : v;
 }
 static int64_t last_ping_ms;
 static int64_t last_host_ms;
@@ -476,8 +500,8 @@ static void dispatch(const char *json)
 		 */
 		double ss = -1, ws = -1;
 
-		num(json, "session_pct", &sp, -1, PCT_MAX);
-		num(json, "weekly_pct", &wp, -1, PCT_MAX);
+		num_pct(json, "session_pct", &sp, -1);
+		num_pct(json, "weekly_pct", &wp, -1);
 		num(json, "session_resets_in_s", &ss, -1, SECS_MAX);
 		num(json, "weekly_resets_in_s", &ws, -1, SECS_MAX);
 
@@ -515,7 +539,7 @@ static void dispatch(const char *json)
 		 * us); an absent key leaves the -1 "unknown" default. */
 		double mf = -1;
 
-		num(json, "fable_pct", &mf, -1, PCT_MAX);
+		num_pct(json, "fable_pct", &mf, -1);
 		usage_view_set_models(mf);
 
 		/* Every usage message says whether its own numbers can be
@@ -604,8 +628,8 @@ static void dispatch(const char *json)
 		if (msg_get_str(json, "p2", p2, sizeof(p2))) {
 			bool p2stale = false;
 
-			num(json, "p2_session_pct", &p2s, -1, PCT_MAX);
-			num(json, "p2_weekly_pct", &p2w, -1, PCT_MAX);
+			num_pct(json, "p2_session_pct", &p2s, -1);
+			num_pct(json, "p2_weekly_pct", &p2w, -1);
 			num(json, "p2_s_in_s", &p2si, -1, SECS_MAX);
 			num(json, "p2_w_in_s", &p2wi, -1, SECS_MAX);
 			/* Absent leaves this false, so a daemon older than

@@ -58,3 +58,19 @@ def test_a_plan_confirms_and_a_usage_line_without_one_resets():
     assert reset, "the usage arm does not reset an unconfirmed plan"
     assert reset.start() < usage.index("usage_view_set_provider1(p1)")
     assert reset.start() < usage.index("usage_view_update(sp,")
+
+
+def test_a_share_past_the_ceiling_is_held_at_it_not_dropped():
+    # num() refuses a value out of range and leaves the caller's default,
+    # which for the usage line's percentages is 0: a $300 spend against a
+    # $20 cap arrived as share 1500 and was drawn as an empty 0% ring with
+    # no "used up" (U3). Every percentage on the line is read through the
+    # clamping reader instead.
+    body = _arm("usage")
+    for key in ("session_pct", "weekly_pct", "fable_pct",
+                "p2_session_pct", "p2_weekly_pct"):
+        assert re.search(r'num_pct\(json, "%s",' % key, body), key
+        assert not re.search(r'\bnum\(json, "%s",' % key, body), key
+    fn = re.search(r"static void num_pct\(.*?\n\}", SRC, re.S)
+    assert fn, "no num_pct() in proto.c"
+    assert "PCT_MAX" in fn.group(0)
