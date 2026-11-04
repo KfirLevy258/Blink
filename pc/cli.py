@@ -3080,7 +3080,8 @@ def _announce(home=None, wsl_name=None, named=False):
         # at most, and are never logged or sent. "Or saved" too, until the
         # review of feat/enterprise-spend (U35): on a seat billed by usage
         # pc/spend_count saves both in spend-count.json, and the paragraph
-        # that says so (_announce_spend_later) is pointed at from here.
+        # that says so (_announce_spend_later, or on a seat already billed
+        # by usage _announce_spend_seat) is pointed at from here.
         print("             usage figures. It keeps the last status line payload")
         print("             Claude Code sent, which also names the session, the")
         print("             working directory and the transcript file. The bridge")
@@ -3215,10 +3216,12 @@ def _announce(home=None, wsl_name=None, named=False):
     # tokens included, so this says exactly what happens to it. It follows
     # CLAUDE_CONFIG_DIR as the transcripts' folder does, through the same
     # record.
-    _announce_claude_reads(home, wsl_name)
-    if wsl_name is None:
-        # On a WSL desk the setup step says it, from the distribution's
-        # config, once the probe has started it (_setup_wsl).
+    # On a WSL desk the seat is not known yet: the setup step says the
+    # full paragraph, from the distribution's config, once the probe has
+    # started it (_setup_wsl).
+    seat = wsl_name is None and _spend_seat(home)
+    _announce_claude_reads(home, wsl_name, spend_seat=seat)
+    if seat:
         _announce_spend_seat(home)
     # The same for Codex (CodexBurnReader): an account whose Codex log
     # reports a weekly limit and no five-hour one -- Codex Pro on the
@@ -3250,13 +3253,19 @@ def _announce(home=None, wsl_name=None, named=False):
     print()
 
 
-def _announce_claude_reads(home, wsl_name=None) -> None:
+def _announce_claude_reads(home, wsl_name=None, spend_seat=False) -> None:
     """_announce's paragraph on what is read out of Claude Code: the
     transcripts on an account with no five-hour limit, and the config for
     the plan and seat. With `wsl_name`, the folders are named by the
     distribution rather than spelled out: they are Linux paths inside it,
     and config_path would stat over UNC. Its own function so `blink install
-    --wsl` can say it before its probe starts the distribution."""
+    --wsl` can say it before its probe starts the distribution.
+
+    `spend_seat` is a config already known to name a seat billed by
+    usage: _announce_spend_seat follows with the full paragraph, so the
+    short one every other desk gets is left out. Both were printed until
+    the second review round (C5), saying twice what spend-count.json
+    keeps."""
     from pc import claude_plan
     if wsl_name is not None:
         # Named, not spelled out: the folders are Linux paths inside the
@@ -3297,7 +3306,8 @@ def _announce_claude_reads(home, wsl_name=None) -> None:
         print("  CLAUDE_CONFIG_DIR is set in this shell, and install records")
         print("  its folder, so the background service reads the folder and")
         print("  the file above too.")
-    _announce_spend_later()
+    if not spend_seat:
+        _announce_spend_later()
 
 
 def _announce_spend_later() -> None:
@@ -3308,9 +3318,11 @@ def _announce_spend_later() -> None:
     session id and cost "are never logged or saved" -- false on that seat,
     and false on a Max desk the day it /logins to one, which install never
     sees again (review of feat/enterprise-spend, U35). So the fact is said
-    here unconditionally, with the fingerprint the full paragraph left
-    out. The path is the native ~/.blink on a WSL desk too: the daemon
-    keeps the count on Windows, beside the board."""
+    here on every desk the full paragraph does not cover: all but a
+    native desk whose config names such a seat already, which is told
+    by _announce_spend_seat instead, once (review round 2, C5). The path
+    is the native ~/.blink on a WSL desk too: the daemon keeps the count
+    on Windows, beside the board."""
     from pc import spend_count
     print("  On a Claude seat billed by usage -- this one now, or one you")
     print("  /login to later -- it also keeps, in")
@@ -3348,6 +3360,19 @@ def _announce_wsl_files(home, name) -> None:
     print("  Leaves     Claude Code on Windows itself alone: it is not read.")
 
 
+def _spend_seat(home=None) -> bool:
+    """Does the config of `home` (claude_home.from_environ() when None)
+    name a seat billed by usage? A config that cannot be read does not:
+    the daemon would not show the page either."""
+    from pc import claude_plan
+    home = home or claude_home.from_environ()
+    try:
+        return bool(claude_plan.PlanReader(
+            path=claude_plan.config_path(home)).look(time.time()).spend_seat)
+    except Exception:
+        return False
+
+
 def _announce_spend_seat(home=None) -> None:
     """The extra paragraph a usage-billed Claude seat gets. Install asks the
     config now, rather than saying "if" for a thing it can see: on a seat
@@ -3356,14 +3381,8 @@ def _announce_spend_seat(home=None) -> None:
     true. A config that cannot be read means no paragraph; the daemon
     would not show the page either. The config is that of `home`, the one
     being installed (claude_home.from_environ() when None)."""
-    from pc import claude_plan, spend_count
-    home = home or claude_home.from_environ()
-    try:
-        spend = claude_plan.PlanReader(
-            path=claude_plan.config_path(home)).look(time.time()).spend_seat
-    except Exception:
-        return
-    if not spend:
+    from pc import spend_count
+    if not _spend_seat(home):
         return
     print()
     for line in (

@@ -3083,6 +3083,22 @@ def test_disclosure_says_what_a_usage_seat_keeps_on_any_desk(
     assert SPEND_LATER.format(path=spend_count._default_path()) in said
 
 
+def test_a_usage_seat_is_told_what_is_kept_once(tmp_path, capsys,
+                                                monkeypatch):
+    """Round 2, C5: on a seat billed by usage the disclosure said what
+    spend-count.json keeps twice, in two overlapping paragraphs: the one
+    every desk gets, and the full one this seat gets. The full one, which
+    says all the other does, is the one said."""
+    from pc import spend_count
+    as_checkout(monkeypatch)
+    _claude_json(tmp_path, "enterprise_usage_based")
+    cli._announce()
+    said = " ".join(l.strip() for l in capsys.readouterr().out.splitlines())
+    assert SPEND_NOTE.format(path=spend_count._default_path()) in said
+    assert SPEND_LATER.format(path=spend_count._default_path()) not in said
+    assert said.count(spend_count._default_path()) == 1
+
+
 def test_status_wire_counts_what_the_daemon_counted(tmp_path, capsys,
                                                     monkeypatch):
     """U19: on a seat billed by usage between /usage runs, `--wire` built
