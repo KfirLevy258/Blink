@@ -741,3 +741,58 @@ def test_widest_sburn_line():
         "claude", q, [protocol.SBURN_MAX_CENTS] * 20))
     assert why is None and len(raw) <= protocol.MAX_LINE_BYTES
     assert len(raw) == 234, len(raw)
+
+
+# ------------------------------------------------------------- the log
+
+
+def test_the_daemon_logs_plan_and_sburn_by_change_not_by_send():
+    """/code-review max of 2026-11-04, U5: on a working spend desk the plan
+    went out with every cent and the sburn line every 15 s, and neither was
+    in _REPEATED, so each send was a line in bridge.log -- with the board's
+    "[plan]" echo of each plan beside it, some 1000 lines an hour against a
+    Max desk's 370. The plan is compared on what it says, not the dollars,
+    which move by construction; sburn on the page and quarter-hour, as the
+    token burn line is."""
+    import ast
+    import pathlib
+    from pc import logbook
+    root = pathlib.Path(__file__).resolve().parents[2]
+    src = ast.unparse(ast.parse(
+        (root / "claude_usage_bridge.py").read_text(encoding="utf-8")))
+    assert "'plan': plan_frames" in src and "'sburn': sburn_frames" in src
+    assert "plan_frames.due()" in src and "sburn_frames.due()" in src
+    assert ("logbook.RepeatsBy('p', PLAN_LOGGED_FIELDS, 'plan lines')"
+            in src)
+    assert "logbook.RepeatsBy('p', ('q',), 'spend burn lines')" in src
+
+    import claude_usage_bridge as cub
+    r = logbook.RepeatsBy("p", cub.PLAN_LOGGED_FIELDS, "plan lines")
+    logged = 0
+    for cents in range(31412, 31412 + 300):
+        m = protocol.plan("claude", base.PLAN_SPEND, "monthly",
+                          cents / 100, 500.0, est=True)
+        logged += r.worth_logging(m)
+    assert logged == 1                       # three hundred cents, one line
+    assert r.worth_logging(protocol.plan("claude", base.PLAN_WINDOWS))
+    assert "usd" not in cub.PLAN_LOGGED_FIELDS
+
+
+def test_the_boards_plan_echo_is_collapsed():
+    """The board prints "[plan] <page> <kind>" for every plan it takes, and
+    bridge.log keeps only the tag (console_line), so each restated plan was
+    an identical line. Logged at most once per ten minutes, with a count of
+    what was held back; other tags are untouched."""
+    from pc import logbook
+    t = [0.0]
+    e = logbook.ConsoleEcho(now=lambda: t[0])
+    out = []
+    for _ in range(100):
+        out += e.feed(b"[plan] claude spend monthly\n[usage] x 5\n")
+        t[0] += 5
+    assert out.count("[plan]") == 1
+    assert out.count("[usage]") == 100
+    t[0] += 600
+    out = e.feed(b"[plan] claude windows\n")
+    assert out == ["[plan] (99 more not logged)"]
+    assert e.feed(b"[plan] claude windows\n") == []

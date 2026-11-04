@@ -417,6 +417,15 @@ PROBE_S = 1.5
 # seconds cannot miss a live board.
 PROBE_PATIENT_S = 11.0
 
+# What a `plan` line is compared on for the log (logbook.RepeatsBy below):
+# everything it says except the dollars. On a working spend desk the
+# dollars move with nearly every render, so a plan went out about every ten
+# seconds and each one was a line in bridge.log -- some 360 an hour, with the
+# board's "[plan]" echo of each beside it (/code-review max of 2026-11-04,
+# U5). A change of plan, period, cap or flag is still a line at once; the
+# dollars travel on the wire and are never in the log anyway.
+PLAN_LOGGED_FIELDS = ("plan", "period", "lim", "acct", "est", "hint")
+
 
 def hold_single_instance(home, on_wait=None, poll_s=5.0):
     """Block until this process is the only daemon, then keep the lock.
@@ -903,8 +912,15 @@ def main(argv=None):
     # quarter-hour, and the rest counted. Per page, like svc_frames: with a
     # claude and a codex line alternating, one Repeats would log them all.
     burn_frames = logbook.RepeatsBy("p", ("q",), "burn lines")
+    # The spend page's two lines, for the same reason (U5 of the
+    # /code-review max of 2026-11-04: about 1000 lines an hour on a spend
+    # desk). The plan on what it says, not the dollars (PLAN_LOGGED_FIELDS),
+    # and restated each heartbeat; sburn exactly as the token burn line.
+    plan_frames = logbook.RepeatsBy("p", PLAN_LOGGED_FIELDS, "plan lines")
+    sburn_frames = logbook.RepeatsBy("p", ("q",), "spend burn lines")
     _REPEATED = {"usage": usage_frames, "time": time_frames,
-                 "svc": svc_frames, "burn": burn_frames}
+                 "svc": svc_frames, "burn": burn_frames,
+                 "plan": plan_frames, "sburn": sburn_frames}
     # For this computer's own Claude Code, in the folder `blink install`
     # recorded (pc/claude_home): a login service does not see the shell's
     # CLAUDE_CONFIG_DIR, so the watchdog guards the file install wrote.
@@ -965,7 +981,8 @@ def main(argv=None):
         if drifted:
             print(f"[watchdog] {drifted}", file=sys.stderr)
         for line in (heartbeat.due(), usage_frames.due(), time_frames.due(),
-                     svc_frames.due(), burn_frames.due()):
+                     svc_frames.due(), burn_frames.due(), plan_frames.due(),
+                     sburn_frames.due()):
             if line:
                 print(line, file=sys.stderr)
         if logbook.rotate_if_full(_log_file, sys.stderr):
