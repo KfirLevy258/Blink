@@ -477,6 +477,25 @@ static void dispatch(const char *json)
 		num(json, "weekly_pct", &wp, -1, PCT_MAX);
 		num(json, "session_resets_in_s", &ss, -1, SECS_MAX);
 		num(json, "weekly_resets_in_s", &ws, -1, SECS_MAX);
+
+		/*
+		 * Whose figures these are, BEFORE they are drawn. The plan
+		 * record names a provider (usage_view_set_plan), so whether
+		 * the page is a spend page, and so its captions and its status
+		 * words, is decided by this name. Set after
+		 * usage_view_update(), as it was, the first line of a
+		 * connection on a board that booted first was drawn under the
+		 * name "" -- a spend share as "SESSION 5h 63%" -- and a switch
+		 * of main source drew Codex's windows under Claude's spend
+		 * captions (review of feat/enterprise-spend, 2026-11-04, FW1).
+		 * usage_view_set_provider1() redraws on a new name too; this
+		 * order is what keeps the first drawing right as well.
+		 */
+		char p1[USAGE_TAG_MAX];
+
+		if (msg_get_str(json, "provider", p1, sizeof(p1))) {
+			usage_view_set_provider1(p1);
+		}
 		usage_view_update(sp, (int32_t)ss, wp, (int32_t)ws);
 
 		/* Flat model key (protocol.py flattens its models list for
@@ -550,12 +569,6 @@ static void dispatch(const char *json)
 		num(json, "n_wait", &nw, 0, 9999);
 		num(json, "n_stuck", &nst, 0, 9999);
 		usage_view_set_counts((int)ns, (int)nr, (int)nw, (int)nst);
-
-		char p1[USAGE_TAG_MAX];
-
-		if (msg_get_str(json, "provider", p1, sizeof(p1))) {
-			usage_view_set_provider1(p1);
-		}
 
 		/*
 		 * How fast the session window is filling, when nothing can say

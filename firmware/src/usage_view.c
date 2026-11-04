@@ -3350,16 +3350,47 @@ void usage_view_set_burn(double pph)
 
 void usage_view_set_provider1(const char *tag)
 {
+	char was[USAGE_TAG_MAX];
+
 	/* The outer ring is whichever provider the daemon made primary, which
 	 * on a codex-only machine is codex -- so the colour follows the NAME,
 	 * not the ring position. */
+	snprintf(was, sizeof(was), "%s", provider1_tag);
 	snprintf(provider1_tag, sizeof(provider1_tag), "%s", tag ? tag : "");
+	/*
+	 * A new name is a new page as far as the plan is concerned: plan_of()
+	 * matches the record against this tag, so the captions, the right
+	 * gauge, the countdown under it and the status row's words all depend
+	 * on it. Only the pill used to follow. A board that booted before the
+	 * daemon has "" here when the greet burst lands, and drew a spend page
+	 * as "SESSION 5h 63%" / "WEEKLY 7d --%" -- red "Session almost used
+	 * up" near the cap -- until the next usage line, up to a minute later;
+	 * making Codex the main source swapped the pill and left Claude's
+	 * spend captions over Codex's windows (review of feat/enterprise-spend,
+	 * 2026-11-04, FW1, seen on host LVGL). proto.c now names the page
+	 * before the figures land as well, but the page is drawn again here
+	 * whatever order a caller uses.
+	 *
+	 * The status row is asked again only once there are figures for its
+	 * words to be about. Before the first reading the status is
+	 * DISCONNECTED, and asking would raise the connecting overlay -- over
+	 * the boot clip, if one is playing -- for the usage line that names
+	 * the page to take straight back down.
+	 */
+	if (built && strcmp(was, provider1_tag) != 0) {
+		render_gauges();	/* the pill and burn_sync() with it */
+		if (have_data) {
+			usage_view_set_status(last_status);
+		}
+		return;
+	}
 	refresh_provider1();
 	/*
-	 * The burn view finds its page by this tag, and proto.c sets it AFTER
-	 * usage_view_update() has already rendered the page -- so on the
-	 * first usage line of a connection the page had no name yet when it
-	 * was asked whether a burn line was its own.
+	 * The burn view finds its page by this tag. proto.c used to set it
+	 * AFTER usage_view_update() had rendered the page, so on the first
+	 * usage line of a connection the page had no name yet when it was
+	 * asked whether a burn line was its own. The order is right now, and
+	 * a new name redraws above; this stays for a name that did not move.
 	 */
 	burn_sync();
 }
