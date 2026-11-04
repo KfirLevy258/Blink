@@ -5,6 +5,7 @@ key. Two rules follow: never lose their existing statusline command (it goes in
 the chain file, and uninstall puts it back verbatim), and never rewrite any key
 but `statusLine`.
 """
+import copy
 import glob
 import hashlib
 import json
@@ -538,10 +539,27 @@ def merge_uninstall(doc: dict, marker: str, chain_text, shim_cmd=None):
     return doc, "", ("delete",), msg
 
 
+def decode_chain(raw: bytes) -> str:
+    """The chain file's text, whatever a hand edit left in it. Never raises.
+
+    Blink writes it UTF-8, but it is a plain file in the customer's home
+    and the README tells them where it is. PowerShell 5.1's `>` writes
+    UTF-16LE with a BOM, Notepad's ANSI is cp1252, and a crash mid-write
+    cuts a character in half. A strict decode raised UnicodeDecodeError,
+    which no caller catches, so uninstall died after the service was
+    already gone and install died after the record was saved (review of
+    feat/enterprise-spend, U33). A BOM decides; otherwise UTF-8, with a
+    byte that is not UTF-8 replaced rather than guessed at -- the command
+    is still put back, and the customer can see which character to fix."""
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16", "replace")
+    return raw.decode("utf-8-sig", "replace")
+
+
 def _read_chain(home=None):
     try:
-        with open(_chain_path(home), encoding="utf-8") as f:
-            return f.read()
+        with open(_chain_path(home), "rb") as f:
+            return decode_chain(f.read())
     except OSError:
         return None
 
@@ -638,11 +656,7 @@ def _announce(settings_path: str, shim_path: str, undo_hint: str = None) -> None
     print("           nothing else in the file is touched)")
     if previous and is_ours:
         chained = ""
-        try:
-            with open(_chain_path(), encoding="utf-8") as f:
-                chained = f.read().strip()
-        except OSError:
-            pass
+        chained = (_read_chain() or "").strip()
         print(f"  Was      {previous}")
         print(f"  Now      {new_command}")
         print()
@@ -709,10 +723,37 @@ _CHANGED = 75
 # parsed. readlink -f fails on some systems for a file that does not exist
 # yet -- the first install on a fresh account -- and the path as given is
 # then the right answer, since there is no link to follow.
+#
+# Unless it IS a link: GNU readlink -f also fails for a link whose target's
+# folder does not exist yet, and falling back to the link itself made the
+# write's mv replace the link with a plain file -- the dotfiles loss _save's
+# comment describes, which natively realpath and makedirs avoid (review of
+# feat/enterprise-spend, U31). So a link is followed by hand, one level at
+# a time, and the write's mkdir -p makes the folder, as natively.
+#
+# $2 "install" also refuses a file on a Windows drive (exit _ON_WINDOWS).
+# A ~/.claude inside WSL linked into the Windows profile is the folder
+# Claude Code on Windows reads: an install wrote `sh /home/...` commands
+# into it, blanking the Windows status line and breaking its hooks, and
+# chained Windows' own `bash "$USERPROFILE/..."` command into Linux (U31).
+# wslpath -w of the folder says where it is whatever the automount root is
+# called. An uninstall reads with "any": it only ever takes Blink out.
 _READ = r"""p=$1
-t=$(readlink -f -- "$p" 2>/dev/null) && [ -n "$t" ] || t=$p
+t=$(readlink -f -- "$p" 2>/dev/null) && [ -n "$t" ] || {
+  t=$p n=0
+  while [ -L "$t" ] && [ "$n" -lt 40 ]; do
+    l=$(readlink -- "$t") && [ -n "$l" ] || exit 66
+    case $l in /*) t=$l ;; *) t=${t%/*}/$l ;; esac
+    n=$((n + 1))
+  done
+  [ -L "$t" ] && exit 66
+}
 case $t in *'
 '*) exit 65 ;; esac
+if [ "$2" = install ]; then
+  w=$(wslpath -w "${t%/*}" 2>/dev/null) || w=
+  case $w in [A-Za-z]:*) exit 67 ;; esac
+fi
 printf '%s\n' "$t"
 if [ -e "$t" ]; then
   printf 'present\n'
@@ -720,6 +761,9 @@ if [ -e "$t" ]; then
 fi
 printf 'absent\n'
 """
+
+# Exit status of the read script for "settings.json is on a Windows drive".
+_ON_WINDOWS = 67
 
 # Write stdin to $1, atomically, refusing if $1 is not what was read: $2 is
 # the SHA-256 of the bytes read, "absent" for a file that was not there, or
@@ -842,9 +886,17 @@ class _WslSettings:
         self.trailing_newline = trailing_newline
 
 
-def _wsl_read_settings(home, wsl_run) -> _WslSettings:
+def _wsl_read_settings(home, wsl_run, purpose="install") -> _WslSettings:
+    """settings.json inside the distribution. `purpose` "install" refuses
+    one on a Windows drive (_READ's comment); "any" is uninstall's."""
     linux = _linux_path(home, home.join(home.config_dir, "settings.json"))
-    rc, out, _ = wsl_run(["sh", "-c", _READ, "sh", linux])
+    rc, out, _ = wsl_run(["sh", "-c", _READ, "sh", linux, purpose])
+    if rc == _ON_WINDOWS:
+        raise WslInstallError(
+            "Claude Code inside WSL keeps its settings on the Windows drive"
+            " (its folder is a link into your Windows profile), so a Linux"
+            " status line there would break Claude Code on Windows. Give"
+            " it a folder inside Linux, or use a plain `blink install`.")
     head, _, rest = out.partition(b"\n")
     state, sep, body = rest.partition(b"\n")
     if rc != 0 or not sep or state not in (b"present", b"absent"):
@@ -952,10 +1004,22 @@ def install_into(home, wsl_run, *, hooks=True, files=True) -> str:
         st.doc, _read_marker(home), None, wsl_statusline_command(home))
     lines = [msg]
     if hooks:
-        doc, hk_marker, added, repointed = install_hooks.merge_install(
-            doc, install_hooks._read_marker(home),
-            lambda ev: install_hooks.wsl_hook_command(home, ev))
-        lines.append(install_hooks.install_message(added, repointed))
+        # As natively (cli's "Activity hooks" step): a hooks section Blink
+        # cannot safely edit costs the activity light, not the status line,
+        # which is the product. Until the review of feat/enterprise-spend
+        # (U32) it stopped the whole WSL install. Merged on a copy, because
+        # merge_install has added the events before the bad one by the time
+        # it raises, and those must not be written either.
+        try:
+            merged, hk_marker, added, repointed = install_hooks.merge_install(
+                copy.deepcopy(doc), install_hooks._read_marker(home),
+                lambda ev: install_hooks.wsl_hook_command(home, ev))
+        except SettingsUnreadable as e:
+            hooks = False
+            lines.append(f"Activity hooks skipped ({e}).")
+        else:
+            doc = merged
+            lines.append(install_hooks.install_message(added, repointed))
 
     _wsl_apply_chain(home, wsl_run, action)
     _wsl_write(wsl_run, st.path, st.sha, "keep",
@@ -965,6 +1029,13 @@ def install_into(home, wsl_run, *, hooks=True, files=True) -> str:
     if hooks:
         install_hooks._write_marker(hk_marker, home)
     return " ".join(lines)
+
+
+# How long uninstall_from waits between taking the hooks out of
+# settings.json and removing the shims they call. Claude Code 2.1.316 and
+# .318 were seen to re-capture hooks 1 to 1.5 s after the file changed;
+# two seconds covers that, once, on an interactive uninstall.
+HOOK_RECAPTURE_S = 2.0
 
 
 def uninstall_from(home, wsl_run) -> str:
@@ -978,7 +1049,7 @@ def uninstall_from(home, wsl_run) -> str:
     quotes the customer's own command."""
     from pc import install_hooks
 
-    st = _wsl_read_settings(home, wsl_run)
+    st = _wsl_read_settings(home, wsl_run, "any")
     chain = wsl_shim_path(home, os.path.basename(CHAIN_PATH))
     rc, out, _ = wsl_run(["sh", "-c", _CAT_OR_NOTHING, "sh", chain])
     # _CAT_OR_NOTHING exits 0 for a missing chain file, so a non-zero rc is
@@ -989,7 +1060,7 @@ def uninstall_from(home, wsl_run) -> str:
     if rc != 0:
         raise WslInstallError("Could not read Blink's status line chain file"
                               " inside WSL.")
-    chain_text = out.decode("utf-8", "replace") if out else None
+    chain_text = decode_chain(out) if out else None
 
     sl_doc, sl_marker, action, msg = merge_uninstall(
         st.doc, _read_marker(home), chain_text, wsl_statusline_command(home))
@@ -1006,6 +1077,12 @@ def uninstall_from(home, wsl_run) -> str:
         _remove_marker(home)
     install_hooks._remove_marker(home)
     lines = [msg, install_hooks.uninstall_message(removed)]
+    if removed and HOOK_RECAPTURE_S > 0:
+        # Claude Code re-reads its hooks a second or so after settings.json
+        # changes and runs the old ones until then; a hook shim removed at
+        # once is a missing file for that second, and dash's exit 2 for it
+        # is "block" to Claude Code (review of feat/enterprise-spend, U29).
+        time.sleep(HOOK_RECAPTURE_S)
     if not _wsl_rm(wsl_run,
                    *(wsl_shim_path(home, n) for n in WSL_SHIMS + ("out",))):
         lines.append("Could not remove Blink's shims inside WSL; they do"
@@ -1090,13 +1167,21 @@ def drift_check(settings_path: str, shim_path: str, home=None, wsl_run=None):
         # shim moved, which is what an update to this program does.
         what = "statusline hook pointed at an old shim path; repointed it"
     else:
+        # Not quoted. This goes into bridge.log, the file customers send
+        # us, and the replacement is the customer's own command, with their
+        # paths and arguments in it; until the review of
+        # feat/enterprise-spend (U6) it was printed whole. `blink status`
+        # and the chain file are where they find it.
         what = ("statusline hook had been replaced; restored it and chained"
-                f" the replacement: {current}")
+                " the replacement")
 
     try:
         install(settings_path, shim_path, home)
     except Exception as e:
-        return f"statusline hook is missing and could not be restored: {e}"
+        # By type alone, for the same reason: an OSError's text names the
+        # settings file, whose path holds the account's user name.
+        return ("statusline hook is missing and could not be restored"
+                f" ({type(e).__name__})")
     return what
 
 
@@ -1184,20 +1269,37 @@ def wsl_shim_check(home, wsl_run):
                 said.append(f"{name} inside WSL was out of date; replaced it")
         out_file = wsl_shim_path(home, "out")
         rc, out, _ = wsl_run(["sh", "-c", _CAT_OR_NOTHING, "sh", out_file])
-        if rc == 0 and not out.strip():
-            # Without it the shims write into the Linux home, where the
-            # daemon never looks, and the panel stops with no error.
+        if rc == 0:
+            # Without the right one the shims write into the Linux home, or
+            # into a folder the daemon never reads, and the panel stops
+            # with no error. Not only an empty file is wrong: one saved with
+            # a CR names a folder ending in \r, and one left from an older
+            # Windows profile names a folder nobody reads (review of
+            # feat/enterprise-spend, U30). An unreadable one reads as empty
+            # here, as it is absent to the shims. So the file is compared
+            # with what install would write, which costs one more wsl.exe
+            # on a check that runs every five minutes at most.
+            missing = not out.strip()
             try:
                 out_dir = _wsl_out_dir(home, wsl_run)
-                _wsl_write(wsl_run, out_file, "-", "600",
-                           (out_dir + "\n").encode("utf-8"),
-                           "Blink's out file")
             except WslInstallError:
-                said.append("Blink's out file inside WSL is missing and could"
-                            " not be put back")
-            else:
-                said.append("Blink's out file inside WSL was missing; put it"
-                            " back")
+                out_dir = None
+                if missing:
+                    said.append("Blink's out file inside WSL is missing and"
+                                " could not be put back")
+            want = None if out_dir is None else (out_dir + "\n").encode(
+                "utf-8")
+            if want is not None and out != want:
+                what = "missing" if missing else "named the wrong folder"
+                try:
+                    _wsl_write(wsl_run, out_file, "-", "600", want,
+                               "Blink's out file")
+                except WslInstallError:
+                    said.append(f"Blink's out file inside WSL is {what} and"
+                                " could not be put right")
+                else:
+                    said.append(f"Blink's out file inside WSL was {what};"
+                                " put it right")
     except Exception:
         pass
     return "; ".join(said) if said else None
@@ -1238,7 +1340,10 @@ def shim_content_check(shims, home=None):
         try:
             cli._write_shim(path, name)
         except Exception as e:
-            repaired.append(f"{name} is out of date and could not be replaced: {e}")
+            # The type, not the text: an OSError's names the path, and
+            # this goes into bridge.log (drift_check says the same).
+            repaired.append(f"{name} is out of date and could not be"
+                            f" replaced ({type(e).__name__})")
             continue
         repaired.append(f"{name} was out of date; replaced it")
 

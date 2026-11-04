@@ -200,7 +200,10 @@ prints one hint: "Using Claude Code inside WSL? Run
   config, the transcripts and the drift check are read from the
   distribution only while the user is using it (the Windows folder changed
   in the last ten minutes) and the distribution is running, on a worker
-  thread, never on the serial loop.
+  thread, never on the serial loop. The drift repair also runs on an idle
+  desk every five minutes, only when `wsl -l --running` lists the
+  distribution: a deleted shim or out file stops the folder ever changing
+  again, so a repair gated on use would never come.
 - **One home per page:** with a WSL home configured, the Claude page reads
   that home only, and `blink status` says the native one is ignored.
 

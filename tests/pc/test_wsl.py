@@ -46,7 +46,11 @@ def test_policy_blocks():
     assert not wsl.policy_blocks(FakeReg({}))
     assert not wsl.policy_blocks(FakeReg({p: {"AllowWSL": 1}}))
     assert wsl.policy_blocks(FakeReg({p: {"AllowWSL": 0}}))
-    assert wsl.policy_blocks(FakeReg({p: {"AllowInboxWSL": 0}}))
+    # AllowInboxWSL=0 turns off only the WSL that ships inside Windows; the
+    # Store WSL that `wsl --install` gives still runs, and Microsoft's own
+    # Intune recommended settings set it. Only AllowWSL=0 is "WSL off".
+    assert not wsl.policy_blocks(FakeReg({p: {"AllowInboxWSL": 0}}))
+    assert wsl.policy_blocks(FakeReg({p: {"AllowWSL": 0, "AllowInboxWSL": 1}}))
 
 
 def test_unc_paths():
@@ -209,7 +213,7 @@ def test_probe_none_when_unreadable():
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shells")
-@pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+@pytest.mark.parametrize("shell", ["bash", "zsh", "fish", "tcsh", "csh"])
 def test_probe_env_capture_under_real_shells(shell, tmp_path):
     """The step-2 command, `<shell> -lic 'exec env -0'`, under the real shell
     with a fake HOME whose rc files print a banner and add an nvm-like entry
@@ -225,12 +229,15 @@ def test_probe_env_capture_under_real_shells(shell, tmp_path):
         "export CLAUDE_CONFIG_DIR=/cfg\n")
     (home / ".bash_profile").write_text(". ~/.bashrc\n")
     (home / ".zshrc").write_text((home / ".bashrc").read_text())
+    (home / ".cshrc").write_text(
+        f"{banner}\nsetenv PATH \"$HOME/.nvm/bin:$PATH\"\n"
+        "setenv CLAUDE_CONFIG_DIR /cfg\n")
     (home / ".config" / "fish" / "config.fish").write_text(
         f"{banner}\nset -gx PATH $HOME/.nvm/bin $PATH\n"
         "set -gx CLAUDE_CONFIG_DIR /cfg\n")
     env = {"PATH": os.environ["PATH"], "HOME": str(home),
            "ZDOTDIR": str(home), "XDG_CONFIG_HOME": str(home / ".config")}
-    out = subprocess.run([exe, "-lic", "exec env -0"], env=env,
+    out = subprocess.run([exe, *wsl.env_capture_args(exe)], env=env,
                          stdin=subprocess.DEVNULL, capture_output=True,
                          timeout=20)
     got = wsl._parse_env0(out.stdout)
@@ -314,3 +321,112 @@ def test_policy_unreadable_means_allowed():
 ])
 def test_usable_rejects_windows_claudes(path, ok):
     assert wsl._usable(path) is ok
+
+
+# --- review of feat/enterprise-spend, W3 ----------------------------------
+
+import sys
+import time
+
+
+def test_default_runner_is_the_bounded_one():
+    """subprocess.run under CPython 3.11 on Windows, after a timeout, kills
+    wsl.exe and then waits on communicate() with no timeout at all, while a
+    grandchild can still hold the pipes; that wedges WslWatch for good. Every
+    entry point must default to the runner that bounds the whole call."""
+    import inspect
+    for fn in (wsl.running, wsl.run, wsl.probe):
+        assert inspect.signature(fn).parameters["runner"].default \
+            is wsl._bounded_run, fn.__name__
+
+
+def test_bounded_run_returns_while_a_grandchild_holds_the_pipes(monkeypatch):
+    # The child starts a grandchild that inherits stdout and outlives it:
+    # the shape of wsl.exe killed while its relay still holds the handle.
+    monkeypatch.setattr(wsl, "_REAP_SECONDS", 0.3)
+    code = ("import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(4)'])\n"
+            "time.sleep(4)\n")
+    t0 = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        wsl._bounded_run([sys.executable, "-c", code],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         stdin=subprocess.DEVNULL, timeout=0.5)
+    assert time.monotonic() - t0 < 3
+
+
+def test_bounded_run_returns_when_the_child_never_reads_its_input(monkeypatch):
+    # 3.11's Windows communicate() writes input on the calling thread before
+    # its timeout starts; a child that never reads blocks that write once
+    # the pipe buffer is full. Far more than any pipe buffer here.
+    monkeypatch.setattr(wsl, "_REAP_SECONDS", 0.3)
+    t0 = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        wsl._bounded_run([sys.executable, "-c", "import time; time.sleep(4)"],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         input=b"x" * (4 << 20), timeout=0.5)
+    assert time.monotonic() - t0 < 3
+
+
+def test_bounded_run_round_trips():
+    done = wsl._bounded_run(
+        [sys.executable, "-c",
+         "import sys; d = sys.stdin.buffer.read(); "
+         "sys.stdout.buffer.write(d[::-1]); sys.stderr.write('e'); "
+         "sys.exit(3)"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, input=b"abc",
+        timeout=20)
+    assert (done.returncode, done.stdout, done.stderr) == (3, b"cba", b"e")
+    done = wsl._bounded_run([sys.executable, "-c", "print(1)"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL, timeout=20)
+    assert done.returncode == 0 and done.stdout.strip() == b"1"
+
+
+# --- review of feat/enterprise-spend, W5 ----------------------------------
+
+@pytest.mark.parametrize("shell,flags", [
+    ("/bin/bash", "-lic"), ("/usr/bin/zsh", "-lic"), ("/usr/bin/fish", "-lic"),
+    ("/bin/sh", "-lic"), ("/bin/tcsh", "-ic"), ("/usr/bin/csh", "-ic"),
+    ("/usr/local/bin/tcsh", "-ic"),
+])
+def test_the_csh_family_is_asked_without_l(shell, flags):
+    """tcsh and csh take -l only as the sole flag, so `tcsh -lic` exits 1
+    and every `install --wsl` for a csh user failed with "could not read
+    the distribution". -ic reads ~/.cshrc, where they set PATH."""
+    assert wsl.env_capture_args(shell) == [flags, "exec env -0"]
+
+
+def test_probe_works_for_a_tcsh_user():
+    def ans(argv):
+        tail = argv[argv.index("-k") + 3:]
+        if tail[0] == "sh" and "getent" in tail[2]:
+            return 0, b"bob:x:1:1::/home/bob:/bin/tcsh\n", b""
+        if tail == ["/bin/tcsh", "-ic", "exec env -0"]:
+            return 0, b"PATH=/home/bob/.nvm/bin:/usr/bin\0", b""
+        if tail[0] == "/bin/tcsh":
+            return 1, b"", b"Unknown option"
+        if tail[0] == "sh" and "command -v" in tail[2]:
+            return 0, b"/home/bob/.nvm/bin/claude\n", b""
+        return 1, b"", b""
+    p = wsl.probe("U", exe=EXE, runner=Rec(ans))
+    assert p is not None and p.claude_exe == "/home/bob/.nvm/bin/claude"
+
+
+# --- review of feat/enterprise-spend, U34 ---------------------------------
+
+@pytest.mark.parametrize("linux,want", [
+    ("/home/a//.claude", "\\home\\a\\.claude"),
+    ("/home/a/x/../.claude", "\\home\\a\\.claude"),
+    ("/home/a/./.claude/", "\\home\\a\\.claude"),
+    ("//home/a/.claude", "\\home\\a\\.claude"),
+    ("/..", ""),
+])
+def test_unc_normalises_what_a_long_path_will_not(linux, want):
+    """A \\\\?\\ path is handed to the filesystem as it is: Windows does
+    not collapse `..`, `.` or an empty component in one, so a
+    CLAUDE_CONFIG_DIR of /home/a//.claude or /home/a/x/../.claude, which
+    Linux reads happily, named nothing from Windows."""
+    assert wsl.unc("U", linux) == "\\\\?\\UNC\\wsl.localhost\\U" + want
+    assert wsl.unc("U", linux, long_paths=False) == "\\\\wsl$\\U" + want

@@ -188,26 +188,66 @@ def test_running_checked_at_most_every_15s(tmp_path):
     assert running.calls == ["Ubuntu"] * 3
 
 
-def test_idle_desk_never_runs_wsl(tmp_path, monkeypatch):
-    """A drop folder ten minutes stale -- or never written -- means
-    wsl.exe is never started, not even to ask whether it is running."""
+def test_idle_desk_asks_only_every_300s_and_never_reads(tmp_path,
+                                                       monkeypatch):
+    """A drop folder ten minutes stale -- or never written -- means no UNC
+    read and no config or transcript read. wsl.exe is started only to ask
+    `wsl -l --running`, which starts nothing, at most once every
+    IDLE_REPAIR_EVERY_S, and the first not until one has passed."""
     home, unc = _home(tmp_path)
     t0 = time.time()
     clock = _Clock(t0)
-    running = _Running(True)
+    running = _Running(False)
     drift = _Drift()
     w = _watch(home, clock, running, drift)
     hits = _count_unc(monkeypatch, unc)
-    for _ in range(20):            # no drop folder at all
-        w.tick()
-        clock.t += 60
+    for _ in range(int(wsl_watch.IDLE_REPAIR_EVERY_S // wsl_watch.TICK_S)):
+        w.tick()                    # no drop folder at all
+        clock.t += wsl_watch.TICK_S
+    assert running.calls == []
     _touch_drop(home, clock.t - wsl_watch.LIVE_S - 1)
     for _ in range(20):
         w.tick()
         clock.t += 60
-    assert running.calls == []
+    # 1200 s of ticks: four asks, and a stopped distribution is never
+    # entered -- the drift check is what would start it.
+    assert running.calls == ["Ubuntu"] * 4
     assert drift.ticks == 0
     assert hits == []
+    assert w.view() is None and not w.live()
+
+
+def test_idle_running_distro_gets_the_drift_repair(tmp_path, monkeypatch):
+    """U30: a shim or the out file deleted inside WSL while nobody used
+    Claude Code there stops the drop folder ever getting fresh again, so a
+    repair gated on "fresh" never came: a missing hook shim makes dash exit
+    2 and Claude Code block every prompt, until a reinstall. Natively the
+    watchdog restores it within 300 s; now so does this, when (and only
+    when) the distribution is running anyway. Still no config read."""
+    home, unc = _home(tmp_path)
+    _write_config(home)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0 - wsl_watch.LIVE_S - 1)
+    running = _Running(True)
+    drift = _Drift()
+    w = _watch(home, clock, running, drift)
+    hits = _count_unc(monkeypatch, unc)
+    w.tick()
+    assert drift.ticks == 0 and running.calls == []
+    clock.t += wsl_watch.IDLE_REPAIR_EVERY_S
+    w.tick()
+    assert running.calls == ["Ubuntu"] and drift.ticks == 1
+    for _ in range(10):
+        clock.t += wsl_watch.TICK_S
+        w.tick()
+    assert drift.ticks == 1 and len(running.calls) == 1
+    assert hits == [] and w.view() is None and not w.live()
+    # Stopped by the next ask: not entered.
+    running.answer = False
+    clock.t += wsl_watch.IDLE_REPAIR_EVERY_S
+    w.tick()
+    assert drift.ticks == 1 and len(running.calls) == 2
 
 
 def test_live_reads_the_state_folder_too(tmp_path):
@@ -691,3 +731,56 @@ def test_a_wsl_bus_keeps_its_own_drop_folder(tmp_path, monkeypatch):
         "/home/zoe", wsl.unc("Debian", "/home/zoe/.claude"), False))
     cli_p, = [p for p in bus._providers if isinstance(p, ClaudeCliProvider)]
     assert cli_p.path() == os.path.join(first.drop_dir, "statusline.json")
+
+
+# --- review of feat/enterprise-spend, W4 ---------------------------------
+
+@pytest.mark.parametrize("winerror", [53, 67])
+def test_an_unreachable_share_is_not_a_missing_config(tmp_path, monkeypatch,
+                                                      winerror):
+    """CPython maps ERROR_BAD_NETPATH (53) and ERROR_BAD_NET_NAME (67) to
+    ENOENT, so a \\\\wsl.localhost share that drops for a moment raised
+    FileNotFoundError like a config that is not there, and the watch
+    published EMPTY_VIEW: no seat, the spend page gone until the file
+    next changed. Not knowing keeps the last view."""
+    home, _ = _home(tmp_path)
+    _write_config(home, seat=True)
+    clock = _Clock(time.time())
+    _touch_drop(home, clock.t)
+    w = _watch(home, clock, _Running(True))
+    w.tick()
+    assert w.view().spend_seat
+    _write_config(home, seat=True, extra={"x": 1})     # a new signature
+    real = os.stat
+    path = claude_plan.config_path(home)
+
+    def stat(p, *a, **k):
+        if os.fspath(p) == path:
+            e = FileNotFoundError(2, "The network path was not found")
+            e.winerror = winerror
+            raise e
+        return real(p, *a, **k)
+    monkeypatch.setattr(os, "stat", stat)
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert w.view().spend_seat
+    monkeypatch.setattr(os, "stat", real)
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert w.view().spend_seat
+
+
+def test_a_config_really_gone_is_still_no_seat(tmp_path):
+    home, _ = _home(tmp_path)
+    path = _write_config(home, seat=True)
+    clock = _Clock(time.time())
+    _touch_drop(home, clock.t)
+    w = _watch(home, clock, _Running(True))
+    w.tick()
+    os.remove(path)
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert w.view() is claude_plan.EMPTY_VIEW

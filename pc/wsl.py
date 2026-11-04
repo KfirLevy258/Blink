@@ -35,6 +35,7 @@ tests run on every platform.
 import os
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -118,15 +119,25 @@ class _WinReg:
 
 
 def policy_blocks(reg=None):
-    """Does group policy forbid WSL? AllowWSL or AllowInboxWSL equal to 0.
+    """Does group policy forbid WSL? AllowWSL equal to 0, and nothing else.
     Missing means allowed; so does an unreadable registry, because the
-    policy key is absent on almost every machine."""
+    policy key is absent on almost every machine.
+
+    AllowInboxWSL is not read on purpose. Microsoft's WSL settings policy
+    ("Allow the Inbox version of WSL") turns off only the WSL component that
+    ships inside Windows; the Store WSL, which is what `wsl --install` puts
+    on any current Windows, keeps running, and Microsoft's Intune
+    recommended settings set AllowInboxWSL=0 to steer desks onto it. The
+    first cut refused on that value too, and so told exactly the managed
+    enterprise desks this feature is for that WSL was turned off. A desk
+    left with only the inbox WSL under that policy fails at the first
+    wsl.exe call instead, and the probe's own message covers it."""
     reg = reg or _WinReg()
     try:
         values = reg.values(HKLM, POLICY)
     except OSError:
         return False
-    return any(values.get(k) == 0 for k in ("AllowWSL", "AllowInboxWSL"))
+    return values.get("AllowWSL") == 0
 
 
 class Unreadable(Exception):
@@ -185,6 +196,57 @@ def distros(reg=None):
         return []
 
 
+# How long a killed wsl.exe is given to hand back its pipes before they are
+# abandoned. Short: by then the call has already failed.
+_REAP_SECONDS = 2.0
+
+
+def _feed(pipe, data):
+    try:
+        pipe.write(data)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _bounded_run(argv, *, input=None, timeout=None, **kwargs):
+    """subprocess.run whose timeout bounds the whole call, on every platform.
+
+    CPython 3.11's run() on Windows, once the timeout fires, kills wsl.exe
+    and then calls communicate() with no timeout at all; a WSL relay
+    process still holding the pipes (wslhost, a hung wslservice) keeps that
+    wait going for ever, and WslWatch's thread with it, so the burn view
+    froze on its last snapshot. 3.11's Windows communicate() also writes
+    `input` on the calling thread before the timeout starts, so a child
+    that never reads blocks there once the pipe buffer is full. Here the
+    input goes in on a thread of its own, the reap after the kill is
+    bounded, and a call that still will not end is abandoned: its pipes are
+    left open rather than closed, because closing a buffered pipe another
+    thread is reading takes that reader's lock and would block the same
+    way. Raises TimeoutExpired like run(); the caller maps it to FAILED."""
+    if input is not None:
+        kwargs["stdin"] = subprocess.PIPE
+    p = subprocess.Popen(argv, **kwargs)
+    if input is not None:
+        feed, p.stdin = p.stdin, None
+        threading.Thread(target=_feed, args=(feed, input), daemon=True,
+                         name="blink-wsl-stdin").start()
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        try:
+            p.communicate(timeout=_REAP_SECONDS)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        raise
+    return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+
 def _call(argv, wsl_utf8, stdin, timeout, runner):
     """One wsl.exe launch. Returns (rc, out, err) or FAILED on a timeout or
     when wsl.exe cannot start."""
@@ -203,7 +265,7 @@ def _call(argv, wsl_utf8, stdin, timeout, runner):
     return done.returncode, done.stdout or b"", done.stderr or b""
 
 
-def running(name, exe=None, timeout=5, runner=subprocess.run):
+def running(name, exe=None, timeout=5, runner=_bounded_run):
     """Is the named distribution running right now? Never starts it."""
     rc, out, _ = _call([*(exe or wsl_exe()), "-l", "--running", "-q"],
                        "0", None, timeout, runner)
@@ -215,7 +277,7 @@ def running(name, exe=None, timeout=5, runner=subprocess.run):
 
 
 def run(name, argv, user=None, env=None, exe=None, stdin=None, timeout=30,
-        runner=subprocess.run):
+        runner=_bounded_run):
     """Run argv inside the distribution as `user`: (rc, stdout, stderr), or
     (-1, b"", b"") on a timeout.
 
@@ -274,7 +336,23 @@ def _usable(path):
             and not path.lower().endswith((".exe", ".cmd", ".bat")))
 
 
-def probe(name, exe=None, runner=subprocess.run):
+# tcsh and csh accept -l only as the sole flag: `tcsh -lic ...` prints
+# "Unknown option" and exits 1, so for a csh user every probe came back
+# None and `install --wsl` said the distribution could not be read (review
+# of feat/enterprise-spend, W5, measured under tcsh). -ic reads ~/.cshrc,
+# which every csh reads and where csh users set PATH; ~/.login, read only
+# by a login shell, is missed, and a PATH set only there is not seen.
+_CSH = ("csh", "tcsh")
+
+
+def env_capture_args(shell):
+    """The flags and command after `shell` that print its environment."""
+    base = shell.rstrip("/").rsplit("/", 1)[-1]
+    flags = "-ic" if base in _CSH else "-lic"
+    return [flags, "exec env -0"]
+
+
+def probe(name, exe=None, runner=_bounded_run):
     """Find the Linux user, home, shell, Claude config folder and claude
     binary of a distribution, or None if it cannot be read. Starts the
     distribution; callers only reach this after the user named it."""
@@ -287,8 +365,9 @@ def probe(name, exe=None, runner=subprocess.run):
 
     # The user's own login shell, interactive so ~/.zshrc and nvm-style
     # additions to PATH count; stdin is closed so nothing waits for a tty.
-    # `exec env -0` works in bash, zsh and fish, and zsh has no `type -P`.
-    rc, out, _ = run(name, [shell, "-lic", "exec env -0"],
+    # `exec env -0` works in bash, zsh, fish, tcsh and csh, and zsh has no
+    # `type -P`.
+    rc, out, _ = run(name, [shell, *env_capture_args(shell)],
                      user=user, timeout=20, **kw)
     captured = _parse_env0(out) if rc == 0 else {}
     path = captured.get("PATH")

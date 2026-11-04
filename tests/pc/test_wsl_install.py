@@ -35,6 +35,13 @@ posix_only = pytest.mark.skipif(sys.platform == "win32",
                                 reason="runs the WSL scripts under real sh")
 
 
+@pytest.fixture(autouse=True)
+def _no_recapture_wait(monkeypatch):
+    """uninstall_from waits HOOK_RECAPTURE_S between taking the hooks out
+    and removing the shims they call; the tests that care say so."""
+    monkeypatch.setattr(install_statusline, "HOOK_RECAPTURE_S", 0)
+
+
 def _home(lin, name="Ubuntu"):
     """A WSL home whose Linux home is the tmp folder `lin`. Its config_dir
     is the UNC spelling of lin/.claude, exactly as install would record it;
@@ -630,3 +637,227 @@ def test_wsl_shim_refresh_does_not_rewrite_what_it_could_not_read(tmp_path):
     assert install_statusline.wsl_shim_check(home, run) is None
     assert all(stdin_less[2] != install_statusline._WRITE
                for stdin_less in calls)
+
+
+# ------------------------------- review of feat/enterprise-spend, U30 (b, c)
+
+@posix_only
+@pytest.mark.parametrize("bad", ["crlf", "stale", "unreadable"])
+def test_wsl_watchdog_rewrites_an_out_file_that_names_the_wrong_folder(
+        tmp_path, bad):
+    """The repair put back only an empty out file. One saved with a CR
+    (an editor on the Windows side) names a folder that ends in \\r, and
+    one left from an older Windows profile names a folder the daemon never
+    reads: either way the panel stops with no error. Both are rewritten,
+    and so is one the user cannot read, which the shim treats as absent."""
+    lin = _tree(tmp_path, {}, link=False)
+    home = _home(lin)
+    run = _runner(lin, _fake_bin(tmp_path))
+    install_statusline.install_into(home, run)
+    out = lin / ".blink" / "out"
+    good = out.read_bytes()
+    if bad == "crlf":
+        out.write_bytes(good.rstrip(b"\n") + b"\r\n")
+    elif bad == "stale":
+        out.write_bytes(b"/mnt/c/Users/zoe-old-profile/.blink/wsl-x\n")
+    else:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("root reads a mode-000 file")
+        out.chmod(0o000)
+    msg = install_statusline.wsl_shim_check(home, run)
+    assert msg and "out file" in msg
+    for secret in (str(tmp_path), home.drop_dir, "zoe-old-profile"):
+        assert secret not in msg
+    assert out.read_bytes() == good
+    assert install_statusline.wsl_shim_check(home, run) is None
+
+
+@posix_only
+def test_wsl_watchdog_leaves_an_out_file_it_cannot_check(tmp_path):
+    """wslpath failing (automount turned off since) is "cannot tell" for
+    an out file that is there: it is left as it is, and nothing is said."""
+    lin = _tree(tmp_path, {}, link=False)
+    home = _home(lin)
+    install_statusline.install_into(home, _runner(lin, _fake_bin(tmp_path)))
+    out = lin / ".blink" / "out"
+    out.write_bytes(b"/somewhere/else\n")
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    run = _runner(lin, _fake_bin(broken, "exit 1\n"))
+    assert install_statusline.wsl_shim_check(home, run) is None
+    assert out.read_bytes() == b"/somewhere/else\n"
+
+
+@posix_only
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root reads a mode-000 file")
+@pytest.mark.parametrize("shim", ["blink-statusline.sh", "blink-hook.sh"])
+def test_an_unreadable_out_file_ignores_an_exported_out_dir(tmp_path, shim):
+    """U30(c): `read` fails on an unreadable out file and leaves out_dir as
+    it was, so an `out_dir` exported in the user's environment became the
+    folder the payload was written into. The shims clear it first."""
+    home = tmp_path / "home"
+    (home / ".blink").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    out = home / ".blink" / "out"
+    out.write_text("/nowhere\n")
+    out.chmod(0o000)
+    try:
+        subprocess.run(["sh", os.path.join(REPO, "tools", shim),
+                        "UserPromptSubmit"],
+                       input=b'{"session_id":"a","cwd":"/p"}',
+                       capture_output=True, timeout=30,
+                       env={"HOME": str(home), "PATH": "/usr/bin:/bin",
+                            "out_dir": str(elsewhere)})
+    finally:
+        out.chmod(0o600)
+    assert list(elsewhere.iterdir()) == []
+
+
+# ------------------------------------ review of feat/enterprise-spend, U32
+
+@posix_only
+@pytest.mark.parametrize("hooks", [
+    "not an object",
+    {"UserPromptSubmit": [], "Stop": {"hooks": [{"type": "command",
+                                                 "command": "x"}]}},
+])
+def test_a_hooks_section_it_cannot_edit_still_gets_the_status_line(
+        tmp_path, hooks):
+    """Natively a hooks section Blink cannot safely edit costs the activity
+    light and nothing else (cli: "Activity hooks ... skipped"). Inside WSL
+    the same SettingsUnreadable stopped the whole install, status line and
+    all. Now it installs the status line, leaves "hooks" exactly as it was
+    -- an event merged before the bad one is not kept either -- and says
+    the hooks were skipped."""
+    lin = _tree(tmp_path, {"statusLine": {"type": "command",
+                                          "command": "echo MINE"},
+                           "hooks": hooks}, link=False)
+    home = _home(lin)
+    msg = install_statusline.install_into(home,
+                                          _runner(lin, _fake_bin(tmp_path)))
+    assert "skipped" in msg
+    doc = json.loads((lin / ".claude" / "settings.json").read_text())
+    assert doc["statusLine"]["command"] == _sl_cmd(lin)
+    assert doc["hooks"] == hooks
+    assert install_hooks._read_marker(home) == set()
+    assert (lin / ".blink" / "statusline-chain").read_text().strip() == \
+        "echo MINE"
+
+
+# ------------------------------------ review of feat/enterprise-spend, U31
+
+_WSLPATH_WITH_A_DRIVE = r'''
+if [ "$1" = -w ]; then
+  case $2 in */mnt/c/*) printf 'C:\\Users\\zoe\\.claude\n' ;;
+             *) printf '\\\\wsl.localhost\\Ubuntu%s\n' "$2" ;; esac
+  exit 0
+fi
+[ "$1" = -u ] && shift
+printf '%s\n' "$1"
+'''
+
+
+@posix_only
+@pytest.mark.parametrize("shell", SHELLS)
+def test_install_refuses_settings_on_the_windows_drive(tmp_path, shell):
+    """(a) ~/.claude inside WSL linked into the Windows profile: the WSL
+    install wrote `sh /home/...` commands into the settings Claude Code on
+    Windows reads, blanking its status line and breaking its hooks, and
+    chained Windows' own `bash "$USERPROFILE/..."` command into Linux. It is
+    refused, with no path in the message; uninstall still works there, to
+    take out what an earlier install put in."""
+    lin = tmp_path / "lin"
+    lin.mkdir()
+    win = tmp_path / "mnt" / "c" / "Users" / "zoe" / ".claude"
+    win.mkdir(parents=True)
+    before = {"statusLine": {"type": "command",
+                             "command": 'bash "$USERPROFILE/.blink/x.sh"'}}
+    _write_json(str(win / "settings.json"), before)
+    (lin / ".claude").symlink_to(win)
+    home = _home(lin)
+    run = _runner(lin, _fake_bin(tmp_path, _WSLPATH_WITH_A_DRIVE),
+                  shell=shell)
+    with pytest.raises(install_statusline.WslInstallError) as e:
+        install_statusline.install_into(home, run)
+    assert "Windows" in str(e.value)
+    for secret in (str(tmp_path), "zoe"):
+        assert secret not in str(e.value)
+    assert json.loads((win / "settings.json").read_text()) == before
+    # The drift check reads the same way and so does nothing.
+    install_statusline._write_marker(_sl_cmd(lin), home)
+    assert install_statusline.drift_check("", "", home, wsl_run=run) is None
+    assert json.loads((win / "settings.json").read_text()) == before
+    # Uninstall is not refused: it only ever takes Blink out.
+    doc = {"statusLine": {"type": "command", "command": _sl_cmd(lin)}}
+    _write_json(str(win / "settings.json"), doc)
+    install_statusline.uninstall_from(home, run)
+    assert "statusLine" not in json.loads((win / "settings.json").read_text())
+
+
+@posix_only
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_dangling_link_into_a_missing_folder_stays_a_link(tmp_path, shell):
+    """(b) settings.json a link to a dotfiles path whose folder is not there
+    yet. GNU readlink -f fails on it, the script fell back to the link
+    itself, and the mv replaced the link with a plain file -- the dotfiles
+    loss _save's comment describes. Natively _save follows the link and
+    makes the folder; so does this now."""
+    lin = tmp_path / "lin"
+    (lin / ".claude").mkdir(parents=True)
+    target = lin / "dotfiles" / "claude" / "settings.json"
+    link = lin / ".claude" / "settings.json"
+    link.symlink_to(target)
+    home = _home(lin)
+    run = _runner(lin, _fake_bin(tmp_path), shell=shell)
+    real_readlink = shutil.which("readlink")
+    # macOS readlink -f resolves a missing parent; GNU's does not. Stand in
+    # for GNU: -f fails when the target's folder is absent.
+    fake = tmp_path / "fakebin" / "readlink"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = -f ]; then shift; [ "$1" = -- ] && shift\n'
+        '  t=$(' + real_readlink + ' "$1") || exit 1\n'
+        '  [ -d "${t%/*}" ] || exit 1\nfi\n'
+        'exec ' + real_readlink + ' "$@"\n')
+    fake.chmod(0o755)
+    install_statusline.install_into(home, run)
+    assert link.is_symlink()
+    assert json.loads(target.read_text())["statusLine"]["command"] == \
+        _sl_cmd(lin)
+
+
+# ------------------------------------ review of feat/enterprise-spend, U29
+
+@posix_only
+def test_uninstall_waits_for_claude_code_to_drop_the_hooks(tmp_path,
+                                                            monkeypatch):
+    """Claude Code re-reads its hooks a second or so after settings.json
+    changes, and until then runs the old ones. Removing the hook shim at
+    once left that second's hook calling a missing file: dash exits 2,
+    which Claude Code takes as "block". The shims go after a short wait,
+    and only when hooks were taken out."""
+    lin = _tree(tmp_path, {}, link=False)
+    home = _home(lin)
+    order = []
+    real = _runner(lin, _fake_bin(tmp_path))
+
+    def run(argv, stdin=None):
+        if len(argv) > 2:
+            order.append("rm" if argv[2] == install_statusline._RM
+                         else "write" if argv[2] == install_statusline._WRITE
+                         else "read")
+        return real(argv, stdin)
+    install_statusline.install_into(home, real)
+    monkeypatch.setattr(install_statusline, "HOOK_RECAPTURE_S", 2.0)
+    monkeypatch.setattr(install_statusline.time, "sleep",
+                        lambda s: order.append(("sleep", s)))
+    install_statusline.uninstall_from(home, run)
+    assert order.index(("sleep", 2.0)) > order.index("write")
+    # The last rm is the shims' (the first may be the chain file's).
+    assert order[-1] == "rm" and order[-2] == ("sleep", 2.0)
+    # Nothing of ours in settings: nothing to wait for.
+    order.clear()
+    install_statusline.uninstall_from(home, run)
+    assert ("sleep", 2.0) not in order
