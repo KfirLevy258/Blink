@@ -2980,9 +2980,11 @@ SPEND_NOTE = (
     "This Claude seat is billed by usage. BLINK reads the seat type, and the"
     " month's spend and limit that Claude Code saved the last time /usage ran"
     " in a terminal. Between /usage runs it adds the cost Claude Code's status"
-    " line estimates for each session, and keeps each session's id and"
-    " highest estimate, what it counted in the last five hours, the month's"
-    " total and a one-way fingerprint of the account in {path}. Spend in"
+    " line estimates for each session, and keeps each session's id with,"
+    " for each of its cost ledgers (up to eight: a /login or a second"
+    " terminal can start one), the highest estimate and when it was seen;"
+    " what it counted in the last five hours, the month's total and a"
+    " one-way fingerprint of the account, in {path}. Spend in"
     " Claude Desktop (chat"
     " and its Code tab), Cowork, claude.ai, claude -p, the Agent SDK or on"
     " other computers appears only after the next /usage, and a session's last"
@@ -3060,9 +3062,11 @@ def test_status_never_prints_amounts(tmp_path, capsys, monkeypatch):
 SPEND_LATER = (
     "On a Claude seat billed by usage -- this one now, or one you /login to"
     " later -- it also keeps, in {path} a one-way fingerprint of the account"
-    " and organisation ids, each session's id with its highest cost"
-    " estimate, and the rises it counted, so the month's spend survives a"
-    " restart. Nothing in it leaves this computer.")
+    " and organisation ids, each session's id with the highest cost"
+    " estimate and its time for each of its cost ledgers (up to eight: a"
+    " /login or a second terminal can start one), and the rises it counted,"
+    " so the month's spend survives a restart. Nothing in it leaves this"
+    " computer.")
 
 
 def test_disclosure_says_what_a_usage_seat_keeps_on_any_desk(
