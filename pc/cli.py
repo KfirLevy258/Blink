@@ -3421,11 +3421,15 @@ def _holds_ours(path, home):
         data = install_statusline._load(path)
     except (install_statusline.SettingsUnreadable, OSError):
         return False
+    # The markers of `home`, not the native ones: each home keeps its own
+    # (claude_home.marker_dir), and reading the native ones here judged a
+    # WSL home's settings by what a native install had recorded.
     if install_statusline._is_ours(
             install_statusline._current_command(data),
-            install_statusline.statusline_command(shim_path(home))):
+            install_statusline.statusline_command(shim_path(home)),
+            install_statusline._read_marker(home)):
         return True
-    ours = install_hooks._read_marker() | {
+    ours = install_hooks._read_marker(home) | {
         install_hooks.hook_command(hook_shim_path(home), ev)
         for ev, _ in install_hooks.HOOK_EVENTS}
     hooks = data.get("hooks")

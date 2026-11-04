@@ -40,6 +40,23 @@
 input=$(cat)
 umask 077
 
+# WHERE the copy goes. Natively ~/.blink, as it always was. Inside a WSL
+# distribution the daemon is not here -- it stays on Windows with the board --
+# so `blink install --wsl` writes $HOME/.blink/out naming a Windows folder it
+# owns, reached through the automount (/mnt/c/Users/.../.blink/wsl-<guid>),
+# and the daemon's 2 s poll reads that folder without ever starting the
+# distribution or crossing into it (docs/plans/enterprise-spend.md, section 4).
+#
+# `[ -f ]` and `read` are builtins: this runs on every render, and a native
+# desk, which has no out file, pays one stat for it and no fork. IFS= and -r
+# keep the path byte for byte -- a profile folder can hold a space ("Zoe
+# Smith"). `read` fails on a last line with no newline but has still set the
+# variable, so the test is on the value, not on read's status.
+OUT="$HOME/.blink"
+if [ -f "$HOME/.blink/out" ]; then
+  IFS= read -r out_dir < "$HOME/.blink/out"
+  [ -n "$out_dir" ] && OUT=$out_dir
+fi
 
 # Atomic write: the daemon may read this file at any moment, and a half-written
 # file would parse as malformed and blank the panel. Failures here (disk full,
@@ -48,7 +65,7 @@ umask 077
 # Guarded, because this runs on EVERY status line render -- many times a
 # minute -- and an unconditional mkdir forks a process each time to create a
 # directory that has existed since the first one.
-[ -d "$HOME/.blink" ] || mkdir -p "$HOME/.blink" 2>/dev/null
+[ -d "$OUT" ] || mkdir -p "$OUT" 2>/dev/null
 # 2>/dev/null must come BEFORE the '>' target on this line, not after: if
 # opening the target itself fails (e.g. the mkdir above also failed), the
 # shell reports that failure using whatever stderr was in effect when the '>'
@@ -60,8 +77,8 @@ umask 077
 # The temp name carries this process's pid: several terminals render at once,
 # and one shared temp name let a second render truncate the first's
 # half-written file before its rename.
-printf '%s' "$input" 2>/dev/null > "$HOME/.blink/statusline.json.$$.tmp" &&
-  mv -f "$HOME/.blink/statusline.json.$$.tmp" "$HOME/.blink/statusline.json" 2>/dev/null
+printf '%s' "$input" 2>/dev/null > "$OUT/statusline.json.$$.tmp" &&
+  mv -f "$OUT/statusline.json.$$.tmp" "$OUT/statusline.json" 2>/dev/null
 
 # Delegate to the previously configured command, if any. Never fail the status
 # bar because Blink had a problem.
@@ -81,6 +98,9 @@ printf '%s' "$input" 2>/dev/null > "$HOME/.blink/statusline.json.$$.tmp" &&
 # statusline is hung. Do not reorder this to "only record on success" -- that
 # would let a hanging chain block Blink's own capture too, which is exactly
 # the failure this ordering exists to prevent.
+# $HOME/.blink, not $OUT, even inside WSL: the chain file holds a command for
+# this shell to run, so it lives beside the shim in the distribution, where
+# install writes it and uninstall puts it back from.
 CHAIN="$HOME/.blink/statusline-chain"
 if [ -s "$CHAIN" ]; then
   # `read`, not `cat`: a builtin instead of a fork, on the same every-render

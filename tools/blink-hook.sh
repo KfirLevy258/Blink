@@ -76,9 +76,10 @@ input=$(cat)
 #
 # The FIRST character must be alphanumeric. The class used to admit any of
 # `._-` anywhere, which let the literal names `.` and `..` through -- and
-# `$DIR/..` is ~/.blink itself, where the SubagentStart/Stop branches below
-# would then truncate or delete whichever file the agent id named. Reproduced
-# against the signing key before this was tightened.
+# `$DIR/..` is ~/.blink itself (or the WSL drop folder), where the
+# SubagentStart/Stop branches below would then truncate or delete whichever
+# file the agent id named. Reproduced against the signing key before this was
+# tightened.
 #
 # And the FIRST occurrence, not the last. The pattern's leading `.*` was
 # greedy, so on PreToolUse/PostToolUse it matched the last "session_id" on the
@@ -140,7 +141,16 @@ _projname() {
 # Private to the user. These files name the sessions someone has open, and
 # the default umask would leave them readable by every account on the machine.
 umask 077
-DIR="$HOME/.blink/$sub"
+# Under the folder $HOME/.blink/out names when it exists -- the Windows folder
+# the daemon reads for a WSL install -- and ~/.blink otherwise. The same rule,
+# with the same reasons, as tools/blink-statusline.sh: builtins only, since
+# this runs on every tool call, and the value tested rather than read's status.
+OUT="$HOME/.blink"
+if [ -f "$HOME/.blink/out" ]; then
+	IFS= read -r out_dir < "$HOME/.blink/out"
+	[ -n "$out_dir" ] && OUT=$out_dir
+fi
+DIR="$OUT/$sub"
 [ -d "$DIR" ] || mkdir -p "$DIR" 2>/dev/null
 
 case $event in
