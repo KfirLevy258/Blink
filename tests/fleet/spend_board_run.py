@@ -180,6 +180,31 @@ def board_hello(records):
     return found
 
 
+def board_fw(records):
+    """The firmware the board said it runs: its hello's `fw`, else the
+    `cur` of its OTA query. A board that was already running when the
+    daemon connected sends no hello (on the board run of 2026-11-04 it sent
+    a pref, a theme_now and an ota_query), so the hello alone left the
+    summary saying "not heard" about a board it had just talked to."""
+    fw = board_hello(records).get("fw")
+    if fw:
+        return str(fw)
+    for r in records:
+        msg = r.get("msg")
+        if (r.get("dir") == "rx" and isinstance(msg, dict)
+                and msg.get("t") == "ota_query" and msg.get("cur")):
+            return str(msg["cur"])
+    return None
+
+
+def board_uptimes(records):
+    """The board's own uptime from each ping, in milliseconds, in order."""
+    return [r["msg"]["up_ms"] for r in records
+            if r.get("dir") == "rx" and isinstance(r.get("msg"), dict)
+            and r["msg"].get("t") == "ping"
+            and isinstance(r["msg"].get("up_ms"), int)]
+
+
 def sent(records, t):
     return [r["msg"] for r in records
             if r.get("dir") == "tx" and r.get("sent") is not False
@@ -208,7 +233,7 @@ def judge(records):
     caps = protocol.board_caps(hello)
     new = protocol.BOARD_CAP_PLAN in caps
     dollars = protocol.BOARD_CAP_SPENDBURN in caps
-    lines.append(f"board firmware: {hello.get('fw') or 'not heard'}"
+    lines.append(f"board firmware: {board_fw(records) or 'not heard'}"
                  f" ({'announces' if new else 'does not announce'} plans,"
                  f" {'announces' if dollars else 'does not announce'}"
                  f" spendburn)")
@@ -263,7 +288,20 @@ def judge(records):
     check(not refused, "no refused line",
           f"{len(refused)} refused lines")
     reboots = [x for x in console if any(k in x for k in _REBOOTED)]
-    check(not reboots, "no reboot", f"{len(reboots)} boot or fault lines")
+    check(not reboots, "no boot or fault line",
+          f"{len(reboots)} boot or fault lines")
+    # The board's uptime only grows on one boot. The console can miss a
+    # boot line (it prints before the port is open again); the pings
+    # cannot.
+    up = board_uptimes(records)
+    restarted = sum(1 for a, b in zip(up, up[1:]) if b < a)
+    if up:
+        check(not restarted,
+              f"no reboot: board uptime {up[0] // 1000} s to"
+              f" {up[-1] // 1000} s over {len(up)} pings",
+              f"board uptime went back {restarted} times")
+    else:
+        check(False, "", "no ping heard, so no uptime to judge a reboot by")
     return ok, lines
 
 

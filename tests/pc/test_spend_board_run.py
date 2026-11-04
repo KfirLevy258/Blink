@@ -60,6 +60,9 @@ def _records(sent, board_lines=None, fw="1.5.0"):
         board_lines = [f"[plan] claude {run._words(m)}" for m in sent
                        if m["t"] == "plan"]
     recs = [{"dir": "rx", "msg": _hello(fw)}]
+    recs += [{"dir": "rx", "msg": {"t": "ping", "v": protocol.VERSION,
+                                   "up_ms": 170_000 + 10_000 * i}}
+             for i in range(3)]
     recs += [{"dir": "tx", "sent": True, "msg": m} for m in sent]
     recs += [{"dir": "console", "line": line} for line in board_lines]
     return recs
@@ -203,6 +206,37 @@ def test_the_judge_fails_a_refused_line(tmp_path, line):
     ok, lines = run.judge(recs)
     assert not ok
     assert "FAIL 1 refused lines" in lines
+
+
+def test_the_judge_fails_an_uptime_that_went_back(tmp_path):
+    """A boot line can be missed -- the board prints it before the port is
+    open again -- but the pings' uptime starting over cannot."""
+    sent = _drive(tmp_path, "1.5.0")
+    recs = _records(sent) + [{"dir": "rx", "msg": {
+        "t": "ping", "v": protocol.VERSION, "up_ms": 4_000}}]
+    ok, lines = run.judge(recs)
+    assert not ok
+    assert "FAIL board uptime went back 1 times" in lines
+
+
+def test_the_judge_fails_a_run_with_no_ping(tmp_path):
+    sent = _drive(tmp_path, "1.5.0")
+    recs = [r for r in _records(sent)
+            if r.get("msg", {}).get("t") != "ping"]
+    ok, _ = run.judge(recs)
+    assert not ok
+
+
+def test_the_firmware_comes_from_the_ota_query_without_a_hello(tmp_path):
+    """A board already running when the daemon connects sends no hello;
+    its OTA query still names the firmware."""
+    sent = _drive(tmp_path, "1.5.0")
+    recs = [r for r in _records(sent)
+            if r.get("msg", {}).get("t") != "hello"]
+    recs.insert(0, {"dir": "rx", "msg": {"t": "ota_query",
+                                         "v": protocol.VERSION,
+                                         "cur": "1.4.1"}})
+    assert run.board_fw(recs) == "1.4.1"
 
 
 def test_the_judge_fails_a_reboot(tmp_path):
