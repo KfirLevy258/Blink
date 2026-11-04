@@ -155,6 +155,14 @@ Known gaps, stated in the install note and the README:
   only at the next `/usage`.
 - Claude Code's cost is its own list-price estimate and may differ from the
   bill.
+- After a `/login` to another account, the status-line render in the file
+  when the switch is noticed is taken for the old login's, and the first
+  render that differs for the new one's (claude_cli._note_login). A new
+  login's render made before the switch is noticed (within 5 s natively,
+  one watch tick on WSL) is dropped, and the page is blank until the
+  next. A repaint with the old account's cached figures, or a terminal
+  still on the old token, can show the old login's figures once: the
+  status line carries no account id.
 
 ### 3. On the board
 

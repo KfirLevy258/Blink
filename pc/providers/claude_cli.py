@@ -793,7 +793,19 @@ class ClaudeCliProvider(base.ProviderParser):
         nothing until the session passes its old total, which the next
         /usage corrects. Round 2 of the 2026-11-04 review counted them as
         a ledger of their own and round 3 took that out again, for
-        counting too much across a /usage (pc/spend_count.py)."""
+        counting too much across a /usage (pc/spend_count.py).
+
+        The renders, after a switch, are told apart by read order: the
+        file as it stands when the switch is seen is the old login's,
+        the first that differs the new login's. Two residuals, kept (round
+        6 of the review): a render of the new login that lands between
+        the /login write and the poll that notices it is marked old, and
+        the page is blank until the next render -- a window of up to
+        claude_plan.FIRST_ANSWER_RETRY_S natively, one wsl_watch tick on
+        WSL. And a repaint carrying the old account's cached figures, or
+        another terminal still on the old token, differs from the mark
+        and lifts it, so the old login's figures can show once: the
+        status line carries no account id to tell them by."""
         fp = view.account_fp
         if not fp:
             return
