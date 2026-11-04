@@ -20,7 +20,7 @@ from serial.tools import list_ports
 from pc import ota as ota_mod
 from pc import (ingest, install_statusline, interval, logbook, protocol,
                 status_page, statusline_source, theme, theme_server, update,
-                win_driver)
+                usage_refresh, user_config, win_driver)
 from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
@@ -259,6 +259,57 @@ def poll_interval():
     """
     return interval.seconds_from_env(os.environ, "BLINK_POLL_INTERVAL_S",
                                      POLL_INTERVAL_S)
+
+
+def start_usage_refresh(blink_home, bus, board_alive):
+    """Start the /usage refresh's thread (pc/usage_refresh.RefreshWatch),
+    or start nothing and return None.
+
+    Nothing for a WSL Claude home, which this version never runs, and
+    nothing under BLINK_SCENARIO, whose bus replays a scenario: a real
+    Claude Code run on a fleet desk would mix this machine's login into
+    the replay. Started whatever the setting says, like the status-page
+    watch: it reads config.json each tick, so `blink config usage-refresh
+    on` takes effect within a minute without a restart.
+
+    `board_alive` is the Bridge's, which only compares a timestamp the
+    serial loop keeps, so asking it from the refresh's thread is safe and
+    never waits on the serial thread. The serial thread never calls into
+    the refresh at all."""
+    from pc import claude_home
+    if os.environ.get("BLINK_SCENARIO"):
+        return None
+    if claude_home.current().kind != claude_home.NATIVE:
+        return None
+
+    def enabled():
+        try:
+            return (user_config.load(blink_home).get(usage_refresh.SETTING)
+                    is True)
+        except (OSError, user_config.Unreadable):
+            return False
+
+    def other_at():
+        # The status line's mtime as well as the bus's frames: the bus is
+        # polled only while a board answers and only every few seconds, and
+        # a render with no figure in it still says a terminal is in use.
+        stamps = [bus.claude_fresh_at()]
+        try:
+            stamps.append(os.stat(statusline_source.payload_path(
+                claude_home.native())).st_mtime)
+        except OSError:
+            pass
+        stamps = [t for t in stamps if t is not None]
+        return max(stamps) if stamps else None
+
+    # current, not native: a record that turns WSL under a running daemon
+    # stops the runs at the next tick, before the restart that follows.
+    watch = usage_refresh.RefreshWatch(
+        blink_home, claude_home.current, enabled=enabled,
+        board_alive=board_alive,
+        view=usage_refresh.config_view(claude_home.current),
+        other_at=other_at)
+    return watch.start()
 
 
 def build_bus():
@@ -1072,6 +1123,20 @@ def main(argv=None):
         enabled=lambda: status_page.enabled(blink_home))
     svc_watch.start()
 
+    # The /usage refresh, once for the life of the process like the watch
+    # above: its spacing and its failure count describe this login, not
+    # this cable. It asks whether the board is answering through `live`,
+    # which holds the Bridge of the connection that is open now (set where
+    # the Bridge is built below); a Bridge from a connection that has gone
+    # stops answering by itself once its last ping is older than the
+    # liveness window.
+    live = {}
+
+    def _board_alive():
+        b = live.get("bridge")
+        return b is not None and b.board_alive()
+    start_usage_refresh(blink_home, bus, _board_alive)
+
     # Themes, for the life of the process like the watch above: what the
     # board is believed to hold outlives a reconnect, and the builder a
     # board's "Edit on computer" opened must not close because the cable
@@ -1427,6 +1492,7 @@ def main(argv=None):
                         board_caps_hint=board_caps_hint(heard, known),
                         pending=update.PendingFirmware(
                             os.path.join(blink_home, "pending_fw.json")))
+        live["bridge"] = bridge  # for the /usage refresh's board_alive
         report_failure = None   # handed to the Bridge above; never repeated
         # No reset means no boot `hello`, so nothing would trigger the
         # greeting -- see Bridge.greet.

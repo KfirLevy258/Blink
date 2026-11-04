@@ -190,6 +190,9 @@ class IngestionBus:
         # rather than copied into a flag of its own, so that it answers for
         # the same poll the usage line came from. See page().
         self._pages = {}
+        # The newest observed_at of a Claude figure from a source other
+        # than BLINK's own /usage refresh, or None: claude_fresh_at().
+        self._claude_fresh_at = None
         # What is left of the read budget for this pass's burn lines, shared
         # by every reader (burn_reader.READ_BUDGET_BYTES, or a reader's own
         # when it was given less); None for a full one. Filled by
@@ -535,6 +538,7 @@ class IngestionBus:
         # must not date the usage line by the moment it started.
         now = self._now()
         frames = self._guard_account(frames, now)
+        self._note_claude_fresh(frames)
         primary, secondary = normalizer.select_pair(
             frames, preferred=self._preferred)
         # The claude page wherever it sits: the main one, or the second when
@@ -559,6 +563,27 @@ class IngestionBus:
         self._session_pair = _pair_from(
             primary, secondary, msg.get("state", base.STATE_UNKNOWN))
         return msg
+
+    def _note_claude_fresh(self, frames):
+        # After the login guard, so a reading from another login does not
+        # count as this one's. USAGE_SRC_ID is the refresh's own cache: if
+        # it counted, every refresh would hold off the next.
+        fresh = [f.observed_at for f in frames
+                 if f is not None and f.provider == claude_cli.PROVIDER_ID
+                 and f.src != base.USAGE_SRC_ID and f.has_usage()]
+        if fresh:
+            self._claude_fresh_at = max(fresh)
+
+    def claude_fresh_at(self):
+        """When another Claude source last gave a figure (the status line,
+        Claude Desktop's Code tab, chat or Cowork), as the last poll() that
+        had one saw it; None before any.
+
+        Written by poll() on the serial loop and read by
+        usage_refresh.RefreshWatch on its own thread, as a plain float with
+        no lock: a float read is atomic in CPython, and a value one poll old
+        moves the refresh's 15-minute rule by two seconds."""
+        return self._claude_fresh_at
 
     def claude_page(self):
         """The merged claude frame the last poll() put on a page, or None.
