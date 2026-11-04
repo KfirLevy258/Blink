@@ -585,13 +585,21 @@ def test_a_failing_sburn_is_said_once_by_type(capsys):
 def test_the_bus_builds_sburn_only_for_a_spend_page():
     from pc import spend_count
     counter = spend_count.SpendCounter(persist=False)
-    held = [spend()]
+    # The config's page, the one the count feeds (IngestionBus.spend_burn).
+    page = spend()
+    page.src = base.SPEND_SRC_ID
+    held = [page]
     bus = ingest.IngestionBus(providers=[_source(held)], now=lambda: NOW,
                               account=_Watch("enterprise"), counter=counter)
     bus.poll()
     m = bus.fetch().spend_burn()
     assert m["t"] == "sburn" and m["q"] == protocol.burn_quarter(NOW)
     assert m["b"] == counter.buckets(NOW) and len(m["b"]) == 20
+    # A gateway's page, from the status line: a spend page the count does
+    # not feed, so no line.
+    held[:] = [spend()]
+    bus.poll()
+    assert bus.fetch().spend_burn() is None
     held[:] = [windows()]
     bus.poll()
     assert bus.fetch().spend_burn() is None

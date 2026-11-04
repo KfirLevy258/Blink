@@ -670,10 +670,22 @@ class IngestionBus:
         scenario's stand-in (scripted.ScriptedSpendCount), whose buckets are
         None until a step names some: that is no line too. Pure arithmetic
         on the in-memory count: no file is read here.
+
+        And None unless the page is the one the count feeds: the config's
+        (base.SPEND_SRC_ID). A gateway's page (the status line's own
+        spend_limit, pc/statusline_source) is a spend page too, but nothing
+        feeds the count from it, so its buckets were twenty zeros, and new
+        firmware gives the left half of the burn view to any fresh sburn,
+        hiding the gateway's share behind an empty dollar line (final
+        review of 2026-11-04). A scenario's stand-in is not held to this:
+        its line is whatever its steps say, on whatever page they draw.
         """
         page = self._pages.get(provider)
         if (self._counter is None or page is None
                 or getattr(page, "plan", base.PLAN_WINDOWS) != base.PLAN_SPEND):
+            return None
+        if (isinstance(self._counter, spend_count.SpendCounter)
+                and page.src != base.SPEND_SRC_ID):
             return None
         now = self._now()
         cents = self._counter.buckets(now)

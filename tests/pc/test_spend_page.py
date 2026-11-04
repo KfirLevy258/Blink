@@ -420,6 +420,30 @@ def test_a_gateway_spend_frame_wins(tmp_path):
     assert bus.claude_page().src == ss.SRC_ID
 
 
+def test_a_gateway_spend_page_gets_no_dollar_burn_line(tmp_path):
+    """The running count feeds the config's page (SPEND_SRC_ID) and only
+    that one. On a gateway's page it is never fed, so its buckets are all
+    zero, and a fresh sburn of twenty zeros takes the left half of the burn
+    view from the gateway's share on new firmware (final review of
+    2026-11-04). A gateway page sends no dollar line; the config's page on
+    the same bus, once the gateway figure is gone, still does."""
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 60)
+    gateway = {"spend_limit": {"used_percentage": 62.8,
+                               "resets_at": NEXT_MONTH, "used_usd": 314.12,
+                               "limit_usd": 500, "period": "monthly"}}
+    render(tmp_path, NOW - 30, 1.00, rate_limits=gateway)
+    bus = bus_on(clock)
+    bus.poll()
+    page = bus.claude_page()
+    assert page.plan == base.PLAN_SPEND and page.src == ss.SRC_ID
+    assert bus.spend_burn() is None
+    render(tmp_path, NOW - 20, 1.20)
+    bus.poll()
+    assert bus.claude_page().src == claude_cli.SPEND_SRC_ID
+    assert bus.spend_burn()["t"] == "sburn"
+
+
 def test_a_usage_newer_than_the_last_render_dates_the_page(tmp_path):
     clock = Clock(NOW)
     render(tmp_path, NOW - 3600, 1.00)
