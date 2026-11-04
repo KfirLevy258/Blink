@@ -538,10 +538,27 @@ def merge_uninstall(doc: dict, marker: str, chain_text, shim_cmd=None):
     return doc, "", ("delete",), msg
 
 
+def decode_chain(raw: bytes) -> str:
+    """The chain file's text, whatever a hand edit left in it. Never raises.
+
+    Blink writes it UTF-8, but it is a plain file in the customer's home
+    and the README tells them where it is. PowerShell 5.1's `>` writes
+    UTF-16LE with a BOM, Notepad's ANSI is cp1252, and a crash mid-write
+    cuts a character in half. A strict decode raised UnicodeDecodeError,
+    which no caller catches, so uninstall died after the service was
+    already gone and install died after the record was saved (review of
+    feat/enterprise-spend, U33). A BOM decides; otherwise UTF-8, with a
+    byte that is not UTF-8 replaced rather than guessed at -- the command
+    is still put back, and the customer can see which character to fix."""
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16", "replace")
+    return raw.decode("utf-8-sig", "replace")
+
+
 def _read_chain(home=None):
     try:
-        with open(_chain_path(home), encoding="utf-8") as f:
-            return f.read()
+        with open(_chain_path(home), "rb") as f:
+            return decode_chain(f.read())
     except OSError:
         return None
 
@@ -638,11 +655,7 @@ def _announce(settings_path: str, shim_path: str, undo_hint: str = None) -> None
     print("           nothing else in the file is touched)")
     if previous and is_ours:
         chained = ""
-        try:
-            with open(_chain_path(), encoding="utf-8") as f:
-                chained = f.read().strip()
-        except OSError:
-            pass
+        chained = (_read_chain() or "").strip()
         print(f"  Was      {previous}")
         print(f"  Now      {new_command}")
         print()
@@ -989,7 +1002,7 @@ def uninstall_from(home, wsl_run) -> str:
     if rc != 0:
         raise WslInstallError("Could not read Blink's status line chain file"
                               " inside WSL.")
-    chain_text = out.decode("utf-8", "replace") if out else None
+    chain_text = decode_chain(out) if out else None
 
     sl_doc, sl_marker, action, msg = merge_uninstall(
         st.doc, _read_marker(home), chain_text, wsl_statusline_command(home))

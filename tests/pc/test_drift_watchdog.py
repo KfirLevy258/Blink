@@ -244,3 +244,48 @@ def test_a_failed_shim_rewrite_says_no_path(tmp_path, monkeypatch):
     msg = isl.shim_content_check([(target, "blink-hook.sh")])
     assert msg and "could not be replaced" in msg
     assert "zoe-private" not in msg
+
+
+# --- review of feat/enterprise-spend, U33 --------------------------------
+#
+# The chain file is ours, written UTF-8, but a customer who edits it by hand
+# can leave anything there: PowerShell 5.1's `>` writes UTF-16LE with a BOM,
+# Notepad's ANSI is cp1252, and a crash mid-write cuts a character in half.
+# Uninstall read it with a strict decoder before deciding anything, and
+# died -- after the service had already been removed.
+
+@pytest.mark.parametrize("raw,want", [
+    ("my-bar ë\n".encode("utf-16"), "my-bar ë"),
+    (b"\xef\xbb\xbfmy-bar\n", "my-bar"),
+    ("my-bar é\n".encode("cp1252"), None),
+    ("my-bar é".encode("utf-8")[:-1], None),
+])
+def test_a_chain_file_in_another_encoding_never_raises(settings, raw, want):
+    isl.install(settings, SHIM)
+    data = json.loads(open(settings).read())
+    data["statusLine"] = {"type": "command", "command": "foreign-bar"}
+    open(settings, "w").write(json.dumps(data))
+    chain = os.path.expanduser(isl.CHAIN_PATH)
+    with open(chain, "wb") as f:
+        f.write(raw)
+    # A foreign status line: left alone, and no raise on the way.
+    assert "leaving it alone" in isl.uninstall(settings, SHIM)
+    # Ours again: restored from the chain, decoded as well as it can be.
+    data["statusLine"] = {"type": "command",
+                          "command": isl.statusline_command(SHIM)}
+    open(settings, "w").write(json.dumps(data))
+    isl.uninstall(settings, SHIM)
+    got = _current(settings)
+    if want is not None:
+        assert got == want
+    else:
+        assert got.startswith("my-bar ")
+
+
+def test_the_install_note_reads_a_chain_file_in_another_encoding(
+        settings, capsys):
+    isl.install(settings, SHIM)
+    with open(os.path.expanduser(isl.CHAIN_PATH), "wb") as f:
+        f.write("my-bar\n".encode("utf-16"))
+    isl._announce(settings, SHIM)
+    assert "my-bar" in capsys.readouterr().out
