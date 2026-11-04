@@ -94,6 +94,16 @@ def _blink_home():
     return os.path.join(os.path.expanduser("~"), ".blink")
 
 
+def linux_norm(linux_path):
+    """`linux_path` as unc spells it inside a distribution: absolute, with
+    `//`, `.` and `x/..` collapsed lexically and no trailing slash. unc's
+    own normalisation, here so a comparison against what the record holds
+    reads both sides alike: _moved_inside in pc/cli compared the record's
+    normalised folder with the probe's raw one, and a CLAUDE_CONFIG_DIR of
+    /home/a//.claude made every reinstall a move (review round 2, C2)."""
+    return posixpath.normpath("/" + linux_path.strip("/"))
+
+
 def unc(name, linux_path, long_paths=True):
     """The Windows path of `linux_path` inside distribution `name`. The one
     builder: pc/wsl's unc is this function, since two had drifted on a
@@ -108,7 +118,7 @@ def unc(name, linux_path, long_paths=True):
     with x a symlink goes where the text says rather than where Linux
     would; a config folder reached that way is not worth a wsl.exe call
     to resolve on every path built."""
-    rest = posixpath.normpath("/" + linux_path.strip("/")).strip("/")
+    rest = linux_norm(linux_path).strip("/")
     rest = rest.replace("/", "\\")
     base = (_UNC_ROOT if long_paths else "\\\\wsl$\\") + name
     return base + ("\\" + rest if rest else "")

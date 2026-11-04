@@ -3744,6 +3744,25 @@ def test_reinstall_into_the_same_folder_undoes_nothing(tmp_path,
     assert _inside(calls) == ["probe", "install_into"]
 
 
+@pytest.mark.parametrize("config_dir, linux_home", [
+    ("/home/zoe//.claude", "/home/zoe"),
+    ("/home/zoe/x/../.claude", "/home/zoe"),
+    ("/home/zoe/./.claude/", "/home/zoe//"),
+])
+def test_the_same_folder_spelled_another_way_is_not_a_move(
+        tmp_path, monkeypatch, capsys, config_dir, linux_home):
+    """Round 2, C2: the record's folder is normalised on the way in
+    (claude_home.unc, U34), and was compared against the probe's raw
+    spelling. A CLAUDE_CONFIG_DIR with `//` or `..` in it then made every
+    reinstall a move, and took Blink out of the live folder first."""
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe(config_dir=config_dir, home=linux_home,
+                                   config_dir_set=True))
+    _recorded_wsl(tmp_path)
+    assert cli.main(["install"]) == 0
+    assert _inside(calls) == ["probe", "install_into"]
+
+
 def test_a_kept_wsl_desk_that_fails_says_no_done(tmp_path, monkeypatch,
                                                  capsys):
     """U27: a plain install on a WSL desk whose probe failed said

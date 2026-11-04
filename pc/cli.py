@@ -4162,15 +4162,20 @@ def _moved_inside(prev, home, config_dir) -> bool:
     """Is `home` (just probed, its config folder `config_dir` as Linux
     spells it) another folder or account inside the distribution `prev`
     was recorded for? A record whose folder cannot be read back is taken
-    as not moved: there would be nothing to find of it."""
+    as not moved: there would be nothing to find of it.
+
+    Both sides normalised the one way, claude_home.linux_norm: the record's
+    folder went through it on the way in (unc, U34) and the probe's did
+    not, so `/home/zoe//.claude` read as a move on every reinstall and
+    Blink was taken out of the live folder first (review round 2, C2)."""
     try:
         old = install_statusline._linux_path(prev, prev.config_dir)
     except install_statusline.WslInstallError:
         return False
-    return (old.rstrip("/") != config_dir.rstrip("/")
+    norm = claude_home.linux_norm
+    return (norm(old) != norm(config_dir)
             or prev.linux_user != home.linux_user
-            or (prev.linux_home or "").rstrip("/")
-            != (home.linux_home or "").rstrip("/"))
+            or norm(prev.linux_home or "") != norm(home.linux_home or ""))
 
 
 def _say_wsl_manual_steps(name) -> None:
