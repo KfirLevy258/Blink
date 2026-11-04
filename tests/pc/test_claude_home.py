@@ -263,3 +263,50 @@ def test_unreadable_user_config_keeps_the_home(tmp_path):
 def test_a_malformed_record_is_no_record(tmp_path, rec):
     user_config.put(cli.blink_home(), "claude_home", rec)
     assert claude_home.current() == claude_home.from_environ({})
+
+
+@pytest.mark.parametrize("second", [None, "other"], ids=["to-home", "to-Y"])
+def test_a_moved_record_takes_blink_out_of_the_recorded_folder(
+        tmp_path, monkeypatch, second):
+    """Recorded X, then installed again without the variable (or with Y):
+    X's settings.json gets its own status line back and loses our hooks,
+    and uninstall leaves nothing of Blink's in either file (review of
+    b3abec4: only ~/.claude was ever cleaned, so X kept hooks pointing at
+    shims uninstall deleted, and its status line was lost to the chain)."""
+    x = _j(tmp_path, "x")
+    os.makedirs(x)
+    mine = {"type": "command", "command": "sh ~/x-bar.sh"}
+    with open(os.path.join(x, "settings.json"), "w") as f:
+        json.dump({"statusLine": mine}, f)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", x)
+    assert cli.main(["install"]) == 0
+
+    if second:
+        y = _j(tmp_path, second)
+        os.makedirs(y)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", y)
+        new = os.path.join(y, "settings.json")
+    else:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+        new = _j(tmp_path, ".claude", "settings.json")
+    assert cli.main(["install"]) == 0
+    with open(os.path.join(x, "settings.json")) as f:
+        assert json.load(f) == {"statusLine": mine}
+    with open(new) as f:
+        assert f.read().count("blink-statusline.sh") == 1
+
+    assert cli.main(["uninstall"]) == 0
+    for p in (os.path.join(x, "settings.json"), new):
+        with open(p) as f:
+            assert "blink" not in f.read()
+
+
+def test_an_unparseable_config_json_is_not_said_to_be_changed(tmp_path,
+                                                              capsys):
+    os.makedirs(cli.blink_home())
+    with open(user_config.path(cli.blink_home()), "w") as f:
+        f.write("{half an edit")
+    cli._announce()
+    out = capsys.readouterr().out
+    assert f"Changes    {user_config.path(cli.blink_home())}" not in out
+    assert "does not parse" in out

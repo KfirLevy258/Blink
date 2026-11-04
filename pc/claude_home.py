@@ -178,7 +178,7 @@ def from_record(rec):
 _last = {}
 
 
-def _recorded():
+def recorded():
     """The recorded home, or None. Read through a stat signature, since the
     readers ask on every poll; a file that cannot be read gives the last
     good answer, because a half-written config.json must not move the
@@ -204,18 +204,22 @@ def _recorded():
 def native(environ=None):
     """This computer's own Claude Code: the folder recorded by `blink
     install` when there is a native record, else from_environ(environ)."""
-    rec = _recorded()
+    return _native_from(recorded(), environ)
+
+
+def _native_from(rec, environ=None):
     if rec is not None and rec.kind == NATIVE:
         return rec
     return from_environ(environ)
 
 
 def current():
-    """The home the readers read: a recorded WSL home, else native()."""
-    rec = _recorded()
+    """The home the readers read: a recorded WSL home, else native().
+    One read of the record for both questions."""
+    rec = recorded()
     if rec is not None and rec.kind == WSL:
         return rec
-    return native()
+    return _native_from(rec)
 
 
 def save(home):

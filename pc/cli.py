@@ -3052,21 +3052,33 @@ def _announce(home=None):
     if prev_cmd:
         print(f"             Your current status line is kept and still runs:")
         print(f"               {prev_cmd}")
-    old = _old_settings(home)
-    if old:
-        # The file every release before the record wrote, whatever
-        # CLAUDE_CONFIG_DIR said. Claude Code does not read it while the
-        # variable is set, and leaving our entries in it would leave its
-        # chain file describing the wrong settings.json.
+    for old in _old_settings(home):
+        # A settings.json an earlier install wrote into -- the previously
+        # recorded folder, or ~/.claude, which every release before the
+        # record wrote whatever CLAUDE_CONFIG_DIR said. Claude Code does not
+        # read it for this install, and our entries left in it would leave
+        # the one chain file describing the wrong settings.json.
         print(f"  Changes    {old}")
         print("             takes Blink's status line and hooks back out of it:")
-        print("             with CLAUDE_CONFIG_DIR set, Claude Code reads the")
-        print("             file above instead. A status line of yours that")
-        print("             Blink had kept is put back.")
-    print(f"  Changes    {user_config.path(blink_home())}")
-    print("             records which Claude Code folder this is for, so the")
-    print("             background service, which does not see this shell's")
-    print("             variables, reads the same one.")
+        print("             Claude Code reads the file above for this install")
+        print("             instead. A status line of yours that Blink had kept")
+        print("             is put back.")
+    config = user_config.path(blink_home())
+    try:
+        user_config.load(blink_home())
+    except (user_config.Unreadable, OSError):
+        # user_config.put refuses to write over it, so saying "Changes"
+        # here would be false (review of b3abec4).
+        print(f"  Leaves     {config}")
+        print("             alone: it does not parse, so which Claude Code")
+        print("             folder this is for is not recorded, and the")
+        print("             background service reads the one its own")
+        print("             environment names.")
+    else:
+        print(f"  Changes    {config}")
+        print("             records which Claude Code folder this is for, so")
+        print("             the background service, which does not see this")
+        print("             shell's variables, reads the same one.")
     created = backend().creates()
     if created:
         print(f"  Creates    {created}")
@@ -3393,32 +3405,26 @@ def cmd_driver(_args) -> int:
     return 1
 
 
-def _old_settings(home):
-    """~/.claude/settings.json when it is not `home`'s settings file and
-    still holds a status line or hook of ours, else None.
+def _same_file(a, b):
+    """Do two paths name one file? realpath, so a symlinked config folder
+    or a differently spelled one is not taken for a second file to clean."""
+    norm = lambda p: os.path.normcase(os.path.realpath(p))  # noqa: E731
+    return norm(a) == norm(b)
 
-    Every release before claude_home wrote there whatever CLAUDE_CONFIG_DIR
-    said. Once the recorded folder moves, install takes our entries back
-    out of it and uninstall cleans it too: left in, its chain file would be
-    restored into the new file at uninstall, and a later terminal without
-    the variable would keep feeding the panel from an account the daemon
-    is not reading. "Ours" by the commands this home's shims would have and
-    by the markers, the same evidence install and uninstall act on. None
-    for an unreadable file: there is nothing we could safely do to it."""
-    if home.kind != claude_home.NATIVE:
-        return None
-    old = claude_home.legacy_settings_path()
-    norm = lambda p: os.path.normcase(os.path.abspath(p))  # noqa: E731
-    if norm(old) == norm(settings_path(home)):
-        return None
+
+def _holds_ours(path, home):
+    """Does settings.json at `path` hold a status line or hook of ours?
+    "Ours" by the commands this home's shims would have and by the
+    markers, the same evidence install and uninstall act on. False for an
+    unreadable file: there is nothing we could safely do to it."""
     try:
-        data = install_statusline._load(old)
+        data = install_statusline._load(path)
     except (install_statusline.SettingsUnreadable, OSError):
-        return None
+        return False
     if install_statusline._is_ours(
             install_statusline._current_command(data),
             install_statusline.statusline_command(shim_path(home))):
-        return old
+        return True
     ours = install_hooks._read_marker() | {
         install_hooks.hook_command(hook_shim_path(home), ev)
         for ev, _ in install_hooks.HOOK_EVENTS}
@@ -3428,8 +3434,38 @@ def _old_settings(home):
             inner = group.get("hooks") if isinstance(group, dict) else None
             for h in inner if isinstance(inner, list) else ():
                 if isinstance(h, dict) and h.get("command") in ours:
-                    return old
-    return None
+                    return True
+    return False
+
+
+def _old_settings(home):
+    """The settings.json files other than `home`'s that still hold an entry
+    of ours, in the order to take them out.
+
+    Two candidates. The file of the native home recorded now, before
+    `home` replaces it: a record of X followed by an install without the
+    variable, or with Y, left X's entries behind, and uninstall never
+    looked there again, so X kept hooks pointing at deleted shims (review
+    of b3abec4). And ~/.claude/settings.json, which every release before
+    claude_home wrote whatever CLAUDE_CONFIG_DIR said. The recorded one
+    first: it is the file install last chained from, so the one chain file
+    is restored into the file it came from, and the legacy one after it
+    has nothing left to restore. Left in, our entries would also keep a
+    terminal for another account feeding the panel."""
+    if home.kind != claude_home.NATIVE:
+        return []
+    new = settings_path(home)
+    candidates = []
+    rec = claude_home.recorded()
+    if rec is not None and rec.kind == claude_home.NATIVE:
+        candidates.append(settings_path(rec))
+    candidates.append(claude_home.legacy_settings_path())
+    out = []
+    for p in candidates:
+        if (not _same_file(p, new) and not any(_same_file(p, q) for q in out)
+                and _holds_ours(p, home)):
+            out.append(p)
+    return out
 
 
 def _take_out_of(path, home):
@@ -3537,12 +3573,14 @@ def cmd_install(_args) -> int:
     # not parse is not ours to overwrite (user_config.put refuses), and
     # costs only the record: the daemon then reads the folder its own
     # environment names, as every release before this did.
+    # The files to take our entries out of, asked before the save: one of
+    # them is the folder recorded until now.
+    olds = _old_settings(home)
     try:
         claude_home.save(home)
     except (user_config.Unreadable, OSError) as e:
         print(f"      Could not record the Claude Code folder: {e}")
-    old = _old_settings(home)
-    if old:
+    for old in olds:
         for line in _take_out_of(old, home):
             print(f"      {old}: {line}")
     _write_shim(shim_path(home), "blink-statusline.sh")
@@ -3625,7 +3663,7 @@ def cmd_uninstall(_args) -> int:
     # And ~/.claude/settings.json, when the recorded folder is elsewhere and
     # that file still holds an entry of ours. Asked now, while the markers
     # that help recognise them are still there.
-    old = _old_settings(home)
+    olds = _old_settings(home)
     print("Blink uninstall.")
     print()
     print("[1/5] Background service ... ", end="", flush=True)
@@ -3653,9 +3691,9 @@ def cmd_uninstall(_args) -> int:
         # Same reasoning as the step above: keep going, and never "repair" a
         # file we cannot parse by writing a fresh one over it.
         print(f"      Left alone: {e}")
-    if old:
-        # After the recorded file, whose chain file is the one uninstall
-        # restores from; the old file's own was put back when install moved.
+    # After the recorded file, whose chain file is the one uninstall
+    # restores from; an old file's own was put back when install moved.
+    for old in olds:
         for line in _take_out_of(old, home):
             print(f"      {old}: {line}")
 
@@ -3670,10 +3708,10 @@ def cmd_uninstall(_args) -> int:
     for p in (shim_path(home), hook_shim_path(home), launcher_path(),
               # Spelled once, in statusline_source.payload_path, and asked
               # for here rather than rebuilt from blink_home().
-              statusline_source.payload_path(),
-              statusline_source.payload_path() + ".tmp",
+              statusline_source.payload_path(home),
+              statusline_source.payload_path(home) + ".tmp",
               # Pid-scoped temp names, from a render interrupted mid-write.
-              *glob.glob(statusline_source.payload_path() + ".*.tmp"),
+              *glob.glob(statusline_source.payload_path(home) + ".*.tmp"),
               os.path.join(blink_home(), "state.json"),
               os.path.join(blink_home(), "state.json.tmp"),
               os.path.join(blink_home(), "pending_fw.json"),

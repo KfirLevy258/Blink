@@ -105,6 +105,9 @@ def _chain_path(home=None):
 
     Natively ~/.blink/statusline-chain, as it always was. For a WSL home it
     is the copy inside the distribution, which the shim there runs."""
+    # The literal, not claude_home.WSL: claude_home imports user_config,
+    # which imports this module, so importing it here at the top would be
+    # a cycle, and a lazy import for one string is not worth it.
     if home is not None and home.kind == "wsl":
         return home.inside(".blink", os.path.basename(CHAIN_PATH))
     return os.path.join(_blink_dir(home), os.path.basename(CHAIN_PATH))
