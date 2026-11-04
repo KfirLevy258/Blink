@@ -92,7 +92,11 @@ all month and was rewritten on nearly every render. Now:
   forward within a login and a month, and bind() empties everything when
   either changes.
 * Each session's mark, so a resumed session's past cost is never counted
-  as new. These are kept until the month turns or the login
+  as new: its highest cost estimate and the time of the render that first
+  showed that amount -- the session's first render, or the one where it
+  last rose. A render showing the same amount again does not move it (an
+  equal figure may be another process's). These are kept until the month
+  turns or the login
   changes, and they are what the file's size follows: about 70 bytes a
   session, so 2 KB a day at thirty sessions a day and 66 KB by the 31st
   (tests/pc/test_spend_count.py's busy month, U13b in the final review of
@@ -296,7 +300,8 @@ class SpendCounter:
         self._written_to = None  # the file the last write went to
         self._fp = None
         self._period = None
-        # sid -> [high_water_cents, the time of the sighting that set it]
+        # sid -> [highest cost estimate in cents, the time of the render
+        # that first showed it: the session's first, or its last rise]
         self._sessions = {}
         self._adds = []       # [prev_seen, at, cents], the last _RECENT_S
         # [boundary, cents_from_boundary, cents, first_prev, last_at], or
