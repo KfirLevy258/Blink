@@ -414,20 +414,22 @@ def test_a_login_away_and_back_takes_new_baselines(tmp_path):
     assert bus.plan_msg()["usd"] == 0.85
 
 
-def test_a_sign_out_and_in_to_the_same_seat_counts_the_new_ledger(tmp_path):
-    """Round 2 of the 2026-11-04 review, K1: a /logout and /login to the
-    same seat shows no switch to the provider (the fingerprint is the
-    same throughout), but the session's cost starts again from zero. The
-    count takes the drop as a new ledger: 30 cents before, 50 after."""
+def test_a_sign_out_and_in_to_the_same_seat_counts_once_past_the_old_total(
+        tmp_path):
+    """U9, kept (pc/spend_count.py's docstring): a /logout and /login to
+    the same seat shows no switch to the provider and the session's cost
+    starts again from zero. Nothing counts until the session passes its
+    old total of 1.30: 30 cents before, 10 after, the 50 under it left to
+    the next /usage."""
     clock = Clock(NOW)
     config(tmp_path, NOW - 3600, cache=False)
     bus = bus_on(clock)
     for at, cost in ((NOW, 1.00), (NOW + 10, 1.30), (NOW + 20, 0.00),
-                     (NOW + 30, 0.20), (NOW + 40, 0.50)):
+                     (NOW + 30, 0.50), (NOW + 40, 1.40)):
         render(tmp_path, at, cost, session="sess-a")
         clock.t = at + 1
         bus.poll()
-    assert bus.plan_msg()["usd"] == 0.80
+    assert bus.plan_msg()["usd"] == 0.40
 
 
 def test_another_organisation_does_not_take_the_old_usage(tmp_path):
@@ -700,3 +702,25 @@ def test_nothing_spend_related_is_printed(tmp_path, capfd, caplog,
         assert word not in text
     # The failure is said, once, in fixed words.
     assert out.err.count(claude_cli.SPEND_FAILED_MSG) == 1
+
+
+def test_the_bus_names_the_reading_on_a_page(tmp_path):
+    """Bridge._outgoing tells the reading a spend page was taken down from
+    by IngestionBus.reading: the same for as long as the same render is
+    offered, whatever the clock does, and another for the next render."""
+    clock = Clock(NOW)
+    max_config(tmp_path, NOW - 3600)
+    bus = bus_on(clock)
+    render(tmp_path, NOW + 600, 0.10, rate_limits=WINDOWS)   # dated ahead
+    clock.t = NOW + 1
+    bus.poll()
+    first = bus.fetch().reading("claude")
+    assert first is not None
+    for step in (2, 3600, -7200):
+        clock.t += step
+        bus.poll()
+        assert bus.fetch().reading("claude") == first
+    render(tmp_path, NOW + 700, 0.20, rate_limits=WINDOWS)
+    bus.poll()
+    assert bus.fetch().reading("claude") != first
+    assert bus.fetch().reading("codex") is None

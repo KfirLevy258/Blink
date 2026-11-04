@@ -763,11 +763,12 @@ class ClaudeCliProvider(base.ProviderParser):
         in memory: a daemon restarted after the switch cannot tell.
 
         A same-seat re-login without a switch in between (sign out, sign
-        in) leaves the fingerprint as it was, and is not seen here. The
-        count meets it as a figure below the session's mark, which
-        SpendCounter.observe takes for a new ledger and counts the rises
-        of (round 2 of the 2026-11-04 review, K1); the /usage needs no
-        floor, being the same login's."""
+        in) leaves the fingerprint as it was, and is not seen here: the
+        count meets it as figures below the session's mark and counts
+        nothing until the session passes its old total, which the next
+        /usage corrects. Round 2 of the 2026-11-04 review counted them as
+        a ledger of their own and round 3 took that out again, for
+        counting too much across a /usage (pc/spend_count.py)."""
         fp = view.account_fp
         if not fp:
             return
