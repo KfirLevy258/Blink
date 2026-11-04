@@ -451,3 +451,11 @@ def test_a_desk_with_no_record_guards_the_legacy_settings(tmp_path,
     claude_home.save(claude_home.from_environ())
     dog = cli.drift_watchdog(claude_home.current())
     assert dog._settings == os.path.join(elsewhere, "settings.json")
+
+
+@pytest.fixture(autouse=True)
+def _no_recapture_wait(monkeypatch):
+    """`blink uninstall` waits cli.HOOK_RECAPTURE_S between taking the
+    hooks out and removing the script they run; not here."""
+    from pc import cli as _cli
+    monkeypatch.setattr(_cli, "HOOK_RECAPTURE_S", 0)

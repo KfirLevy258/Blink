@@ -228,3 +228,11 @@ def test_a_marker_that_is_not_utf8_reads_as_none(tmp_path):
         f.write(b"bash '/x/blink-hook.sh' Stop\xff\xfe\n")
     assert ih._read_marker() == set()
     assert cli.main(["uninstall"]) in (0, 1)
+
+
+@pytest.fixture(autouse=True)
+def _no_recapture_wait(monkeypatch):
+    """`blink uninstall` waits cli.HOOK_RECAPTURE_S between taking the
+    hooks out and removing the script they run; not here."""
+    from pc import cli as _cli
+    monkeypatch.setattr(_cli, "HOOK_RECAPTURE_S", 0)

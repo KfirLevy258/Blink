@@ -4398,12 +4398,16 @@ def cmd_uninstall(_args) -> int:
     # wrote (Windows 1.0.0 to 1.0.2), and taken out after it, those were
     # left behind running a deleted script (U37). No chain file to get
     # wrong here, unlike the status line, which waits for step 2's.
+    hooks_out = False
     for old in olds:
         for line in _take_out_of(old, home, statusline=False):
+            hooks_out = hooks_out or _hooks_removed(line)
             print(f"      {old}: {line}")
     try:
-        print("      " + install_hooks.uninstall(settings_path(home),
-                                                 hook_shim_path(home), home))
+        said = install_hooks.uninstall(settings_path(home),
+                                       hook_shim_path(home), home)
+        hooks_out = hooks_out or _hooks_removed(said)
+        print("      " + said)
     except install_statusline.SettingsUnreadable as e:
         # Same reasoning as the step above: keep going, and never "repair" a
         # file we cannot parse by writing a fresh one over it.
@@ -4422,6 +4426,15 @@ def cmd_uninstall(_args) -> int:
     _uninstall_codex_hooks()
 
     print("[5/5] Files ... ", end="", flush=True)
+    if hooks_out and HOOK_RECAPTURE_S > 0:
+        # Claude Code 2.1.316 and .318 were seen to re-read their hooks 1
+        # to 1.5 s after settings.json changed. A hook firing in between
+        # runs the script removed below, and sh's exit 2 for a missing
+        # file is "block" in Claude Code's hook contract: one prompt or
+        # tool call refused (review of feat/enterprise-spend, U29; the WSL
+        # uninstall waits the same). The Codex step above sits in between
+        # already; this covers the rest, once, on an interactive command.
+        time.sleep(HOOK_RECAPTURE_S)
     # Only what install created. NOT ~/.blink itself: it also holds the two
     # signing keys, which cannot be regenerated -- every board flashed with the
     # first one's public half, and every app carrying the second one's, would
@@ -4507,6 +4520,17 @@ def cmd_uninstall(_args) -> int:
     print("back in, then delete it by hand:")
     print(f"  {bin_dir()}")
     return 1
+
+
+# How long uninstall waits between taking the hooks out of settings.json
+# and removing the script they run: see cmd_uninstall's step 5. The same
+# figure as install_statusline's for a WSL uninstall.
+HOOK_RECAPTURE_S = 2.0
+
+
+def _hooks_removed(said: str) -> bool:
+    """Did install_hooks.uninstall's answer say it took hooks out?"""
+    return said.startswith("Blink state hooks removed")
 
 
 def _theme_files(home: str) -> list:

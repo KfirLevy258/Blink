@@ -335,6 +335,36 @@ def test_uninstall_forgets_whether_the_account_has_a_window(tmp_path):
     assert session_verdict.SessionVerdict().current() is None
 
 
+@pytest.fixture(autouse=True)
+def _no_recapture_wait(monkeypatch):
+    """Uninstall waits HOOK_RECAPTURE_S between taking the hooks out and
+    removing the script they run; the tests that care say so."""
+    monkeypatch.setattr(cli, "HOOK_RECAPTURE_S", 0)
+
+
+def test_uninstall_waits_for_claude_code_to_let_go_of_the_hooks(
+        tmp_path, monkeypatch):
+    """U29, natively: Claude Code re-reads its hooks 1 to 1.5 s after
+    settings.json changes (2.1.316 and .318), and a hook that fires in
+    between runs the script uninstall has just deleted -- an exit 2, which
+    blocks that call. So the script goes two seconds after the hooks, and
+    only when hooks were taken out."""
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    monkeypatch.setattr(cli, "HOOK_RECAPTURE_S", 2.0)
+    shim = inside(tmp_path, cli.hook_shim_path())
+    waited = []
+    monkeypatch.setattr(cli.time, "sleep", lambda s: waited.append(
+        (s, os.path.exists(shim), "blink-hook.sh" in json.dumps(
+            _read(tmp_path)))))
+    cli.main(["uninstall"])
+    assert waited == [(2.0, True, False)]
+    assert not os.path.exists(shim)
+    waited.clear()
+    cli.main(["uninstall"])
+    assert waited == []
+
+
 def test_uninstall_removes_the_spend_count(tmp_path):
     """U36: the spend count is install's file -- written only because
     Blink was installed on a seat billed by usage -- and it holds session
