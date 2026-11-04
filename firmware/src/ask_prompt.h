@@ -31,6 +31,14 @@
  *     an answer, and the daemon already counted the ask, so it comes down
  *     with none; an ask still waiting for the glass is dropped as well,
  *     rather than kept for whatever computer the board meets next.
+ *   - Never while the board dozes (ui_sleep.c), and withdrawn, with no
+ *     answer, when a doze starts. The doze is half an hour without Claude
+ *     activity -- exactly when the daemon is likeliest to ask -- and
+ *     lv_timer_handler keeps running under the sleep clip, so a box drawn
+ *     then sat over the clip and took the tap meant to wake the board,
+ *     which could land on "No thanks" unseen; that answer is for good
+ *     (Task 7 review, round 1). The ask stays owed and goes up once the
+ *     board is awake.
  *   - Closed after a minute as "later". A question left on the gauges all
  *     afternoon is not a question; it is a sticker.
  *   - An ask that arrives while the box is up is the same question, and is
@@ -55,14 +63,15 @@ struct ask_prompt_turn {
 /*
  * `pending` is an ask received and not yet shown, `open` whether the box is
  * on the glass, `busy` whether anything else owns it, `host_gone` whether
- * the computer has stopped answering. `now_ms` and `shown_ms` are uptimes;
+ * the computer has stopped answering, `dozing` whether the sleep clip is
+ * up (a tap's peek included: the board is still dozing under it). `now_ms` and `shown_ms` are uptimes;
  * `shown_ms` is read only while `open`.
  *
  * The caller applies the answer verbatim -- act, then `pending`.
  */
 struct ask_prompt_turn ask_prompt_step(bool pending, bool open, bool busy,
-				       bool host_gone, int64_t now_ms,
-				       int64_t shown_ms);
+				       bool host_gone, bool dozing,
+				       int64_t now_ms, int64_t shown_ms);
 
 enum ask_answer {
 	ASK_ANSWER_ON,		/* Turn on */

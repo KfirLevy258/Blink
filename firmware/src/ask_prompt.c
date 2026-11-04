@@ -3,8 +3,8 @@
 #include "ask_prompt.h"
 
 struct ask_prompt_turn ask_prompt_step(bool pending, bool open, bool busy,
-				       bool host_gone, int64_t now_ms,
-				       int64_t shown_ms)
+				       bool host_gone, bool dozing,
+				       int64_t now_ms, int64_t shown_ms)
 {
 	struct ask_prompt_turn t = { ASK_PROMPT_NOTHING, pending };
 
@@ -12,8 +12,10 @@ struct ask_prompt_turn ask_prompt_step(bool pending, bool open, bool busy,
 		/* The same question, already on the glass. */
 		t.pending = false;
 		/* Before the timeout: a "later" into a wire nobody reads is a
-		 * line for nothing, and the daemon counted the ask already. */
-		if (host_gone) {
+		 * line for nothing, and the daemon counted the ask already. A
+		 * doze is the same case: nobody saw the box, so it says nothing
+		 * either. */
+		if (host_gone || dozing) {
 			t.act = ASK_PROMPT_WITHDRAW;
 		} else if (now_ms - shown_ms >= ASK_PROMPT_OPEN_MS) {
 			t.act = ASK_PROMPT_EXPIRE;
@@ -27,9 +29,10 @@ struct ask_prompt_turn ask_prompt_step(bool pending, bool open, bool busy,
 		t.pending = false;	/* not kept for the next computer */
 		return t;
 	}
-	/* Never stack on top of something the person is already answering;
-	 * still owed, so the next clear tick asks. */
-	if (!busy) {
+	/* Never stack on top of something the person is already answering,
+	 * nor over the sleep clip, where it would eat the tap that wakes the
+	 * board; still owed, so the next clear, awake tick asks. */
+	if (!busy && !dozing) {
 		t.act = ASK_PROMPT_SHOW;
 		t.pending = false;
 	}

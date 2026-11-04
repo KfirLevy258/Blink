@@ -913,6 +913,7 @@ static void upd_prompt_draw(const struct ota_ui *snap)
  */
 static lv_obj_t *ask_box;
 static bool ask_pending;	/* an ask arrived and is not up yet */
+static bool ask_dozing;		/* ui_sleep_run is in charge of the panel */
 static int64_t ask_shown_ms;	/* uptime it went up; 60 s from here */
 
 static void ask_close(void)
@@ -1372,7 +1373,7 @@ static void ask_tick(void)
 	struct ask_prompt_turn at = ask_prompt_step(
 		ask_pending, ask_box != NULL,
 		panel || confirm || notice || wn || upd_prompt || dl_overlay,
-		!proto_host_seen(), k_uptime_get(), ask_shown_ms);
+		!proto_host_seen(), ask_dozing, k_uptime_get(), ask_shown_ms);
 
 	ask_pending = at.pending;
 	switch (at.act) {
@@ -1383,7 +1384,14 @@ static void ask_tick(void)
 		break;
 	case ASK_PROMPT_WITHDRAW:
 		ask_close();
-		printk("[ask] withdrawn: the computer went away\n");
+		/* Two literal printks, not one with a ?: -- the console
+		 * allowlist test finds a message only as printk's first
+		 * literal. */
+		if (ask_dozing) {
+			printk("[ask] withdrawn: the board is dozing\n");
+		} else {
+			printk("[ask] withdrawn: the computer went away\n");
+		}
 		break;
 	case ASK_PROMPT_EXPIRE:
 		ask_close();
@@ -1399,6 +1407,19 @@ static void ask_tick(void)
 void ui_settings_ask(void)
 {
 	ask_pending = true;
+}
+
+void ui_settings_ask_dozing(bool dozing)
+{
+	ask_dozing = dozing;
+	/* At once, not on the next 250 ms tick: the closing clip is drawn
+	 * straight to the panel the moment ui_sleep_run starts it, and the box
+	 * is clickable on lv_layer_top under it from then on. Withdrawn as on
+	 * host loss -- no answer; the daemon counted the ask when it sent it. */
+	if (dozing && ask_box) {
+		ask_close();
+		printk("[ask] withdrawn: the board is dozing\n");
+	}
 }
 
 static void upd_timer_cb(lv_timer_t *t)

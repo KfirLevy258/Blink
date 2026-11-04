@@ -35,67 +35,91 @@ int main(void)
 	int n;
 
 	/* --- the ordinary ask --------------------------------------------- */
-	t = ask_prompt_step(true, false, false, false, T0, 0);
+	t = ask_prompt_step(true, false, false, false, false, T0, 0);
 	CHECK(t.act == ASK_PROMPT_SHOW);
 	CHECK(t.pending == false);	/* shown once, not on every tick */
 
 	/* Nothing asked, nothing shown. */
-	t = ask_prompt_step(false, false, false, false, T0, 0);
+	t = ask_prompt_step(false, false, false, false, false, T0, 0);
 	CHECK(t.act == ASK_PROMPT_NOTHING);
 	CHECK(t.pending == false);
 
 	/* Up, and inside its minute: left alone. */
-	t = ask_prompt_step(false, true, false, false, T0 + 59999, T0);
+	t = ask_prompt_step(false, true, false, false, false, T0 + 59999, T0);
 	CHECK(t.act == ASK_PROMPT_NOTHING);
 
 	/* --- never on top of anything ------------------------------------- */
 	/* `busy` is the update offer, the install confirm, a notice, What's
 	 * new, the download screen or the settings panel. The ask waits for
 	 * the glass to clear, and is still owed when it does. */
-	t = ask_prompt_step(true, false, true, false, T0, 0);
+	t = ask_prompt_step(true, false, true, false, false, T0, 0);
 	CHECK(t.act == ASK_PROMPT_NOTHING);
 	CHECK(t.pending == true);
-	t = ask_prompt_step(t.pending, false, false, false, T0 + 5000, 0);
+	t = ask_prompt_step(t.pending, false, false, false, false, T0 + 5000, 0);
 	CHECK(t.act == ASK_PROMPT_SHOW);
 
 	/* --- a second ask while the box is up is the same question --------- */
 	/* Without this the box would go up again the moment it was answered. */
-	t = ask_prompt_step(true, true, false, false, T0 + 1000, T0);
+	t = ask_prompt_step(true, true, false, false, false, T0 + 1000, T0);
 	CHECK(t.act == ASK_PROMPT_NOTHING);
 	CHECK(t.pending == false);
 
 	/* --- withdrawn when the computer goes ------------------------------ */
 	/* Nobody is there to hear an answer, and the daemon has already
 	 * counted the ask: it comes down with no answer at all. */
-	t = ask_prompt_step(false, true, false, true, T0 + 1000, T0);
+	t = ask_prompt_step(false, true, false, true, false, T0 + 1000, T0);
 	CHECK(t.act == ASK_PROMPT_WITHDRAW);
 	CHECK(t.pending == false);
 	/* Host gone wins over the timeout: no "later" into an empty wire. */
-	t = ask_prompt_step(false, true, false, true, T0 + 60000, T0);
+	t = ask_prompt_step(false, true, false, true, false, T0 + 60000, T0);
 	CHECK(t.act == ASK_PROMPT_WITHDRAW);
 	/* An ask still waiting for the glass is dropped, not kept for the
 	 * next computer. */
-	t = ask_prompt_step(true, false, true, true, T0, 0);
+	t = ask_prompt_step(true, false, true, true, false, T0, 0);
 	CHECK(t.act == ASK_PROMPT_NOTHING);
 	CHECK(t.pending == false);
-	t = ask_prompt_step(true, false, false, true, T0, 0);
+	t = ask_prompt_step(true, false, false, true, false, T0, 0);
 	CHECK(t.act == ASK_PROMPT_NOTHING);
 	CHECK(t.pending == false);
 
 	/* --- nobody answered: "later", after 60 s --------------------------- */
-	t = ask_prompt_step(false, true, false, false, T0 + ASK_PROMPT_OPEN_MS,
+	t = ask_prompt_step(false, true, false, false, false, T0 + ASK_PROMPT_OPEN_MS,
 			    T0);
 	CHECK(ASK_PROMPT_OPEN_MS == 60000);
 	CHECK(t.act == ASK_PROMPT_EXPIRE);
 	CHECK(t.pending == false);
 	/* Busy does not hold an open box past its minute: busy only gates
 	 * putting one up. */
-	t = ask_prompt_step(false, true, true, false, T0 + 61000, T0);
+	t = ask_prompt_step(false, true, true, false, false, T0 + 61000, T0);
 	CHECK(t.act == ASK_PROMPT_EXPIRE);
 	/* An uptime that went backwards (it cannot, but the subtraction is
 	 * signed) does not close the box early. */
-	t = ask_prompt_step(false, true, false, false, T0 - 1, T0);
+	t = ask_prompt_step(false, true, false, false, false, T0 - 1, T0);
 	CHECK(t.act == ASK_PROMPT_NOTHING);
+
+	/* --- never while the board dozes ------------------------------------ */
+	/* The doze is half an hour without Claude activity, which is exactly
+	 * when the daemon is likeliest to ask. A box drawn over the sleep clip
+	 * swallows the tap meant to wake the board, and that tap can land on
+	 * "No thanks" unseen -- which is for good. Dozing is busy: the ask
+	 * waits, still owed, and goes up once the board is awake. */
+	t = ask_prompt_step(true, false, false, false, true, T0, 0);
+	CHECK(t.act == ASK_PROMPT_NOTHING);
+	CHECK(t.pending == true);
+	t = ask_prompt_step(t.pending, false, false, false, false, T0 + 5000, 0);
+	CHECK(t.act == ASK_PROMPT_SHOW);
+	/* A box already up when a doze starts comes down with no answer, as
+	 * on host loss: the daemon counted the ask when it sent it. */
+	t = ask_prompt_step(false, true, false, false, true, T0 + 1000, T0);
+	CHECK(t.act == ASK_PROMPT_WITHDRAW);
+	CHECK(t.pending == false);
+	/* Even past its minute: never a "later" for a box nobody could see. */
+	t = ask_prompt_step(false, true, false, false, true, T0 + 70000, T0);
+	CHECK(t.act == ASK_PROMPT_WITHDRAW);
+	/* Host loss while dozing still drops a pending ask. */
+	t = ask_prompt_step(true, false, false, true, true, T0, 0);
+	CHECK(t.act == ASK_PROMPT_NOTHING);
+	CHECK(t.pending == false);
 
 	/* --- the answers on the wire ---------------------------------------- */
 	CHECK(strcmp(ask_prompt_word(ASK_ANSWER_ON), "on") == 0);

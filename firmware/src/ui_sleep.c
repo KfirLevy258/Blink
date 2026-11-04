@@ -173,6 +173,16 @@ void ui_sleep_run(bool (*awake)(void), const char *peek_note)
 	 * written.
 	 */
 	ui_settings_whatsnew_dismiss();
+	/*
+	 * And "Keep figures fresh?" too, for the same tap, and kept down for
+	 * the whole doze. lv_timer_handler runs on under the clip (service()),
+	 * so an ask arriving now would otherwise be drawn over it -- and half
+	 * an hour without Claude activity, which is what puts the board here,
+	 * is just when the daemon asks. The 300 px box took the waking tap,
+	 * and that tap could land on "No thanks" unseen, which is for good
+	 * (Task 7 review, round 1). Withdrawn with no answer, as on host loss.
+	 */
+	ui_settings_ask_dozing(true);
 	lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_set_style_bg_color(scr, lv_color_hex(close->bg_rgb), 0);
@@ -235,6 +245,8 @@ void ui_sleep_run(bool (*awake)(void), const char *peek_note)
 	 * this does not release a backlog -- waking shows what is true now.
 	 */
 	usage_view_set_sleeping(false);
+	/* Awake: an ask still owed goes up on the next clear tick. */
+	ui_settings_ask_dozing(false);
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 	bench_dozing = false;
 	bench_wake = false;

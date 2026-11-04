@@ -396,6 +396,7 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[ask] answered",
     "[ask] closed unanswered",
     "[ask] withdrawn: the computer went away",
+    "[ask] withdrawn: the board is dozing",
     # the rest
     "[sleep] dozing",                                          # ui_sleep.c:183
     "[sleep] waking",                                          # ui_sleep.c:201
