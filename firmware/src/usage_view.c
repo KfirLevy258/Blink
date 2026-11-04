@@ -3907,6 +3907,7 @@ void usage_view_set_plan(const char *prov, const char *plan,
 {
 	struct plan_record next = { .kind = PLAN_KIND_WINDOWS,
 				    .usd = -1, .lim = -1 };
+	enum plan_kind was[RAIL_PAGES_MAX];
 
 	if (plan != NULL && strcmp(plan, "spend") == 0) {
 		next.kind = PLAN_KIND_SPEND;
@@ -3936,7 +3937,35 @@ void usage_view_set_plan(const char *prov, const char *plan,
 	if (plan_same(&next, &plan_rec)) {
 		return;
 	}
+	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
+		was[i] = plan_of(i);
+	}
 	plan_rec = next;
+	/*
+	 * A page whose kind changed holds figures that meant something else:
+	 * a spend share is not a five-hour window, and a window is not a share
+	 * of a cap. They are dropped, so the page reads "--%" under its new
+	 * captions until the usage line that belongs to them arrives -- the
+	 * daemon sends that right behind a plan, when it has one.
+	 *
+	 * It does not always have one. After a /login away from a spend seat
+	 * the daemon states "windows" and has no reading for the new login
+	 * yet, so the plan came alone and the spend share 62.8 was redrawn as
+	 * "SESSION 5h 63%" over the month's 16d countdown, and at 96 as a red
+	 * "Session almost used up" (review of feat/enterprise-spend,
+	 * 2026-11-04, U15). New dollars on the same kind are not a change of
+	 * meaning, and keep the figures.
+	 */
+	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
+		if (plan_of(i) == was[i]) {
+			continue;
+		}
+		pg[i].s_pct = -1;
+		pg[i].w_pct = -1;
+		pg[i].s_in_s = -1;
+		pg[i].w_in_s = -1;
+		pg[i].burn = 0;
+	}
 
 	/*
 	 * Kept while the screen is down as well (Settings frees it). The
