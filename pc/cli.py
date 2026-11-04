@@ -3038,15 +3038,19 @@ def _announce(home=None, wsl_name=None):
         # cost.total_cost_usd on every poll, to tell a reply that came back
         # without a five-hour window (pc/session_verdict) -- the /code-review max
         # of 2026-11-01 found it. Both stay in the daemon's memory, 64 sessions
-        # at most, and are never logged, saved or sent.
+        # at most, and are never logged or sent. "Or saved" too, until the
+        # review of feat/enterprise-spend (U35): on a seat billed by usage
+        # pc/spend_count saves both in spend-count.json, and the paragraph
+        # that says so (_announce_spend_later) is pointed at from here.
         print("             usage figures. It keeps the last status line payload")
         print("             Claude Code sent, which also names the session, the")
         print("             working directory and the transcript file. The bridge")
         print("             reads three things from it: the usage figures, the")
         print("             session id and the session's running cost. The last")
-        print("             two only tell it whether Claude Code's replies keep")
+        print("             two tell it whether Claude Code's replies keep")
         print("             coming back without a five-hour limit, and are never")
-        print("             logged or saved.")
+        print("             logged. They are saved only on a seat billed by")
+        print("             usage, to count its spend (see below).")
         print("             Nothing in it leaves this machine, and it is readable")
         print("             by you alone.")
         print(f"  Creates    {hook_shim_path(home)}")
@@ -3257,6 +3261,28 @@ def _announce_claude_reads(home, wsl_name=None) -> None:
         print("  CLAUDE_CONFIG_DIR is set in this shell, and install records")
         print("  its folder, so the background service reads the folder and")
         print("  the file above too.")
+    _announce_spend_later()
+
+
+def _announce_spend_later() -> None:
+    """What a seat billed by usage keeps, said on every desk.
+
+    _announce_spend_seat says it in full, but only when the config names
+    such a seat at install time, and the shim paragraph above it said the
+    session id and cost "are never logged or saved" -- false on that seat,
+    and false on a Max desk the day it /logins to one, which install never
+    sees again (review of feat/enterprise-spend, U35). So the fact is said
+    here unconditionally, with the fingerprint the full paragraph left
+    out. The path is the native ~/.blink on a WSL desk too: the daemon
+    keeps the count on Windows, beside the board."""
+    from pc import spend_count
+    print("  On a Claude seat billed by usage -- this one now, or one you")
+    print("  /login to later -- it also keeps, in")
+    print(f"    {spend_count._default_path()}")
+    print("  a one-way fingerprint of the account and organisation ids, each")
+    print("  session's id with its highest cost estimate, and the rises it")
+    print("  counted, so the month's spend survives a restart. Nothing in it")
+    print("  leaves this computer.")
 
 def _announce_wsl_files(home, name) -> None:
     """_announce's Claude Code lines for a WSL desk being set up again:
@@ -3278,9 +3304,11 @@ def _announce_wsl_files(home, name) -> None:
     print("             Claude Code sent (it also names the session, the")
     print("             working directory and the transcript file; the bridge")
     print("             reads the usage figures, the session id and the")
-    print("             session's running cost, never logged), and one small")
-    print("             file per open session (event name, time, session and")
-    print("             agent ids). Nothing in it leaves this machine.")
+    print("             session's running cost, never logged, and saved only")
+    print("             on a seat billed by usage, to count its spend: see")
+    print("             below), and one small file per open session (event")
+    print("             name, time, session and agent ids). Nothing in it")
+    print("             leaves this machine.")
     print("  Leaves     Claude Code on Windows itself alone: it is not read.")
 
 
@@ -3306,14 +3334,16 @@ def _announce_spend_seat(home=None) -> None:
         "This Claude seat is billed by usage. BLINK reads the seat type, and the",
         "month's spend and limit that Claude Code saved the last time /usage ran",
         "in a terminal. Between /usage runs it adds the cost Claude Code's status",
-        "line estimates for each session, and keeps each session's highest",
-        "estimate, what it counted in the last five hours and the month's total",
-        f"in {spend_count._default_path()}. Spend in Claude Desktop (chat",
-        "and its Code tab), Cowork, claude.ai, claude -p, the Agent SDK or on",
-        "other computers appears only after the next /usage, and a session's last",
-        "reply can be missed. Between /usage runs the figure is an estimate and",
-        "may differ from your bill; run /usage in Claude Code to make it exact.",
-        "Nothing about it leaves this computer except the figure on the board."):
+        "line estimates for each session, and keeps each session's id and",
+        "highest estimate, what it counted in the last five hours, the month's",
+        "total and a one-way fingerprint of the account in",
+        f"{spend_count._default_path()}. Spend in",
+        "Claude Desktop (chat and its Code tab), Cowork, claude.ai, claude -p,",
+        "the Agent SDK or on other computers appears only after the next",
+        "/usage, and a session's last reply can be missed. Between /usage runs",
+        "the figure is an estimate and may differ from your bill; run /usage in",
+        "Claude Code to make it exact. Nothing about it leaves this computer",
+        "except the figure on the board."):
         print("  " + line)
     print()
 

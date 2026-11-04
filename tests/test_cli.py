@@ -2950,9 +2950,10 @@ SPEND_NOTE = (
     "This Claude seat is billed by usage. BLINK reads the seat type, and the"
     " month's spend and limit that Claude Code saved the last time /usage ran"
     " in a terminal. Between /usage runs it adds the cost Claude Code's status"
-    " line estimates for each session, and keeps each session's highest"
-    " estimate, what it counted in the last five hours and the month's total"
-    " in {path}. Spend in Claude Desktop (chat"
+    " line estimates for each session, and keeps each session's id and"
+    " highest estimate, what it counted in the last five hours, the month's"
+    " total and a one-way fingerprint of the account in {path}. Spend in"
+    " Claude Desktop (chat"
     " and its Code tab), Cowork, claude.ai, claude -p, the Agent SDK or on"
     " other computers appears only after the next /usage, and a session's last"
     " reply can be missed. Between /usage runs the figure is an estimate and"
@@ -2985,7 +2986,7 @@ def test_no_spend_note_on_max(tmp_path, capsys, monkeypatch):
     as_checkout(monkeypatch)
     _claude_json(tmp_path, "max_5x")
     cli._announce()
-    assert "billed by usage" not in capsys.readouterr().out
+    assert "This Claude seat is billed by usage" not in capsys.readouterr().out
 
 
 def test_status_never_prints_amounts(tmp_path, capsys, monkeypatch):
@@ -3024,6 +3025,32 @@ def test_status_never_prints_amounts(tmp_path, capsys, monkeypatch):
     rest = "\n".join(lines[:i + 1] + lines[i + 2:])
     for amount in ("4321", "43.21", "250.00", "25000"):
         assert amount not in rest, amount
+
+
+SPEND_LATER = (
+    "On a Claude seat billed by usage -- this one now, or one you /login to"
+    " later -- it also keeps, in {path} a one-way fingerprint of the account"
+    " and organisation ids, each session's id with its highest cost"
+    " estimate, and the rises it counted, so the month's spend survives a"
+    " restart. Nothing in it leaves this computer.")
+
+
+def test_disclosure_says_what_a_usage_seat_keeps_on_any_desk(
+        tmp_path, capsys, monkeypatch):
+    """U35: the shim paragraph said the session id and the running cost
+    "are never logged or saved", while on a seat billed by usage
+    spend-count.json saves both, with a fingerprint of the account. And
+    the paragraph that corrected it was printed only when the config named
+    such a seat at install time, so a Max desk that later /logins to one
+    was never told. Said on every desk now, the Max one included."""
+    from pc import spend_count
+    as_checkout(monkeypatch)
+    _claude_json(tmp_path, "max_5x")
+    cli._announce()
+    said = " ".join(l.strip() for l in capsys.readouterr().out.splitlines())
+    assert "never logged or saved" not in said
+    assert "saved only on a seat billed by usage" in said
+    assert SPEND_LATER.format(path=spend_count._default_path()) in said
 
 
 def test_config_disclosure_names_seat_fields(tmp_path, capsys, monkeypatch):
@@ -3320,7 +3347,7 @@ def test_install_wsl_no_spend_note_on_max(tmp_path, monkeypatch, capsys):
                         lambda home=None: str(tmp_path / "linux"
                                               / ".claude.json"))
     assert cli.main(["install", "--wsl", "Ubuntu"]) == 0
-    assert "billed by usage" not in capsys.readouterr().out
+    assert "This Claude seat is billed by usage" not in capsys.readouterr().out
 
 
 class _UncWatch:
@@ -3842,6 +3869,10 @@ def test_install_wsl_discloses_before_it_starts_anything(monkeypatch,
     assert "Claude Code's config inside Ubuntu, while you use it" in before
     assert "To undo all of it:" in before
     assert "zoe" not in before and "wsl.localhost" not in before
+    from pc import spend_count
+    flat = " ".join(l.strip() for l in before.splitlines())
+    assert SPEND_LATER.format(path=spend_count._default_path()) in flat
+    assert "saved only on a seat billed by usage" in flat
     # Nothing of it waited for the write.
     assert "Changes    Claude Code's settings.json" not in \
         said["install_into"]
