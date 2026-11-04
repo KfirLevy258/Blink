@@ -297,8 +297,16 @@ def merge(frames):
     # Ultra login marked them, and until the final review of 2026-11-04
     # the merged spend page came out with no_session_window=True and the
     # token burn view on (tests/pc/test_spend_page.py).
+    #
+    # Nor on a page that says its login reports nothing (PLAN_UNREPORTED,
+    # an Enterprise or Team login, pc/claude_account.select). The hook's
+    # frames beside it carry whatever mark a verdict saved by an earlier
+    # Ultra login puts on them, and until the /code-review max of
+    # 2026-11-04 (U38) the "Not reported" page came out marked: the token
+    # burn view drawn on it, and the transcripts read for it.
     no_window = (not any(f.plan == base.PLAN_SPEND and f.has_usage()
                          for f in frames)
+                 and not any(f.plan == base.PLAN_UNREPORTED for f in frames)
                  and any(f.no_session_window for f in frames
                          if f.plan != base.PLAN_SPEND))
     session_frames = ([f for f in frames if f.plan == base.PLAN_SPEND]

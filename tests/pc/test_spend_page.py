@@ -301,6 +301,23 @@ def test_merge_never_marks_a_group_with_a_spend_figure():
     assert page.no_session_window is False
 
 
+def test_an_unreported_page_is_never_marked():
+    """/code-review max of 2026-11-04, U38: an Enterprise or Team login that
+    reports nothing gets claude_account's unreported frame, and the hook's
+    frames beside it carry the mark a saved Ultra verdict puts on them. The
+    merge then said no_session_window, and the "Not reported" ENTERPRISE
+    page got the token burn view, with the transcripts read for it. The
+    verdict is the earlier Ultra login's; it says nothing of this one."""
+    from pc import normalizer
+    from pc import claude_account
+    unreported = claude_account._unreported("enterprise", NOW, NOW - 60)
+    marked = _hook_state(NOW)
+    marked.no_session_window = True
+    page = normalizer.merge([unreported, marked])
+    assert page.plan == base.PLAN_UNREPORTED
+    assert page.no_session_window is False
+
+
 def test_no_token_burn_on_a_spend_page(tmp_path):
     _proved_no_window(tmp_path)
     asked = []
