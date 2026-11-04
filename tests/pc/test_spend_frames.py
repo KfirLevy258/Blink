@@ -208,7 +208,7 @@ def test_a_huge_dollar_figure_is_not_reported(field, value):
                        "limit_usd": "spend_limit_usd"}[field]) is None
 
 
-@pytest.mark.parametrize("pct", [HUGE, 5000, 1000.5, float("inf")])
+@pytest.mark.parametrize("pct", [HUGE, 5000, 1000.5, 1e300])
 def test_a_spend_share_past_the_bound_is_held_at_it(pct):
     """Round 2 of the 2026-11-04 review, K2. 5000 went to the board as it
     was until U2, and U2's bound then dropped the whole spend page for it:
@@ -222,10 +222,12 @@ def test_a_spend_share_past_the_bound_is_held_at_it(pct):
 
 
 @pytest.mark.parametrize("pct", [float("nan"), -1, -0.5, float("-inf"),
-                                 True, "50", None])
+                                 float("inf"), True, "50", None])
 def test_a_spend_share_that_is_not_one_is_not_drawn(pct):
-    """NaN, a negative or a non-number is no percentage at all, and an
-    object without one is no evidence of an allowance."""
+    """NaN, a negative, an infinity or a non-number is no percentage at
+    all, and an object without one is no evidence of an allowance. The
+    first cut of K2 held infinity at 1000 and drew a full red dial for it
+    (R4, round 2's review)."""
     assert frame_of(spend_payload(used_percentage=pct)).plan \
         == base.PLAN_WINDOWS
 

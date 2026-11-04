@@ -63,6 +63,22 @@ Rules, each from a way the raw number misleads:
   counts only rises whose previous sighting is at or after the anchor: a rise
   between a sighting before the anchor and one after it may have happened
   partly before /usage measured, so it is dropped rather than counted twice.
+  With several ledgers the figure's own is not known, so the stamp is the
+  oldest among the marks at or below the figure, and the marks it passes
+  keep the oldest stamp they could stand for (R1, round 2 of the 2026-11-04
+  review: one ledger's figure landing on another's mark moved that mark's
+  stamp past a /usage, and the other's next rise was counted whole, 460
+  cents for 425). What that costs, kept: a mark no ledger returns to -- a
+  process that exited, the old total a /login left behind once the new
+  ledger passed it -- stays under every later figure with its old stamp,
+  and after the next /usage the session's rises above it count toward the
+  period but not toward the /usage, until the /usage after that measures
+  them. It may be a live process whose renders were lost, spending before
+  the /usage; nothing on the status line says it is not. In the random
+  lives of tests/pc/test_spend_count.py, every one a session with several
+  ledgers, the count since a /usage is 31% of the spend after it; with one
+  mark a session, as before K1, it was 20%. A session with one ledger, the
+  usual one, is counted as before.
 * `at` is the render's own time (the payload's mtime), so reading the same
   render again moves nothing.
 
@@ -317,8 +333,6 @@ class SpendCounter:
         self._dirty = False
         # Written at the next save whatever the pacing: see the docstring.
         self._urgent = False
-        # True while observe() or bind() is changing the state: see _flush.
-        self._busy = False
         if persist:
             self._load()
 
@@ -363,13 +377,6 @@ class SpendCounter:
         self._latest = max(stamps, default=None)
 
     def bind(self, account_fp, period_start) -> None:
-        # Mid-update for the exit flush, as in observe(): the new login is
-        # named before the old one's count is emptied.
-        self._busy = True
-        self._bind(account_fp, period_start)
-        self._busy = False
-
-    def _bind(self, account_fp, period_start) -> None:
         if self._fp is None and self._period is None:
             # Nothing stored or loaded: adopt without discarding what was
             # observed before the first look.
@@ -377,8 +384,13 @@ class SpendCounter:
             self._dirty = self._urgent = True
             return
         if account_fp != self._fp or period_start != self._period:
-            self._fp, self._period = account_fp, period_start
+            # Emptied first, named after. The exit flush (_flush) can save
+            # whatever state an exit leaves half done, and this order
+            # leaves either the old login's name, which the next start
+            # empties again, or an emptied count -- never the old count
+            # under the new name (K4, round 2 of the 2026-11-04 review).
             self._clear()
+            self._fp, self._period = account_fp, period_start
 
     def forget_sessions(self) -> None:
         """Drop every session's high-water marks, keeping what was counted.
@@ -397,16 +409,20 @@ class SpendCounter:
 
     # -- counting --------------------------------------------------------
     def observe(self, session_id, cost_usd, at) -> bool:
-        """Count one render's figure; True when the state changed."""
-        # Marked mid-update for the exit flush (_flush; K4 in round 2 of
-        # the 2026-11-04 review). Not a try/finally: an exit raised in the
-        # middle must leave the mark set.
-        self._busy = True
-        changed = self._observe(session_id, cost_usd, at)
-        self._busy = False
-        return changed
+        """Count one render's figure; True when the state changed.
 
-    def _observe(self, session_id, cost_usd, at) -> bool:
+        Ordered for the exit flush (_flush): the daemon's SIGTERM raises
+        SystemExit between any two bytecodes of the main thread, the one
+        that polls, and the flush saves whatever state that leaves. Each
+        step here leaves one that counts no more than the truth: the
+        session's marks are replaced whole, in one store, before the rise
+        they cover is appended, so an exit between the two loses that one
+        rise rather than saving it against the old mark. Saved the other
+        way round, the restart counted it again from there (K4, round 2
+        of the 2026-11-04 review). The first fix skipped the flush while
+        an update was in flight, which lost every other unsaved rise with
+        it (R3) and, its flag cleared only on success, every flush after
+        an ordinary exception (R2)."""
         # The counter owns the guard: a NaN, infinity, string or bool from
         # a damaged payload must not touch the state.
         # And a cost past MAX_CENTS or a time that is not one: see there.
@@ -422,11 +438,10 @@ class SpendCounter:
             self._dirty = self._urgent = True
             return True
         # The ledger this figure continues: the highest mark at or below
-        # it, so the rise counted is the smallest it could be.
-        best = None
-        for t in tracks:
-            if t[0] <= cents and (best is None or t[0] > best[0]):
-                best = t
+        # it, so the rise counted is the smallest it could be. Every mark
+        # at or below it is a ledger it could continue, though.
+        cands = [t for t in tracks if t[0] <= cents]
+        best = max(cands, key=lambda t: t[0], default=None)
         if best is None:
             # Below every mark: a new ledger, a base like a first sighting.
             # Not urgent: a restart that missed it opens it again from the
@@ -439,14 +454,33 @@ class SpendCounter:
             self._dirty = True
             return True
         hw, last = best
-        changed = False
+        # Stamped with the oldest sighting among the marks it could
+        # continue, and those it passed take the older of their own stamp
+        # and the one `best` held (R1, round 2 of the 2026-11-04 review).
+        # Stamped with `best`'s alone, a figure from another ledger moved
+        # `best`'s stamp past a /usage while the ledger it had stood for
+        # was still behind it, and that ledger's next figure was counted
+        # in full against the newer stamp: B at 4.00 before a /usage at
+        # 100, A's 4.05 at 107 on B's mark, B's 4.60 counted as 55 cents
+        # after the /usage, 45 of them spent before it. Whichever ledger
+        # the figure came from, the one it did not is now at its own mark
+        # or at `best`'s, sighted no later than the older stamp, and the
+        # straddling rule (the module docstring) needs that older one.
+        prev = min(t[1] for t in cands)
+        new = []
+        for t in tracks:
+            if t is best:
+                new.append([max(hw, cents), max(last, at)])
+            elif t[0] <= cents and t[1] > last:
+                new.append([t[0], last])
+            else:
+                new.append(list(t))
+        changed = new != tracks
+        if changed:
+            # One store: see the docstring.
+            self._sessions[session_id] = new
         if cents > hw:
-            self._adds.append([last, at, cents - hw])
-            best[0] = cents
-            changed = True
-        if at > last:
-            best[1] = at
-            changed = True
+            self._adds.append([prev, at, cents - hw])
         if changed:
             if self._latest is None or at > self._latest:
                 self._latest = at
@@ -460,7 +494,6 @@ class SpendCounter:
         old = [a for a in self._adds if a[1] < cutoff]
         if not old:
             return
-        self._adds = [a for a in self._adds if a[1] >= cutoff]
         fold = self._fold
         candidates = [x for x in (self._anchor, self._period,
                                   None if fold is None else fold[0])
@@ -474,12 +507,19 @@ class SpendCounter:
             # one: since() answers that question, so it decides here too.
             fold = [boundary, self._folded_since(boundary), fold[2],
                     fold[3], fold[4]]
+        else:
+            fold = list(fold)
         for prev, at, c in old:
             if prev >= boundary:
                 fold[1] += c
             fold[2] += c
             fold[3] = min(fold[3], prev)
             fold[4] = max(fold[4], at)
+        # Built aside and stored last, the rises taken out before the fold
+        # that carries them goes in: an exit between the two stores (the
+        # exit flush, observe's docstring) loses them rather than saving
+        # them twice.
+        self._adds = [a for a in self._adds if a[1] >= cutoff]
         self._fold = fold
 
     def _folded_since(self, anchor_at) -> int:
@@ -537,19 +577,9 @@ class SpendCounter:
 
     def _flush(self):
         """The exit flush (_flush_at_exit): whatever is unwritten, to the
-        file the last write went to, pacing and back-off aside.
-
-        Not while an update is in flight. The daemon's SIGTERM raises
-        SystemExit between any two bytecodes of the main thread, the one
-        that polls, so it can land inside observe() after a rise is
-        appended and before its mark moves; that state saved, the restart
-        counted the rise again from the old mark (a dollar shown for 50
-        cents, K4 in round 2 of the 2026-11-04 review). Skipped, the file
-        keeps what was last written, which is whole, and the rise is
-        counted from its saved mark at the session's next render, as
-        before U12."""
-        if self._busy:
-            return
+        file the last write went to, pacing and back-off aside. An exit
+        can land in the middle of observe() or bind(); both are ordered so
+        that what it leaves is safe to save (see observe)."""
         if self._persist and self._dirty and self._written_to is not None:
             self._write(self._written_to, self._clock())
 

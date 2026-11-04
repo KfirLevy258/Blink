@@ -480,6 +480,69 @@ def test_a_spend_page_back_with_the_same_share_is_drawn():
     assert _usages_after(sent, n)[-1]["session_pct"] == 62.8
 
 
+def test_the_new_logins_reading_ends_the_hiding_even_with_the_same_shares():
+    """R5, round 2's review of K3: the hiding ended only when the shares
+    changed, so a new login whose page carried the same ones -- 62.8 and
+    no weekly here; 0.0 and none on a fresh seat -- stayed "--" for as
+    long as nothing moved, hours on an idle desk. A reading observed after
+    the one taken down is the new login's, whatever it says."""
+    sent = []
+    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
+               protocol.plan_for(spend()))
+    b = _bridge(f, sent)
+    _hello(b, "1.4.0")
+    b.poll_if_changed()
+    f.plan = protocol.plan("claude", "windows")
+    b.poll_if_changed()
+    assert [m for m in sent if m["t"] == "usage"][-1]["session_pct"] == -1
+    fresh = windows(at=NOW - 1, s=62.8, w=-1)
+    f.usage = protocol.frame_to_usage(fresh, NOW)
+    n = len(sent)
+    b.poll_if_changed()
+    assert _usages_after(sent, n)[-1]["session_pct"] == 62.8
+
+
+def test_the_remembered_reading_stays_down_as_it_ages():
+    """Its age grows with the clock; it is the same reading, and stays
+    down."""
+    sent, clock = [], [1000.0]
+    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
+               protocol.plan_for(spend()))
+    b = Bridge(write_msg=sent.append, fetch_usage=f, now=lambda: clock[0],
+               wall=lambda: (1752444000, 0), **_NO_FEED)
+    _hello(b, "1.4.0")
+    b.poll_if_changed()
+    f.plan = protocol.plan("claude", "windows")
+    b.poll_if_changed()
+    n = len(sent)
+    for k in range(1, 40, 7):
+        clock[0] = 1000.0 + k
+        f.usage = protocol.frame_to_usage(spend(), NOW + k)
+        b.poll_if_changed()
+        b.poll_once()
+    for m in _usages_after(sent, n):
+        assert m["session_pct"] == -1
+
+
+def test_a_reconnect_keeps_the_taken_down_page_down():
+    """greet() forgets the plan it last sent, so the board hears it again;
+    the reading it took a page down from is still the remembered one, and
+    a reconnect is no reason to put its share back."""
+    sent = []
+    f = _Fetch(protocol.frame_to_usage(spend(), NOW),
+               protocol.plan_for(spend()))
+    b = _bridge(f, sent)
+    _hello(b, "1.4.0")
+    b.poll_if_changed()
+    f.plan = protocol.plan("claude", "windows")
+    b.poll_if_changed()
+    n = len(sent)
+    _hello(b, "1.4.0")
+    b.poll_if_changed()
+    usages = _usages_after(sent, n)
+    assert usages and all(m["session_pct"] == -1 for m in usages)
+
+
 def test_no_blank_when_a_reading_comes_with_the_switch():
     """With a Max reading in hand, the usage line itself replaces the share:
     no second line."""
