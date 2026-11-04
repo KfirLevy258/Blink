@@ -81,7 +81,7 @@ class ClaudeHome:
         did not choose config_dir: ~ natively, the Linux home in WSL."""
         if self.kind != WSL:
             return os.path.expanduser("~")
-        return _unc(self.distro_name, self.linux_home)
+        return unc(self.distro_name, self.linux_home)
 
     def inside(self, *parts):
         """A path under the home folder, as this computer reaches it."""
@@ -93,8 +93,14 @@ def _blink_home():
     return os.path.join(os.path.expanduser("~"), ".blink")
 
 
-def _unc(name, linux_path):
-    return _UNC_ROOT + name + linux_path.replace("/", "\\").rstrip("\\")
+def unc(name, linux_path, long_paths=True):
+    """The Windows path of `linux_path` inside distribution `name`. The one
+    builder: pc/wsl's unc is this function, since two had drifted on a
+    trailing slash. `long_paths` False is the short \\\\wsl$\\ form, which
+    a path longer than MAX_PATH cannot use."""
+    rest = linux_path.strip("/").replace("/", "\\")
+    base = (_UNC_ROOT if long_paths else "\\\\wsl$\\") + name
+    return base + ("\\" + rest if rest else "")
 
 
 def _native(config_dir, config_dir_set):

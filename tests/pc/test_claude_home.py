@@ -310,3 +310,15 @@ def test_an_unparseable_config_json_is_not_said_to_be_changed(tmp_path,
     out = capsys.readouterr().out
     assert f"Changes    {user_config.path(cli.blink_home())}" not in out
     assert "does not parse" in out
+
+
+def test_one_unc_builder():
+    """pc/wsl and pc/claude_home spell a path into a distribution the same
+    way, because they are the same function: two builders had drifted on a
+    trailing slash (final branch review, finding 10)."""
+    from pc import claude_home, wsl
+    assert wsl.unc is claude_home.unc
+    assert claude_home.unc("U", "/home/a/") == \
+        "\\\\?\\UNC\\wsl.localhost\\U\\home\\a"
+    assert claude_home.unc("U", "/") == "\\\\?\\UNC\\wsl.localhost\\U"
+    assert claude_home.unc("U", "/x", long_paths=False) == "\\\\wsl$\\U\\x"

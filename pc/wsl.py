@@ -38,6 +38,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
+from pc import claude_home
 from pc.ota import NO_WINDOW
 
 HKCU = "HKCU"
@@ -200,14 +201,9 @@ def run(name, argv, user=None, env=None, exe=None, stdin=None, timeout=30,
     return _call(cmd, "1", stdin, secs + 10, runner)
 
 
-def unc(name, linux_path, long_paths=True):
-    """The Windows path of a file inside the distribution."""
-    rest = linux_path.lstrip("/").replace("/", "\\")
-    if long_paths:
-        base = "\\\\?\\UNC\\wsl.localhost\\" + name
-    else:
-        base = "\\\\wsl$\\" + name
-    return base + ("\\" + rest if rest else "")
+# The Windows path of a file inside the distribution: claude_home's builder,
+# the only one, so the record and the probe spell it alike.
+unc = claude_home.unc
 
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
