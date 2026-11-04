@@ -413,13 +413,13 @@ def test_a_refused_file_is_not_parsed_again_until_it_changes(
                         lambda p, st=None: reads.append(1) or real(p, st))
     reader = claude_plan.PlanReader()
     assert reader.ultra(NOW) is False
-    assert reader.ultra(NOW + claude_plan.RECHECK_S) is False
-    assert reader.ultra(NOW + 2 * claude_plan.RECHECK_S) is False
+    assert reader.ultra(NOW + 60) is False
+    assert reader.ultra(NOW + 120) is False
     assert len(reads) == 1
 
     put_config(tmp_path, plan_doc())
     os.utime(path, (NOW + 500, NOW + 500))
-    assert reader.ultra(NOW + 3 * claude_plan.RECHECK_S) is True
+    assert reader.ultra(NOW + 180) is True
     assert len(reads) == 2
 
 
@@ -555,7 +555,7 @@ def test_a_failed_read_is_tried_again_at_the_next_look(tmp_path,
                         lambda p, st=None: results.pop(0))
     reader = claude_plan.PlanReader()
     assert reader.ultra(NOW) is False
-    assert reader.ultra(NOW + claude_plan.RECHECK_S) is True
+    assert reader.ultra(NOW + 60) is True
 
 
 def test_nothing_but_the_answer_is_kept_or_said(tmp_path, capsys, caplog):

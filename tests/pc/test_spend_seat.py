@@ -123,7 +123,7 @@ def test_failed_read_keeps_the_last_view(tmp_path, monkeypatch):
     r = claude_plan.PlanReader(path=str(p))
     first = r.look(NOW)
     os.utime(p, (NOW, NOW + 7))
-    assert r.look(NOW + claude_plan.RECHECK_S) == first == good
+    assert r.look(NOW + 60) == first == good
 
 
 def test_missing_file_is_the_empty_view_and_other_errors_keep_the_last(
@@ -156,7 +156,7 @@ def test_look_parses_once(tmp_path, monkeypatch):
                         n.append(1) or real(path, st))
     r = claude_plan.PlanReader(path=str(p))
     a = r.look(NOW)
-    b = r.look(NOW + 2 * claude_plan.RECHECK_S)
+    b = r.look(NOW + 120)
     assert a == b and len(n) == 1
 
 
@@ -166,13 +166,13 @@ def test_a_source_replaces_the_file(tmp_path):
     r = claude_plan.PlanReader(path=str(tmp_path / "nope"),
                                source=lambda: answers.pop(0))
     assert r.look(NOW) == seat
-    assert r.look(NOW + claude_plan.RECHECK_S) == seat      # None: last good
+    assert r.look(NOW + 60) == seat      # None: last good
 
 
 def test_no_answer_yet_is_not_held_for_a_minute(tmp_path):
     """/code-review max of 2026-11-04, U18: a WSL home's source answers
     None until its watch's first tick, and the first look stamped its time
-    all the same, so EMPTY_VIEW -- "no seat" -- was held for RECHECK_S
+    all the same, so EMPTY_VIEW -- "no seat" -- was held for a minute
     after every daemon start. A spend desk then showed Claude Desktop's
     windows figures, the saved Ultra verdict's mark and the token burn
     view for most of a minute. The source is asked on every look (since
@@ -207,7 +207,7 @@ def test_a_file_not_read_yet_is_tried_again_at_the_next_look(tmp_path,
     assert r.look(NOW).spend_seat is False
     assert r.look(NOW + 2).spend_seat is False        # not every poll
     assert r.look(NOW + claude_plan.FIRST_ANSWER_RETRY_S).spend_seat is True
-    assert claude_plan.FIRST_ANSWER_RETRY_S < claude_plan.RECHECK_S
+    assert claude_plan.FIRST_ANSWER_RETRY_S < 60
 
 
 def test_ultra_and_read_still_answer(tmp_path):
@@ -314,7 +314,7 @@ def test_a_cache_id_nested_deep_does_not_raise(tmp_path):
 
 def test_a_changed_config_is_read_at_the_next_look(tmp_path, monkeypatch):
     """Round 5 of the 2026-11-04 review, ruling A: the config was looked at
-    once a RECHECK_S while the status line is read every two seconds, so a
+    once a minute while the status line is read every two seconds, so a
     /login was seen up to a minute late -- the new login's renders counted
     on the old one, and its first render taken for the old login's. The
     file is stat'ed at every look and parsed when its signature changes;
@@ -353,7 +353,7 @@ def test_a_changed_file_that_fails_is_retried_within_seconds(tmp_path,
                                                              monkeypatch):
     """Round 6 of the 2026-11-04 review, item 3: after a first answer, a
     file that changed and then failed to read (a write caught half done)
-    was tried again only RECHECK_S later, so a /login caught mid-write was
+    was tried again only a minute later, so a /login caught mid-write was
     seen a minute late. It is tried again FIRST_ANSWER_RETRY_S later."""
     p = tmp_path / ".claude.json"
     p.write_text(json.dumps(doc()), encoding="utf-8")

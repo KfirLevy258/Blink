@@ -491,7 +491,7 @@ def test_bus_reads_the_watch_not_the_unc_path(tmp_path, monkeypatch):
     assert hits == []
     w.tick()
     hits.clear()
-    assert bus._plan_reader.look(t0 + claude_plan.RECHECK_S).spend_seat
+    assert bus._plan_reader.look(t0 + 60).spend_seat
     bus.prune_burn()
     assert hits == []
 

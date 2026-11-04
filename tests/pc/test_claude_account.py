@@ -174,7 +174,7 @@ def _stamp(path, at):
 def test_a_switch_is_dated_by_the_rewrite_that_carried_it(tmp_path):
     """/code-review max of 2026-11-04, finding 9: the switch was dated by
     the poll on which PlanReader's cached view first showed the new login,
-    up to RECHECK_S after /login then, and select() dropped every reading
+    up to a minute after /login then, and select() dropped every reading
     the new login made in that minute as the old one's. /login writes the
     file, so the switch happened no later than the mtime that carries the
     new fingerprint, and no earlier than the mtime that still carried the

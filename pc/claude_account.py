@@ -78,7 +78,7 @@ class AccountWatch:
     which this watch first sees a different fingerprint. The view comes from
     pc/claude_plan's PlanReader, which stats the file once a poll and
     parses a change at most once a FIRST_ANSWER_RETRY_S (rounds 5 and 6 of
-    the 2026-11-04 review; once a RECHECK_S before), so a switch is seen
+    the 2026-11-04 review; once a minute before), so a switch is seen
     within seconds of /login writing it.
 
     But it is DATED by the file. /login writes the file, so the switch

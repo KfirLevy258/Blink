@@ -788,7 +788,7 @@ def test_the_old_logins_spend_share_never_reaches_the_new_login(tmp_path,
     n = len(sent)
     _switch_and_wait(b, clock, tmp_path)
     after = _drawn(sent[n:])
-    # Until the config is looked at again (claude_plan.RECHECK_S) the old
+    # Until the config is parsed again (claude_plan.ConfigFile) the old
     # login is the login; from the first line under another plan on, the
     # page is blank.
     turned = [i for i, (plan, _s) in enumerate(after) if plan != "spend"]
@@ -814,7 +814,7 @@ def test_the_old_logins_windows_are_not_offered_for_the_new_one(tmp_path):
     config(tmp_path, NOW + 1, seat="max", billing="subscription",
            cache=False, acct="ACCT-OTHER-0c0c0c", org="ORG-OTHER-0d0d0d",
            org_type="claude_max")
-    clock.t = NOW + 120                 # past claude_plan.RECHECK_S
+    clock.t = NOW + 120                 # well past the parse spacing
     assert bus.poll() is None
     render(tmp_path, NOW + 130, 0.10, rate_limits=WINDOWS)
     clock.t = NOW + 132

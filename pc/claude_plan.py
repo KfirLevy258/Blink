@@ -48,7 +48,7 @@ from the file -- no value, no key, no path, no exception text -- is logged,
 printed, raised or saved, at any level (CLAUDE.md), and the parsed document
 is dropped before read() returns.
 
-WHAT IT COSTS. A stat once a poll (every two seconds; once a RECHECK_S
+WHAT IT COSTS. A stat once a poll (every two seconds; once a minute
 until round 5 of the 2026-11-04 review, which needed a /login seen within
 seconds), and a read only when the file's signature -- inode, mtime and
 size -- has changed since the last answer, at most once a
@@ -88,17 +88,11 @@ import time
 
 from pc import claude_account, claude_home
 
-# A minute: how often the file was looked at until round 5 of the
-# 2026-11-04 review, which put a /login up to a minute behind the status
-# line, and how soon a failed read was tried again until round 6. Nothing
-# here is paced by it now (ConfigFile); it names "a minute" where the
-# tests and older comments speak of that pacing. Lateness of another kind
-# remains: the plan name in the file can be a day stale, or stale for good
-# under CLAUDE_CODE_OAUTH_TOKEN, because Claude Code refreshes it only with
-# a profile over a day old (the review of PR #6, 2026-11-01). The tier,
-# refreshed on nearly every launch, is what keeps a stale name from
-# vouching for a downgraded desk (is_ultra).
-RECHECK_S = 60
+# A lateness no look can help: the plan name in the file can be a day
+# stale, or stale for good under CLAUDE_CODE_OAUTH_TOKEN, because Claude
+# Code refreshes it only with a profile over a day old (the review of PR
+# #6, 2026-11-01). The tier, refreshed on nearly every launch, is what
+# keeps a stale name from vouching for a downgraded desk (is_ultra).
 
 # The shortest gap between two parses of the file (ConfigFile.look): a
 # change that comes sooner, and a read that failed, wait for it. Not every
@@ -473,7 +467,7 @@ class PlanReader:
     def look(self, now_epoch) -> ConfigView:
         """The view now.
 
-        Looked at once a poll, and not once a RECHECK_S as until round 5
+        Looked at once a poll, and not once a minute as until round 5
         of the 2026-11-04 review (ruling A): the status line is read every
         two seconds, and a /login seen up to a minute late left the new
         login's renders counted on the old one and its first render taken
