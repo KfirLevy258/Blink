@@ -218,7 +218,8 @@ def test_the_shim_it_writes_is_the_one_in_the_tree(tmp_path):
     assert (tmp_path / ".blink" / "blink-statusline.sh").read_text() == src
 
 
-def test_too_old_claude_warns_rather_than_refusing(tmp_path, capsys, monkeypatch):
+def test_too_old_claude_warns_rather_than_refusing(tmp_path,
+                                                   capsys, monkeypatch):
     """Everything installed stays correct, so it works the moment they update."""
     monkeypatch.setattr(cli, "claude_version", lambda *a, **k: ("2.1.0 (Claude Code)", (2, 1, 0)))
     _settings(tmp_path, {})
@@ -334,6 +335,58 @@ def test_uninstall_forgets_whether_the_account_has_a_window(tmp_path):
     assert session_verdict.SessionVerdict().current() is None
 
 
+@pytest.fixture(autouse=True)
+def _no_recapture_wait(monkeypatch):
+    """Uninstall waits HOOK_RECAPTURE_S between taking the hooks out and
+    removing the script they run; the tests that care say so."""
+    monkeypatch.setattr(cli, "HOOK_RECAPTURE_S", 0)
+
+
+def test_uninstall_waits_for_claude_code_to_let_go_of_the_hooks(
+        tmp_path, monkeypatch):
+    """U29, natively: Claude Code re-reads its hooks 1 to 1.5 s after
+    settings.json changes (2.1.316 and .318), and a hook that fires in
+    between runs the script uninstall has just deleted -- an exit 2, which
+    blocks that call. So the script goes two seconds after the hooks, and
+    only when hooks were taken out."""
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    monkeypatch.setattr(cli, "HOOK_RECAPTURE_S", 2.0)
+    shim = inside(tmp_path, cli.hook_shim_path())
+    waited = []
+    monkeypatch.setattr(cli.time, "sleep", lambda s: waited.append(
+        (s, os.path.exists(shim), "blink-hook.sh" in json.dumps(
+            _read(tmp_path)))))
+    cli.main(["uninstall"])
+    assert waited == [(2.0, True, False)]
+    assert not os.path.exists(shim)
+    waited.clear()
+    cli.main(["uninstall"])
+    assert waited == []
+
+
+def test_uninstall_removes_the_spend_count(tmp_path):
+    """U36: the spend count is install's file -- written only because
+    Blink was installed on a seat billed by usage -- and it holds session
+    ids and a fingerprint of the account. Left behind, a reinstall in the
+    same month picked the old count up again. Its temp names go too: the
+    mkstemp `.spend-count.*` names and those theme._write_json writes."""
+    from pc import spend_count
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    path = inside(tmp_path, spend_count._default_path())
+    leftovers = [os.path.join(os.path.dirname(path), ".spend-count.ab12cd"),
+                 path + ".1234.0.blink-tmp"]
+    for p in [path] + leftovers:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("{}")
+
+    cli.main(["uninstall"])
+
+    for p in [path] + leftovers:
+        assert not os.path.exists(p), p
+
+
 def test_install_refuses_to_touch_a_settings_file_that_will_not_parse(
         tmp_path, capsys, monkeypatch):
     """Treating unparseable JSON as {} would write a fresh settings.json over
@@ -356,7 +409,8 @@ def test_install_refuses_to_touch_a_settings_file_that_will_not_parse(
     assert not os.path.exists(cli.bin_dir()), "it installed anyway"
 
 
-def test_uninstall_finishes_even_when_settings_will_not_parse(tmp_path, capsys):
+def test_uninstall_finishes_even_when_settings_will_not_parse(tmp_path,
+                                                              capsys):
     """The login service is removed before this step, so stopping here would
     leave the machine half-undone."""
     cli.main(["install"])
@@ -408,7 +462,8 @@ def test_status_notices_hooks_that_went_missing(tmp_path, capsys):
     assert "install` to restore them" in out
 
 
-def test_status_does_not_call_a_missing_hook_shim_out_of_date(tmp_path, capsys):
+def test_status_does_not_call_a_missing_hook_shim_out_of_date(tmp_path,
+                                                              capsys):
     """Absent and stale are different faults and want different sentences.
 
     The hooks in settings.json still point at the shim path, so Claude Code
@@ -690,7 +745,8 @@ def test_desktop_installed_but_never_used_is_not_called_absent(
     assert "open Claude Code once" not in st
 
 
-def test_no_claude_code_still_installs_everything(tmp_path, capsys, monkeypatch):
+def test_no_claude_code_still_installs_everything(tmp_path,
+                                                  capsys, monkeypatch):
     """A note, not a refusal, and not a failed step. The edits are correct and
     start working by themselves the day Claude Code arrives -- exactly the
     rule the too-old warning already follows."""
@@ -2924,9 +2980,10 @@ SPEND_NOTE = (
     "This Claude seat is billed by usage. BLINK reads the seat type, and the"
     " month's spend and limit that Claude Code saved the last time /usage ran"
     " in a terminal. Between /usage runs it adds the cost Claude Code's status"
-    " line estimates for each session, and keeps each session's highest"
-    " estimate, what it counted in the last five hours and the month's total"
-    " in {path}. Spend in Claude Desktop (chat"
+    " line estimates for each session, and keeps each session's id and"
+    " highest estimate, what it counted in the last five hours, the month's"
+    " total and a one-way fingerprint of the account in {path}. Spend in"
+    " Claude Desktop (chat"
     " and its Code tab), Cowork, claude.ai, claude -p, the Agent SDK or on"
     " other computers appears only after the next /usage, and a session's last"
     " reply can be missed. Between /usage runs the figure is an estimate and"
@@ -2959,7 +3016,7 @@ def test_no_spend_note_on_max(tmp_path, capsys, monkeypatch):
     as_checkout(monkeypatch)
     _claude_json(tmp_path, "max_5x")
     cli._announce()
-    assert "billed by usage" not in capsys.readouterr().out
+    assert "This Claude seat is billed by usage" not in capsys.readouterr().out
 
 
 def test_status_never_prints_amounts(tmp_path, capsys, monkeypatch):
@@ -2998,6 +3055,62 @@ def test_status_never_prints_amounts(tmp_path, capsys, monkeypatch):
     rest = "\n".join(lines[:i + 1] + lines[i + 2:])
     for amount in ("4321", "43.21", "250.00", "25000"):
         assert amount not in rest, amount
+
+
+SPEND_LATER = (
+    "On a Claude seat billed by usage -- this one now, or one you /login to"
+    " later -- it also keeps, in {path} a one-way fingerprint of the account"
+    " and organisation ids, each session's id with its highest cost"
+    " estimate, and the rises it counted, so the month's spend survives a"
+    " restart. Nothing in it leaves this computer.")
+
+
+def test_disclosure_says_what_a_usage_seat_keeps_on_any_desk(
+        tmp_path, capsys, monkeypatch):
+    """U35: the shim paragraph said the session id and the running cost
+    "are never logged or saved", while on a seat billed by usage
+    spend-count.json saves both, with a fingerprint of the account. And
+    the paragraph that corrected it was printed only when the config named
+    such a seat at install time, so a Max desk that later /logins to one
+    was never told. Said on every desk now, the Max one included."""
+    from pc import spend_count
+    as_checkout(monkeypatch)
+    _claude_json(tmp_path, "max_5x")
+    cli._announce()
+    said = " ".join(l.strip() for l in capsys.readouterr().out.splitlines())
+    assert "never logged or saved" not in said
+    assert "saved only on a seat billed by usage" in said
+    assert SPEND_LATER.format(path=spend_count._default_path()) in said
+
+
+def test_status_wire_counts_what_the_daemon_counted(tmp_path, capsys,
+                                                    monkeypatch):
+    """U19: on a seat billed by usage between /usage runs, `--wire` built
+    its count from nothing and printed only the /usage share, while the
+    board showed it plus every rise the daemon had counted since. The
+    count is loaded from the daemon's file now (and still never saved)."""
+    import json as _json
+    from pc import claude_plan, spend_count
+    now = time.time()
+    _claude_json(tmp_path, "enterprise_usage_based", used=4321,
+                 fetched_ms=int((now - 60) * 1000))
+    view = claude_plan.PlanReader().look(now)
+    path = inside(tmp_path, spend_count._default_path())
+    daemon = spend_count.SpendCounter(path=path)
+    daemon.bind(view.account_fp, claude_plan.month_start_utc(now))
+    daemon.observe("s1", 1.00, now - 30)
+    daemon.observe("s1", 11.00, now - 20)       # $10.00 counted
+    daemon.save()
+    with open(path, "rb") as f:
+        saved = f.read()
+    cli.main(["status", "--wire"])
+    lines = capsys.readouterr().out.splitlines()
+    i = lines.index("Wire        the next usage message, exactly as the"
+                    " board gets it:")
+    wire = _json.loads(lines[i + 1])
+    assert wire["session_pct"] == 21.3          # (4321 + 1000) / 25000
+    with open(path, "rb") as f:
+        assert f.read() == saved
 
 
 def test_config_disclosure_names_seat_fields(tmp_path, capsys, monkeypatch):
@@ -3092,15 +3205,44 @@ def _wsl_desk(monkeypatch, reg, probe=None, running=False):
     monkeypatch.setattr(install_statusline, "uninstall_from", fake_from)
     monkeypatch.setattr(cli, "restart_service",
                         lambda: calls.append(("restart",)) or "restarted")
+    monkeypatch.setattr(cli, "halt_service",
+                        lambda: calls.append(("halt",)))
+
+    def fake_run_in(home):
+        # What status reads settings.json through inside a running
+        # distribution (claude_hooks): no file there.
+        def run(argv, stdin=None):
+            calls.append(("wsl_run", home.distro_name))
+            return 0, argv[-1].encode() + b"\nabsent\n", b""
+        return run
+    monkeypatch.setattr(install_statusline, "default_wsl_run", fake_run_in)
+    monkeypatch.setattr(cli, "_install_service",
+                        lambda: calls.append(("service",))
+                        or "running (Scheduled Task)")
     return calls
 
 
-def _recorded_wsl(name="Ubuntu", guid=WSL_GUID):
-    from pc import claude_home, wsl
-    h = claude_home.wsl(distro_guid=guid, distro_name=name,
-                        linux_user="zoe", linux_home="/home/zoe",
-                        config_dir=wsl.unc(name, "/home/zoe/.claude"),
-                        config_dir_set=False)
+def _inside(calls):
+    """The calls that reach into a distribution, in order."""
+    return [c[0] for c in calls
+            if c[0] in ("probe", "install_into", "uninstall_from")]
+
+
+def _recorded_wsl(home, name="Ubuntu", guid=WSL_GUID, **kw):
+    """Record a WSL home in ~/.blink/config.json, as `install --wsl` would.
+
+    `home` is the caller's home (tmp_path under pytest), and the record is
+    written only once it is known to lie under it (tests/support/home):
+    this wrote whatever ~/.blink the process saw, so a scratch script that
+    imported it would have pointed a real desk's daemon at a made-up
+    distribution (review of feat/enterprise-spend, CV1)."""
+    from pc import claude_home, user_config, wsl
+    fields = dict(linux_user="zoe", linux_home="/home/zoe",
+                  config_dir=wsl.unc(name, "/home/zoe/.claude"),
+                  config_dir_set=False)
+    fields.update(kw)
+    h = claude_home.wsl(distro_guid=guid, distro_name=name, **fields)
+    inside(home, user_config.path(cli.blink_home()))
     claude_home.save(h)
     return h
 
@@ -3200,7 +3342,8 @@ def test_install_wsl_unknown_name(monkeypatch, capsys):
 def test_install_wsl_records_guid_not_env(tmp_path, monkeypatch, capsys):
     """The record is the GUID and name, the Linux user and home and the
     config folder; nothing out of the shell's environment. The service is
-    restarted after the record, since the bus is built once at startup."""
+    installed after the record, since the bus is built once at startup:
+    stopped before anything is written, started by the service step."""
     from pc import claude_home, user_config, wsl
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       probe=_probe(config_dir="/srv/cc", config_dir_set=True))
@@ -3214,8 +3357,9 @@ def test_install_wsl_records_guid_not_env(tmp_path, monkeypatch, capsys):
                    "linux_home": "/home/zoe"}
     home = claude_home.current()
     assert home.kind == "wsl"
-    assert [c[0] for c in calls] == ["probe", "install_into", "restart"]
-    assert calls[1][1] == home
+    assert [c[0] for c in calls] == ["halt", "probe", "install_into",
+                                     "service"]
+    assert calls[2][1] == home
     # What was written and where, said to the person.
     assert "Statusline installed. Activity hooks added." in out
     assert "/srv/cc/settings.json" in out
@@ -3228,15 +3372,19 @@ def test_install_wsl_unreadable_distribution(monkeypatch, capsys):
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       probe=None)
     assert cli.main(["install", "--wsl", "Ubuntu"]) == 1
-    assert "Ubuntu" in capsys.readouterr().out
-    assert [c[0] for c in calls] == ["probe"]
+    out = capsys.readouterr().out
+    assert "Ubuntu" in out
+    assert "Claude Code inside Ubuntu was not changed." in out
+    assert "Nothing was changed." not in out and "Done." not in out
+    assert _inside(calls) == ["probe"]
     assert claude_home.recorded() is None
 
 
 def test_install_wsl_failure_records_nothing(monkeypatch, capsys):
-    """A write inside the distribution that fails leaves the record and
-    the service alone: a daemon moved to a home with nothing installed in
-    it would read an empty folder."""
+    """A write inside the distribution that fails leaves the record as it
+    was: a daemon moved to a home with nothing installed in it would read
+    an empty folder. The service stopped for the write is started again,
+    reading what it read before, and nothing after the step runs (U27)."""
     from pc import claude_home
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       probe=_probe())
@@ -3246,10 +3394,12 @@ def test_install_wsl_failure_records_nothing(monkeypatch, capsys):
             "Could not write Claude Code's settings.json inside WSL.")
     monkeypatch.setattr(install_statusline, "install_into", fails)
     assert cli.main(["install", "--wsl", "Ubuntu"]) == 1
-    assert ("Could not write Claude Code's settings.json inside WSL."
-            in capsys.readouterr().out)
+    out = capsys.readouterr().out
+    assert "Could not write Claude Code's settings.json inside WSL." in out
+    assert "running again, reading what it read before" in out
+    assert "Done." not in out
     assert claude_home.recorded() is None
-    assert ("restart",) not in calls
+    assert ("restart",) in calls and ("service",) not in calls
 
 
 def test_install_wsl_prints_the_spend_note(tmp_path, monkeypatch, capsys):
@@ -3285,7 +3435,7 @@ def test_install_wsl_no_spend_note_on_max(tmp_path, monkeypatch, capsys):
                         lambda home=None: str(tmp_path / "linux"
                                               / ".claude.json"))
     assert cli.main(["install", "--wsl", "Ubuntu"]) == 0
-    assert "billed by usage" not in capsys.readouterr().out
+    assert "This Claude seat is billed by usage" not in capsys.readouterr().out
 
 
 class _UncWatch:
@@ -3321,7 +3471,7 @@ def test_status_names_the_distro_without_unc(tmp_path, monkeypatch, capsys):
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       running=False)
     monkeypatch.setattr(cli, "claude_on_path", lambda home=None: False)
-    _recorded_wsl()
+    _recorded_wsl(tmp_path)
     watch = _UncWatch(monkeypatch)
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
@@ -3332,17 +3482,19 @@ def test_status_names_the_distro_without_unc(tmp_path, monkeypatch, capsys):
     assert "Claude Code on Windows itself is not read" not in out
 
 
-def test_status_wire_never_touches_unc_when_stopped(monkeypatch, capsys):
+def test_status_wire_never_touches_unc_when_stopped(tmp_path,
+                                                    monkeypatch, capsys):
     _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), running=False)
-    _recorded_wsl()
+    _recorded_wsl(tmp_path)
     watch = _UncWatch(monkeypatch)
     assert cli.main(["status", "--wire"]) == 0
     assert watch.seen == []
 
 
-def test_status_running_distro_and_native_ignored(monkeypatch, capsys):
+def test_status_running_distro_and_native_ignored(tmp_path,
+                                                  monkeypatch, capsys):
     _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), running=True)
-    _recorded_wsl()
+    _recorded_wsl(tmp_path)
     monkeypatch.setattr(cli, "claude_on_path",
                         lambda home=None: home is not None
                         and home.kind == "native")
@@ -3352,9 +3504,9 @@ def test_status_running_distro_and_native_ignored(monkeypatch, capsys):
     assert "Claude Code on Windows itself is not read" in out
 
 
-def test_status_says_a_removed_distro_is_gone(monkeypatch, capsys):
+def test_status_says_a_removed_distro_is_gone(tmp_path, monkeypatch, capsys):
     calls = _wsl_desk(monkeypatch, _FakeReg([(OTHER_GUID, "Debian")]))
-    _recorded_wsl()
+    _recorded_wsl(tmp_path)
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
     assert ("Claude Code WSL (Ubuntu), not found -- removed or reinstalled?"
@@ -3362,9 +3514,33 @@ def test_status_says_a_removed_distro_is_gone(monkeypatch, capsys):
     assert calls == []
 
 
+def test_uninstall_leaves_a_config_json_it_cannot_read(tmp_path,
+                                                       monkeypatch, capsys):
+    """U26: with config.json not parsing, the WSL record in it could not
+    be read, so uninstall never looked inside the distribution, deleted
+    the file -- the only record of where Blink was set up -- and said
+    "Done. Nothing left". It leaves the file now, says why, and does not
+    say done."""
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]))
+    _recorded_wsl(tmp_path)
+    config = inside(tmp_path, cli.user_config.path(cli.blink_home()))
+    with open(config, "w") as f:
+        f.write('{"claude_home": {"kind": "wsl"')
+    # A fresh process, as `blink uninstall` is: no last good answer kept.
+    from pc import claude_home
+    claude_home._last.clear()
+    assert cli.main(["uninstall"]) == 1
+    out = capsys.readouterr().out
+    with open(config) as f:
+        assert f.read() == '{"claude_home": {"kind": "wsl"'
+    assert config in out and "does not parse" in out
+    assert "Done." not in out
+    assert "uninstall_from" not in [c[0] for c in calls]
+
+
 def test_uninstall_skips_a_removed_distro(tmp_path, monkeypatch, capsys):
     calls = _wsl_desk(monkeypatch, _FakeReg([(OTHER_GUID, "Debian")]))
-    home = _recorded_wsl()
+    home = _recorded_wsl(tmp_path)
     os.makedirs(home.state_dir)
     (tmp_path / ".blink" / os.path.basename(home.drop_dir)
      / "statusline.json").write_text("{}")
@@ -3375,9 +3551,10 @@ def test_uninstall_skips_a_removed_distro(tmp_path, monkeypatch, capsys):
     assert not os.path.exists(home.drop_dir)
 
 
-def test_uninstall_takes_blink_out_of_the_distro(monkeypatch, capsys):
+def test_uninstall_takes_blink_out_of_the_distro(tmp_path,
+                                                 monkeypatch, capsys):
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]))
-    home = _recorded_wsl()
+    home = _recorded_wsl(tmp_path)
     os.makedirs(home.state_dir)
     cli.main(["uninstall"])
     out = capsys.readouterr().out
@@ -3386,9 +3563,9 @@ def test_uninstall_takes_blink_out_of_the_distro(monkeypatch, capsys):
     assert not os.path.exists(home.drop_dir)
 
 
-def test_uninstall_says_why_a_distro_was_left(monkeypatch, capsys):
+def test_uninstall_says_why_a_distro_was_left(tmp_path, monkeypatch, capsys):
     _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]))
-    _recorded_wsl()
+    _recorded_wsl(tmp_path)
 
     def fails(home, wsl_run, **k):
         raise install_statusline.WslInstallError(
@@ -3399,12 +3576,12 @@ def test_uninstall_says_why_a_distro_was_left(monkeypatch, capsys):
     assert "Could not read Claude Code's settings inside WSL." in out
 
 
-def test_a_wsl_home_reads_its_drop_folder(monkeypatch):
+def test_a_wsl_home_reads_its_drop_folder(tmp_path, monkeypatch):
     """With a WSL home recorded, the status-line payload and the hook
     state are read from the Windows drop folder, not ~/.blink."""
     from pc import statusline_source
     from pc.providers import claude_cli, claude_state
-    home = _recorded_wsl()
+    home = _recorded_wsl(tmp_path)
     assert statusline_source.payload_path() == os.path.join(
         home.drop_dir, "statusline.json")
     assert claude_cli.ClaudeCliProvider().path() == os.path.join(
@@ -3414,21 +3591,22 @@ def test_a_wsl_home_reads_its_drop_folder(monkeypatch):
     assert home.drop_dir != cli.blink_home()
 
 
-def test_status_reads_inside_a_running_distro(monkeypatch, capsys):
+def test_status_reads_inside_a_running_distro(tmp_path, monkeypatch, capsys):
     """The other half of the test above, and the proof its watch sees a
     UNC read at all: with the distribution running, status does look
     inside it (the settings, for the Activity row)."""
     _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), running=True)
-    _recorded_wsl()
+    _recorded_wsl(tmp_path)
     watch = _UncWatch(monkeypatch)
     cli.main(["status"])
     assert watch.seen
 
 
-def test_uninstall_finds_a_renamed_distro_by_its_guid(monkeypatch, capsys):
+def test_uninstall_finds_a_renamed_distro_by_its_guid(tmp_path,
+                                                      monkeypatch, capsys):
     from pc import wsl
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Work")]))
-    _recorded_wsl(name="Ubuntu")
+    _recorded_wsl(tmp_path, name="Ubuntu")
     cli.main(["uninstall"])
     (what, home), = calls
     assert what == "uninstall_from"
@@ -3445,7 +3623,7 @@ def test_plain_install_keeps_a_wsl_record(tmp_path, monkeypatch, capsys):
     from pc import claude_home, user_config
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       probe=_probe())
-    home = _recorded_wsl()
+    home = _recorded_wsl(tmp_path)
     before = user_config.load(cli.blink_home())["claude_home"]
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
@@ -3453,6 +3631,10 @@ def test_plain_install_keeps_a_wsl_record(tmp_path, monkeypatch, capsys):
     assert user_config.load(cli.blink_home())["claude_home"] == before
     assert claude_home.current() == home
     assert ("install_into", home) in calls
+    # Stopped before the write inside, so its WslWatch cannot repair the
+    # folder under it (W1); started by the service step.
+    assert [c[0] for c in calls] == ["halt", "probe", "install_into",
+                                     "service"]
     assert out.count("Claude Code inside WSL (Ubuntu), kept") == 1
     assert "Using Claude Code inside WSL?" not in out
     # The Windows settings are not edited on a WSL desk.
@@ -3463,7 +3645,7 @@ def test_plain_install_after_the_distro_is_gone(tmp_path, monkeypatch,
                                                 capsys):
     from pc import claude_home
     calls = _wsl_desk(monkeypatch, _FakeReg([(OTHER_GUID, "Debian")]))
-    home = _recorded_wsl()
+    home = _recorded_wsl(tmp_path)
     os.makedirs(home.state_dir)
     with open(os.path.join(home.drop_dir, "statusline.json"), "w") as f:
         f.write("{}")
@@ -3474,35 +3656,108 @@ def test_plain_install_after_the_distro_is_gone(tmp_path, monkeypatch,
     assert claude_home.recorded().kind == "native"
     assert not os.path.exists(home.drop_dir)
     assert "statusLine" in _read(tmp_path)
-    assert not [c for c in calls if c[0] != "running"]
+    assert not [c for c in calls if c[0] not in ("running", "service")]
 
 
-def test_install_wsl_over_another_distro(monkeypatch, capsys):
+def test_install_wsl_over_another_distro(tmp_path, monkeypatch, capsys):
     """`--wsl B` over `--wsl A`: A is taken out of its distribution and
     its drop folder removed before B's record replaces it, or uninstall,
     which reads only the record, would never find A again."""
     from pc import claude_home
     calls = _wsl_desk(monkeypatch, _FakeReg(
         [(WSL_GUID, "Ubuntu"), (OTHER_GUID, "Debian")]), probe=_probe())
-    old = _recorded_wsl()
+    old = _recorded_wsl(tmp_path)
     os.makedirs(old.state_dir)
     assert cli.main(["install", "--wsl", "Debian"]) == 0
     new = claude_home.current()
     assert new.distro_guid == OTHER_GUID
-    assert [c[0] for c in calls] == ["probe", "install_into",
-                                     "uninstall_from", "restart"]
-    assert calls[2][1] == old
+    assert [c[0] for c in calls] == ["halt", "probe", "install_into",
+                                     "uninstall_from", "service"]
+    assert calls[3][1] == old
     assert not os.path.exists(old.drop_dir)
 
 
-def test_install_wsl_again_leaves_the_same_distro(monkeypatch, capsys):
+def test_install_wsl_again_leaves_the_same_distro(tmp_path,
+                                                  monkeypatch, capsys):
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       probe=_probe())
-    home = _recorded_wsl()
+    home = _recorded_wsl(tmp_path)
     os.makedirs(home.state_dir)
     assert cli.main(["install", "--wsl", "Ubuntu"]) == 0
     assert "uninstall_from" not in [c[0] for c in calls]
     assert os.path.isdir(home.drop_dir)
+
+
+def test_reinstall_into_a_moved_folder_takes_blink_out_of_the_old(
+        tmp_path, monkeypatch, capsys):
+    """U21: the same distribution, with CLAUDE_CONFIG_DIR (or the default
+    user) changed inside it since. The old folder used to keep Blink's
+    status line and ten hooks, which ran deleted shims after an uninstall
+    and blocked every prompt; and the one chain file per Linux home was
+    overwritten with the new folder's. The old folder is taken out first,
+    under the old record, then the new one written."""
+    from pc import claude_home, wsl
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe(config_dir="/home/zoe/work-claude",
+                                   config_dir_set=True))
+    old = _recorded_wsl(tmp_path)
+    os.makedirs(old.state_dir)
+    assert cli.main(["install"]) == 0
+    assert _inside(calls) == ["probe", "uninstall_from", "install_into"]
+    assert calls[[c[0] for c in calls].index("uninstall_from")][1] == old
+    new = claude_home.recorded()
+    assert new.config_dir == wsl.unc("Ubuntu", "/home/zoe/work-claude")
+    assert os.path.isdir(new.drop_dir)
+
+
+def test_a_moved_folder_that_will_not_undo_stops_the_install(
+        tmp_path, monkeypatch, capsys):
+    """U21, when the old folder cannot be reached (its Linux account gone,
+    say): nothing is written inside, the record stays, and the way out is
+    said, rather than overwriting the chain file the old folder's own
+    status line is kept in."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe(user="amy", home="/home/amy",
+                                   config_dir="/home/amy/.claude"))
+    old = _recorded_wsl(tmp_path)
+
+    def fails(home, wsl_run, **k):
+        calls.append(("uninstall_from", home))
+        raise install_statusline.WslInstallError("nope")
+    monkeypatch.setattr(install_statusline, "uninstall_from", fails)
+    assert cli.main(["install", "--wsl", "Ubuntu"]) == 1
+    out = capsys.readouterr().out
+    assert _inside(calls) == ["probe", "uninstall_from"]
+    assert claude_home.recorded() == old
+    assert "another folder inside Ubuntu" in out
+    assert "inside Ubuntu remove ~/.blink/out" in out
+    assert "Done." not in out
+
+
+def test_reinstall_into_the_same_folder_undoes_nothing(tmp_path,
+                                                       monkeypatch, capsys):
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe())
+    _recorded_wsl(tmp_path)
+    assert cli.main(["install"]) == 0
+    assert _inside(calls) == ["probe", "install_into"]
+
+
+def test_a_kept_wsl_desk_that_fails_says_no_done(tmp_path, monkeypatch,
+                                                 capsys):
+    """U27: a plain install on a WSL desk whose probe failed said
+    "Nothing was changed." and went on to the Codex hooks, the service and
+    "Done." It stops at the step now, with the service it stopped started
+    again, and says only what is true."""
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=None)
+    _recorded_wsl(tmp_path)
+    assert cli.main(["install"]) == 1
+    out = capsys.readouterr().out
+    assert "Nothing was changed." not in out and "Done." not in out
+    assert "Claude Code inside Ubuntu was not changed." in out
+    assert [c[0] for c in calls] == ["halt", "probe", "restart"]
 
 
 def test_install_wsl_over_a_native_record(tmp_path, monkeypatch, capsys):
@@ -3523,11 +3778,82 @@ def test_install_wsl_over_a_native_record(tmp_path, monkeypatch, capsys):
     assert "statusLine" not in got and not got.get("hooks")
 
 
+def test_install_wsl_puts_this_build_in_place(tmp_path, monkeypatch,
+                                              capsys):
+    """U28: run from a new download, `install --wsl` swaps this build in
+    and installs the service, as a plain install does. It used to restart
+    whatever the service ran -- on a 1.4.1 desk a daemon that ignores the
+    record -- and print "Done" over it."""
+    from pc import update
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe())
+    as_frozen(monkeypatch)
+    download = tmp_path / "Downloads" / "blink"
+    download.mkdir(parents=True)
+    (download / "blink").write_text("new build")
+    monkeypatch.setattr(cli, "_self_path", lambda: str(download / "blink"))
+    swapped = []
+
+    def swap_in(staged, installed, version):
+        swapped.append(version)
+        calls.append(("swap",))
+        return True, ""
+    monkeypatch.setattr(update, "swap_in", swap_in)
+    assert cli.main(["install", "--wsl", "Ubuntu"]) == 0
+    out = capsys.readouterr().out
+    assert swapped == [cli.RELEASE_VERSION]
+    assert [c[0] for c in calls] == ["halt", "swap", "probe", "install_into",
+                                     "service"]
+    assert ("restart",) not in calls
+    assert "Blink reads Claude Code inside Ubuntu only" in out
+
+
+def test_install_wsl_stops_over_a_config_json_it_cannot_record_in(
+        tmp_path, monkeypatch, capsys):
+    """U25: the record is the WSL desk. With a config.json that does not
+    parse, the disclosure said "Changes" it, the settings inside were
+    written, the save failed, and uninstall then had no record to undo
+    them by. Stopped before anything is started or written."""
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe())
+    os.makedirs(cli.blink_home(), exist_ok=True)
+    config = inside(tmp_path, cli.user_config.path(cli.blink_home()))
+    with open(config, "w") as f:
+        f.write("{half an edit")
+    assert cli.main(["install", "--wsl", "Ubuntu"]) == 1
+    out = capsys.readouterr().out
+    assert "Blink setup stopped." in out and "Nothing was changed." in out
+    assert calls == []
+    with open(config) as f:
+        assert f.read() == "{half an edit"
+
+
+def test_install_wsl_takes_back_what_it_could_not_record(
+        tmp_path, monkeypatch, capsys):
+    """U25's other half: a save that fails at the write (an OSError)
+    comes before the previous home is taken apart, and the writes inside
+    are taken back out, so the desk is left as it was."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg(
+        [(WSL_GUID, "Ubuntu"), (OTHER_GUID, "Debian")]), probe=_probe())
+    old = _recorded_wsl(tmp_path)
+
+    def fails(home):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(claude_home, "save", fails)
+    assert cli.main(["install", "--wsl", "Debian"]) == 1
+    out = capsys.readouterr().out
+    assert "PermissionError" in out and "Done." not in out
+    assert claude_home.recorded() == old
+    undone = [c[1].distro_name for c in calls if c[0] == "uninstall_from"]
+    assert undone == ["Debian"]
+
+
 def test_install_wsl_says_when_the_service_did_not_come_back(monkeypatch,
                                                              capsys):
     _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
-    monkeypatch.setattr(cli, "restart_service",
-                        lambda: "could not restart it")
+    monkeypatch.setattr(cli, "_install_service",
+                        lambda: "could not start it")
     assert cli.main(["install", "--wsl", "Ubuntu"]) == 1
     out = capsys.readouterr().out
     assert "Done." not in out
@@ -3539,23 +3865,45 @@ def test_install_wsl_refuses_a_foreign_home(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_home_refusal", lambda: True)
     assert cli.main(["install", "--wsl", "Ubuntu"]) == 1
     out = capsys.readouterr().out
-    assert "The background service was NOT restarted." in out
-    assert "goes on reading the Claude Code it read before" in out
-    assert "still reads the folder it read before" not in out
+    assert "The background service was NOT installed." in out
     assert "Done." not in out
 
 
-def test_status_says_a_failed_read_is_not_a_parse_error(monkeypatch,
+def test_status_says_a_failed_read_is_not_a_parse_error(tmp_path, monkeypatch,
                                                         capsys):
     _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), running=True)
-    _recorded_wsl()
+    _recorded_wsl(tmp_path)
 
-    def fails(path):
-        raise OSError("gone")
-    monkeypatch.setattr(install_statusline, "_load", fails)
+    monkeypatch.setattr(install_statusline, "default_wsl_run",
+                        lambda home: lambda argv, stdin=None: (1, b"", b""))
     cli.main(["status"])
     out = capsys.readouterr().out
     assert "Activity    unknown -- settings.json could not be read" in out
+
+
+def test_status_follows_a_symlinked_settings_json_inside_wsl(
+        tmp_path, monkeypatch, capsys):
+    """U45: read inside the distribution, where readlink -f resolves a
+    settings.json linked into a dotfiles folder, not over UNC, where the
+    9P server may not follow it."""
+    from pc import install_hooks
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), running=True)
+    home = _recorded_wsl(tmp_path)
+    doc = {"hooks": {ev: [{"hooks": [{
+        "type": "command",
+        "command": install_hooks.wsl_hook_command(home, ev)}]}]
+        for ev, _ in install_hooks.HOOK_EVENTS}}
+    asked = []
+
+    def run(argv, stdin=None):
+        asked.append(argv[-1])
+        return (0, b"/home/zoe/dotfiles/claude-settings.json\npresent\n"
+                + json.dumps(doc).encode(), b"")
+    monkeypatch.setattr(install_statusline, "default_wsl_run",
+                        lambda h: run)
+    hooks = cli.claude_hooks(home)
+    assert hooks.readable and hooks.wired == hooks.total
+    assert asked == ["/home/zoe/.claude/settings.json"]
 
 
 def test_plain_install_on_a_wsl_desk_discloses_the_wsl_files(
@@ -3565,7 +3913,7 @@ def test_plain_install_on_a_wsl_desk_discloses_the_wsl_files(
     this path never edits; and it names no Linux path or user, since the
     probe that finds them has not run when it prints."""
     _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
-    home = _recorded_wsl()
+    home = _recorded_wsl(tmp_path)
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
     out = capsys.readouterr().out
@@ -3586,7 +3934,7 @@ def test_plain_install_on_a_wsl_desk_ignores_a_broken_native_settings(
     parse neither stops the install nor raises out of the disclosure."""
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       probe=_probe())
-    home = _recorded_wsl()
+    home = _recorded_wsl(tmp_path)
     _settings(tmp_path).write_text("{ not json")
     assert cli.main(["install"]) == 0
     assert ("install_into", home) in calls
@@ -3599,7 +3947,7 @@ def test_gone_distro_keeps_its_drop_folder_when_native_check_stops(
     record and the drop folder are both left as they were, together."""
     from pc import claude_home
     _wsl_desk(monkeypatch, _FakeReg([(OTHER_GUID, "Debian")]))
-    home = _recorded_wsl()
+    home = _recorded_wsl(tmp_path)
     os.makedirs(home.state_dir)
     _settings(tmp_path).write_text("{ not json")
     assert cli.main(["install"]) == 1
@@ -3633,7 +3981,7 @@ def test_plain_install_leaves_an_unchecked_wsl_desk_alone(tmp_path,
                            WSL_GUID),
                 _FakeReg(broken=True)):
         calls = _wsl_desk(monkeypatch, reg, probe=_probe())
-        home = _recorded_wsl()
+        home = _recorded_wsl(tmp_path)
         os.makedirs(home.state_dir, exist_ok=True)
         _settings(tmp_path, {})
         assert cli.main(["install"]) == 1
@@ -3651,15 +3999,15 @@ def test_a_bad_neighbour_key_does_not_hide_the_distro(tmp_path,
     calls = _wsl_desk(monkeypatch, _BadKeyReg(
         [(OTHER_GUID, "Debian"), (WSL_GUID, "Ubuntu")], OTHER_GUID),
         probe=_probe())
-    home = _recorded_wsl()
+    home = _recorded_wsl(tmp_path)
     _settings(tmp_path, {})
     assert cli.main(["install"]) == 0
     assert ("install_into", home) in calls
 
 
-def test_status_says_it_could_not_check_wsl(monkeypatch, capsys):
+def test_status_says_it_could_not_check_wsl(tmp_path, monkeypatch, capsys):
     calls = _wsl_desk(monkeypatch, _FakeReg(broken=True))
-    _recorded_wsl()
+    _recorded_wsl(tmp_path)
     watch = _UncWatch(monkeypatch)
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
@@ -3669,13 +4017,15 @@ def test_status_says_it_could_not_check_wsl(monkeypatch, capsys):
     assert calls == [] and not watch.seen
 
 
-def test_status_says_a_distro_was_renamed(monkeypatch, capsys):
+def test_status_says_a_distro_was_renamed(tmp_path, monkeypatch, capsys):
     """Finding 7: found by GUID under another name, status says so and
     reads it under the name it has now."""
-    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Work")]), running=True)
-    _recorded_wsl(name="Ubuntu")
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Work")]),
+                      running=True)
+    _recorded_wsl(tmp_path, name="Ubuntu")
     watch = _UncWatch(monkeypatch)
     cli.main(["status"])
+    assert ("wsl_run", "Work") in calls and ("wsl_run", "Ubuntu") not in calls
     out = capsys.readouterr().out
     assert "Claude Code WSL (Work), running" in out
     assert (f"renamed from Ubuntu -- run `{cli._repair_command()} install`"
@@ -3684,22 +4034,75 @@ def test_status_says_a_distro_was_renamed(monkeypatch, capsys):
     assert all("\\Work\\" in p and "Ubuntu" not in p for p in watch.paths), watch.paths
 
 
-def _marked_drop(home):
-    """A drop folder as install leaves it: state/, a payload, a marker."""
-    os.makedirs(home.state_dir, exist_ok=True)
+def test_status_wire_reads_a_renamed_distro_under_its_new_name(
+        tmp_path, monkeypatch, capsys):
+    """U20: `--wire` built its bus with no home, so its readers asked
+    claude_home.current() -- the record, under the old name -- and read
+    paths that lead nowhere, while plain status read the new name. The
+    bus is pinned to the home status found."""
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Work")]), running=True)
+    _recorded_wsl(tmp_path, name="Ubuntu")
+    watch = _UncWatch(monkeypatch)
+    cli.main(["status", "--wire"])
+    assert watch.paths
+    assert all("\\Work\\" in p and "Ubuntu" not in p
+               for p in watch.paths), watch.paths
+
+
+def _marked_drop(home, wsl_home):
+    """A drop folder as install leaves it: state/, a payload, a marker.
+    In `wsl_home`'s drop folder, once it is known to lie under `home`."""
+    inside(home, wsl_home.drop_dir)
+    os.makedirs(wsl_home.state_dir, exist_ok=True)
     for name in ("statusline.json", "statusline-installed-command"):
-        with open(os.path.join(home.drop_dir, name), "w") as f:
+        with open(os.path.join(wsl_home.drop_dir, name), "w") as f:
             f.write("x")
 
 
-def test_a_failed_wsl_uninstall_keeps_what_can_undo_it(monkeypatch, capsys):
+def test_the_wsl_helpers_write_only_under_the_callers_home(tmp_path):
+    """CV1: handed a home the files would not land under -- a script's
+    real ~ while the code resolves another -- they stop before writing."""
+    from pc import claude_home
+    elsewhere = tmp_path / "not-home"
+    elsewhere.mkdir()
+    with pytest.raises(AssertionError):
+        _recorded_wsl(elsewhere)
+    assert claude_home.recorded() is None
+    h = claude_home.wsl(WSL_GUID, "Ubuntu", "", "", "", False)
+    with pytest.raises(AssertionError):
+        _marked_drop(elsewhere, h)
+    assert not os.path.exists(h.drop_dir)
+
+
+def test_codex_hooks_on_a_wsl_desk_have_a_script_to_run(tmp_path,
+                                                        monkeypatch, capsys):
+    """U24: Codex runs on Windows, and its hooks name ~/.blink/blink-hook.sh,
+    but a plain install on a WSL desk writes its shims inside the
+    distribution and never wrote that one: all ten Codex hooks ran a
+    missing script, and the Codex waiting state was never shown. The
+    Codex step writes the script it registers."""
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
+    _recorded_wsl(tmp_path)
+    monkeypatch.setattr(cli, "codex_present", lambda: True)
+    registered = []
+    monkeypatch.setattr(
+        cli.install_codex_hooks, "install",
+        lambda p, s: registered.append(s) or "installed (10 events).")
+    assert cli.main(["install"]) == 0
+    shim = inside(tmp_path, cli.hook_shim_path())
+    assert registered == [shim]
+    assert os.path.isfile(shim) and os.access(shim, os.X_OK)
+
+
+def test_a_failed_wsl_uninstall_keeps_what_can_undo_it(tmp_path,
+                                                       monkeypatch, capsys):
     """Finding 2: the shims inside are still live and write into the drop
     folder, so the record, that folder and its markers stay, and the
     person is told how to finish by hand."""
     from pc import claude_home
     _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]))
-    home = _recorded_wsl()
-    _marked_drop(home)
+    home = _recorded_wsl(tmp_path)
+    _marked_drop(tmp_path, home)
 
     def fails(home, wsl_run, **k):
         raise install_statusline.WslInstallError(
@@ -3719,13 +4122,14 @@ def test_a_failed_wsl_uninstall_keeps_what_can_undo_it(monkeypatch, capsys):
     assert not os.path.exists(home.drop_dir)
 
 
-def test_an_unchecked_wsl_uninstall_keeps_the_record(monkeypatch, capsys):
+def test_an_unchecked_wsl_uninstall_keeps_the_record(tmp_path,
+                                                     monkeypatch, capsys):
     """Finding 1, uninstall's half: a registry that cannot be read is not
     a distribution gone."""
     from pc import claude_home
     calls = _wsl_desk(monkeypatch, _FakeReg(broken=True))
-    home = _recorded_wsl()
-    _marked_drop(home)
+    home = _recorded_wsl(tmp_path)
+    _marked_drop(tmp_path, home)
     assert cli.main(["uninstall"]) == 1
     out = capsys.readouterr().out
     assert "could not check WSL" in out
@@ -3736,21 +4140,41 @@ def test_an_unchecked_wsl_uninstall_keeps_the_record(monkeypatch, capsys):
     assert calls == []
 
 
-def test_a_previous_distro_that_would_not_undo_keeps_its_folder(
+def test_a_previous_distro_that_would_not_undo_keeps_its_folder(tmp_path, 
         monkeypatch, capsys):
     """`--wsl Debian` over Ubuntu, with Ubuntu's undo failing: Ubuntu's
-    shims still write into its drop folder, which is not deleted."""
-    _wsl_desk(monkeypatch, _FakeReg(
+    shims still write into its drop folder, which is not deleted.
+
+    U22: and the install stops there. It used to go on and record Debian,
+    while the advice it had just printed said to run uninstall again once
+    Ubuntu started -- an uninstall that, reading only the record, would
+    never look at Ubuntu again. Debian's entries come back out, Ubuntu's
+    record is put back, and the advice is then true."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg(
         [(WSL_GUID, "Ubuntu"), (OTHER_GUID, "Debian")]), probe=_probe())
-    old = _recorded_wsl()
-    _marked_drop(old)
+    old = _recorded_wsl(tmp_path)
+    _marked_drop(tmp_path, old)
 
     def fails(home, wsl_run, **k):
-        raise install_statusline.WslInstallError("nope")
+        calls.append(("uninstall_from", home))
+        if home.distro_name == "Ubuntu":
+            raise install_statusline.WslInstallError("nope")
+        return "Statusline removed."
     monkeypatch.setattr(install_statusline, "uninstall_from", fails)
-    assert cli.main(["install", "--wsl", "Debian"]) == 0
+    assert cli.main(["install", "--wsl", "Debian"]) == 1
+    out = capsys.readouterr().out
     assert os.path.isdir(old.drop_dir)
-    assert "inside Ubuntu remove ~/.blink/out" in capsys.readouterr().out
+    assert "inside Ubuntu remove ~/.blink/out" in out
+    assert (f"Run `{cli.command_to_type()} install --wsl Debian` again once"
+            " Ubuntu starts") in out
+    assert "Blink still reads Ubuntu, not Debian." in out
+    assert "Done." not in out
+    assert claude_home.recorded() == old
+    undone = [c[1].distro_name for c in calls if c[0] == "uninstall_from"]
+    assert undone == ["Ubuntu", "Debian"]
+    new = claude_home.wsl(OTHER_GUID, "Debian", "", "", "", False)
+    assert not os.path.exists(new.drop_dir)
 
 
 def test_install_wsl_discloses_before_it_starts_anything(monkeypatch,
@@ -3783,6 +4207,10 @@ def test_install_wsl_discloses_before_it_starts_anything(monkeypatch,
     assert "Claude Code's config inside Ubuntu, while you use it" in before
     assert "To undo all of it:" in before
     assert "zoe" not in before and "wsl.localhost" not in before
+    from pc import spend_count
+    flat = " ".join(l.strip() for l in before.splitlines())
+    assert SPEND_LATER.format(path=spend_count._default_path()) in flat
+    assert "saved only on a seat billed by usage" in flat
     # Nothing of it waited for the write.
     assert "Changes    Claude Code's settings.json" not in \
         said["install_into"]

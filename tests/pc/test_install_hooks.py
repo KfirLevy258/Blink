@@ -212,3 +212,27 @@ def test_windows_commands_are_ascii_even_under_a_non_ascii_profile(monkeypatch):
     assert sl == 'bash "$USERPROFILE/.blink/blink-statusline.sh"'
     # A shim somewhere else keeps its own path, forward-slashed and quoted.
     assert ih.hook_command("D:\\tools\\hook.sh", "Stop") == "bash D:/tools/hook.sh Stop"
+
+
+def test_a_marker_that_is_not_utf8_reads_as_none(tmp_path):
+    """UnicodeDecodeError is a ValueError, not an OSError, so a marker
+    that is not valid UTF-8 (a truncated write, a hand edit in another
+    encoding) raised out of _read_marker into install and uninstall. The
+    status line's marker reader already reads one as "no marker"."""
+    import os
+    from pc import cli
+    from tests.support.home import inside
+    path = inside(tmp_path, ih._marker_path())
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"bash '/x/blink-hook.sh' Stop\xff\xfe\n")
+    assert ih._read_marker() == set()
+    assert cli.main(["uninstall"]) in (0, 1)
+
+
+@pytest.fixture(autouse=True)
+def _no_recapture_wait(monkeypatch):
+    """`blink uninstall` waits cli.HOOK_RECAPTURE_S between taking the
+    hooks out and removing the script they run; not here."""
+    from pc import cli as _cli
+    monkeypatch.setattr(_cli, "HOOK_RECAPTURE_S", 0)

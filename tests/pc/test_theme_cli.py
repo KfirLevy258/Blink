@@ -564,3 +564,11 @@ def test_show_says_when_the_theme_file_cannot_be_read(capsys):
 def test_show_with_no_theme_file_still_says_nothing_is_set(capsys):
     assert cli.main(["theme", "show"]) == 0
     assert "Nothing is set from this computer" in capsys.readouterr().out
+
+
+@pytest.fixture(autouse=True)
+def _no_recapture_wait(monkeypatch):
+    """`blink uninstall` waits cli.HOOK_RECAPTURE_S between taking the
+    hooks out and removing the script they run; not here."""
+    from pc import cli as _cli
+    monkeypatch.setattr(_cli, "HOOK_RECAPTURE_S", 0)
