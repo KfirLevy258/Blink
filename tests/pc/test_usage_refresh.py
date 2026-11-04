@@ -11,6 +11,15 @@ from pc.usage_refresh import (State, Verdict, command, find_claude, judge,
                               load_state, record, run_once, save_state,
                               spacing)
 
+@pytest.fixture(autouse=True)
+def _no_system_claude(monkeypatch, tmp_path):
+    """find_claude also looks in /opt/homebrew/bin and /usr/local/bin, which
+    are this machine's, not the sandbox's: a claude installed there would
+    be found by every test that expects none."""
+    monkeypatch.setattr(ur, "SYSTEM_BIN_DIRS",
+                        (str(tmp_path / "no-system-bin"),))
+
+
 ZERO = json.dumps({"type": "result", "subtype": "success", "is_error": False,
                    "num_turns": 0, "total_cost_usd": 0, "modelUsage": {},
                    "result": "x"})
@@ -555,7 +564,7 @@ def test_no_claude_says_so_once_per_streak(tmp_path, monkeypatch, capsys):
     for i in range(3):
         t.clock[0] = NOW + 60 * i
         t.w.tick_once()
-    assert t.state() == State()
+    assert t.state() == State(missing=True)
     assert capsys.readouterr().err.splitlines() == ["usage refresh skipped"]
     found[0] = "/x/claude"
     t.w.tick_once()
@@ -882,12 +891,13 @@ class _Asker:
 CAPS = frozenset({"svc", "ask"})
 
 
-def test_board_ask_due_and_counted_when_sent(tmp_path, monkeypatch):
+def test_board_ask_due_and_spaced_a_day_when_sent(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", "")
     k = _Asker(tmp_path)
     assert k.a.due(CAPS) is True
     k.a.asked()
-    assert k.ask() == AskState(1, NOW, False)
+    # Sent, not counted: only an answer shows the person saw it.
+    assert k.ask() == AskState(0, NOW, False)
     assert k.a.due(CAPS) is False                  # not again today
     k.clock[0] += ASK_EVERY_S
     assert k.a.due(CAPS) is True
@@ -1044,3 +1054,397 @@ def test_no_board_ask_under_a_scenario(monkeypatch, tmp_path):
     assert cub.board_ask(str(tmp_path)) is None
     monkeypatch.delenv("BLINK_SCENARIO")
     assert isinstance(cub.board_ask(str(tmp_path)), ur.BoardAsk)
+
+
+# --- final review, Important 1: turning it back on is a fresh start --------
+
+def _failing_watch(tmp_path, monkeypatch):
+    """A watch one failure from its day of failures, the setting on, and a
+    runner that always fails; returns (watch, runs)."""
+    from pc import user_config
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    runs = []
+    t = _Watch(tmp_path, monkeypatch, runner=lambda argv, **kw:
+               runs.append(1) or subprocess.CompletedProcess(argv, 2, b"",
+                                                            None))
+    ur.save_state(str(t.blink), State(last_run_at=NOW - 7200, fails=26,
+                                      failing_since=NOW - ur.GIVE_UP_S))
+    user_config.put(str(t.blink), ur.SETTING, True)
+    t.w.tick_once()
+    assert t.state().off_reason == "failing"
+    assert user_config.load(str(t.blink))[ur.SETTING] is False
+    return t, runs
+
+
+def _turn_on(t, at):
+    """What `blink config usage-refresh on` does."""
+    from pc import user_config
+    user_config.put(str(t.blink), ur.SETTING, True)
+    ur.clear_off(str(t.blink), now=at)
+
+
+def test_reenabled_after_failing_one_failure_does_not_turn_it_off(
+        tmp_path, monkeypatch, capsys):
+    # The review's reproduction: the watch sees the setting off first, then
+    # the person turns it on, then one run fails (a network blip). Before,
+    # the watch's memory kept fails=26 and a day-old failing_since, and that
+    # one failure turned it off again at once.
+    from pc import user_config
+    t, runs = _failing_watch(tmp_path, monkeypatch)
+    t.clock[0] = NOW + 60
+    t.w.tick_once()                      # sees it off
+    _turn_on(t, NOW + 120)
+    t.clock[0] = NOW + ur.REFRESH_AFTER_S   # spacing from the last run
+    t.w.tick_once()
+    assert len(runs) == 2
+    s = t.state()
+    assert s.off_reason == "" and s.fails == 1
+    assert s.failing_since == NOW + ur.REFRESH_AFTER_S
+    assert user_config.load(str(t.blink))[ur.SETTING] is True
+
+
+def test_reenabled_within_one_tick_runs_again(tmp_path, monkeypatch):
+    # The other order (Task 6 note): turned on before the watch ever saw it
+    # off. Before, the reason held in memory kept it off until a restart
+    # while `blink status` said "on".
+    from pc import user_config
+    t, runs = _failing_watch(tmp_path, monkeypatch)
+    _turn_on(t, NOW + 30)
+    t.clock[0] = NOW + 60
+    t.w.tick_once()
+    assert len(runs) == 1                # the throttle still holds
+    t.clock[0] = NOW + ur.REFRESH_AFTER_S
+    t.w.tick_once()
+    assert len(runs) == 2
+    assert t.state().off_reason == "" and t.state().fails == 1
+    assert user_config.load(str(t.blink))[ur.SETTING] is True
+
+
+@pytest.mark.allow_claude_launch
+def test_a_cost_off_holds_until_turned_on_with_blink_config(tmp_path,
+                                                            monkeypatch):
+    from pc import user_config
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    costly = json.loads(ZERO)
+    costly.update(num_turns=1, total_cost_usd=0.02)
+    exe, rec = _moving_claude(tmp_path, json.dumps(costly), NOW)
+    _on_path(monkeypatch, exe)
+    t = _Watch(tmp_path, monkeypatch)
+    user_config.put(str(t.blink), ur.SETTING, True)
+    t.w.tick_once()
+    assert t.state().off_reason == "cost"
+    rec.unlink()
+    t.clock[0] = NOW + 60
+    t.w.tick_once()                      # sees it off
+    # The key flipped by hand, not `blink config`: the reason on disk holds.
+    user_config.put(str(t.blink), ur.SETTING, True)
+    t.clock[0] = NOW + 3600
+    t.w.tick_once()
+    assert not rec.exists()
+    _turn_on(t, NOW + 3600)
+    t.clock[0] = NOW + 7200
+    t.w.tick_once()
+    assert rec.exists()
+
+
+def test_a_state_file_that_reads_as_nothing_never_lifts_a_held_cost(
+        tmp_path, monkeypatch):
+    # Only a newer cleared_at lifts what the watch holds; a corrupt file
+    # loads as all zeros and must not.
+    from pc import user_config
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    runs = []
+    t = _Watch(tmp_path, monkeypatch, runner=lambda argv, **kw:
+               runs.append(1))
+    t.w._mem = State(last_run_at=NOW - 7200, off_reason="cost",
+                     cleared_at=5.0)
+    user_config.put(str(t.blink), ur.SETTING, True)
+    (t.blink / ur.STATE_FILE).write_text("{broken")
+    t.w.tick_once()
+    assert runs == []
+
+
+def test_clear_off_always_writes_a_stamp(tmp_path):
+    home = str(tmp_path)
+    ur.clear_off(home, now=42.0)
+    assert load_state(home).cleared_at == 42.0
+    save_state(home, State(last_run_at=7.0, fails=3, failing_since=1.0,
+                           off_reason="failing"))
+    ur.clear_off(home, now=50.0)
+    assert load_state(home) == State(last_run_at=7.0, cleared_at=50.0)
+
+
+@pytest.mark.parametrize("run", [{"cleared_at": "x"}, {"cleared_at": True},
+                                 {"missing": 1}])
+def test_a_bad_new_field_is_a_fresh_state(tmp_path, run):
+    with open(os.path.join(str(tmp_path), ur.STATE_FILE), "w",
+              encoding="utf-8") as f:
+        json.dump({"run": run}, f)
+    assert load_state(str(tmp_path)) == State()
+
+
+# --- final review, Important 2: finding claude without the shell's PATH ----
+
+def _exe_at(d, name="claude"):
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text("")
+    return str(p)
+
+
+@pytest.mark.parametrize("where", [
+    (".claude", "local"), (".npm-global", "bin")])
+def test_find_claude_in_the_other_installers_folders(tmp_path, monkeypatch,
+                                                     where):
+    home = tmp_path / "h"
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    exe = _exe_at(home.joinpath(*where))
+    assert find_claude(str(home)) == exe
+
+
+def test_find_claude_in_homebrew(tmp_path, monkeypatch):
+    home = tmp_path / "h"
+    brew = tmp_path / "opt" / "homebrew" / "bin"
+    monkeypatch.setattr(ur, "SYSTEM_BIN_DIRS", (str(brew),))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    exe = _exe_at(brew)
+    assert find_claude(str(home)) == exe
+    # The official installer's folder comes first.
+    local = _exe_at(home / ".local" / "bin")
+    assert find_claude(str(home)) == local
+
+
+def test_find_claude_takes_the_newest_nvm_node(tmp_path, monkeypatch):
+    home = tmp_path / "h"
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    node = home / ".nvm" / "versions" / "node"
+    _exe_at(node / "v9.11.2" / "bin")
+    new = _exe_at(node / "v20.11.1" / "bin")   # newer, though "v2" < "v9"
+    assert find_claude(str(home)) == new
+    # Only the newest Node is looked in: the one nvm's default most likely
+    # is, rather than a claude left in a version nobody runs.
+    (node / "v22.1.0" / "bin").mkdir(parents=True)
+    assert find_claude(str(home)) is None
+
+
+def test_the_recorded_path_comes_first_and_a_gone_one_falls_back(
+        tmp_path, monkeypatch):
+    home = tmp_path / "h"
+    blink = tmp_path / ".blink"
+    blink.mkdir()
+    local = _exe_at(home / ".local" / "bin")
+    rec = _exe_at(tmp_path / "opt" / "homebrew" / "bin")
+    exe, _ = _fake_claude(tmp_path, ZERO)
+    _on_path(monkeypatch, exe)            # even ahead of PATH
+    ur.remember_claude(str(blink), rec)
+    assert ur.recorded_claude(str(blink)) == rec
+    assert ur.locate_claude(str(blink), str(home)) == rec
+    os.remove(rec)
+    assert ur.locate_claude(str(blink), str(home)) == exe
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert ur.locate_claude(str(blink), str(home)) == local
+
+
+def test_remember_claude_keeps_the_rest_of_the_file(tmp_path):
+    home = str(tmp_path)
+    save_state(home, State(fails=2))
+    ur.save_ask(home, ur.AskState(times=1))
+    ur.remember_claude(home, "/opt/homebrew/bin/claude")
+    assert load_state(home).fails == 2 and ur.load_ask(home).times == 1
+    save_state(home, State(fails=3))        # and the other way round
+    assert ur.recorded_claude(home) == "/opt/homebrew/bin/claude"
+
+
+@pytest.mark.parametrize("junk", [3, "", "relative/claude", None])
+def test_a_bad_recorded_path_is_none(tmp_path, junk):
+    with open(os.path.join(str(tmp_path), ur.STATE_FILE), "w",
+              encoding="utf-8") as f:
+        json.dump({"exe": junk}, f)
+    assert ur.recorded_claude(str(tmp_path)) is None
+
+
+@pytest.mark.allow_claude_launch
+def test_the_daemon_runs_the_recorded_claude_with_no_path(tmp_path,
+                                                          monkeypatch,
+                                                          capsys):
+    # launchd's PATH holds no claude; the CLI recorded where it was.
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    exe, rec = _moving_claude(tmp_path, ZERO, NOW + 2)
+    t = _Watch(tmp_path, monkeypatch)
+    # launchd's own PATH: the shell tools the fake needs, and no claude.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    assert ur.find_claude(os.environ["HOME"]) is None
+    ur.remember_claude(str(t.blink), exe)
+    t.w.tick_once()
+    assert rec.exists()
+    assert capsys.readouterr().err.splitlines() == ["usage refresh ran"]
+
+
+def test_a_daemon_that_finds_no_claude_says_so_in_the_state(tmp_path,
+                                                            monkeypatch):
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    found = [None]
+    monkeypatch.setattr(ur, "find_claude", lambda home: found[0])
+    t = _Watch(tmp_path, monkeypatch, runner=lambda argv, **kw:
+               subprocess.CompletedProcess(argv, 3, b"", None))
+    t.w.tick_once()
+    assert t.state().missing is True
+    found[0] = "/x/claude"
+    t.w.tick_once()
+    assert t.state().missing is False and t.state().fails == 1
+
+
+# --- final review, Important 3: a cache with no figures still moves --------
+
+def _null_cache_doc(fetched_at):
+    return {"oauthAccount": {"accountUuid": ACCOUNT},
+            "cachedUsageUtilization": {
+                "accountUuid": ACCOUNT,
+                "fetchedAtMs": int(fetched_at * 1000),
+                "utilization": {"five_hour": None, "seven_day": None}}}
+
+
+def test_the_view_carries_the_caches_own_fetch_time():
+    from pc import claude_plan
+    v = claude_plan._view(_null_cache_doc(NOW - 60), 0.0)
+    assert v.windows is None and v.anchor is None
+    assert v.cache_fetched_at == NOW - 60
+    assert ur._cache_at(v) == NOW - 60
+    other = _null_cache_doc(NOW)
+    other["cachedUsageUtilization"]["accountUuid"] = "someone-else"
+    assert claude_plan._view(other, 0.0).cache_fetched_at is None
+
+
+@pytest.mark.allow_claude_launch
+def test_a_run_that_moves_an_all_null_cache_is_ok_and_spaced(tmp_path,
+                                                            monkeypatch,
+                                                            capsys):
+    home = pathlib.Path(os.environ["HOME"])
+    (home / ".claude.json").write_text(
+        json.dumps(_null_cache_doc(NOW - 3600)))
+    exe, rec = _fake_claude(tmp_path, ZERO)
+    body = json.dumps(_null_cache_doc(NOW + 2))
+    text = pathlib.Path(exe).read_text()
+    pathlib.Path(exe).write_text(text.replace(
+        "cat <<'EOF'",
+        f"cat > '{home / '.claude.json'}' <<'CFG'\n{body}\nCFG\ncat <<'EOF'",
+        1))
+    _on_path(monkeypatch, exe)
+    t = _Watch(tmp_path, monkeypatch)
+    t.w.tick_once()
+    assert t.state().fails == 0 and t.state().last_run_at == NOW
+    assert capsys.readouterr().err.splitlines() == ["usage refresh ran"]
+    rec.unlink()
+    t.clock[0] = NOW + ur.REFRESH_AFTER_S - 60
+    t.w.tick_once()                      # fresh: 25 min from the cache
+    assert not rec.exists()
+    t.clock[0] = NOW + ur.REFRESH_AFTER_S + 5
+    t.w.tick_once()
+    assert rec.exists()
+
+
+# --- final review, Important 4: an ask counts only when it was seen --------
+
+def test_an_ask_never_answered_is_asked_again_daily_past_three(tmp_path,
+                                                             monkeypatch):
+    # A board that dozed through every ask (withdrawn, or dropped after ten
+    # minutes) sends no answer; none of them was seen, so none counts.
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+    for _ in range(ASK_AT_MOST + 2):
+        assert k.a.due(CAPS) is True
+        k.a.asked()
+        assert k.a.due(CAPS) is False        # a day apart all the same
+        k.clock[0] += ASK_EVERY_S
+    assert k.ask().times == 0
+
+
+def test_three_seen_laters_then_never(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+    for i in range(ASK_AT_MOST):
+        assert k.a.due(CAPS) is True
+        k.a.asked()
+        k.a.answer("later")
+        assert k.ask().times == i + 1
+        k.clock[0] += ASK_EVERY_S
+    assert k.a.due(CAPS) is False
+
+
+@pytest.mark.parametrize("have", [True, False])
+@pytest.mark.parametrize("a", ["on", "no"])
+def test_an_answer_after_the_choice_was_made_changes_nothing(tmp_path,
+                                                             have, a):
+    # A box answered after `blink install` or `blink config` chose must not
+    # overturn that choice.
+    from pc import user_config
+    k = _Asker(tmp_path)
+    k.a.asked()
+    user_config.put(str(k.blink), ur.SETTING, have)
+    k.a.answer(a)
+    assert k.setting() is have
+    assert k.ask().declined is False
+
+
+def test_an_answer_when_config_cannot_be_read_changes_nothing(tmp_path):
+    k = _Asker(tmp_path)
+    (k.blink / "config.json").write_text("{not json")
+    k.a.answer("on")
+    assert (k.blink / "config.json").read_text() == "{not json"
+
+
+# --- final review, Important 5: CLAUDE_CONFIG_DIR goes with the run --------
+
+def _env_runner(seen):
+    def runner(argv, **kw):
+        seen.update(kw["env"])
+        return subprocess.CompletedProcess(argv, 0, ZERO.encode(), None)
+    return runner
+
+
+def test_run_once_passes_the_recorded_config_dir(tmp_path, monkeypatch):
+    from pc import claude_home
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    h = claude_home.from_environ({"CLAUDE_CONFIG_DIR": str(tmp_path / "cc")})
+    assert h.config_dir_set
+    seen = {}
+    run_once("c", str(tmp_path), _env_runner(seen), home=h)
+    assert seen["CLAUDE_CONFIG_DIR"] == h.config_dir
+    assert seen["BLINK_REFRESH"] == "1"
+
+
+def test_run_once_drops_a_config_dir_the_record_did_not_choose(tmp_path,
+                                                               monkeypatch):
+    from pc import claude_home
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "elsewhere"))
+    h = claude_home.from_environ({})
+    assert not h.config_dir_set
+    seen = {}
+    run_once("c", str(tmp_path), _env_runner(seen), home=h)
+    assert "CLAUDE_CONFIG_DIR" not in seen
+
+
+def test_the_watch_hands_its_home_to_the_run(tmp_path, monkeypatch):
+    import dataclasses
+
+    from pc import claude_home
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    cc = pathlib.Path(os.environ["HOME"]) / "cc"
+    cc.mkdir()
+    (cc / ".claude.json").write_text(json.dumps(_config_doc(NOW - 3600)))
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    seen = {}
+    t = _Watch(tmp_path, monkeypatch, runner=_env_runner(seen))
+    rec = dataclasses.replace(
+        claude_home.from_environ({"CLAUDE_CONFIG_DIR": str(cc)}),
+        kind=claude_home.NATIVE)
+    t.w._home = lambda: rec
+    t.w._view = ur.config_view(lambda: rec)
+    t.w.tick_once()
+    assert seen["CLAUDE_CONFIG_DIR"] == str(cc)
+
+
+def test_usage_refresh_does_not_import_ota():
+    assert not hasattr(ur, "ota")

@@ -964,9 +964,10 @@ class Bridge:
 
     def _ask_caps(self):
         """The board's OWN caps, never board_caps_hint. The hint is
-        board.json's, which names the last board that spoke, and an ask is
-        counted when it goes out: one sent to an older board on the same
-        port is dropped there and spends one of the three for nothing."""
+        board.json's, which names the last board that spoke, and an ask
+        sent starts a day's wait: one sent to an older board on the same
+        port is dropped there, and the person is asked a day later than
+        they need be. (It is counted only on an answer; BoardAsk.)"""
         caps = self._board_caps
         if caps is None or protocol.BOARD_CAP_ASK not in caps:
             return None

@@ -915,6 +915,7 @@ static lv_obj_t *ask_box;
 static bool ask_pending;	/* an ask arrived and is not up yet */
 static bool ask_dozing;		/* ui_sleep_run is in charge of the panel */
 static int64_t ask_shown_ms;	/* uptime it went up; 60 s from here */
+static int64_t ask_pending_ms;	/* uptime the ask arrived; 10 min to go up */
 
 static void ask_close(void)
 {
@@ -1373,7 +1374,8 @@ static void ask_tick(void)
 	struct ask_prompt_turn at = ask_prompt_step(
 		ask_pending, ask_box != NULL,
 		panel || confirm || notice || wn || upd_prompt || dl_overlay,
-		!proto_host_seen(), ask_dozing, k_uptime_get(), ask_shown_ms);
+		!proto_host_seen(), ask_dozing, k_uptime_get(), ask_shown_ms,
+		ask_pending_ms);
 
 	ask_pending = at.pending;
 	switch (at.act) {
@@ -1398,6 +1400,9 @@ static void ask_tick(void)
 		proto_send_answer(ask_prompt_timeout_answer());
 		printk("[ask] closed unanswered\n");
 		break;
+	case ASK_PROMPT_DROP:
+		printk("[ask] dropped: not shown in time\n");
+		break;
 	case ASK_PROMPT_NOTHING:
 	default:
 		break;
@@ -1406,7 +1411,10 @@ static void ask_tick(void)
 
 void ui_settings_ask(void)
 {
+	/* A new ask restarts the ten minutes: the daemon sent it because
+	 * someone is at the computer now. */
 	ask_pending = true;
+	ask_pending_ms = k_uptime_get();
 }
 
 void ui_settings_ask_dozing(bool dozing)
@@ -1415,7 +1423,7 @@ void ui_settings_ask_dozing(bool dozing)
 	/* At once, not on the next 250 ms tick: the closing clip is drawn
 	 * straight to the panel the moment ui_sleep_run starts it, and the box
 	 * is clickable on lv_layer_top under it from then on. Withdrawn as on
-	 * host loss -- no answer; the daemon counted the ask when it sent it. */
+	 * host loss -- no answer, so the daemon counts none of its three. */
 	if (dozing && ask_box) {
 		ask_close();
 		printk("[ask] withdrawn: the board is dozing\n");

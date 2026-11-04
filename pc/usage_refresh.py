@@ -27,7 +27,9 @@ must never reach a log line; RefreshWatch logs the event name only, in the
 exact words below. Importing does nothing.
 """
 
+import dataclasses
 import enum
+import glob
 import json
 import os
 import shutil
@@ -37,8 +39,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, fields
 
-from . import (claude_home, claude_plan, ota, protocol, theme, user_config,
-               wsl)
+from . import (claude_home, claude_plan, protocol, theme, user_config, wsl)
 from . import idle as idle_probe
 
 SETTING = "usage-refresh"
@@ -64,15 +65,82 @@ class Verdict(enum.Enum):
     TIMEOUT = "timeout"
 
 
+# Where the other installers put `claude`, tried after PATH. The daemon runs
+# under launchd (/usr/bin:/bin:/usr/sbin:/sbin), systemd or Task Scheduler,
+# whose PATH holds none of them, so `blink install` found Homebrew's or
+# npm's claude in a terminal, asked, got a yes, and the daemon then never
+# found it: "usage refresh skipped" once, and `blink status` said "on"
+# forever (final review of feat/usage-refresh, Important 2). A module
+# constant with no home in it, so tests can point it at an empty folder.
+SYSTEM_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
+def _version_key(path):
+    """Sort key of an nvm folder name, v20.11.1 -> (20, 11, 1); a name that
+    is not a version sorts first."""
+    name = os.path.basename(path).lstrip("v")
+    try:
+        return tuple(int(x) for x in name.split("."))
+    except ValueError:
+        return (-1,)
+
+
 def find_claude(home):
-    """The claude executable: PATH first, then the installer's own folder,
-    which a launchd or Task Scheduler job's short PATH does not include."""
+    """The claude executable, or None: PATH first, then where the official
+    installer (~/.local/bin), the older local install (~/.claude/local),
+    Homebrew (/opt/homebrew/bin, /usr/local/bin), npm with a user prefix
+    (~/.npm-global/bin) and the newest nvm Node put it. Desktop's private
+    copy is never used. `home` is the user's home, passed in, never looked
+    up here (tests/test_sandbox.py)."""
     found = shutil.which("claude")
     if found:
         return found
-    name = "claude.exe" if sys.platform == "win32" else "claude"
-    local = os.path.join(home, ".local", "bin", name)
-    return local if os.path.isfile(local) else None
+    win = sys.platform == "win32"
+    name = "claude.exe" if win else "claude"
+    dirs = [os.path.join(home, ".local", "bin"),
+            os.path.join(home, ".claude", "local")]
+    if not win:
+        dirs += list(SYSTEM_BIN_DIRS)
+        dirs.append(os.path.join(home, ".npm-global", "bin"))
+        nvm = glob.glob(os.path.join(home, ".nvm", "versions", "node", "*"))
+        dirs += [os.path.join(d, "bin")
+                 for d in sorted(nvm, key=_version_key, reverse=True)[:1]]
+    for d in dirs:
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def recorded_claude(blink_home):
+    """The path the CLI last found claude at (remember_claude), or None."""
+    exe = _read(blink_home).get("exe")
+    return exe if isinstance(exe, str) and os.path.isabs(exe) else None
+
+
+def remember_claude(blink_home, exe):
+    """Keep `exe`, found by the CLI with the person's own PATH, for the
+    daemon, whose PATH is the service manager's. The path as found, not its
+    target: ~/.local/bin/claude is a link to a versioned file that each
+    Claude Code update replaces. Never logged. Raises what the write
+    raises; nothing is written when it is already the one kept."""
+    exe = os.path.abspath(exe)
+    doc = _read(blink_home)
+    if doc.get("exe") == exe:
+        return
+    doc["exe"] = exe
+    theme._write_json(_path(blink_home), doc, tries=1)
+
+
+def locate_claude(blink_home, home):
+    """What the daemon runs: the recorded path while it is still there,
+    else find_claude. A Claude Code that moved is found by the fallbacks
+    until the next `blink install`, `update` or `config usage-refresh on`
+    records it again."""
+    exe = recorded_claude(blink_home)
+    if exe and os.path.isfile(exe):
+        return exe
+    return find_claude(home)
 
 
 def command(exe):
@@ -105,13 +173,26 @@ def judge(returncode, stdout):
     return Verdict.FAILED
 
 
-def run_once(exe, blink_home, runner=wsl._bounded_run):
+def run_once(exe, blink_home, runner=wsl._bounded_run, home=None):
+    """One run. `home` is the claude_home record BLINK reads the cache
+    from: when CLAUDE_CONFIG_DIR chose its folder, the run is given the
+    same folder, and when it did not, the run is not given one either. The
+    daemon runs under launchd or systemd without the person's shell rc, so
+    someone who exports CLAUDE_CONFIG_DIR there had `/usage` run against
+    the default folder (no login, or another one), the recorded folder's
+    cache never moved, and a day later the refresh turned itself off with
+    the wrong advice (final review, Important 5)."""
     try:
         cwd = os.path.join(blink_home, "refresh")
         os.makedirs(cwd, mode=0o700, exist_ok=True)
         # Read at call time so a test can pose as Windows.
         extra = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
         env = dict(os.environ, BLINK_REFRESH="1")
+        if home is not None:
+            if home.config_dir_set:
+                env["CLAUDE_CONFIG_DIR"] = home.config_dir
+            else:
+                env.pop("CLAUDE_CONFIG_DIR", None)
         r = runner(command(exe), timeout=RUN_TIMEOUT_S, cwd=cwd, env=env,
                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                    stderr=subprocess.DEVNULL, **extra)
@@ -128,6 +209,13 @@ class State:
     fails: int = 0
     failing_since: float | None = None
     off_reason: str = ""
+    # When `blink config usage-refresh on` last cleared the above
+    # (clear_off): a watch that sees a newer one than it holds takes the
+    # file's fresh start over its own memory (RefreshWatch._floor).
+    cleared_at: float = 0.0
+    # The daemon looked for claude and found it nowhere; `blink status`
+    # says so (final review, Important 2).
+    missing: bool = False
 
 
 def _path(blink_home):
@@ -153,6 +241,9 @@ def load_state(blink_home):
         if (not isinstance(s.fails, int) or isinstance(s.fails, bool)
                 or not isinstance(s.last_run_at, (int, float))
                 or not isinstance(s.off_reason, str)
+                or not isinstance(s.cleared_at, (int, float))
+                or isinstance(s.cleared_at, bool)
+                or not isinstance(s.missing, bool)
                 or not (s.failing_since is None
                         or isinstance(s.failing_since, (int, float)))):
             return State()
@@ -168,9 +259,7 @@ def save_state(blink_home, state):
 
 
 def record(state, verdict, now):
-    s = State(state.last_run_at, state.fails, state.failing_since,
-              state.off_reason)
-    s.last_run_at = now
+    s = dataclasses.replace(state, last_run_at=now, missing=False)
     if verdict is Verdict.OK:
         s.fails = 0
         s.failing_since = None
@@ -220,9 +309,16 @@ def due(now, *, enabled, native, board_alive, idle_s, cache_at, other_at,
 # question is asked in the terminal, and the refresh never runs without a
 # yes. So a board that lists the "ask" cap is sent {"t":"ask","id":"refresh"}
 # and puts up "Keep figures fresh?" with Turn on / No thanks
-# (firmware/src/ask_prompt.h). The ask is counted when it goes out: a box
-# the board withdraws (host lost) or closes after a minute ("later") is one
-# of the ASK_AT_MOST, a day apart.
+# (firmware/src/ask_prompt.h). An ask counts toward ASK_AT_MOST only when
+# the person saw it: on an answer, "later" (the box closed itself after a
+# minute) included. Sending one only starts the day before the next. A box
+# the board withdrew (host lost, a doze) or an ask it dropped because it
+# could not show it within ten minutes answers nothing and counts nothing.
+# Counted on send, as first built, all three could be spent on a dozing
+# board for exactly the person the board ask is for -- someone in Desktop
+# with no Claude Code terminal, whose board dozes for want of hook activity
+# -- who would never have seen the box (final review, Important 4; owner's
+# ruling: "at most 3 times" means shown 3 times).
 
 ANSWERS = protocol.ASK_ANSWERS
 
@@ -350,28 +446,39 @@ class BoardAsk:
         if h.kind != claude_home.NATIVE:
             return False                # before anything stats a UNC path
         ask.update(native=True,
-                   claude_found=find_claude(h.user_dir()) is not None,
+                   claude_found=locate_claude(self._blink_home,
+                                              h.user_dir()) is not None,
                    work_login=is_work_login(self._view(now)))
         if not should_ask(now, idle_s=0.0, **ask):
             return False
         return should_ask(now, idle_s=self._idle(), **ask)
 
     def asked(self):
-        """Count one ask, sent just now."""
+        """An ask went out just now: the next waits ASK_EVERY_S. Not
+        counted: the board may never show it (answer() counts)."""
         with self._lock:
             st = self._state()
-            self._keep(AskState(st.times + 1, self._now(), st.declined))
+            self._keep(AskState(st.times, self._now(), st.declined))
 
     def answer(self, a):
-        """The board's answer: "on" saves yes, "no" saves no and never asks
-        again, "later" changes nothing (asked() counted it). Never raises."""
-        if a not in ANSWERS or a == "later":
+        """The board's answer, which means the person saw the box: one of
+        the ASK_AT_MOST. "on" saves yes, "no" saves no and never asks again,
+        "later" saves nothing. Applied only while the setting is still
+        absent: a box answered after `blink install` or `blink config` made
+        the choice must not overturn it. Never raises."""
+        if a not in ANSWERS:
             return
         try:
             with self._lock:
-                if a == "no":
-                    st = self._state()
-                    self._keep(AskState(st.times, st.last_at, True))
+                try:
+                    absent = chosen(self._blink_home) is None
+                except Exception:
+                    absent = False      # unreadable: change nothing
+                st = self._state()
+                self._keep(AskState(st.times + 1, st.last_at,
+                                    st.declined or (absent and a == "no")))
+                if not absent or a == "later":
+                    return
                 try:
                     user_config.put(self._blink_home, SETTING, a == "on")
                 except Exception:
@@ -405,24 +512,32 @@ def chosen(blink_home):
     return v if isinstance(v, bool) else None
 
 
-def clear_off(blink_home):
+def clear_off(blink_home, now=None):
     """Forget why the refresh turned itself off, so that turning it on again
-    is a fresh start: no off_reason, no failure count. Nothing is written
-    when there is no state file to correct."""
+    is a fresh start: no off_reason, no failure count, and `cleared_at` set
+    to now. Written every time, even with nothing on disk to correct: the
+    running watch may hold a reason in memory that its write never got to
+    the file, and `cleared_at` is how it learns to drop it (RefreshWatch.
+    _floor). The last run's time stays, so the spacing still holds."""
     state = load_state(blink_home)
-    if state.off_reason == "" and state.fails == 0 \
-            and state.failing_since is None:
-        return
     state.off_reason = ""
     state.fails = 0
     state.failing_since = None
+    state.cleared_at = time.time() if now is None else now
     save_state(blink_home, state)
 
 
 def _cache_at(view):
-    """When this login's /usage cache was fetched, or None. The anchor and
-    the windows come from one cache (claude_plan._cache), so either will
-    do; both are asked because a seat may carry only one of them."""
+    """When this login's /usage cache was fetched, or None: the cache's own
+    fetchedAtMs, whatever it holds. A cache with both windows null and no
+    spend (a Team or Enterprise seat that reports nothing, a free login)
+    still moves when a run refreshes it; read through the windows or the
+    anchor alone, it never did, every good run was judged a failure, and a
+    day later the refresh turned itself off with "run claude and /login"
+    (final review, Important 3). The anchor and windows are a fallback for
+    a view built without the field."""
+    if view.cache_fetched_at is not None:
+        return view.cache_fetched_at
     stamps = [x.fetched_at for x in (view.anchor, view.windows)
               if x is not None]
     return max(stamps) if stamps else None
@@ -472,7 +587,6 @@ class RefreshWatch:
         self._idle = idle if idle is not None else idle_probe.seconds_idle
         self._runner = runner if runner is not None else wsl._bounded_run
         self._said = None          # the exception type said for this streak
-        self._missing = False      # "no claude" said for this streak
         # The state as this watch last left it: the floor under what the
         # file says. The throttle and the cost guard must not rest on one
         # write: save_state is a single try, and a failed write (a full
@@ -502,10 +616,14 @@ class RefreshWatch:
             # Off in config.json, which is where the person turns it back
             # on (the cost guard writes it off first). From here the file
             # decides whether it was turned off for a reason; only the
-            # throttle stays held.
-            if self._mem is not None and self._mem.off_reason:
-                self._mem = State(self._mem.last_run_at, self._mem.fails,
-                                  self._mem.failing_since, "")
+            # throttle stays held. The failure streak goes too: kept, a
+            # day of failures behind a "failing" shutdown made the first
+            # failure after `blink config usage-refresh on` turn it off
+            # again at once, since failing_since was already a day old
+            # (final review, Important 1, reproduced).
+            if self._mem is not None:
+                self._mem = State(self._mem.last_run_at,
+                                  cleared_at=self._mem.cleared_at)
             return
         h = self._home()
         if h.kind != claude_home.NATIVE:
@@ -517,8 +635,7 @@ class RefreshWatch:
             # The clock went back past the last run. Counted as run just
             # now, as StatusWatch does, so the next is a spacing from here
             # rather than whenever the clock catches up with the old reading.
-            state = State(now, state.fails, state.failing_since,
-                          state.off_reason)
+            state = dataclasses.replace(state, last_run_at=now)
             self._keep(state)
         ask = dict(enabled=True, native=True,
                    board_alive=bool(self._board_alive()),
@@ -530,24 +647,38 @@ class RefreshWatch:
             return
         if not due(now, idle_s=self._idle(), **ask):
             return
-        exe = find_claude(h.user_dir())
+        exe = locate_claude(self._blink_home, h.user_dir())
         if exe is None:
-            if not self._missing:
-                self._missing = True
+            if not state.missing:
+                # Kept in the state so `blink status` can say "on, but
+                # Claude Code wasn't found", and said once per streak.
+                unsaved = self._keep(dataclasses.replace(state, missing=True))
                 print("usage refresh skipped", file=sys.stderr)
+                if unsaved:
+                    self._say_failure(unsaved)
             return
-        self._missing = False
-        self._ask(exe, state, now)
+        self._ask(exe, h, state, now)
 
     def _floor(self, read):
         """`read` (the file) under this watch's own copy: a reload never
-        moves last_run_at back or clears an off_reason held here."""
+        moves last_run_at back or clears an off_reason held here -- unless
+        the person cleared it since (a newer `cleared_at`, written by
+        `blink config usage-refresh on`): then the file's fresh start wins
+        over the streak and the reason held here. Without that, turning it
+        on within one tick of a shutdown kept it off until a restart while
+        `blink status` said "on" (Task 6 note). Only a newer stamp counts:
+        a file that cannot be read loads as all zeros, and must not lift a
+        cost guard held here."""
         mem = self._mem
         if mem is None:
             return read
+        last = max(mem.last_run_at, read.last_run_at)
+        if read.cleared_at > mem.cleared_at:
+            return dataclasses.replace(read, last_run_at=last)
         base = mem if mem.last_run_at >= read.last_run_at else read
-        return State(max(mem.last_run_at, read.last_run_at), base.fails,
-                     base.failing_since, mem.off_reason or read.off_reason)
+        return State(last, base.fails, base.failing_since,
+                     mem.off_reason or read.off_reason,
+                     cleared_at=mem.cleared_at, missing=base.missing)
 
     def _keep(self, state):
         """Hold `state` here, then write it. The type of a failed write is
@@ -560,7 +691,7 @@ class RefreshWatch:
             return type(e).__name__
         return None
 
-    def _ask(self, exe, state, started):
+    def _ask(self, exe, home, state, started):
         codes, raised = [], []
 
         def runner(argv, **kw):
@@ -575,7 +706,8 @@ class RefreshWatch:
             return r
 
         try:
-            verdict = run_once(exe, self._blink_home, runner=runner)
+            verdict = run_once(exe, self._blink_home, runner=runner,
+                               home=home)
         except Exception as e:
             # run_once maps a timeout and an OSError; anything else from the
             # runner is a failed run all the same, counted and spaced.

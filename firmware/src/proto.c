@@ -222,9 +222,8 @@ static void emit(const char *json)
  * without the view and is sent no line it would drop. */
 /* ask: this firmware puts up "Keep figures fresh?" for the daemon's `ask`
  * line and answers it with an `answer` line (ask_prompt.h). The daemon
- * counts an ask as made when it sends one, so it sends one only to a board
- * that lists this: an older board would drop it and spend one of the three
- * the daemon allows itself for nothing. */
+ * sends one only to a board that lists this: an older board would drop it,
+ * and the daemon would wait a day to ask again for nothing. */
 #define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"burn\",\"plan\",\"spendburn\",\"ask\"]"
 
 /*

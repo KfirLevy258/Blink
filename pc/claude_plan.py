@@ -215,6 +215,12 @@ class ConfigView:
     anchor: "SpendAnchor | None"
     # The 5-hour and weekly figures the same /usage saved, or None.
     windows: "CacheWindows | None" = None
+    # When this login's /usage cache was fetched (fetchedAtMs, epoch
+    # seconds), whatever it holds; None with no cache of this login's. The
+    # refresh's "did the run move the cache" check reads this, not
+    # windows or anchor: a cache with both windows null and no spend is
+    # still a refreshed cache (final review of feat/usage-refresh, 3).
+    cache_fetched_at: "float | None" = None
 
 
 # No file, or nothing in it that was asked for. account_fp "" is "no
@@ -359,6 +365,16 @@ def _cache_windows(doc):
         return None
 
 
+def _cache_fetched_at(doc):
+    """fetchedAtMs of this login's cache, in epoch seconds, or None. Never
+    raises."""
+    try:
+        got = _cache(doc)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return None if got is None else got[1]
+
+
 def month_start_utc(now) -> float:
     """Epoch seconds of 00:00 UTC on the 1st of the month `now` is in."""
     t = time.gmtime(now)
@@ -384,7 +400,8 @@ def _view(doc, mtime):
     return ConfigView(ultra=is_ultra(doc), spend_seat=is_spend_seat(doc),
                       account_fp=fp or "", org_kind=kind, mtime=mtime,
                       anchor=_anchor(doc),
-                      windows=_cache_windows(doc))
+                      windows=_cache_windows(doc),
+                      cache_fetched_at=_cache_fetched_at(doc))
 
 
 def parse(path, st=None):

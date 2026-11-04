@@ -3764,6 +3764,24 @@ def _refresh_view(home):
         return None
 
 
+def _remember_claude() -> None:
+    """While the refresh is on, record where this terminal finds claude, for
+    the daemon: it runs with the service manager's PATH (launchd's is
+    /usr/bin:/bin:/usr/sbin:/sbin), which holds neither Homebrew's nor
+    npm's nor nvm's, and the person who said yes here got no run at all
+    (final review of feat/usage-refresh, Important 2). Called by install,
+    update and `config usage-refresh on`, for a native home only. Never
+    says anything and never fails the command: the daemon has fallbacks."""
+    try:
+        if usage_refresh.enabled(blink_home()) is not True:
+            return
+        exe = usage_refresh.find_claude(_home())
+        if exe:
+            usage_refresh.remember_claude(blink_home(), exe)
+    except Exception:
+        pass
+
+
 def _install_refresh_step(home) -> str:
     """The text after "[n/N] Usage refresh ... ": asks, once, whether to run
     the person's own `claude -p /usage` to keep the figures fresh.
@@ -3780,6 +3798,8 @@ def _install_refresh_step(home) -> str:
     except (user_config.Unreadable, OSError):
         return "left as it was (config.json cannot be read)"
     if have is not None:
+        if have:
+            _remember_claude()
         return "on" if have else "off"
     if not usage_refresh.find_claude(_home()):
         return ("off (Claude Code isn't installed; see"
@@ -3796,6 +3816,8 @@ def _install_refresh_step(home) -> str:
         user_config.put(blink_home(), usage_refresh.SETTING, answer)
     except (user_config.Unreadable, OSError):
         return "not saved (config.json cannot be written)"
+    if answer:
+        _remember_claude()
     return "on" if answer else REFRESH_OFF_HINT
 
 
@@ -4817,10 +4839,13 @@ def cmd_uninstall(_args) -> int:
               # itself off) and any temp name a write of it left.
               *_usage_refresh_files()):
         _rm(p)
-    # The folder `claude -p /usage` runs in. Empty unless Claude Code left
-    # something there, so a flat sweep and an rmdir that refuses a folder
-    # holding a subdirectory.
-    _rm_tree(os.path.join(blink_home(), "refresh"))
+    # The folder `claude -p /usage` runs in, and whatever Claude Code left
+    # in it, subfolders included: the flat _rm_tree refused a folder holding
+    # a subdirectory and left it, and with it ~/.blink, behind, while the
+    # README promises one command undoes everything. This folder and
+    # nothing above it; a link put in its place is refused by rmtree
+    # rather than followed.
+    shutil.rmtree(os.path.join(blink_home(), "refresh"), ignore_errors=True)
     # The per-session state directory, and everything under it. state.json
     # above is the single-slot file this replaced; it is still on the list so
     # an install that predates the directory leaves nothing behind.
@@ -5490,6 +5515,8 @@ def _refresh_status(wsl_home) -> str:
         return "not set up (turn on with: blink config usage-refresh on)"
     if not have:
         return "off"
+    if state.missing:
+        return "on, but Claude Code wasn't found"
     if state.last_run_at > 0:
         mins = max(0, int((time.time() - state.last_run_at) // 60))
         return f"on, last ran {mins} min ago"
@@ -6054,10 +6081,12 @@ def _update_refresh_question() -> str:
     not interactive, already answered, or a WSL home. Nothing is saved when
     nobody could answer, so the next interactive run asks."""
     try:
-        if usage_refresh.chosen(blink_home()) is not None:
-            return ""
         home = claude_home.current()
         if home.kind == claude_home.WSL:
+            return ""
+        # Whoever already said yes: where claude is now, for the daemon.
+        _remember_claude()
+        if usage_refresh.chosen(blink_home()) is not None:
             return ""
         if not sys.stdin.isatty():
             return ""
@@ -6328,6 +6357,12 @@ def cmd_config(args) -> int:
             except OSError as e:
                 print(f"Could not clear the earlier reason it was off: {e}")
                 return 1
+            try:
+                native = claude_home.current().kind == claude_home.NATIVE
+            except Exception:
+                native = False
+            if native:
+                _remember_claude()
     print(f"{name}: {state(setting)}")
     if value is not None:
         for line in (setting.said_on if value == "on" else setting.said_off):

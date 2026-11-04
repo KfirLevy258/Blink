@@ -1240,7 +1240,7 @@ def test_no_ask_for_a_board_without_the_cap():
 
 
 def test_the_remembered_caps_never_send_an_ask():
-    """board.json names the LAST board; an ask is counted when it goes out,
+    """board.json names the LAST board; an ask sent starts a day's wait,
     so only this board's own word may send one."""
     ask, sent = _Ask(), []
     b = Bridge(write_msg=_checked_writer(sent),
@@ -1333,8 +1333,10 @@ def test_an_answer_writes_the_setting_end_to_end(tmp_path, monkeypatch):
     b, sent = _ask_bridge(ask)
     b.pump()
     assert len(_asks(sent)) == 1
-    assert ur.load_ask(blink).times == 1
+    # Sent is not seen: only the board's answer counts one of the three.
+    assert ur.load_ask(blink) == ur.AskState(0, 1_800_000_000.0, False)
     b.on_message({"t": "answer", "v": 2, "id": "refresh", "a": "on"})
+    assert ur.load_ask(blink).times == 1
     assert user_config.load(blink)[ur.SETTING] is True
     b.poll_once()
     b.pump()

@@ -14,6 +14,13 @@ QUESTION = ("BLINK can keep your figures current when Claude Code isn't"
             " no messages and uses no quota. Turn on? ")
 
 
+@pytest.fixture(autouse=True)
+def _no_system_claude(monkeypatch, tmp_path):
+    """Not this machine's /opt/homebrew/bin or /usr/local/bin."""
+    monkeypatch.setattr(ur, "SYSTEM_BIN_DIRS",
+                        (str(tmp_path / "no-system-bin"),))
+
+
 def _bh():
     return cli.blink_home()
 
@@ -220,3 +227,65 @@ def test_update_asks_only_when_interactive_and_absent(monkeypatch, capsys,
     _work(monkeypatch, False)
     assert cli._update_refresh_question() == "on"
     assert cli._update_refresh_question() == ""   # answered: not again
+
+
+# --- final review, Important 2: where claude is, recorded for the daemon ----
+
+def test_install_yes_records_where_claude_is(monkeypatch, claude_found):
+    _tty(monkeypatch, [""])
+    _work(monkeypatch, False)
+    assert cli._install_refresh_step(_native()) == "on"
+    assert ur.recorded_claude(_bh()) == "/x/claude"
+
+
+@pytest.mark.parametrize("answers,tty", [(["n"], True), ([], False)])
+def test_install_records_nothing_without_a_yes(monkeypatch, claude_found,
+                                               answers, tty):
+    _tty(monkeypatch, answers, tty=tty)
+    _work(monkeypatch, False)
+    cli._install_refresh_step(_native())
+    assert ur.recorded_claude(_bh()) is None
+    assert not os.path.exists(os.path.join(_bh(), ur.STATE_FILE))
+
+
+def test_reinstall_already_on_records_it_again(monkeypatch, claude_found):
+    os.makedirs(_bh(), exist_ok=True)
+    user_config.put(_bh(), ur.SETTING, True)
+    _tty(monkeypatch, [])
+    assert cli._install_refresh_step(_native()) == "on"
+    assert ur.recorded_claude(_bh()) == "/x/claude"
+
+
+def test_config_on_records_where_claude_is(monkeypatch, claude_found):
+    assert cli.main(["config", "usage-refresh", "on"]) == 0
+    assert ur.recorded_claude(_bh()) == "/x/claude"
+
+
+def test_config_off_records_nothing(monkeypatch, claude_found):
+    assert cli.main(["config", "usage-refresh", "off"]) == 0
+    assert ur.recorded_claude(_bh()) is None
+
+
+def test_update_records_it_for_someone_already_on(monkeypatch, claude_found):
+    os.makedirs(_bh(), exist_ok=True)
+    user_config.put(_bh(), ur.SETTING, True)
+    _tty(monkeypatch, [], tty=False)
+    assert cli._update_refresh_question() == ""
+    assert ur.recorded_claude(_bh()) == "/x/claude"
+
+
+def test_status_says_when_the_daemon_found_no_claude():
+    os.makedirs(_bh(), exist_ok=True)
+    user_config.put(_bh(), ur.SETTING, True)
+    ur.save_state(_bh(), ur.State(missing=True))
+    assert cli._refresh_status(False) == "on, but Claude Code wasn't found"
+
+
+def test_uninstall_removes_a_refresh_folder_with_subfolders():
+    # Whatever Claude Code leaves in its run folder, a folder of its own
+    # included, goes; the flat sweep left it, and ~/.blink with it.
+    deep = os.path.join(_bh(), "refresh", ".claude", "x")
+    os.makedirs(deep)
+    open(os.path.join(deep, "f"), "w").write("")
+    assert cli.main(["uninstall"]) == 0
+    assert not os.path.exists(os.path.join(_bh(), "refresh"))

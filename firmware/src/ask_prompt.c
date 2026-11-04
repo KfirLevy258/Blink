@@ -4,7 +4,8 @@
 
 struct ask_prompt_turn ask_prompt_step(bool pending, bool open, bool busy,
 				       bool host_gone, bool dozing,
-				       int64_t now_ms, int64_t shown_ms)
+				       int64_t now_ms, int64_t shown_ms,
+				       int64_t pending_ms)
 {
 	struct ask_prompt_turn t = { ASK_PROMPT_NOTHING, pending };
 
@@ -12,9 +13,9 @@ struct ask_prompt_turn ask_prompt_step(bool pending, bool open, bool busy,
 		/* The same question, already on the glass. */
 		t.pending = false;
 		/* Before the timeout: a "later" into a wire nobody reads is a
-		 * line for nothing, and the daemon counted the ask already. A
-		 * doze is the same case: nobody saw the box, so it says nothing
-		 * either. */
+		 * line for nothing. A doze is the same case: nobody saw the box,
+		 * so it says nothing either, and the daemon counts only an
+		 * answer. */
 		if (host_gone || dozing) {
 			t.act = ASK_PROMPT_WITHDRAW;
 		} else if (now_ms - shown_ms >= ASK_PROMPT_OPEN_MS) {
@@ -27,6 +28,14 @@ struct ask_prompt_turn ask_prompt_step(bool pending, bool open, bool busy,
 	}
 	if (host_gone) {
 		t.pending = false;	/* not kept for the next computer */
+		return t;
+	}
+	/* Too late to be the question the daemon meant: it asked because
+	 * someone was at the computer then. Nothing is sent; the daemon asks
+	 * again tomorrow. */
+	if (now_ms - pending_ms >= ASK_PROMPT_PENDING_MS) {
+		t.act = ASK_PROMPT_DROP;
+		t.pending = false;
 		return t;
 	}
 	/* Never stack on top of something the person is already answering,

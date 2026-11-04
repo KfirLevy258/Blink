@@ -13,11 +13,14 @@
  * Someone updated automatically never sees `blink install`, where the
  * question is asked in the terminal, and the refresh never runs without a
  * yes. So the daemon sends {"t":"ask","v":2,"id":"refresh"} to a board that
- * lists the "ask" cap, at most once a day and three times in all, and only
- * while someone is at the computer. It counts the ask when it sends it, so
- * the board owes it an answer only when there is one: "on" for Turn on,
- * "no" for No thanks, and "later" when the box closes itself after
- * ASK_PROMPT_OPEN_MS with nobody having touched it.
+ * lists the "ask" cap, at most once a day, and only while someone is at the
+ * computer. It counts an ask toward its three only when an answer comes
+ * back -- "on" for Turn on, "no" for No thanks, and "later" when the box
+ * closes itself after ASK_PROMPT_OPEN_MS with nobody having touched it --
+ * because an answer is the one proof the box was seen. A box withdrawn, or
+ * an ask dropped unshown, answers nothing, and so costs none of the three
+ * (final review of feat/usage-refresh, Important 4: counted on send, a
+ * dozing board could spend all three unseen).
  *
  * Pure, and in its own file, for the reason upd_prompt is: every rule below
  * would otherwise live in a 250 ms LVGL timer that only a finger can reach.
@@ -28,9 +31,14 @@
  *     panel. An ask that arrives while one of those is up waits, still
  *     owed, until the glass is clear.
  *   - Withdrawn when the computer goes (HOST LOST). Nobody is there to hear
- *     an answer, and the daemon already counted the ask, so it comes down
- *     with none; an ask still waiting for the glass is dropped as well,
- *     rather than kept for whatever computer the board meets next.
+ *     an answer, so it comes down with none; an ask still waiting for the
+ *     glass is dropped as well, rather than kept for whatever computer the
+ *     board meets next.
+ *   - Dropped, with no answer, when it could not go up within
+ *     ASK_PROMPT_PENDING_MS of arriving. The daemon sends it because
+ *     someone is at the computer now; a box that surfaced hours later,
+ *     once a doze ended, would be asking an empty room. The daemon asks
+ *     again a day later, and the dropped ask has cost none of the three.
  *   - Never while the board dozes (ui_sleep.c), and withdrawn, with no
  *     answer, when a doze starts. The doze is half an hour without Claude
  *     activity -- exactly when the daemon is likeliest to ask -- and
@@ -48,11 +56,16 @@
 /* How long the box stays up unanswered before it closes itself as later. */
 #define ASK_PROMPT_OPEN_MS 60000
 
+/* How long an ask may wait for the glass (a doze, another box) before it is
+ * dropped unshown. */
+#define ASK_PROMPT_PENDING_MS 600000
+
 enum ask_prompt_act {
 	ASK_PROMPT_NOTHING,	/* leave the glass alone */
 	ASK_PROMPT_SHOW,	/* put the question up */
 	ASK_PROMPT_WITHDRAW,	/* take it down and answer nothing: host gone */
 	ASK_PROMPT_EXPIRE,	/* take it down and answer "later" */
+	ASK_PROMPT_DROP,	/* forget an ask never shown in time; no answer */
 };
 
 struct ask_prompt_turn {
@@ -64,14 +77,16 @@ struct ask_prompt_turn {
  * `pending` is an ask received and not yet shown, `open` whether the box is
  * on the glass, `busy` whether anything else owns it, `host_gone` whether
  * the computer has stopped answering, `dozing` whether the sleep clip is
- * up (a tap's peek included: the board is still dozing under it). `now_ms` and `shown_ms` are uptimes;
- * `shown_ms` is read only while `open`.
+ * up (a tap's peek included: the board is still dozing under it). `now_ms`,
+ * `shown_ms` and `pending_ms` are uptimes; `shown_ms` is read only while
+ * `open`, `pending_ms` (when the ask arrived) only while `pending`.
  *
  * The caller applies the answer verbatim -- act, then `pending`.
  */
 struct ask_prompt_turn ask_prompt_step(bool pending, bool open, bool busy,
 				       bool host_gone, bool dozing,
-				       int64_t now_ms, int64_t shown_ms);
+				       int64_t now_ms, int64_t shown_ms,
+				       int64_t pending_ms);
 
 enum ask_answer {
 	ASK_ANSWER_ON,		/* Turn on */

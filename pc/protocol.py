@@ -1040,8 +1040,9 @@ BOARD_CAP_PLAN = "plan"
 BOARD_CAP_SPENDBURN = "spendburn"
 # Puts up "Keep figures fresh?" for an `ask` line and answers it with an
 # `answer` line (docs/plans/usage-refresh.md, 1b; firmware/src/ask_prompt.h).
-# A board without it is never sent one: an ask is counted as made when it
-# goes out, and one a board drops would spend one of the three for nothing.
+# A board without it is never sent one: it would drop the line, and the
+# daemon would wait a day to ask again for nothing. An ask counts toward the
+# three only once the board answers it (usage_refresh.BoardAsk.answer).
 BOARD_CAP_ASK = "ask"
 # The words an `answer` line may carry. Anything else is not an answer.
 ASK_ANSWERS = ("on", "no", "later")
