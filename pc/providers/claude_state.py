@@ -526,11 +526,12 @@ class ClaudeStateProvider(base.ProviderParser):
     its numbers actually are. It contributes execution fields and nothing else.
     """
 
-    def __init__(self, path=None, now=time.time, sweep=True):
+    def __init__(self, path=None, now=time.time, sweep=True, home=None):
         # None: the state folder of claude_home.current() -- ~/.blink/state
         # (STATE_DIR) natively, the drop folder's for Claude Code in WSL.
         if path is None:
-            path = claude_home.current().state_dir
+            path = (home() if home is not None
+                    else claude_home.current()).state_dir
         self._dir = path
         self._now = now
         self._sweep = sweep

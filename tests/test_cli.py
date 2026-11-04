@@ -3540,6 +3540,8 @@ def test_install_wsl_refuses_a_foreign_home(monkeypatch, capsys):
     assert cli.main(["install", "--wsl", "Ubuntu"]) == 1
     out = capsys.readouterr().out
     assert "The background service was NOT restarted." in out
+    assert "goes on reading the Claude Code it read before" in out
+    assert "still reads the folder it read before" not in out
     assert "Done." not in out
 
 

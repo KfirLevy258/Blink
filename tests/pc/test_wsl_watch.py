@@ -640,3 +640,54 @@ def test_resolve_name_leaves_the_same_name_and_a_missing_distro():
         reader = w._reader
         w.resolve_name()
         assert w._home is home and w._reader is reader
+
+
+def test_a_native_bus_stays_native_when_the_record_turns_wsl(tmp_path,
+                                                             monkeypatch):
+    """Finding 5: the bus is built once per process. A native one whose
+    readers asked claude_home.current() on every poll moved onto a WSL
+    record the moment `install --wsl` saved it -- before the restart, or
+    for good when the restart was refused -- and the serial loop then
+    stat'ed UNC paths. Its readers ask claude_home.native() instead."""
+    import claude_usage_bridge as cub
+    from pc import wsl
+    monkeypatch.delenv("BLINK_SCENARIO", raising=False)
+    bus = cub.build_bus()
+    native = claude_home.native()
+    claude_home.save(claude_home.wsl(
+        GUID, "Ubuntu", "zoe", "/home/zoe",
+        wsl.unc("Ubuntu", "/home/zoe/.claude"), False))
+    assert claude_home.current().kind == claude_home.WSL
+    from pc.providers.claude_cli import ClaudeCliProvider
+    from pc.providers.claude_state import ClaudeStateProvider
+    paths = [bus._plan_reader.path(), bus._burn["claude"].root()]
+    for p in bus._providers:
+        if isinstance(p, ClaudeCliProvider):
+            paths.append(p.path())
+        if isinstance(p, ClaudeStateProvider):
+            paths.append(p._dir)
+    assert len(paths) == 4
+    assert not any("wsl" in p.lower() for p in paths), paths
+    assert paths[1] == native.transcripts
+    assert paths[2] == os.path.join(native.drop_dir, "statusline.json")
+    assert paths[3] == native.state_dir
+
+
+def test_a_wsl_bus_keeps_its_own_drop_folder(tmp_path, monkeypatch):
+    """The same for a WSL-built bus: `install --wsl Debian` over Ubuntu,
+    with the restart refused, does not move its payload reads onto
+    Debian's drop folder while its watch still reads Ubuntu."""
+    import claude_usage_bridge as cub
+    from pc import wsl
+    from pc.providers.claude_cli import ClaudeCliProvider
+    monkeypatch.delenv("BLINK_SCENARIO", raising=False)
+    monkeypatch.setattr(wsl_watch.WslWatch, "start", lambda self: None)
+    first = claude_home.wsl(GUID, "Ubuntu", "zoe", "/home/zoe",
+                            wsl.unc("Ubuntu", "/home/zoe/.claude"), False)
+    claude_home.save(first)
+    bus = cub.build_bus()
+    claude_home.save(claude_home.wsl(
+        "{11111111-2222-4333-8444-555555555555}", "Debian", "zoe",
+        "/home/zoe", wsl.unc("Debian", "/home/zoe/.claude"), False))
+    cli_p, = [p for p in bus._providers if isinstance(p, ClaudeCliProvider)]
+    assert cli_p.path() == os.path.join(first.drop_dir, "statusline.json")

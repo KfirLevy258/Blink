@@ -231,7 +231,8 @@ def _block_key(payload):
 
 
 class ClaudeCliProvider(base.ProviderParser):
-    def __init__(self, path=None, plan_path=None, counter=None, plan=None):
+    def __init__(self, path=None, plan_path=None, counter=None, plan=None,
+                 home=None):
         # None means "wherever ss.payload_path() says", asked on every poll
         # rather than once here. The default used to be a module constant in
         # statusline_source, expanduser'd at import before tests/conftest.py
@@ -243,6 +244,10 @@ class ClaudeCliProvider(base.ProviderParser):
         # long as the daemon, so its path was fixed by whatever HOME was when
         # it was made (found in review). CLAUDE.md names this hole.
         self._path = path
+        # Whose drop folder that is: a callable returning a
+        # claude_home.ClaudeHome, asked on every poll; None asks
+        # claude_home.current() (statusline_source.payload_path).
+        self._home = home
         # (payload, mtime) for the last reading whose frame put a figure on
         # the session dial when it was read, or None before the first one.
         # The frame's, not the payload's: a five_hour percentage the frame
@@ -372,7 +377,10 @@ class ClaudeCliProvider(base.ProviderParser):
         return PROVIDER_ID
 
     def path(self):
-        return self._path if self._path is not None else ss.payload_path()
+        if self._path is not None:
+            return self._path
+        return ss.payload_path(self._home() if self._home is not None
+                               else None)
 
     def parse_cli_event(self, raw_payload, now_epoch, observed_at):
         """A push from Claude Code, already read.

@@ -49,7 +49,7 @@ FIRST_RETRY_AFTER_S = 60.0
 MAX_RETRY_AFTER_S = 900.0
 
 
-def default_providers(counter=None, plan=None):
+def default_providers(counter=None, plan=None, home=None):
     """Every provider shipped today, in preference order.
 
     Order is not the merge rule -- pc/normalizer merges by recency per field,
@@ -61,11 +61,14 @@ def default_providers(counter=None, plan=None):
     count is the bus's to keep, and one reader serves every user of the
     config. None for either gives that provider its own (a count in memory
     only, a reader of its own), which is what `blink status` wants.
+
+    `home` is IngestionBus's: whose drop folder the Claude Code providers
+    read.
     """
-    return [ClaudeCliProvider(counter=counter, plan=plan),
+    return [ClaudeCliProvider(counter=counter, plan=plan, home=home),
             ClaudeDesktopProvider(),
             ClaudeDesktopLocalStorageProvider(),
-            ClaudeStateProvider(), CodexCliProvider(),
+            ClaudeStateProvider(home=home), CodexCliProvider(),
             # LAST: it only ever offers a remembered projection, and every
             # source above it is polled first so any of them carrying a real
             # weekly reset is what observe() below learns from this cycle.
@@ -88,7 +91,7 @@ DEFAULT_VERDICT = object()
 class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
                  now=time.time, burn=None, verdict=DEFAULT_VERDICT,
-                 account=None, counter=None, plan_source=None):
+                 account=None, counter=None, plan_source=None, home=None):
         """`plan_source`, when given, is where the bus's one reader of
         Claude Code's config takes its view from instead of the file: a
         WSL home's pc/wsl_watch.WslWatch.view, which answers from memory,
@@ -96,6 +99,15 @@ class IngestionBus:
         stat'ed or read on the serial loop (docs/plans/enterprise-spend.md,
         section 4, "Reading"). None reads the file, as every native desk
         does.
+
+        `home`, a callable returning a claude_home.ClaudeHome, pins whose
+        Claude Code the bus's own readers read: the config, the status
+        line payload and the hook state. The daemon's bus is built once
+        per process, and with None each of them asks
+        claude_home.current() on every poll, so a native bus followed a
+        record that turned WSL under it -- `install --wsl` saves before it
+        restarts, and a refused restart never comes -- and the serial loop
+        stat'ed UNC paths (final branch review, finding 5).
 
         `counter` (a pc/spend_count.SpendCounter) is used only when the
         bus builds its own providers (`providers` None): it is handed to
@@ -117,7 +129,8 @@ class IngestionBus:
         # a scenario's bus, for the reason above: it never asks.
         self._plan_reader = None
         if providers is None:
-            self._plan_reader = claude_plan.PlanReader(source=plan_source)
+            self._plan_reader = claude_plan.PlanReader(source=plan_source,
+                                                       home=home)
             if account is None:
                 account = claude_account.AccountWatch(self._plan_reader.look)
         self._account = account
@@ -140,7 +153,8 @@ class IngestionBus:
             if counter is None:
                 counter = spend_count.SpendCounter()
             self._counter = counter
-            self._providers = default_providers(counter, self._plan_reader)
+            self._providers = default_providers(counter, self._plan_reader,
+                                                home)
         else:
             self._providers = list(providers)
         self._preferred = preferred_provider

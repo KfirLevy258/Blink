@@ -301,9 +301,16 @@ def build_bus():
             return ingest.IngestionBus(
                 burn={"claude": watch.burn_source(),
                       "codex": CodexBurnReader()},
-                plan_source=watch.view)
-        return ingest.IngestionBus(burn={"claude": BurnReader(),
-                                         "codex": CodexBurnReader()})
+                plan_source=watch.view, home=lambda: home)
+        # Pinned to this computer's own Claude Code, which a record can
+        # move between folders but never into a distribution: the bus
+        # lives for the process, and asking current() on each poll
+        # followed `install --wsl`'s record onto UNC paths before the
+        # restart that rebuilds it (IngestionBus's `home`).
+        native = claude_home.native
+        return ingest.IngestionBus(burn={"claude": BurnReader(home=native),
+                                         "codex": CodexBurnReader()},
+                                   home=native)
     from pc.providers.scripted import ScriptedProvider
     scripted = ScriptedProvider(scenario)
     # verdict=None: a step says itself whether the account has a five-hour

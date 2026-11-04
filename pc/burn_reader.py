@@ -306,11 +306,15 @@ class BurnReader:
 
     def __init__(self, root=None, read_budget=READ_BUDGET_BYTES,
                  scan_every_s=SCAN_EVERY_S, chunk_bytes=CHUNK_BYTES,
-                 max_line_bytes=MAX_LINE_BYTES):
+                 max_line_bytes=MAX_LINE_BYTES, home=None):
         # None: transcripts_root(), asked on every walk rather than once
         # here -- the reader lives as long as the daemon, and a path fixed at
         # construction is the hole CLAUDE.md describes, one step later.
+        # `home`, a callable returning a claude_home.ClaudeHome, is whose
+        # transcripts those are, asked on every walk; None asks
+        # claude_home.current().
         self._root = root
+        self._home = home
         self._budget = read_budget
         self._scan_every = scan_every_s
         self._chunk = chunk_bytes
@@ -347,7 +351,8 @@ class BurnReader:
         return self._root if self._root is not None else self.default_root()
 
     def default_root(self):
-        return transcripts_root()
+        return transcripts_root(self._home() if self._home is not None
+                                else None)
 
     def poll(self, now, budget=None):
         """(q, tokens) for wall-clock `now`, or None when there is nothing

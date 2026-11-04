@@ -3933,7 +3933,8 @@ def cmd_install_wsl(name) -> int:
         _say_home_refused(
             "restarted",
             f"The settings inside {d.name} are written, but a service that"
-            " is running still reads the folder it read before.")
+            " is running goes on reading the Claude Code it read before"
+            " until it is restarted: its readers are fixed when it starts.")
         return 1
     if restart_left_it_down(detail):
         print()

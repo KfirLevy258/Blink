@@ -341,17 +341,22 @@ class PlanReader:
     ConfigView or None, used instead of the file; None from it keeps the
     last good view."""
 
-    def __init__(self, path=None, source=None):
+    def __init__(self, path=None, source=None, home=None):
         # None: config_path(), asked on every look, so a HOME moved after
-        # construction (tests/conftest.py) is followed.
+        # construction (tests/conftest.py) is followed. `home`, a callable
+        # returning a claude_home.ClaudeHome, names whose config that is,
+        # asked on every look too; None is claude_home.current().
         self._path = path
+        self._home = home
         self._source = source
         self._looked_at = None
         self._sig = None
         self._view = EMPTY_VIEW
 
     def path(self):
-        return self._path if self._path is not None else config_path()
+        if self._path is not None:
+            return self._path
+        return config_path(self._home() if self._home is not None else None)
 
     def look(self, now_epoch) -> ConfigView:
         """The view as of the last look. A look is due RECHECK_S after the
