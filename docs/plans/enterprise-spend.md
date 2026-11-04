@@ -121,7 +121,13 @@ the cap is reached (draw it red, at or over 100%), not "not a spend seat".
    - A session's first sighting sets its high-water mark; nothing is added
      (a resumed session restores an earlier total).
    - Later, only a rise above the session's high-water mark is added (two
-     processes on one session alternate their totals).
+     processes on one session alternate their totals). Since round 2 of
+     the 2026-11-04 review (K1) a session keeps a mark per cost ledger,
+     up to eight: a figure below every mark (a /login, which restarts the
+     cost from zero under the same session id, or a process resumed at an
+     older total) opens a new mark and adds nothing, and each later figure
+     is counted against the highest mark at or below it.
+     `pc/spend_count.py` gives the argument and its residuals.
    - Each addition is stamped with the previous sighting's time and the
      current one; an addition counts toward an anchor only if the previous
      sighting was at or after the anchor. A rise that straddles a `/usage`

@@ -9,10 +9,57 @@ Rules, each from a way the raw number misleads:
 
 * A session's first sighting adds nothing. A resumed session shows its whole
   past cost on the first render, and that is not new spend.
-* Only a rise over the session's high-water mark counts. Two processes on one
-  session id show different totals for the same session; a lower figure from
-  the lagging one must not be counted again when the other catches up.
-* A rise is stamped with the previous sighting of its session. `since(anchor)`
+* A figure counts only its rise over the ledger it continues. Each Claude
+  Code process keeps its own cost ledger, and one session id can show
+  several: `claude --continue` in a second terminal runs a second process
+  restored to an earlier total, and /login starts a process's ledger again
+  from zero under the same id (2.1.318's costLedger.reset). So a session
+  keeps up to _TRACKS high-water marks, one a ledger, and a figure is
+  counted against the highest mark at or below it -- the smallest rise it
+  could be. A figure below every mark is a new ledger (a /login, or a
+  process resumed at an older total): it takes a mark and adds nothing,
+  like a first sighting. Two processes taking turns (A 10.00, B 4.00,
+  A 10.30, B 4.20) then count 30 and 20, each against its own last figure,
+  and the same two figures shown again add nothing.
+
+  Until round 2 of the 2026-11-04 review (K1) a session had one mark, so a
+  sign-out and sign-in to the same seat -- same id, same fingerprint, cost
+  back to zero -- counted nothing until the session passed its old total
+  ($14.34 shown for $16.84 in U9). One mark also never counted the second
+  process's own rises; they are real spend in a ledger of its own.
+
+  Why the count stays at or below the spend: a process starts at zero (a
+  new one, or /login) or at the total the session last exited with (a
+  resume restores it), and in both cases the marks, sorted, stay at or
+  below the ledgers' figures, sorted, place by place; taking the highest
+  mark at or below a figure keeps it so. tests/pc/test_spend_count.py
+  drives random processes, /logins, exits, resumes and lost renders
+  against that. What it costs, each an undercount:
+    - A restarted ledger passing its old mark is counted from that mark
+      once: 16.50 to 17.20 past a dead 17.00 counts 20 cents of 70,
+      because a live first process rising 20 cents looks the same.
+    - The first sighting after a /login is a base, as for any first
+      sighting, so what was spent between /login and it is lost.
+    - A session with _TRACKS ledgers opens no more: a figure below all of
+      them adds nothing until it passes one.
+  And two ways it can count too much, both kept:
+    - Two processes resumed from the same saved total while both run, in
+      a session already holding a lower ledger (a /login earlier): if the
+      first rises past the saved total before the second renders, the
+      second's first figure is counted from the lower mark. 10.00 saved,
+      a /login ledger at 2.00, B's first 10.20 counts 820 cents for 20
+      (test_two_resumes_from_one_saved_total_can_overcount). Once a
+      session, and the next /usage makes the figure exact again. Telling
+      it apart would need the process, which the status line does not
+      carry; refusing every figure between two marks would give up the
+      second terminal's and the /login ledger's own rises, the common
+      cases.
+    - A figure from a damaged payload, below the marks, takes a mark no
+      process holds, and a later resume above it is counted from it once.
+      Claude Code writes the status line whole and a torn file does not
+      parse, so that needs a well-formed lie.
+
+* A rise is stamped with the previous sighting of its ledger. `since(anchor)`
   counts only rises whose previous sighting is at or after the anchor: a rise
   between a sighting before the anchor and one after it may have happened
   partly before /usage measured, so it is dropped rather than counted twice.
@@ -25,16 +72,16 @@ Rules, each from a way the raw number misleads:
 
 * A residual, kept rather than fixed (U10 in the final review of
   2026-11-04). Two processes on one session id -- `claude --continue` in
-  a second terminal -- render different totals, and any sighting at or
-  after the last one moves the session's stamp. If the leading process's
-  render just before a /usage is lost (another session wrote
-  statusline.json over it before the poll read it), the lagging one's
-  figure, equal to the high-water mark, stamps the session after the
-  anchor, and the leader's next rise is counted in full although part of
-  it was spent before /usage measured: 30 cents counted for 20. Only a
-  sighting below the mark could be told apart, and the lost render makes
-  the lagging one's equal to it, so no rule on the figures alone fixes
-  it; the status line carries no process id. It needs two processes on
+  a second terminal -- render different totals, and a sighting at or
+  above a ledger's mark moves that ledger's stamp. If the leading
+  process's render just before a /usage is lost (another session wrote
+  statusline.json over it before the poll read it) and the other's figure
+  equals the leader's mark, it is taken for the leader's and stamps that
+  ledger after the anchor, and the leader's next rise is counted in full
+  although part of it was spent before /usage measured: 30 cents counted
+  for 20. A figure below the mark is a ledger of its own since K1 (round
+  2 of the 2026-11-04 review), but one equal to it cannot be told apart
+  on the figures alone; the status line carries no process id. It needs two processes on
   one session, a lost render and a /usage together, and the next /usage
   makes the figure exact again.
 
@@ -64,12 +111,13 @@ all month and was rewritten on nearly every render. Now:
   Neither arises from Claude Code's config, whose /usage time only moves
   forward within a login and a month, and bind() empties everything when
   either changes.
-* Each session's highest estimate, so a resumed session's past cost is
-  never counted as new. These are kept until the month turns or the login
+* Each session's marks, so a resumed session's past cost is never counted
+  as new. These are kept until the month turns or the login
   changes, and they are what the file's size follows: about 70 bytes a
   session, so 2 KB a day at thirty sessions a day and 66 KB by the 31st
   (tests/pc/test_spend_count.py's busy month, U13b in the final review of
-  2026-11-04, which found the README's "a few kilobytes" untrue). Not
+  2026-11-04, which found the README's "a few kilobytes" untrue); a second
+  ledger adds about 20 bytes, and sessions with one are nearly all. Not
   pruned: a session dropped while its terminal stood idle would take its
   next render for a first sighting and count nothing from it.
 * A save writes a rise on a session already in the file at most once a
@@ -115,6 +163,17 @@ SAVE_EVERY_S = 60
 # file this cannot read is: it held an estimate, which the next /usage
 # makes exact.
 _VERSION = 2
+# The most ledgers one session keeps (see the module docstring). Every
+# /login and every process that exits leaves a mark behind that nothing may
+# continue again, and a full session counts nothing below its marks. In
+# tests/pc/test_spend_count.py's random lives (three /logins and about ten
+# exits and resumes a session) the count came to 28% of the spend with one
+# mark, 71% with four and 88% with eight, never above it; eight pairs are
+# about 150 bytes, and a session that never drops keeps one. A session's
+# marks are saved as one flat list, [mark, seen, mark, seen, ...], so a
+# version-2 file from before ledgers, [mark, seen], reads as a session with
+# one.
+_TRACKS = 8
 
 
 # The largest figure the counter believes, in cents: ten million dollars.
@@ -203,13 +262,16 @@ def _parse(d):
         return None
     sessions = {}
     for sid, v in d["sessions"].items():
-        if not isinstance(v, list) or len(v) != 2:
+        if (not isinstance(v, list) or not v or len(v) % 2
+                or len(v) > 2 * _TRACKS):
             return None
-        hw, seen = v
-        if isinstance(hw, bool) or not isinstance(hw, int) \
-                or not _cents(hw) or not _time(seen):
-            return None
-        sessions[sid] = [hw, seen]
+        tracks = []
+        for hw, seen in zip(v[::2], v[1::2]):
+            if isinstance(hw, bool) or not isinstance(hw, int) \
+                    or not _cents(hw) or not _time(seen):
+                return None
+            tracks.append([hw, seen])
+        sessions[sid] = tracks
     adds = []
     for a in d["adds"]:
         if not isinstance(a, list) or len(a) != 3:
@@ -244,7 +306,8 @@ class SpendCounter:
         self._written_to = None  # the file the last write went to
         self._fp = None
         self._period = None
-        self._sessions = {}   # sid -> [high_water_cents, last_seen]
+        # sid -> [[high_water_cents, last_seen], ...], one pair a ledger.
+        self._sessions = {}
         self._adds = []       # [prev_seen, at, cents], the last _RECENT_S
         # [boundary, cents_from_boundary, cents, first_prev, last_at], or
         # None: every rise folded out of _adds (see the module docstring).
@@ -291,7 +354,8 @@ class SpendCounter:
         self._fp, self._period = fp, period
         self._sessions, self._adds = sessions, adds
         self._fold, self._anchor = fold, anchor
-        stamps = [a[1] for a in adds] + [v[1] for v in sessions.values()]
+        stamps = ([a[1] for a in adds]
+                  + [t[1] for v in sessions.values() for t in v])
         if fold is not None:
             stamps.append(fold[4])
         self._latest = max(stamps, default=None)
@@ -308,12 +372,14 @@ class SpendCounter:
             self._clear()
 
     def forget_sessions(self) -> None:
-        """Drop every session's high-water mark, keeping what was counted.
+        """Drop every session's high-water marks, keeping what was counted.
 
         For a login switch (claude_cli's _note_login): Claude Code keeps a
-        session's id across /login and starts its cost from zero, so a mark
-        from before the switch would swallow every rise after it. Each
-        session's next sighting is then a first one and adds nothing.
+        session's id across /login and starts its cost from zero. observe()
+        takes such a drop for a new ledger on its own (K1), but the marks
+        from before a switch belong to another login's processes and only
+        fill the session's _TRACKS. Each session's next sighting is then a
+        first one and adds nothing.
         Written at once, like an emptied count: a restart that reloaded
         the old marks would undercount again."""
         if self._sessions:
@@ -329,21 +395,38 @@ class SpendCounter:
                 or cost_usd > MAX_CENTS / 100):
             return False
         cents = int(round(cost_usd * 100))
-        s = self._sessions.get(session_id)
-        if s is None:
-            self._sessions[session_id] = [cents, at]
+        tracks = self._sessions.get(session_id)
+        if tracks is None:
+            self._sessions[session_id] = [[cents, at]]
             if self._latest is None or at > self._latest:
                 self._latest = at
             self._dirty = self._urgent = True
             return True
-        hw, last = s
+        # The ledger this figure continues: the highest mark at or below
+        # it, so the rise counted is the smallest it could be.
+        best = None
+        for t in tracks:
+            if t[0] <= cents and (best is None or t[0] > best[0]):
+                best = t
+        if best is None:
+            # Below every mark: a new ledger, a base like a first sighting.
+            # Not urgent: a restart that missed it opens it again from the
+            # next figure below the marks, losing only the rises between.
+            if len(tracks) >= _TRACKS:
+                return False
+            tracks.append([cents, at])
+            if self._latest is None or at > self._latest:
+                self._latest = at
+            self._dirty = True
+            return True
+        hw, last = best
         changed = False
         if cents > hw:
             self._adds.append([last, at, cents - hw])
-            s[0] = cents
+            best[0] = cents
             changed = True
         if at > last:
-            s[1] = at
+            best[1] = at
             changed = True
         if changed:
             if self._latest is None or at > self._latest:
@@ -441,7 +524,9 @@ class SpendCounter:
 
     def _write(self, target, tick):
         doc = {"v": _VERSION, "fp": self._fp, "period": self._period,
-               "sessions": self._sessions, "adds": self._adds,
+               "sessions": {sid: [x for t in tracks for x in t]
+                            for sid, tracks in self._sessions.items()},
+               "adds": self._adds,
                "fold": self._fold, "anchor": self._anchor}
         try:
             # theme._write_json and not tempfile.mkstemp. On Python 3.11,
