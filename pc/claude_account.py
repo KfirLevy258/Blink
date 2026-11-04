@@ -15,9 +15,10 @@ happily merge a Max session window into the page of a login that has none.
 What is read, and from where: the `oauthAccount` object Claude Code keeps in
 its config, parsed once by pc/claude_plan (which knows where the file is),
 and from it only the organisation type and the two account ids. That
-object describes the login; it is not a credential, which Claude Code keeps in the Keychain or in
-~/.claude/.credentials.json and which nothing here opens. The ids are hashed
-on the way in and only the hash is kept, so this process never holds them.
+object describes the login; it is not a credential, which Claude Code
+keeps in the Keychain or in ~/.claude/.credentials.json and which nothing
+here opens. The ids are hashed on the way in and only the hash is kept,
+so this process never holds them.
 
 Nothing taken from the file is printed or logged, at any level: not the
 organisation type, not the hash, not a fragment of a file that would not
