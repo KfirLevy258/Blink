@@ -184,11 +184,19 @@ def _share(v):
     against a cap cut to $20 is 1500%, a figure a gateway really sends, and
     refusing it dropped the whole spend page for the windows one;
     protocol._share and proto.c's num_pct hold one past 1000 at 1000 for
-    the same reason. NaN, a negative and a non-number are no share. An int
-    too long for a float (10**400) is compared as an int, never converted,
-    which is where math.isfinite raised OverflowError (U2).
+    the same reason. NaN, a negative and a non-number are no share, and
+    nor is an infinity: json reads `Infinity`, which no gateway sends for
+    a share and Python's own json.dumps writes for float('inf'), so it is
+    a damaged figure rather than a large one, and held at 1000 it drew a
+    full red dial and "used up" out of nothing (R4, round 2's review). A
+    finite figure past 1000, however large, is a share far over its cap.
+    An int too long for a float (10**400) is finite and compared as an
+    int, never converted, which is where math.isfinite raised
+    OverflowError (U2).
     """
     if type(v) not in (int, float) or v != v or v < 0:
+        return None
+    if isinstance(v, float) and math.isinf(v):
         return None
     return float(MAX_SHARE) if v > MAX_SHARE else float(v)
 
