@@ -76,8 +76,17 @@ After the service step, on macOS, Linux and native Windows (never for a WSL
 home in this version):
 
 1. Find Claude Code: `claude` on PATH, then `~/.local/bin/claude`
-   (`%USERPROFILE%\.local\bin\claude.exe`). Desktop's private copy is not
-   used.
+   (`%USERPROFILE%\.local\bin\claude.exe`), `~/.claude/local`, and on
+   macOS and Linux `/opt/homebrew/bin`, `/usr/local/bin`,
+   `~/.npm-global/bin` and the newest `~/.nvm/versions/node/*/bin`.
+   Desktop's private copy is not used. While the refresh is on, `blink
+   install`, `blink update` and `blink config usage-refresh on` record the
+   path they found in `usage-refresh.json` (`exe`), because the daemon runs
+   with the service manager's PATH (launchd's is
+   `/usr/bin:/bin:/usr/sbin:/sbin`) and would not find a Homebrew, npm or
+   nvm install on its own. The daemon tries the recorded path first, then
+   the same search. When it finds nothing, `blink status` says "on, but
+   Claude Code wasn't found".
 2. Missing: say how to install it (the official command for the platform)
    and leave the refresh off. BLINK does not pipe a script into a shell.
 3. Found: ask once
@@ -104,11 +113,20 @@ absent) and asks:
   prompt like the update offer. "Keep figures fresh?" / "Blink can ask
   Claude Code's /usage now and then. No messages, no quota." Buttons
   "Turn on" and "No thanks". "Turn on" saves yes; "No thanks" saves no and
-  it never asks again. Closed without an answer, it asks again the next
-  day, at most 3 times, then stops. It asks only while someone is at the
-  computer, only when Claude Code is installed, never on a work login
-  (those are asked only in the terminal, default No), and never on a WSL
-  home.
+  it never asks again. Closed without an answer ("later", after a minute),
+  it asks again the next day. It is shown at most 3 times, then stops: an
+  ask counts only when the board answers it, since an answer is the one
+  proof the box was seen. A box the board withdraws (the computer went
+  away, or the board started to doze) answers nothing and counts nothing,
+  and so does an ask the board could not put up within 10 minutes of its
+  arrival (dozing, or another box up), which it drops rather than show to
+  an empty room later. The daemon sends at most one ask a day either way.
+  An answer is applied only while the setting is still absent: one given
+  after `blink install` or `blink config` made the choice changes nothing.
+  It asks only while someone is at the computer, only when Claude Code is
+  installed, never on a work login (those are asked only in the terminal,
+  default No), and never on a WSL home (not asked anywhere in this
+  version).
 - **In the terminal**: `blink update` and `blink install` ask the install
   question when the setting is absent; `blink status` shows "not set up"
   with the command to turn it on.
@@ -153,6 +171,10 @@ claude -p /usage --output-format json --no-session-persistence
   `CREATE_NO_WINDOW`.
 - Environment: the person's, plus `BLINK_REFRESH=1` so BLINK's own
   status-line script and hooks ignore the run even if a setting slips.
+  `CLAUDE_CONFIG_DIR` is set to the folder `blink install` recorded when
+  that variable chose it, and removed when it did not: the daemon runs
+  without the person's shell rc, and a run against another folder would
+  refresh a cache BLINK does not read, or another login's.
 
 ### 4. The cost guard and the failure guard
 
@@ -162,10 +184,13 @@ itself off at once, saves the reason `cost`, logs one line and stays off
 until the person turns it on again. `blink status` says
 "off: Claude Code's /usage used the model".
 
-Failure guard: an answer that is not that JSON, a zero-cost success after which `fetchedAtMs` did not move past the run's start (what a logged-out Claude Code gives), `is_error` true, a non-zero
+Failure guard: an answer that is not that JSON, a zero-cost success after which `fetchedAtMs` did not move past the run's start (what a logged-out Claude Code gives; the cache's own `fetchedAtMs`, whatever its windows hold, so a seat whose windows are both null still counts), `is_error` true, a non-zero
 exit, or the 60-second limit is a failure. 3 in a row stretch the spacing to
 an hour; failures only, for 24 hours, turn it off with the reason `failing`
 ("off: /usage kept failing; run claude and /login, then turn it on again").
+`blink config usage-refresh on` is a fresh start after either guard: the
+reason and the failure streak are cleared, on disk and in the running
+daemon, and only the spacing since the last run still holds.
 
 The `result` text is never read for figures and never logged.
 
