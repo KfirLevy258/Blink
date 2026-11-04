@@ -4337,6 +4337,51 @@ def test_a_previous_distro_that_would_not_undo_keeps_its_folder(tmp_path,
     assert not os.path.exists(new.drop_dir)
 
 
+def test_a_previous_record_that_cannot_be_put_back_is_said(
+        tmp_path, monkeypatch, capsys):
+    """Round 2, C4: U22's path, with the save that puts Ubuntu's record
+    back failing too. That failure was swallowed: Debian had just been
+    emptied, the record still named it, and the message said "Blink still
+    reads Ubuntu, not Debian" -- the opposite. Debian, recorded and
+    written, is now kept; the message says Blink reads Debian, that
+    Ubuntu is left set up with nothing recording it, and how to take it
+    out by hand, since an install or uninstall will no longer find it."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg(
+        [(WSL_GUID, "Ubuntu"), (OTHER_GUID, "Debian")]), probe=_probe())
+    old = _recorded_wsl(tmp_path)
+    _marked_drop(tmp_path, old)
+
+    def from_(home, wsl_run, **k):
+        calls.append(("uninstall_from", home))
+        if home.distro_name == "Ubuntu":
+            raise install_statusline.WslInstallError("nope")
+        return "Statusline removed."
+    monkeypatch.setattr(install_statusline, "uninstall_from", from_)
+    real = claude_home.save
+
+    def save(home):
+        if home.distro_guid == WSL_GUID:
+            raise PermissionError(13, "Permission denied")
+        return real(home)
+    monkeypatch.setattr(claude_home, "save", save)
+    assert cli.main(["install", "--wsl", "Debian"]) == 1
+    out = " ".join(capsys.readouterr().out.split())
+    new = claude_home.recorded()
+    assert new.distro_guid == OTHER_GUID
+    undone = [c[1].distro_name for c in calls if c[0] == "uninstall_from"]
+    assert undone == ["Ubuntu"]
+    assert os.path.isdir(old.drop_dir)
+    assert "Blink still reads Ubuntu" not in out
+    assert "could not put its record of Ubuntu back (PermissionError)" in out
+    assert "Blink reads Debian now" in out
+    assert "inside Ubuntu remove ~/.blink/out" in out
+    assert "reading what it read before" not in out
+    assert ("The background service is running again, reading Claude Code"
+            " inside Debian.") in out
+    assert "Done." not in out
+
+
 def test_install_wsl_discloses_before_it_starts_anything(monkeypatch,
                                                          capsys):
     """Finding 4: what `install --wsl` writes, and what it reads, is said

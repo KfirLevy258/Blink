@@ -3828,15 +3828,24 @@ def cmd_install(args) -> int:
             halt_service()
         print(f"Claude Code inside WSL ({kept_wsl.name})"
               + ("" if named is not None else ", kept"))
+        before = claude_home.recorded()
         if _setup_wsl(kept_wsl) is None:
             # Stopped, rather than going on to the Codex hooks and the
             # service and a "Done." after "Blink setup stopped" (U27). The
-            # record is the one from before, so the service it reads is
-            # the one from before.
+            # record is nearly always the one from before, so the service
+            # reads what it read before; the one stop that leaves the new
+            # distribution recorded (a previous one whose record could not
+            # be put back, C4) is said as what it is.
             if restart_service() == _RESTART_OK:
+                now = claude_home.recorded()
                 print()
-                print("The background service is running again, reading what"
-                      " it read before.")
+                if now is not None and now != before \
+                        and now.kind == claude_home.WSL:
+                    print("The background service is running again, reading"
+                          f" Claude Code inside {now.distro_name}.")
+                else:
+                    print("The background service is running again, reading"
+                          " what it read before.")
             return 1
         step("Activity hooks")
         print("inside WSL, with the status line")
@@ -4418,11 +4427,31 @@ def _setup_wsl(d):
         # where until the review (U22) it said "run uninstall again" over a
         # record that no longer named that distribution, and nothing could
         # undo it afterwards.
-        _undo_wsl_setup(home, d.name)
+        #
+        # The record is put back BEFORE this one's entries come out. The
+        # other way round, a save that failed was swallowed, and left the
+        # record naming the distribution just emptied under a message
+        # saying Blink still read the previous one (review round 2, C4).
+        # Now a failed save leaves this one recorded and written, which is
+        # a desk that works and that uninstall can undo, and says plainly
+        # that the previous one is set up with nothing recording it.
         try:
             claude_home.save(prev)
-        except (user_config.Unreadable, OSError):
-            pass
+        except (user_config.Unreadable, OSError) as e:
+            print()
+            print(f"Blink setup stopped. It could not take itself out of"
+                  f" {prev.distro_name}, and could not put its record of"
+                  f" {prev.distro_name} back ({type(e).__name__}).")
+            print(f"Blink reads {d.name} now, and stays set up there."
+                  f" {prev.distro_name} still has Blink in it, but nothing")
+            print("records that any more, so neither install nor uninstall"
+                  " will find it")
+            print(f"again. Its shims write into {prev.drop_dir},")
+            print("which nothing reads. To take Blink out of it by hand,")
+            _say_wsl_manual_steps(prev.distro_name)
+            print(f"      and remove {prev.drop_dir}.")
+            return None
+        _undo_wsl_setup(home, d.name)
         print()
         print(f"Blink setup stopped, so Blink still reads"
               f" {prev.distro_name}, not {d.name}.")
