@@ -53,12 +53,16 @@ the file's signature -- inode, mtime and size -- has changed since the last
 look that got an answer. The file was 120 KB on the owner's desk. One over
 MAX_BYTES is not opened at all, and anything but a regular file (a FIFO
 would block the open, and the serial thread with it) is not opened either.
-Each of those, and a file corrupt or of any other shape, reads as "not
-Ultra", and that answer is kept against the signature like any other, so
-it is not parsed again until the file changes. Only an OSError, or a file
-that changed between the stat and the read, is tried again at the next
-look. Not Ultra is the safe answer: it leaves the desk to the sustained
-rule, which is slower and was all there was before.
+Each of those, and JSON that is not an object, reads as "not Ultra", and
+that answer is kept against the signature like any other, so it is not
+read again until the file changes. Text that does not decode or parse is
+not an answer at all (since 9aba323): Claude Code rewrites the file all
+day, so it is most often a write caught half-done, and reading it as "not
+Ultra, no seat" flipped the page until the file next changed. It is
+treated like an OSError or a file that changed between the stat and the
+read: the last view is kept and the file is tried again at the next look,
+RECHECK_S later. Not Ultra is the safe answer: it leaves the desk to the
+sustained rule, which is slower and was all there was before.
 
 THE RESIDUAL. One .claude.json vouches for every session in the shared
 statusline.json (the review of PR #6, 2026-11-01). The status line is
@@ -382,9 +386,11 @@ class PlanReader:
             return self._view
         got = parse(p, st)
         # Only a read worth trying again is not cached against the stamp:
-        # a Windows lock, or a write caught half-done. A refused, corrupt
-        # or misshapen file is kept as an empty view until it changes, so
-        # it is not parsed again once a minute.
+        # a Windows lock, or a write caught half-done -- which includes
+        # text that does not decode or parse (parse), retried at the next
+        # look with the last good view kept. A refused file, or JSON that
+        # is not an object, is kept as an empty view until it changes, so
+        # it is not read again once a minute.
         if got is None:
             self._sig = None
             return self._view
