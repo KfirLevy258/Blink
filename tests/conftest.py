@@ -424,29 +424,52 @@ def _program_stem(word):
     return name
 
 
+_WORD = re.compile(r"\"[^\"]*\"|'[^']*'|\S+")
+
+
+def _words(text):
+    """Split a command string into words, a quoted word kept whole and its
+    quotes dropped, so `"C:\\Program Files\\x\\claude.exe" --version` and
+    `"claude" --version` are read as the program they start. Quoting must
+    not get a launch past a safety guard. Not shlex: it would eat the
+    backslashes of a Windows path."""
+    return [w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "\"'" else w
+            for w in _WORD.findall(text)]
+
+
+def _unquote(word):
+    w = word.strip()
+    if len(w) > 1 and w[0] == w[-1] and w[0] in "\"'":
+        return w[1:-1]
+    return w
+
+
 def claude_launcher(args, executable=None):
     """`claude` or `wsl` if a command would start one, else None.
 
     Looks at the program only (the first word, or `executable=`, or the
     first non-switch word after `cmd /c`), never at the words after it:
-    `echo claude` and `python fake_wsl.py` start neither."""
+    `echo claude` and `python fake_wsl.py` start neither. Known gap:
+    `powershell -c claude` starts one and is not refused."""
     names = []
     if executable is not None:
-        names.append(_program_stem(os.fsdecode(executable)))
+        names.append(_program_stem(_unquote(os.fsdecode(executable))))
     if isinstance(args, os.PathLike):
         args = os.fspath(args)
     if isinstance(args, (str, bytes)):
-        words = os.fsdecode(args).split()
+        words = _words(os.fsdecode(args))
     else:
         try:
             words = [os.fsdecode(a) for a in args]
         except TypeError:
             words = []
     if words:
-        prog = _program_stem(words[0])
+        prog = _program_stem(_unquote(words[0]))
         names.append(prog)
+        # A list element that is itself a quoted command line.
+        names.extend(_program_stem(w) for w in _words(words[0])[:1])
         if prog == "cmd":
-            rest = [w for w in " ".join(words[1:]).split()
+            rest = [w for w in _words(" ".join(words[1:]))
                     if not w.startswith("/")]
             if rest:
                 names.append(_program_stem(rest[0]))
@@ -501,7 +524,8 @@ def _no_real_claude(request, monkeypatch):
             refuse(f"subprocess {name}")
         return real_init(self, args, *a, **k)
 
-    monkeypatch.setattr(subprocess.Popen, "__init__", mark(popen_init, real_init))
+    monkeypatch.setattr(subprocess.Popen, "__init__",
+                        mark(popen_init, real_init))
 
     yield
     fail_on_claude_attempts()

@@ -637,6 +637,10 @@ def _claude_guarded(fn):
     ["Claude.exe", "--version"],
     ["claude.bat"],
     ["claude.ps1"],
+    ['"claude" --version'],
+    ['"C:\\Program Files\\nodejs\\claude.exe" --version'],
+    ["'/opt/my tools/claude' --version"],
+    ["cmd", "/c", '"claude"', "--version"],
 ])
 def test_launching_claude_is_refused(argv):
     assert _claude_guarded(subprocess.Popen.__init__), \
@@ -677,6 +681,13 @@ def test_a_shell_string_and_os_system_are_read_by_their_first_word():
         subprocess.run("claude --version", shell=True, capture_output=True)
     with pytest.raises(conftest.RealClaudeLaunchRefused):
         os.system("wsl.exe --status")
+    # Quoting does not get a launch past the guard.
+    assert conftest.claude_launcher('"claude" --version') == "claude"
+    assert conftest.claude_launcher(
+        '"C:\\Program Files\\nodejs\\claude.exe" --version') == "claude"
+    assert conftest.claude_launcher('cmd /c "wsl.exe" --status') == "wsl"
+    with pytest.raises(conftest.RealClaudeLaunchRefused):
+        subprocess.run('"claude" --version', shell=True, capture_output=True)
     conftest.forget_claude_attempts()
 
 
