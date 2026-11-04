@@ -3311,9 +3311,15 @@ def _announce_claude_reads(home, wsl_name=None, spend_seat=False) -> None:
         # The seat is in the distribution's config, which is read only once
         # the probe has started it, so _setup_wsl says the one paragraph
         # that fits then. Said here as well, both paragraphs reached a seat
-        # billed by usage on WSL (review of round 2, D1).
+        # billed by usage on WSL (review of round 2, D1). Said on every
+        # path that leaves the service reading a home it did not read
+        # before (_say_spend_kept); the stops that leave the record as it
+        # was may never reach the seat, so the promise says what holds
+        # for them instead of a paragraph they never print (round 3).
         print("  What it keeps on a Claude seat billed by usage is said once")
-        print(f"  setup has read the seat type inside {wsl_name}.")
+        print(f"  setup has read the seat type inside {wsl_name}. If setup")
+        print("  stops first, Blink goes on reading, and keeping, what it did")
+        print("  before.")
     elif not spend_seat:
         _announce_spend_later()
 
@@ -4512,6 +4518,10 @@ def _setup_wsl(d):
             print("which nothing reads. To take Blink out of it by hand,")
             _say_wsl_manual_steps(prev.distro_name)
             print(f"      and remove {prev.drop_dir}.")
+            # The service restarts reading this home, so the promise the
+            # disclosure made holds here too; it used to return before
+            # the paragraph, and nothing was said (round 3).
+            _say_spend_kept(home)
             return _StoppedOnto(home)
         _undo_wsl_setup(home, d.name)
         print()
@@ -4532,15 +4542,21 @@ def _setup_wsl(d):
         print()
         print(f"  !  Claude Code was not found in {d.name}. What was written")
         print("     starts working by itself once it is installed there.")
-    # The disclosure left this to now (D1): one paragraph, the full one on
-    # a seat billed by usage and the short one on any other, before the
-    # service that would keep the count starts.
+    _say_spend_kept(home)
+    return home
+
+
+def _say_spend_kept(home) -> None:
+    """The spend paragraph the WSL disclosure left to _setup_wsl (D1), for
+    `home`, the one the service is about to read: the full one on a seat
+    billed by usage and the short one on any other, before the service
+    that would keep the count starts. Every path of _setup_wsl that
+    leaves the record on `home` says it, the C4 stop included (round 3)."""
     if _spend_seat(home):
         _announce_spend_seat(home, seat=True)
     else:
         print()
         _announce_spend_later()
-    return home
 
 
 def _take_blink_out_of_previous(old, new) -> bool:

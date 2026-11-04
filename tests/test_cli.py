@@ -4528,6 +4528,82 @@ def test_setup_wsl_says_when_it_stopped_with_the_record_moved(
     assert got.home.distro_guid == OTHER_GUID
 
 
+@pytest.mark.parametrize("seat, note", [
+    ("enterprise_usage_based", SPEND_NOTE), ("max_5x", SPEND_LATER)],
+    ids=["usage", "max"])
+def test_a_stop_that_moved_the_record_still_says_what_is_kept(
+        tmp_path, monkeypatch, capsys, seat, note):
+    """Round 3: the spend paragraph was said at the end of _setup_wsl, and
+    the C4 stop returned before it -- the service then restarted reading
+    the new distribution, which the disclosure had promised to describe
+    "once setup has read the seat type", and nothing was said. Every path
+    that leaves the service reading a home says that home's paragraph
+    before the service starts."""
+    from pc import claude_home, spend_count
+    calls = _wsl_desk(monkeypatch, _FakeReg(
+        [(WSL_GUID, "Ubuntu"), (OTHER_GUID, "Debian")]), probe=_probe())
+    _recorded_wsl(tmp_path)
+    _wsl_seat(monkeypatch, tmp_path, seat)
+
+    def from_(home, wsl_run, **k):
+        calls.append(("uninstall_from", home))
+        raise install_statusline.WslInstallError("nope")
+    monkeypatch.setattr(install_statusline, "uninstall_from", from_)
+    real = claude_home.save
+
+    def save(home):
+        if home.distro_guid == WSL_GUID:
+            raise PermissionError(13, "Permission denied")
+        return real(home)
+    monkeypatch.setattr(claude_home, "save", save)
+    said = {}
+    monkeypatch.setattr(cli, "restart_service",
+                        lambda: said.setdefault(
+                            "restart", capsys.readouterr().out)
+                        and "restarted")
+    assert cli.main(["install", "--wsl", "Debian"]) == 1
+    before = _flat(said["restart"])
+    path = spend_count._default_path()
+    assert note.format(path=path) in before
+    assert before.count(path) == 1
+
+
+def _stop_at_probe(monkeypatch, calls):
+    from pc import wsl
+    monkeypatch.setattr(wsl, "probe", lambda name, *a, **k: None)
+
+
+def _stop_at_write(monkeypatch, calls):
+    def fails(home, wsl_run, **k):
+        raise install_statusline.WslInstallError("nope")
+    monkeypatch.setattr(install_statusline, "install_into", fails)
+
+
+def _stop_at_save(monkeypatch, calls):
+    _save_fails(monkeypatch)
+
+
+@pytest.mark.parametrize("stop", [_stop_at_probe, _stop_at_write,
+                                  _stop_at_save])
+def test_a_stop_that_keeps_the_record_promises_nothing_it_breaks(
+        tmp_path, monkeypatch, capsys, stop):
+    """Round 3, the stops that leave the record as it was: the seat may
+    never have been read, and the service goes back to what it read
+    before. The disclosure's promise says so, rather than promising a
+    paragraph these paths never print."""
+    _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
+    _wsl_seat(monkeypatch, tmp_path, "enterprise_usage_based")
+    stop(monkeypatch, [])
+    assert cli.main(["install", "--wsl", "Ubuntu"]) == 1
+    said = _flat(capsys.readouterr().out)
+    assert ("What it keeps on a Claude seat billed by usage is said once"
+            " setup has read the seat type inside Ubuntu. If setup stops"
+            " first, Blink goes on reading, and keeping, what it did"
+            " before.") in said
+    assert "This Claude seat is billed by usage" not in said
+    assert "reading what it read before" in said
+
+
 def test_install_wsl_discloses_before_it_starts_anything(monkeypatch,
                                                          capsys):
     """Finding 4: what `install --wsl` writes, and what it reads, is said
@@ -4565,7 +4641,9 @@ def test_install_wsl_discloses_before_it_starts_anything(monkeypatch,
     # that file until the service, which starts after it has been said.
     assert spend_count._default_path() not in flat
     assert ("What it keeps on a Claude seat billed by usage is said once"
-            " setup has read the seat type inside Ubuntu.") in flat
+            " setup has read the seat type inside Ubuntu. If setup stops"
+            " first, Blink goes on reading, and keeping, what it did"
+            " before.") in flat
     assert "saved only on a seat billed by usage" in flat
     # Nothing of it waited for the write.
     assert "Changes    Claude Code's settings.json" not in \
