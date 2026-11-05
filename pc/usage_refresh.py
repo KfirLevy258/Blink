@@ -353,6 +353,22 @@ def spacing(state):
 MOVED_SLACK_S = 5
 
 
+def at_computer(now, idle_s, other_at):
+    """Whether somebody is at the computer, as far as it can be known.
+
+    An idle reading decides when the OS gives one (macOS, Windows): input
+    inside IDLE_LIMIT_S. When it cannot say (`idle_s` None: Linux, where
+    no stdlib source exists), the answer is yes only if another Claude
+    source -- the status line, Claude Desktop, any frame but BLINK's own
+    /usage -- showed activity inside the same IDLE_LIMIT_S. Until
+    2026-11-05 None counted as in use, and a Linux desk left on refreshed
+    all night, with nobody there to read it and a Claude Code login
+    spending its calls on nothing."""
+    if idle_s is not None:
+        return idle_s < IDLE_LIMIT_S
+    return other_at is not None and now - other_at < IDLE_LIMIT_S
+
+
 def due(now, *, enabled, native, board_alive, idle_s, cache_at, other_at,
         state):
     """Whether to ask /usage now: the fallback rule, and nothing else.
@@ -361,12 +377,13 @@ def due(now, *, enabled, native, board_alive, idle_s, cache_at, other_at,
     FRESH_SOURCE_S (the status line in a terminal, Claude Desktop's Code
     tab, chat or Cowork) means no run. No exception for a spend seat: while
     Claude Code is used, the running count already adds what each session
-    costs. `idle_s` None is an OS that cannot say, taken as in use (Linux).
+    costs. `idle_s` None is an OS that cannot say (Linux): then only another
+    source's activity inside IDLE_LIMIT_S says someone is here (at_computer).
     `cache_at` None is no cache of this login's yet, which is due."""
     return bool(
         enabled and native and board_alive
         and state.off_reason == ""
-        and (idle_s is None or idle_s < IDLE_LIMIT_S)
+        and at_computer(now, idle_s, other_at)
         and (other_at is None or now - other_at >= FRESH_SOURCE_S)
         and (cache_at is None or now - cache_at >= REFRESH_AFTER_S)
         and now - state.last_run_at >= spacing(state))
@@ -445,20 +462,21 @@ def save_ask(blink_home, ask):
 
 
 def should_ask(now, *, setting_absent, native, claude_found, work_login,
-               board_caps, idle_s, ask_state):
+               board_caps, idle_s, ask_state, other_at=None):
     """Whether the board may ask "Keep figures fresh?" now.
 
     Only while the person has not chosen (the key absent from config.json),
     for a native Claude home (never WSL in this version), with Claude Code
     there to run, never on a work login (asked only in the terminal, with No
     as the default), only on a board that lists "ask", only while someone is
-    at the computer (`idle_s` None is an OS that cannot say, taken as in
-    use), at most ASK_AT_MOST answered times, a day after the last answer,
+    at the computer (at_computer: `idle_s` None is an OS that cannot say,
+    and then only another Claude source's activity inside IDLE_LIMIT_S
+    counts), at most ASK_AT_MOST answered times, a day after the last answer,
     an hour after an ask that went unanswered, and never after a no."""
     return bool(
         setting_absent and native and claude_found and not work_login
         and "ask" in board_caps
-        and (idle_s is None or idle_s < IDLE_LIMIT_S)
+        and at_computer(now, idle_s, other_at)
         and ask_state.times < ASK_AT_MOST
         and not ask_state.declined
         and now - ask_state.last_at >= ASK_EVERY_S
@@ -481,12 +499,14 @@ class BoardAsk:
     (config_view). Nothing here logs: the answer is the person's, and the
     daemon's log names the message type alone."""
 
-    def __init__(self, blink_home, home, view, now=time.time, idle=None):
+    def __init__(self, blink_home, home, view, now=time.time, idle=None,
+                 other_at=None):
         self._blink_home = blink_home
         self._home = home
         self._view = view
         self._now = now
         self._idle = idle if idle is not None else idle_probe.seconds_idle
+        self._other_at = other_at if other_at is not None else (lambda: None)
         self._lock = threading.Lock()
         self._mem = None
 
@@ -545,7 +565,8 @@ class BoardAsk:
                    work_login=view is None or is_work_login(view))
         if not should_ask(now, idle_s=0.0, **ask):
             return False
-        return should_ask(now, idle_s=self._idle(), **ask)
+        return should_ask(now, idle_s=self._idle(),
+                          other_at=self._other_at(), **ask)
 
     def asked(self):
         """An ask went out just now: the next waits ASK_RETRY_S unless an
@@ -722,6 +743,9 @@ class RefreshWatch:
         # last_run_at, so Claude Code ran at every tick, and after a cost
         # verdict nothing held it off (review of Task 4, round 1).
         self._mem = None
+        # (start,) of the last good run made after a real idle reading,
+        # for activity_for.
+        self._proven = None
 
     def tick_once(self):
         """One decision and at most one run. Never raises: a refresh is
@@ -786,7 +810,8 @@ class RefreshWatch:
         # everything else already says yes.
         if not due(now, idle_s=0.0, **ask):
             return
-        if not due(now, idle_s=self._idle(), **ask):
+        idle_s = self._idle()
+        if not due(now, idle_s=idle_s, **ask):
             return
         exe = locate_claude(self._blink_home, h.user_dir())
         if exe is None:
@@ -798,7 +823,30 @@ class RefreshWatch:
                 if unsaved:
                     self._say_failure(unsaved)
             return
-        self._ask(exe, h, state, now)
+        # Presence is proven only by a reading: the Linux rule (another
+        # source's activity) lets a run happen, but is not a person at the
+        # desk now.
+        self._ask(exe, h, state, now, proven=idle_s is not None)
+
+    def activity_for(self, fetched_at):
+        """When to date the saved /usage as activity: the start of the run
+        that wrote it, if this watch ran it after a real idle reading
+        under IDLE_LIMIT_S and `fetched_at` is that run's fetch; else None.
+
+        A /usage the daemon ran counts as somebody at the desk only when
+        the OS had just said so. Counted never (42c58ad), a desk used
+        only in a browser -- the feature's main audience, no other Claude
+        source to say so -- had its board doze with the person there; always,
+        a Linux desk left on refreshed itself awake all night. A cache
+        written by anything else has another fetch time, and counts none.
+        Read from the serial loop: one tuple, replaced whole."""
+        p = self._proven
+        if p is None:
+            return None
+        started, = p
+        if started - MOVED_SLACK_S <= fetched_at <= started + RUN_TIMEOUT_S:
+            return started
+        return None
 
     def _floor(self, read):
         """`read` (the file) under this watch's own copy: a reload never
@@ -832,7 +880,7 @@ class RefreshWatch:
             return type(e).__name__
         return None
 
-    def _ask(self, exe, home, state, started):
+    def _ask(self, exe, home, state, started, proven=False):
         codes, raised = [], []
 
         def runner(argv, **kw):
@@ -884,6 +932,8 @@ class RefreshWatch:
             state = dataclasses.replace(fresh, missing=False)
             if verdict is not Verdict.COST:
                 unread = True
+        if proven and verdict is Verdict.OK:
+            self._proven = (started,)
         new = (inconclusive(state, started) if unread
                else record(state, verdict, started))
         self._mem = new

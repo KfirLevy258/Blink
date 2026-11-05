@@ -261,6 +261,25 @@ def poll_interval():
                                      POLL_INTERVAL_S)
 
 
+def claude_activity_at(bus):
+    """The newest sign of another Claude source in use, or None: the
+    status line's mtime as well as the bus's frames. The bus is polled only
+    while a board answers and only every few seconds, and a render with no
+    figure in it still says a terminal is in use. BLINK's own /usage
+    refresh is never one (bus.claude_fresh_at leaves it out). The refresh's
+    15-minute rule and, where the OS gives no idle figure, its 30-minute
+    "someone is here" rule (usage_refresh.at_computer) both read this."""
+    from pc import claude_home
+    stamps = [bus.claude_fresh_at()]
+    try:
+        stamps.append(os.stat(statusline_source.payload_path(
+            claude_home.native())).st_mtime)
+    except OSError:
+        pass
+    stamps = [t for t in stamps if t is not None]
+    return max(stamps) if stamps else None
+
+
 def start_usage_refresh(blink_home, bus, board_alive):
     """Start the /usage refresh's thread (pc/usage_refresh.RefreshWatch),
     or start nothing and return None.
@@ -288,18 +307,7 @@ def start_usage_refresh(blink_home, bus, board_alive):
         # rather than taking a lock or a half-written file for "off".
         return usage_refresh.enabled(blink_home)
 
-    def other_at():
-        # The status line's mtime as well as the bus's frames: the bus is
-        # polled only while a board answers and only every few seconds, and
-        # a render with no figure in it still says a terminal is in use.
-        stamps = [bus.claude_fresh_at()]
-        try:
-            stamps.append(os.stat(statusline_source.payload_path(
-                claude_home.native())).st_mtime)
-        except OSError:
-            pass
-        stamps = [t for t in stamps if t is not None]
-        return max(stamps) if stamps else None
+    other_at = lambda: claude_activity_at(bus)  # noqa: E731
 
     # current, not native: a record that turns WSL under a running daemon
     # stops the runs at the next tick, before the restart that follows.
@@ -308,10 +316,13 @@ def start_usage_refresh(blink_home, bus, board_alive):
         board_alive=board_alive,
         view=usage_refresh.config_view(claude_home.current),
         other_at=other_at)
+    # A refresh run with the person at the computer counts as activity at
+    # its time (RefreshWatch.activity_for); every other /usage cache none.
+    bus.credit_refresh(watch.activity_for)
     return watch.start()
 
 
-def board_ask(blink_home):
+def board_ask(blink_home, bus=None):
     """The board's "Keep figures fresh?" (usage_refresh.BoardAsk), or None.
 
     Built once for the life of the process and handed to each connection's
@@ -325,7 +336,8 @@ def board_ask(blink_home):
         return None
     return usage_refresh.BoardAsk(
         blink_home, claude_home.current,
-        usage_refresh.config_view(claude_home.current))
+        usage_refresh.config_view(claude_home.current),
+        other_at=None if bus is None else (lambda: claude_activity_at(bus)))
 
 
 def build_bus():
@@ -1154,7 +1166,7 @@ def main(argv=None):
     start_usage_refresh(blink_home, bus, _board_alive)
     # And the question the board asks people who never ran `blink install`
     # since the refresh existed, for every connection's Bridge.
-    refresh_ask = board_ask(blink_home)
+    refresh_ask = board_ask(blink_home, bus)
 
     # Themes, for the life of the process like the watch above: what the
     # board is believed to hold outlives a reconnect, and the builder a

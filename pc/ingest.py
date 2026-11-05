@@ -11,6 +11,7 @@ reach the reconnect loop. The daemon's job is to keep a board fed; a parser
 for an app we do not control is exactly the kind of code that should never be
 able to stop it.
 """
+import dataclasses
 import sys
 import time
 
@@ -193,6 +194,10 @@ class IngestionBus:
         # The newest observed_at of a Claude figure from a source other
         # than BLINK's own /usage refresh, or None: claude_fresh_at().
         self._claude_fresh_at = None
+        # usage_refresh.RefreshWatch.activity_for, once wired: dates the
+        # saved /usage as activity when BLINK's own refresh, run with the
+        # person at the computer, wrote it.
+        self._refresh_activity = None
         # What is left of the read budget for this pass's burn lines, shared
         # by every reader (burn_reader.READ_BUDGET_BYTES, or a reader's own
         # when it was given less); None for a full one. Filled by
@@ -539,6 +544,7 @@ class IngestionBus:
         now = self._now()
         frames = self._guard_account(frames, now)
         self._note_claude_fresh(frames)
+        frames = self._credit_refresh(frames)
         primary, secondary = normalizer.select_pair(
             frames, preferred=self._preferred)
         # The claude page wherever it sits: the main one, or the second when
@@ -563,6 +569,31 @@ class IngestionBus:
         self._session_pair = _pair_from(
             primary, secondary, msg.get("state", base.STATE_UNKNOWN))
         return msg
+
+    def credit_refresh(self, activity_for):
+        """Wire `activity_for(fetched_at)` (RefreshWatch's): the time to
+        date the saved /usage's activity at, or None. Unwired, and for
+        every cache the watch did not write after a proven presence, the
+        frame carries no activity (base.NO_CONTACT), so a refresh with
+        nobody there never keeps the board awake."""
+        self._refresh_activity = activity_for
+
+    def _credit_refresh(self, frames):
+        fn = self._refresh_activity
+        if fn is None:
+            return frames
+        out = []
+        for f in frames:
+            if (f is not None and f.provider == claude_cli.PROVIDER_ID
+                    and f.src == base.USAGE_SRC_ID):
+                try:
+                    at = fn(f.observed_at)
+                except Exception:
+                    at = None
+                if at is not None:
+                    f = dataclasses.replace(f, active_at=min(at, f.observed_at))
+            out.append(f)
+        return out
 
     def _note_claude_fresh(self, frames):
         # After the login guard, so a reading from another login does not

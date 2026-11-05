@@ -149,14 +149,24 @@ refresh does not run. It runs only when all of these hold:
 - the setting is on and the Claude home is native (not WSL);
 - the board is answering (`board_alive()`);
 - the computer is in use: input within the last 30 minutes where the OS
-  reports it (macOS, Windows); Linux has no stdlib source and counts as in
-  use;
+  reports it (macOS, Windows). Linux has no stdlib source, so there it counts
+  only when another Claude source (status line, Desktop, any frame but the
+  refresh's own) showed activity in the last 30 minutes: a Linux desk left
+  on never refreshes through the night. The board's ask follows the same
+  rule;
 - no other Claude source has a reading younger than 15 minutes (the status
   line file's mtime, or the newest `observed_at` of any other Claude frame
   with a figure);
 - the `/usage` cache (`fetchedAtMs`) is older than 25 minutes, so the dial
   is refreshed before it calls the figure stale at 30;
 - BLINK's own last run started more than 25 minutes ago.
+
+What a run counts as, for the board's absence doze: a refresh BLINK ran
+right after a real idle reading under 30 minutes (macOS, Windows) counts as
+activity at the run's time, so a desk used only in a browser does not doze
+with the person at it. A `/usage` cache written by anything else, or a run
+allowed by the Linux rule above, counts as none, so the board still dozes
+overnight on every OS (`RefreshWatch.activity_for`, `IngestionBus.credit_refresh`).
 
 A spend seat follows the same rule: while Claude Code is in use the running
 count already adds what each session costs, and the refresh only makes the

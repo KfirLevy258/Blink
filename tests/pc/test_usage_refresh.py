@@ -329,8 +329,23 @@ def test_a_spend_seat_with_a_fresh_status_line_is_not_due():
     assert _due(other_at=NOW - 30) is False
 
 
-def test_linux_with_no_idle_figure_is_in_use():
-    assert _due(idle_s=None) is True
+def test_linux_with_no_idle_figure_and_no_other_activity_is_not_due():
+    # Nobody can be shown to be here: a desk left on overnight.
+    assert _due(idle_s=None) is False
+    assert _due(idle_s=None, other_at=NOW - ur.IDLE_LIMIT_S) is False
+    assert _due(idle_s=None, other_at=NOW - 8 * 3600) is False
+
+
+def test_linux_with_other_activity_in_the_last_30_minutes_is_due():
+    # Past the 15-minute freshness rule, inside the 30-minute presence one.
+    assert _due(idle_s=None, other_at=NOW - 20 * 60) is True
+    # Fresher than 15 minutes is a source that already has the figure.
+    assert _due(idle_s=None, other_at=NOW - 10 * 60) is False
+
+
+def test_a_real_idle_reading_ignores_other_activity_for_presence():
+    assert _due(idle_s=float(ur.IDLE_LIMIT_S), other_at=NOW - 20 * 60) is False
+    assert _due(idle_s=60.0, other_at=NOW - 8 * 3600) is True
 
 
 # --- IngestionBus.claude_fresh_at -----------------------------------------
@@ -688,7 +703,8 @@ def _wire(monkeypatch, home, kind):
     rec = dataclasses.replace(claude_home.from_environ({}), kind=kind)
     monkeypatch.setattr(claude_home, "current", lambda: rec)
     monkeypatch.setattr(ur.RefreshWatch, "_run", lambda self: None)
-    bus = types.SimpleNamespace(claude_fresh_at=lambda: None)
+    bus = types.SimpleNamespace(claude_fresh_at=lambda: None,
+                                credit_refresh=lambda fn: None)
     th = cub.start_usage_refresh(blink, bus, lambda: True)
     if th is not None:
         th.join(5)
@@ -999,8 +1015,12 @@ def test_each_condition_alone_stops_the_ask(key, value):
     assert should_ask(NOW, **dict(_YES, **{key: value})) is False
 
 
-def test_an_os_that_cannot_say_idle_counts_as_in_use():
-    assert should_ask(NOW, **dict(_YES, idle_s=None)) is True
+def test_an_os_that_cannot_say_idle_asks_only_after_other_activity():
+    assert should_ask(NOW, **dict(_YES, idle_s=None)) is False
+    assert should_ask(NOW, **dict(_YES, idle_s=None,
+                                  other_at=NOW - 8 * 3600)) is False
+    assert should_ask(NOW, **dict(_YES, idle_s=None,
+                                  other_at=NOW - 60)) is True
 
 
 def test_a_day_after_the_last_ask_it_asks_again():
@@ -1766,3 +1786,112 @@ def test_a_claude_cmd_in_the_current_folder_is_never_found_on_windows(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", str(proj))
     assert _same(find_claude(str(tmp_path / "h")), str(proj / "claude.CMD"))
+
+
+# --- no refresh at night, and what a refresh counts as ----------------------
+
+def test_a_linux_tick_with_nothing_else_going_on_never_runs(tmp_path,
+                                                           monkeypatch):
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    t = _Watch(tmp_path, monkeypatch, idle_s=None,
+               runner=lambda *a, **k: 1 / 0)
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    t.w.tick_once()
+    t.clock[0] = NOW + 8 * 3600
+    t.w.tick_once()
+    assert t.state() == State()
+
+
+@pytest.mark.allow_claude_launch
+def test_activity_for_is_set_by_a_run_after_a_real_idle_reading(
+        tmp_path, monkeypatch):
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    exe, rec = _moving_claude(tmp_path, ZERO, NOW + 2)
+    _on_path(monkeypatch, exe)
+    t = _Watch(tmp_path, monkeypatch, idle_s=60.0)
+    assert t.w.activity_for(NOW + 2) is None
+    t.w.tick_once()
+    assert rec.exists()
+    assert t.w.activity_for(NOW + 2) == NOW
+    # A cache fetched by anything else, later or long before, is not it.
+    assert t.w.activity_for(NOW + ur.RUN_TIMEOUT_S + 1) is None
+    assert t.w.activity_for(NOW - 3600) is None
+
+
+@pytest.mark.allow_claude_launch
+def test_a_run_under_the_linux_rule_is_no_activity(tmp_path, monkeypatch):
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    exe, rec = _moving_claude(tmp_path, ZERO, NOW + 2)
+    _on_path(monkeypatch, exe)
+    t = _Watch(tmp_path, monkeypatch, idle_s=None, other=NOW - 20 * 60)
+    t.w.tick_once()
+    assert rec.exists()
+    assert t.w.activity_for(NOW + 2) is None
+
+
+@pytest.mark.allow_claude_launch
+def test_a_failed_run_is_no_activity(tmp_path, monkeypatch):
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    exe, rec = _moving_claude(tmp_path, ZERO, NOW - 3600)   # cache unmoved
+    _on_path(monkeypatch, exe)
+    t = _Watch(tmp_path, monkeypatch, idle_s=60.0)
+    t.w.tick_once()
+    assert rec.exists() and t.state().fails == 1
+    assert t.w.activity_for(NOW) is None
+
+
+def _usage_bus(held):
+    import types
+
+    from pc import ingest
+    src = types.SimpleNamespace(get_provider_id=lambda: "claude",
+                                poll=lambda now: list(held))
+    return ingest.IngestionBus(providers=[src], now=lambda: NOW,
+                               verdict=None)
+
+
+def _cache_frame(at):
+    from pc.providers import base
+    return _frame(base.USAGE_SRC_ID, at, weekly_pct=15.0,
+                  active_at=base.NO_CONTACT)
+
+
+def test_the_bus_dates_a_proven_refresh_as_activity_and_no_other():
+    bus = _usage_bus([_cache_frame(NOW - 90)])
+    assert bus.poll()["active_age_s"] >= 14400          # unwired: nobody
+    bus.credit_refresh(lambda fetched: NOW - 100 if fetched == NOW - 90
+                       else None)
+    assert bus.poll()["active_age_s"] == 100
+    bus.credit_refresh(lambda fetched: None)
+    assert bus.poll()["active_age_s"] >= 14400
+
+
+def test_the_bus_never_credits_a_frame_that_is_not_the_cache():
+    bus = _usage_bus([_frame("desktop", NOW - 7200, weekly_pct=10.0)])
+    bus.credit_refresh(lambda fetched: NOW)
+    assert bus.poll()["active_age_s"] == 7200
+
+
+def test_bridge_wires_the_refresh_credit_to_the_bus(monkeypatch, tmp_path):
+    import types
+
+    import claude_usage_bridge as cub
+    from pc import claude_home, user_config
+    wired = []
+    blink = inside(tmp_path, os.path.join(str(tmp_path), ".blink"))
+    os.makedirs(blink, exist_ok=True)
+    user_config.put(blink, ur.SETTING, True)
+    monkeypatch.setattr(ur.RefreshWatch, "_run", lambda self: None)
+    bus = types.SimpleNamespace(claude_fresh_at=lambda: None,
+                                credit_refresh=wired.append)
+    th = cub.start_usage_refresh(blink, bus, lambda: True)
+    th.join(5)
+    assert len(wired) == 1 and callable(wired[0])
+
+
+def test_the_board_ask_on_linux_needs_other_activity(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path, idle_s=None)
+    assert k.a.due(CAPS) is False
+    k.a._other_at = lambda: NOW - 60
+    assert k.a.due(CAPS) is True
