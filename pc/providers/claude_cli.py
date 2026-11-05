@@ -1003,7 +1003,9 @@ def _usage_frame(windows, now_epoch):
     reset has passed reads 0% and not the figure from before it. A window
     the cache lacked stays base.UNKNOWN: a null five_hour (a Max login,
     2026-11-04) leaves the session dial unknown beside a good week.
-    Returns None when neither window has a figure."""
+    Returns None when neither window has a figure. Active at
+    base.NO_CONTACT: the fetch may be BLINK's own refresh, which is not a
+    person at the desk."""
     stale = (now_epoch - windows.fetched_at) > ss.STALE_AFTER_S
 
     def settle(pct, resets_at):
@@ -1018,7 +1020,7 @@ def _usage_frame(windows, now_epoch):
         return None
     return base.NormalizedUsageFrame(
         provider=PROVIDER_ID, src=base.USAGE_SRC_ID,
-        observed_at=windows.fetched_at, active_at=None,
+        observed_at=windows.fetched_at, active_at=base.NO_CONTACT,
         session_rolled_at=s_ended, weekly_rolled_at=w_ended,
         session_pct=s_pct, session_resets_at=s_reset,
         weekly_pct=w_pct, weekly_resets_at=w_reset, stale=stale)
@@ -1084,9 +1086,20 @@ def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None,
     if not stamps and config_at is not None:
         stamps = [config_at]
     seen = min(max(stamps), now_epoch) if stamps else now_epoch
+    # Active at the last render, never at the /usage: BLINK's own refresh
+    # moves the cache's fetch time, and a page dated by it kept the board
+    # awake with nobody there (base.NO_CONTACT). Without a render, the
+    # config's mtime as before when there is no /usage either; with one,
+    # nobody heard.
+    if render_at is not None:
+        active = min(render_at, now_epoch)
+    elif a is None:
+        active = seen
+    else:
+        active = base.NO_CONTACT
     return base.NormalizedUsageFrame(
         provider=PROVIDER_ID, src=SPEND_SRC_ID, observed_at=seen,
-        active_at=seen, plan=base.PLAN_SPEND, spend_period="monthly",
+        active_at=active, plan=base.PLAN_SPEND, spend_period="monthly",
         spend_usd=cents / 100.0,
         spend_limit_usd=None if limit is None else limit / 100.0,
         session_pct=pct,

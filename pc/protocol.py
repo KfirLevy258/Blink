@@ -909,6 +909,11 @@ def _active_age(frame, secondary, now_epoch: float) -> int:
     return min(ages) if ages else -1
 
 
+# The largest seconds figure the board takes (firmware/src/proto.c SECS_MAX,
+# INT32_MAX); past it num() refuses the field.
+SECS_MAX = 2147483647
+
+
 def _age_of(frame, now_epoch: float, attr: str = "observed_at") -> int:
     """Seconds since `frame` was observed, or -1 when that is unknowable.
 
@@ -925,7 +930,11 @@ def _age_of(frame, now_epoch: float, attr: str = "observed_at") -> int:
     """
     if frame is None or getattr(frame, attr, None) is None:
         return -1
-    return max(0, int(now_epoch - getattr(frame, attr)))
+    # And held at INT32_MAX, the most proto.c's SECS_MAX accepts: a frame
+    # active at base.NO_CONTACT (the epoch) is 1.79e9 s old now and past
+    # the bound in 2038, where the board would refuse the field and fall
+    # back to the reading's age -- fresh -- which is the bug it closes.
+    return min(SECS_MAX, max(0, int(now_epoch - getattr(frame, attr))))
 
 
 EDITIONS = ("claude", "codex")

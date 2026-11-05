@@ -66,6 +66,14 @@ SPEND_SRC_ID = "claude_spend"
 # so claude_account keeps it across a terminal's quiet and reads it by this
 # name.
 USAGE_SRC_ID = "claude_usage"
+# The active_at of a frame that carries figures and no sign of anybody at the
+# desk: merge() takes the newest active_at, so any real contact wins over it,
+# and alone it ages past every doze threshold. The saved /usage is moved by
+# BLINK's own refresh (pc/usage_refresh) as well as by a person, and dated
+# by it, the cache frame and the spend page kept the board's activity age
+# fresh with nobody there -- on Linux, where the idle probe cannot say, all
+# night (/code-review max of feat/usage-refresh, V4).
+NO_CONTACT = 0.0
 
 # Worst-first. This is the order the single scalar `state` collapses to when
 # several sessions -- of one provider or of both -- disagree, and the order is

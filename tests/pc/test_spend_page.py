@@ -1106,3 +1106,49 @@ def test_poll_adds_no_usage_frame_on_a_spend_seat(tmp_path):
     p = claude_cli.ClaudeCliProvider()
     frames = p.poll(NOW)
     assert not [f for f in frames if f.src == base.USAGE_SRC_ID]
+
+
+# --- activity: BLINK's own refresh is nobody at the desk ----------------
+#
+# /code-review max of feat/usage-refresh, V4. The cache frame and the spend
+# page were dated by fetchedAtMs, and active_at with them; the refresh moves
+# fetchedAtMs every 25 minutes, so the daemon's own runs kept the board's
+# activity age fresh -- on Linux, where the idle probe cannot say, all night.
+
+def test_the_cache_frame_carries_figures_but_no_activity():
+    w = claude_plan.CacheWindows(None, None, 15.0, 1794376799.0, 1793828166.0)
+    f = claude_cli._usage_frame(w, now_epoch=1793828200.0)
+    assert f.observed_at == 1793828166.0
+    assert f.active_at == base.NO_CONTACT
+
+
+def test_a_refresh_moved_cache_leaves_the_activity_age_alone(tmp_path):
+    clock = Clock(NOW)
+    render(tmp_path, NOW - 3 * 3600, 1.00)
+    _usage_config(tmp_path, NOW - 30)            # fetched NOW - 90
+    msg = bus_on(clock).poll()
+    assert msg["weekly_pct"] == 15.0
+    assert msg["active_age_s"] == 3 * 3600
+
+
+def test_a_refresh_moved_cache_alone_is_nobody_here(tmp_path):
+    # No other Claude source: the figures are drawn, and the board is told
+    # nobody has been heard (firmware SLEEP_ABSENT_AFTER_S is 14400), not
+    # that someone was here 90 seconds ago.
+    clock = Clock(NOW)
+    _usage_config(tmp_path, NOW - 30)
+    msg = bus_on(clock).poll()
+    assert msg["weekly_pct"] == 15.0
+    assert msg["active_age_s"] >= 14400
+
+
+def test_a_spend_page_dated_by_the_cache_is_not_activity(tmp_path):
+    clock = Clock(NOW)
+    render(tmp_path, NOW - 3 * 3600, 1.00)
+    config(tmp_path, NOW - 30, fetched=NOW - 90)
+    bus = bus_on(clock)
+    msg = bus.poll()
+    page = bus.claude_page()
+    assert page.plan == base.PLAN_SPEND and page.observed_at == NOW - 90
+    assert page.active_at == NOW - 3 * 3600
+    assert msg["active_age_s"] == 3 * 3600
