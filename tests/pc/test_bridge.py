@@ -1334,7 +1334,8 @@ def test_an_answer_writes_the_setting_end_to_end(tmp_path, monkeypatch):
     b.pump()
     assert len(_asks(sent)) == 1
     # Sent is not seen: only the board's answer counts one of the three.
-    assert ur.load_ask(blink) == ur.AskState(0, 1_800_000_000.0, False)
+    assert ur.load_ask(blink) == ur.AskState(0, 0.0, False,
+                                             sent_at=1_800_000_000.0)
     b.on_message({"t": "answer", "v": 2, "id": "refresh", "a": "on"})
     assert ur.load_ask(blink).times == 1
     assert user_config.load(blink)[ur.SETTING] is True

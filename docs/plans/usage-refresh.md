@@ -123,7 +123,11 @@ absent) and asks:
   away, or the board started to doze) answers nothing and counts nothing,
   and so does an ask the board could not put up within 10 minutes of its
   arrival (dozing, or another box up), which it drops rather than show to
-  an empty room later. The daemon sends at most one ask a day either way.
+  an empty room later. The day before the next ask starts only from an
+  answer: an ask that got none was not seen, and the next may go out an
+  hour after it, still only while someone is at the computer (a board
+  dozing for want of Claude activity drops every ask, and a day's wait
+  after each meant the people this ask is for were never asked).
   An answer is applied only while the setting is still absent: one given
   after `blink install` or `blink config` made the choice changes nothing.
   It asks only while someone is at the computer, only when Claude Code is
@@ -157,8 +161,8 @@ refresh does not run. It runs only when all of these hold:
 A spend seat follows the same rule: while Claude Code is in use the running
 count already adds what each session costs, and the refresh only makes the
 figure exact again once nothing else is moving it. After 3 failures in a row
-it waits an hour between tries; after 24 hours of nothing but failures it
-turns itself off.
+it waits an hour between tries; after 24 hours of nothing but failures, and
+at least 6 of them, it turns itself off.
 
 ### 3. Daemon: how it runs
 
@@ -189,7 +193,8 @@ until the person turns it on again. `blink status` says
 
 Failure guard: an answer that is not that JSON, a zero-cost success after which `fetchedAtMs` did not move past the run's start (what a logged-out Claude Code gives; the cache's own `fetchedAtMs`, whatever its windows hold, so a seat whose windows are both null still counts), `is_error` true, a non-zero
 exit, or the 60-second limit is a failure. 3 in a row stretch the spacing to
-an hour; failures only, for 24 hours, turn it off with the reason `failing`
+an hour; failures only, for 24 hours and at least 6 runs (two failures a
+weekend apart are not a day of trying), turn it off with the reason `failing`
 ("off: /usage kept failing; run claude and /login, then turn it on again").
 `blink config usage-refresh on` is a fresh start after either guard: the
 reason and the failure streak are cleared, on disk and in the running

@@ -20,7 +20,7 @@ from serial.tools import list_ports
 from pc import ota as ota_mod
 from pc import (ingest, install_statusline, interval, logbook, protocol,
                 status_page, statusline_source, theme, theme_server, update,
-                usage_refresh, user_config, win_driver)
+                usage_refresh, win_driver)
 from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
@@ -283,11 +283,10 @@ def start_usage_refresh(blink_home, bus, board_alive):
         return None
 
     def enabled():
-        try:
-            return (user_config.load(blink_home).get(usage_refresh.SETTING)
-                    is True)
-        except (OSError, user_config.Unreadable):
-            return False
+        # None for a config.json that cannot be read, as
+        # usage_refresh.enabled says it: the watch keeps what it holds
+        # rather than taking a lock or a half-written file for "off".
+        return usage_refresh.enabled(blink_home)
 
     def other_at():
         # The status line's mtime as well as the bus's frames: the bus is

@@ -31,8 +31,9 @@ import dataclasses
 import enum
 import glob
 import json
+import math
 import os
-import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -53,6 +54,13 @@ RUN_TIMEOUT_S = 60
 BACKOFF_AFTER = 3
 BACKOFF_S = 3600
 GIVE_UP_S = 24 * 3600
+# And at least this many failed runs in the streak: a day of wall time alone
+# was two failures -- one on Friday evening, none over a weekend with nobody
+# at the desk, one on Monday morning before the network was up -- and the
+# refresh turned itself off with "/login" advice that fitted neither
+# (/code-review max of feat/usage-refresh, V12). Six is at least five hours
+# of attempts at the hourly backoff.
+GIVE_UP_AFTER = 6
 TICK_S = 60
 
 STATE_FILE = "usage-refresh.json"
@@ -85,14 +93,54 @@ def _version_key(path):
         return (-1,)
 
 
+def _on_path(name):
+    """`name` in an absolute PATH folder that is not the current one, or
+    None. shutil.which is not used: on Windows it looks in the current
+    folder before PATH, so `blink config usage-refresh on` run inside a
+    project holding a claude.cmd recorded that file, and the daemon then
+    ran it every 25 minutes with the person's environment -- a repo's
+    wrapper, or a hostile clone's (/code-review max of feat/usage-refresh,
+    V18). A relative entry ("." or "bin") names the current folder by
+    another route, so only absolute ones are searched, and the current
+    folder is skipped even when PATH lists it by its full name. Windows
+    tries PATHEXT's extensions, as CreateProcess's callers do."""
+    try:
+        here = os.path.normcase(os.path.realpath(os.getcwd()))
+    except OSError:
+        here = None
+    win = sys.platform == "win32"
+    if win:
+        exts = [e for e in os.environ.get(
+            "PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+        names = [name + e for e in exts]
+    else:
+        names = [name]
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        d = d.strip('"') if win else d
+        if not d or not os.path.isabs(d):
+            continue
+        try:
+            if here is not None and os.path.normcase(
+                    os.path.realpath(d)) == here:
+                continue
+        except (OSError, ValueError):
+            continue
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.isfile(p) and (win or os.access(p, os.X_OK)):
+                return p
+    return None
+
+
 def find_claude(home):
-    """The claude executable, or None: PATH first, then where the official
-    installer (~/.local/bin), the older local install (~/.claude/local),
-    Homebrew (/opt/homebrew/bin, /usr/local/bin), npm with a user prefix
-    (~/.npm-global/bin) and the newest nvm Node put it. Desktop's private
-    copy is never used. `home` is the user's home, passed in, never looked
-    up here (tests/test_sandbox.py)."""
-    found = shutil.which("claude")
+    """The claude executable, or None: PATH first (_on_path: never the
+    current folder), then where the official installer (~/.local/bin), the
+    older local install (~/.claude/local), Homebrew (/opt/homebrew/bin,
+    /usr/local/bin), npm with a user prefix (~/.npm-global/bin) and the
+    newest nvm Node put it. Desktop's private copy is never used. `home` is
+    the user's home, passed in, never looked up here
+    (tests/test_sandbox.py)."""
+    found = _on_path("claude")
     if found:
         return found
     win = sys.platform == "win32"
@@ -223,12 +271,25 @@ def _path(blink_home):
 
 
 def _read(blink_home):
+    """The state file as a dict, {} for anything else. RecursionError is
+    json's answer to an array nested thousands deep, as in
+    session_verdict.load: uncaught, one corrupt file made `blink status`
+    and `blink config usage-refresh on` die with a traceback and every
+    daemon tick fail (/code-review max of feat/usage-refresh, V15)."""
     try:
         with open(_path(blink_home), encoding="utf-8") as f:
             doc = json.load(f)
         return doc if isinstance(doc, dict) else {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
+
+
+def _finite(v):
+    """A finite int or float that is not a bool. json reads NaN and
+    Infinity: a NaN last_run_at made due() False for good, and an infinite
+    one crashed `blink status` in int()."""
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v))
 
 
 def load_state(blink_home):
@@ -239,13 +300,12 @@ def load_state(blink_home):
         kw = {f.name: run[f.name] for f in fields(State) if f.name in run}
         s = State(**kw)
         if (not isinstance(s.fails, int) or isinstance(s.fails, bool)
-                or not isinstance(s.last_run_at, (int, float))
+                or not _finite(s.last_run_at)
                 or not isinstance(s.off_reason, str)
-                or not isinstance(s.cleared_at, (int, float))
-                or isinstance(s.cleared_at, bool)
+                or not _finite(s.cleared_at)
                 or not isinstance(s.missing, bool)
                 or not (s.failing_since is None
-                        or isinstance(s.failing_since, (int, float)))):
+                        or _finite(s.failing_since))):
             return State()
         return s
     except (TypeError, ValueError):
@@ -269,9 +329,18 @@ def record(state, verdict, now):
         s.fails += 1
         if s.failing_since is None:
             s.failing_since = now
-        if now - s.failing_since >= GIVE_UP_S:
+        if (now - s.failing_since >= GIVE_UP_S
+                and s.fails >= GIVE_UP_AFTER):
             s.off_reason = "failing"
     return s
+
+
+def inconclusive(state, now):
+    """A run that exited well but whose cache could not be read afterwards
+    (a torn read while Claude Code rewrote the file, a lock): neither OK
+    nor a failure. Only the time is kept, so the next try is a spacing
+    away and the streak stands as it was."""
+    return dataclasses.replace(state, last_run_at=now, missing=False)
 
 
 def spacing(state):
@@ -311,9 +380,21 @@ def due(now, *, enabled, native, board_alive, idle_s, cache_at, other_at,
 # and puts up "Keep figures fresh?" with Turn on / No thanks
 # (firmware/src/ask_prompt.h). An ask counts toward ASK_AT_MOST only when
 # the person saw it: on an answer, "later" (the box closed itself after a
-# minute) included. Sending one only starts the day before the next. A box
-# the board withdrew (host lost, a doze) or an ask it dropped because it
-# could not show it within ten minutes answers nothing and counts nothing.
+# minute) included. A box the board withdrew (host lost, a doze) or an ask
+# it dropped because it could not show it within ten minutes answers
+# nothing and counts nothing.
+#
+# Only an answer starts the day before the next ask. An ask with no answer
+# was not seen, and the next may go out ASK_RETRY_S after it, still only
+# while someone is at the computer. The board answers within eleven minutes
+# or not at all (it holds an ask ten minutes for the glass,
+# ASK_PROMPT_PENDING_MS, and shows it one, ASK_PROMPT_OPEN_MS), so an hour
+# never sends a second ask over one still on the glass. Until
+# the /code-review max of feat/usage-refresh (V21) a send started the day
+# too: a board dozing for want of Claude activity drops the ask after ten
+# minutes, and the daemon then waited a day, every day, so the people the
+# board ask is for -- in Desktop or a browser, no Claude Code terminal --
+# were never asked at all.
 # Counted on send, as first built, all three could be spent on a dozing
 # board for exactly the person the board ask is for -- someone in Desktop
 # with no Claude Code terminal, whose board dozes for want of hook activity
@@ -322,12 +403,18 @@ def due(now, *, enabled, native, board_alive, idle_s, cache_at, other_at,
 
 ANSWERS = protocol.ASK_ANSWERS
 
+ASK_RETRY_S = 3600
+
 
 @dataclass
 class AskState:
     times: int = 0
+    # When the board last answered: the day before the next ask runs from
+    # here.
     last_at: float = 0.0
     declined: bool = False
+    # When the last ask went out, answered or not.
+    sent_at: float = 0.0
 
 
 def load_ask(blink_home):
@@ -341,8 +428,7 @@ def load_ask(blink_home):
         a = AskState(**kw)
         if (not isinstance(a.times, int) or isinstance(a.times, bool)
                 or a.times < 0
-                or not isinstance(a.last_at, (int, float))
-                or isinstance(a.last_at, bool)
+                or not _finite(a.last_at) or not _finite(a.sent_at)
                 or not isinstance(a.declined, bool)):
             return AskState()
         return a
@@ -367,14 +453,16 @@ def should_ask(now, *, setting_absent, native, claude_found, work_login,
     there to run, never on a work login (asked only in the terminal, with No
     as the default), only on a board that lists "ask", only while someone is
     at the computer (`idle_s` None is an OS that cannot say, taken as in
-    use), at most ASK_AT_MOST times, a day apart, and never after a no."""
+    use), at most ASK_AT_MOST answered times, a day after the last answer,
+    an hour after an ask that went unanswered, and never after a no."""
     return bool(
         setting_absent and native and claude_found and not work_login
         and "ask" in board_caps
         and (idle_s is None or idle_s < IDLE_LIMIT_S)
         and ask_state.times < ASK_AT_MOST
         and not ask_state.declined
-        and now - ask_state.last_at >= ASK_EVERY_S)
+        and now - ask_state.last_at >= ASK_EVERY_S
+        and now - ask_state.sent_at >= ASK_RETRY_S)
 
 
 class BoardAsk:
@@ -409,7 +497,8 @@ class BoardAsk:
             return read
         return AskState(max(mem.times, read.times),
                         max(mem.last_at, read.last_at),
-                        mem.declined or read.declined)
+                        mem.declined or read.declined,
+                        max(mem.sent_at, read.sent_at))
 
     def _keep(self, state):
         self._mem = state
@@ -445,20 +534,26 @@ class BoardAsk:
         h = self._home()
         if h.kind != claude_home.NATIVE:
             return False                # before anything stats a UNC path
+        view = self._view(now)
         ask.update(native=True,
                    claude_found=locate_claude(self._blink_home,
                                               h.user_dir()) is not None,
-                   work_login=is_work_login(self._view(now)))
+                   # A config that could not be read is taken for a work
+                   # login, which the board never asks: a torn read gave
+                   # "consumer" until V2 of the /code-review max, and an
+                   # Enterprise seat could be asked.
+                   work_login=view is None or is_work_login(view))
         if not should_ask(now, idle_s=0.0, **ask):
             return False
         return should_ask(now, idle_s=self._idle(), **ask)
 
     def asked(self):
-        """An ask went out just now: the next waits ASK_EVERY_S. Not
-        counted: the board may never show it (answer() counts)."""
+        """An ask went out just now: the next waits ASK_RETRY_S unless an
+        answer starts the day. Not counted: the board may never show it
+        (answer() counts)."""
         with self._lock:
             st = self._state()
-            self._keep(AskState(st.times, self._now(), st.declined))
+            self._keep(dataclasses.replace(st, sent_at=self._now()))
 
     def answer(self, a):
         """The board's answer, which means the person saw the box: one of
@@ -475,8 +570,9 @@ class BoardAsk:
                 except Exception:
                     absent = False      # unreadable: change nothing
                 st = self._state()
-                self._keep(AskState(st.times + 1, st.last_at,
-                                    st.declined or (absent and a == "no")))
+                self._keep(dataclasses.replace(
+                    st, times=st.times + 1, last_at=self._now(),
+                    declined=st.declined or (absent and a == "no")))
                 if not absent or a == "later":
                     return
                 try:
@@ -518,11 +614,15 @@ def clear_off(blink_home, now=None):
     to now. Written every time, even with nothing on disk to correct: the
     running watch may hold a reason in memory that its write never got to
     the file, and `cleared_at` is how it learns to drop it (RefreshWatch.
-    _floor). The last run's time stays, so the spacing still holds."""
+    _floor). The last run's time stays, so the spacing still holds.
+    "Wasn't found" goes too: the command has just recorded where claude is
+    (cli._remember_claude), and `blink status` kept saying it was missing
+    until a run happened."""
     state = load_state(blink_home)
     state.off_reason = ""
     state.fails = 0
     state.failing_since = None
+    state.missing = False
     state.cleared_at = time.time() if now is None else now
     save_state(blink_home, state)
 
@@ -543,18 +643,46 @@ def _cache_at(view):
     return max(stamps) if stamps else None
 
 
-def config_view(home):
-    """`view` for RefreshWatch: Claude Code's config through a PlanReader
-    made for each look.
+class ConfigLook:
+    """Claude Code's config for this module, one per thread that asks:
+    look(now) is the view of this read, or None when this read failed --
+    a write caught half done, a Windows lock, a file over
+    claude_plan.MAX_BYTES or not a regular file. None is "not known", never
+    "consumer, no cache": a fresh PlanReader per look gave EMPTY_VIEW for
+    a failed read, so the board could ask an Enterprise seat, and a run
+    straight before a torn read was judged FAILED (/code-review max of
+    feat/usage-refresh, V2/V3). Not the last good view either: before a
+    run that view's cache time is old, and after one it is the cache from
+    before the run, which is the misjudgement this exists to stop. A look
+    that fails is asked again at the next tick or heartbeat.
 
-    Not the bus's reader: that one is used from the serial loop, and a
-    PlanReader is not thread-safe. Not one long-lived reader of its own
-    either: ConfigFile parses at most once a FIRST_ANSWER_RETRY_S (5 s), so
-    the look straight after a run that took under 5 s would be handed the
-    view from before it, and every quick, good run would count as a
-    failure. A parse a minute on this thread is nothing (11 ms for a
-    generated 5.6 MB config, claude_plan.ConfigFile)."""
-    return lambda now_epoch: claude_plan.PlanReader(home=home).look(now_epoch)
+    Parsed at every look, not through ConfigFile's spacing: that parses at
+    most once a FIRST_ANSWER_RETRY_S (5 s), so the look straight after a
+    run that took under 5 s would be handed the view from before it. A
+    parse a minute on this thread is nothing (11 ms for a generated 5.6 MB
+    config, claude_plan.ConfigFile). Not the bus's reader: that one is
+    used from the serial loop, and a reader is not thread-safe."""
+
+    def __init__(self, home):
+        self._home = home
+
+    def __call__(self, now_epoch):
+        try:
+            path = claude_plan.config_path(self._home())
+            st = os.stat(path)
+        except FileNotFoundError:
+            return claude_plan.EMPTY_VIEW       # no config: known, empty
+        except (OSError, ValueError):
+            return None
+        if not stat.S_ISREG(st.st_mode) or st.st_size > claude_plan.MAX_BYTES:
+            return None
+        return claude_plan.parse(path, st)
+
+
+def config_view(home):
+    """`view` for RefreshWatch and BoardAsk: a ConfigLook of `home`'s
+    config. Each caller builds its own."""
+    return ConfigLook(home)
 
 
 class RefreshWatch:
@@ -612,7 +740,15 @@ class RefreshWatch:
 
     def _tick(self):
         now = self._now()
-        if self._enabled() is not True:
+        on = self._enabled()
+        if on is None:
+            # config.json could not be read (a lock, a write caught half
+            # done): not knowing is not "off". Nothing runs and nothing held
+            # here is touched. Read as off until V11 of the /code-review
+            # max, one unreadable tick wiped the streak held below, and with
+            # it a cost guard whose writes had both failed.
+            return
+        if on is not True:
             # Off in config.json, which is where the person turns it back
             # on (the cost guard writes it off first). From here the file
             # decides whether it was turned off for a reason; only the
@@ -637,9 +773,14 @@ class RefreshWatch:
             # rather than whenever the clock catches up with the old reading.
             state = dataclasses.replace(state, last_run_at=now)
             self._keep(state)
+        view = self._view(now)
+        if view is None:
+            # The config could not be read: when the cache was fetched is
+            # not known, and not knowing is not "no cache yet, due".
+            return
         ask = dict(enabled=True, native=True,
                    board_alive=bool(self._board_alive()),
-                   cache_at=_cache_at(self._view(now)),
+                   cache_at=_cache_at(view),
                    other_at=self._other_at(), state=state)
         # The idle probe starts a process on macOS, so it is asked only once
         # everything else already says yes.
@@ -713,17 +854,38 @@ class RefreshWatch:
             # runner is a failed run all the same, counted and spaced.
             verdict = Verdict.FAILED
             raised.append(type(e).__name__)
+        unread = False
         if verdict is Verdict.OK:
             # A logged-out Claude Code answers -p /usage with a zero-cost
             # success too, and writes no cache (measured 2026-11-05). Only a
-            # cache fetched by this run makes it a refresh.
+            # cache fetched by this run makes it a refresh. A config that
+            # could not be read now says neither: the run is inconclusive,
+            # not a step toward the day of failures (V3 of the /code-review
+            # max: a torn read straight after a good run counted one).
             try:
-                moved = _cache_at(self._view(self._now()))
+                view = self._view(self._now())
             except Exception:
-                moved = None        # a cache not seen to move is not one
-            if moved is None or moved < started - MOVED_SLACK_S:
-                verdict = Verdict.FAILED
-        new = record(state, verdict, started)
+                view = None
+            if view is None:
+                unread = True
+            else:
+                moved = _cache_at(view)
+                if moved is None or moved < started - MOVED_SLACK_S:
+                    verdict = Verdict.FAILED
+        # `blink config usage-refresh on` may have landed while claude ran
+        # (up to RUN_TIMEOUT_S): its fresh start wins over the streak this
+        # run began with, and only the run's time is added to it. Recorded
+        # over the old state until V13 of the /code-review max, which put
+        # the streak back, so the next failure could turn it off again
+        # right after the person turned it on. A cost verdict still turns
+        # it off: the guard is never lifted by a clear.
+        fresh = load_state(self._blink_home)
+        if fresh.cleared_at > state.cleared_at:
+            state = dataclasses.replace(fresh, missing=False)
+            if verdict is not Verdict.COST:
+                unread = True
+        new = (inconclusive(state, started) if unread
+               else record(state, verdict, started))
         self._mem = new
         if new.off_reason and not state.off_reason:
             # The setting first, each write in its own try: either one

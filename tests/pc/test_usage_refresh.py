@@ -7,6 +7,7 @@ import sys
 import pytest
 
 from pc import usage_refresh as ur
+from tests.support.home import inside
 from pc.usage_refresh import (State, Verdict, command, find_claude, judge,
                               load_state, record, run_once, save_state,
                               spacing)
@@ -196,9 +197,6 @@ def test_find_claude_windows_exe(tmp_path, monkeypatch):
     exe = home / ".local" / "bin" / "claude.exe"
     exe.write_text("x")
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
-    # shutil.which on a posix box cannot pose as Windows (it needs _winapi),
-    # and PATH has no claude here anyway, so stand it in.
-    monkeypatch.setattr(ur.shutil, "which", lambda name: None)
     monkeypatch.setattr(sys, "platform", "win32")
     assert find_claude(str(home)) == str(exe)
 
@@ -223,11 +221,36 @@ def test_record_timeout_counts_as_failure():
 
 
 def test_record_gives_up_after_a_day_of_failures():
+    s = State()
+    step = ur.GIVE_UP_S / (ur.GIVE_UP_AFTER - 1)
+    for i in range(ur.GIVE_UP_AFTER):
+        assert s.off_reason == ""
+        s = record(s, Verdict.FAILED, i * step)
+    assert s.fails == ur.GIVE_UP_AFTER and s.off_reason == "failing"
     s = record(State(), Verdict.FAILED, 0)
-    assert s.off_reason == ""
-    assert record(s, Verdict.FAILED, ur.GIVE_UP_S).off_reason == "failing"
     s = record(s, Verdict.OK, 100)
     s = record(s, Verdict.FAILED, ur.GIVE_UP_S)
+    assert s.off_reason == ""
+
+
+def test_two_failures_a_weekend_apart_are_not_a_day_of_failures():
+    # V12 of the /code-review max: one failure on Friday evening, nobody at
+    # the desk over the weekend, one on Monday morning before the network
+    # was up. A day of wall time, two failures: not "failing".
+    s = record(State(), Verdict.FAILED, 0)
+    s = record(s, Verdict.FAILED, 2.6 * ur.GIVE_UP_S)
+    assert s.fails == 2 and s.off_reason == ""
+    for i in range(ur.GIVE_UP_AFTER - 3):
+        s = record(s, Verdict.FAILED, 2.7 * ur.GIVE_UP_S + i)
+        assert s.off_reason == ""
+    s = record(s, Verdict.FAILED, 2.8 * ur.GIVE_UP_S)
+    assert s.fails == ur.GIVE_UP_AFTER and s.off_reason == "failing"
+
+
+def test_six_failures_inside_a_day_are_not_a_day_of_failures():
+    s = State()
+    for i in range(ur.GIVE_UP_AFTER + 3):
+        s = record(s, Verdict.FAILED, i * 60.0)
     assert s.off_reason == ""
 
 
@@ -376,7 +399,8 @@ def _config_doc(fetched_at):
 
 
 def _write_config(home, fetched_at):
-    (home / ".claude.json").write_text(json.dumps(_config_doc(fetched_at)))
+    p = inside(home, pathlib.Path(home) / ".claude.json")
+    pathlib.Path(p).write_text(json.dumps(_config_doc(fetched_at)))
 
 
 class _Watch:
@@ -421,12 +445,14 @@ def _on_path(monkeypatch, exe):
                        + os.environ.get("PATH", ""))
 
 
-def _moving_claude(tmp_path, stdout, fetched_at, doc=None):
-    """A fake claude that answers `stdout` and rewrites ~/.claude.json with
+def _moving_claude(home, stdout, fetched_at, doc=None):
+    """A fake claude, kept under `home` (the caller's, tmp_path under the
+    sandbox), that answers `stdout` and rewrites `home`/.claude.json with
     the cache fetched at `fetched_at`, as a logged-in /usage does."""
-    cfg = pathlib.Path(os.environ["HOME"]) / ".claude.json"
+    cfg = inside(home, pathlib.Path(home) / ".claude.json")
     body = json.dumps((doc or _config_doc)(fetched_at))
-    return _fake_claude(tmp_path, stdout, config=(str(cfg), body))
+    return _fake_claude(pathlib.Path(inside(home, home)), stdout,
+                        config=(cfg, body))
 
 
 @pytest.mark.allow_claude_launch
@@ -646,16 +672,17 @@ def test_start_names_its_thread(tmp_path, monkeypatch):
 
 # --- the daemon's wiring ---------------------------------------------------
 
-def _wire(monkeypatch, kind):
-    """start_usage_refresh with the setting on and a record of `kind`. The
-    thread's loop is replaced by one that returns at once, so a real thread
-    named blink-refresh starts and nothing outlives the test."""
+def _wire(monkeypatch, home, kind):
+    """start_usage_refresh with the setting on in `home`/.blink and a record
+    of `kind`. The thread's loop is replaced by one that returns at once,
+    so a real thread named blink-refresh starts and nothing outlives the
+    test."""
     import dataclasses
     import types
 
     import claude_usage_bridge as cub
     from pc import claude_home, user_config
-    blink = os.path.join(os.environ["HOME"], ".blink")
+    blink = inside(home, os.path.join(str(home), ".blink"))
     os.makedirs(blink, exist_ok=True)
     user_config.put(blink, ur.SETTING, True)
     rec = dataclasses.replace(claude_home.from_environ({}), kind=kind)
@@ -668,15 +695,15 @@ def _wire(monkeypatch, kind):
     return th
 
 
-def test_the_daemon_starts_the_refresh_on_a_native_home(monkeypatch):
+def test_the_daemon_starts_the_refresh_on_a_native_home(monkeypatch, tmp_path):
     from pc import claude_home
-    th = _wire(monkeypatch, claude_home.NATIVE)
+    th = _wire(monkeypatch, tmp_path, claude_home.NATIVE)
     assert th is not None and th.name == "blink-refresh"
 
 
-def test_the_daemon_starts_no_refresh_on_a_wsl_home(monkeypatch):
+def test_the_daemon_starts_no_refresh_on_a_wsl_home(monkeypatch, tmp_path):
     from pc import claude_home
-    th = _wire(monkeypatch, claude_home.WSL)
+    th = _wire(monkeypatch, tmp_path, claude_home.WSL)
     assert th is None
 
 
@@ -699,12 +726,12 @@ def test_main_starts_the_refresh_once_outside_every_loop():
         assert not isinstance(node, (ast.While, ast.For)), "in a loop"
 
 
-def test_the_daemon_starts_no_refresh_under_a_scenario(monkeypatch):
+def test_the_daemon_starts_no_refresh_under_a_scenario(monkeypatch, tmp_path):
     # A scenario's bus replays invented usage; a real run would mix this
     # desk's login into it.
     from pc import claude_home
     monkeypatch.setenv("BLINK_SCENARIO", "x.json")
-    assert _wire(monkeypatch, claude_home.NATIVE) is None
+    assert _wire(monkeypatch, tmp_path, claude_home.NATIVE) is None
 
 
 # --- review round 1 --------------------------------------------------------
@@ -792,28 +819,154 @@ def test_cost_with_neither_write_still_holds_it_off(tmp_path, monkeypatch):
     assert not rec.exists()
 
 
-def test_a_post_run_view_that_raises_is_a_failure(tmp_path, monkeypatch):
-    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+@pytest.mark.parametrize("unreadable", ["raises", "none"])
+def test_a_post_run_view_that_cannot_be_read_is_inconclusive(
+        tmp_path, monkeypatch, unreadable):
+    # V3 of the /code-review max: a torn read straight after a good run
+    # counted a failure, a step toward the day that turns it off. Not
+    # known is neither OK nor FAILED: the streak stands, the run is spaced.
+    _write_config(tmp_path, NOW - 3600)
     monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
     ran = []
     t = _Watch(tmp_path, monkeypatch, runner=lambda argv, **kw:
                ran.append(1) or subprocess.CompletedProcess(
                    argv, 0, ZERO.encode(), None))
+    save_state(str(t.blink), State(last_run_at=NOW - 7200, fails=2,
+                                   failing_since=NOW - 9000))
     look = t.w._view
 
     def view(now):
         if ran:
-            raise ValueError("unreadable")
+            if unreadable == "raises":
+                raise ValueError("unreadable")
+            return None
         return look(now)
     t.w._view = view
     t.w.tick_once()
     s = t.state()
-    assert ran == [1] and s.fails == 1 and s.last_run_at == NOW
+    assert ran == [1] and s.last_run_at == NOW
+    assert s.fails == 2 and s.failing_since == NOW - 9000
     ran.clear()
     t.w._view = look
     t.clock[0] = NOW + 60
     t.w.tick_once()
     assert ran == []
+
+
+def test_a_config_that_cannot_be_read_is_not_due(tmp_path, monkeypatch):
+    # No cache time known is not "no cache yet, due" (V3).
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    ran = []
+    t = _Watch(tmp_path, monkeypatch, runner=lambda argv, **kw:
+               ran.append(1))
+    t.w._view = lambda now: None
+    t.w.tick_once()
+    assert ran == [] and t.state() == State()
+
+
+def test_config_look_says_not_known_for_a_failed_read(tmp_path, monkeypatch):
+    from pc import claude_home, claude_plan
+    rec = claude_home.from_environ({})
+    look = ur.config_view(lambda: rec)
+    assert look(NOW) == claude_plan.EMPTY_VIEW          # no file: known
+    _write_config(tmp_path, NOW - 60)
+    assert look(NOW).cache_fetched_at == NOW - 60
+    # A read caught half done: parse says "try again".
+    real = claude_plan.parse
+    monkeypatch.setattr(claude_plan, "parse", lambda path, st=None: None)
+    assert look(NOW) is None
+    monkeypatch.setattr(claude_plan, "parse", real)
+    # A file over the reader's cap is not opened, and is not "consumer".
+    monkeypatch.setattr(claude_plan, "MAX_BYTES", 10)
+    assert look(NOW) is None
+    monkeypatch.setattr(claude_plan, "MAX_BYTES", 1 << 30)
+    # Parsed at every look: the look straight after a quick run sees it.
+    _write_config(tmp_path, NOW + 1)
+    assert look(NOW + 1).cache_fetched_at == NOW + 1
+
+
+def test_a_failed_config_read_never_asks_on_the_board(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+    assert k.a.due(CAPS) is True
+    k.view[0] = None
+    assert k.a.due(CAPS) is False
+
+
+def test_an_unreadable_setting_keeps_the_streak_held_here(tmp_path,
+                                                          monkeypatch):
+    # V11: enabled() None (config.json locked or half written) is not
+    # "off"; it once wiped the streak and a cost guard held only here.
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    ran = []
+    t = _Watch(tmp_path, monkeypatch, runner=lambda argv, **kw:
+               ran.append(1))
+    held = State(last_run_at=NOW - 7200, fails=4, failing_since=NOW - 9000,
+                 off_reason="cost")
+    t.w._mem = held
+    t.enabled[0] = None
+    t.w.tick_once()
+    assert t.w._mem == held and ran == []
+    t.enabled[0] = True
+    t.w.tick_once()
+    assert ran == []                     # the cost guard still holds
+
+
+def test_the_daemon_hands_the_watch_an_enabled_that_can_say_unknown(
+        monkeypatch, tmp_path):
+    from pc import claude_home
+    got = {}
+
+    class Capture(ur.RefreshWatch):
+        def __init__(self, *a, **kw):
+            got.update(kw)
+            super().__init__(*a, **kw)
+    monkeypatch.setattr(ur, "RefreshWatch", Capture)
+    _wire(monkeypatch, tmp_path, claude_home.NATIVE)
+    (tmp_path / ".blink" / "config.json").write_text("{not json")
+    assert got["enabled"]() is None
+
+
+def _clearing_runner(t, at, code):
+    """A run during which `blink config usage-refresh on` lands."""
+    def runner(argv, **kw):
+        _turn_on(t, at)
+        return subprocess.CompletedProcess(argv, code, b"", None)
+    return runner
+
+
+def test_a_clear_during_a_run_wins_over_its_streak(tmp_path, monkeypatch):
+    # V13: the run's verdict was recorded over the state from before it,
+    # which put the streak back and could turn it off again at the next
+    # failure, right after the person turned it on.
+    _write_config(tmp_path, NOW - 3600)
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    t = _Watch(tmp_path, monkeypatch)
+    t.w._runner = _clearing_runner(t, NOW + 10, 2)
+    save_state(str(t.blink), State(last_run_at=NOW - 7200, fails=9,
+                                   failing_since=NOW - ur.GIVE_UP_S + 30))
+    t.w.tick_once()
+    s = t.state()
+    assert s == State(last_run_at=NOW, cleared_at=NOW + 10)
+    assert t.w._mem == s
+
+
+def test_a_cost_during_a_clear_still_turns_it_off(tmp_path, monkeypatch):
+    from pc import user_config
+    _write_config(tmp_path, NOW - 3600)
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    t = _Watch(tmp_path, monkeypatch)
+    costly = json.loads(ZERO)
+    costly.update(num_turns=1)
+
+    def runner(argv, **kw):
+        _turn_on(t, NOW + 10)
+        return subprocess.CompletedProcess(argv, 0, json.dumps(
+            costly).encode(), None)
+    t.w._runner = runner
+    t.w.tick_once()
+    assert t.state().off_reason == "cost"
+    assert user_config.load(str(t.blink))[ur.SETTING] is False
 
 
 # --- asking on the board (Task 7) ------------------------------------------
@@ -893,12 +1046,16 @@ def test_a_bad_ask_record_is_a_fresh_one(tmp_path, ask):
 class _Asker:
     """A BoardAsk over tmp_path with every input a test can turn."""
 
-    def __init__(self, tmp_path, *, kind=None, idle_s=60.0, work=False,
-                 claude=True, clock=NOW):
+    def __init__(self, home, *, kind=None, idle_s=60.0, work=False,
+                 claude=True, clock=NOW, view=None):
+        """`home` is the caller's (tmp_path under the sandbox): .blink and
+        the stand-in claude are written there and nowhere else. `view`,
+        given, replaces the config look."""
         import dataclasses
 
         from pc import claude_home, claude_plan
-        self.blink = tmp_path / ".blink"
+        home = pathlib.Path(home)
+        self.blink = pathlib.Path(inside(home, home / ".blink"))
         self.blink.mkdir(exist_ok=True)
         self.clock = [clock]
         self.idle_s = [idle_s]
@@ -907,15 +1064,18 @@ class _Asker:
         rec = dataclasses.replace(claude_home.from_environ({}),
                                   kind=kind or claude_home.NATIVE)
         if claude:
-            b = pathlib.Path(os.environ["HOME"]) / ".local" / "bin"
+            b = pathlib.Path(inside(home, home / ".local" / "bin"))
             b.mkdir(parents=True, exist_ok=True)
             exe = b / ("claude.exe" if sys.platform == "win32" else "claude")
             exe.write_text("")
-        view = dataclasses.replace(claude_plan.EMPTY_VIEW, spend_seat=work)
+        if view is None:
+            view = dataclasses.replace(claude_plan.EMPTY_VIEW,
+                                       spend_seat=work)
+        self.view = [view]
 
         def look(now):
             self.views += 1
-            return view
+            return self.view[0]
 
         def idle():
             self.idle_asked += 1
@@ -935,15 +1095,39 @@ class _Asker:
 CAPS = frozenset({"svc", "ask"})
 
 
-def test_board_ask_due_and_spaced_a_day_when_sent(tmp_path, monkeypatch):
+def test_board_ask_due_and_spaced_a_day_when_answered(tmp_path,
+                                                      monkeypatch):
     monkeypatch.setenv("PATH", "")
     k = _Asker(tmp_path)
     assert k.a.due(CAPS) is True
     k.a.asked()
     # Sent, not counted: only an answer shows the person saw it.
-    assert k.ask() == AskState(0, NOW, False)
+    assert k.ask() == AskState(0, 0.0, False, sent_at=NOW)
+    assert k.a.due(CAPS) is False
+    k.clock[0] += 60
+    k.a.answer("later")
+    assert k.ask() == AskState(1, NOW + 60, False, sent_at=NOW)
+    k.clock[0] += ur.ASK_RETRY_S
     assert k.a.due(CAPS) is False                  # not again today
-    k.clock[0] += ASK_EVERY_S
+    k.clock[0] = NOW + 60 + ASK_EVERY_S
+    assert k.a.due(CAPS) is True
+
+
+def test_an_unanswered_ask_is_sent_again_an_hour_later(tmp_path,
+                                                      monkeypatch):
+    # V21 of the /code-review max: a dozing board drops the ask after ten
+    # minutes, and the daemon waited a day anyway, every day -- so the
+    # person the board ask is for was never asked. No answer: the next
+    # goes out an hour later, still only while someone is at the computer.
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+    k.a.asked()
+    k.clock[0] = NOW + ur.ASK_RETRY_S - 1
+    assert k.a.due(CAPS) is False
+    k.clock[0] = NOW + ur.ASK_RETRY_S
+    k.idle_s[0] = IDLE_LIMIT_S + 1
+    assert k.a.due(CAPS) is False                  # nobody there
+    k.idle_s[0] = 60.0
     assert k.a.due(CAPS) is True
 
 
@@ -1102,11 +1286,13 @@ def test_no_board_ask_under_a_scenario(monkeypatch, tmp_path):
 
 # --- final review, Important 1: turning it back on is a fresh start --------
 
-def _failing_watch(tmp_path, monkeypatch):
+def _failing_watch(home, monkeypatch):
     """A watch one failure from its day of failures, the setting on, and a
-    runner that always fails; returns (watch, runs)."""
+    runner that always fails; returns (watch, runs). Everything is written
+    under `home`, the caller's (tmp_path under the sandbox)."""
     from pc import user_config
-    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    tmp_path = pathlib.Path(inside(home, home))
+    _write_config(tmp_path, NOW - 3600)
     monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
     runs = []
     t = _Watch(tmp_path, monkeypatch, runner=lambda argv, **kw:
@@ -1221,7 +1407,12 @@ def test_clear_off_always_writes_a_stamp(tmp_path):
 
 
 @pytest.mark.parametrize("run", [{"cleared_at": "x"}, {"cleared_at": True},
-                                 {"missing": 1}])
+                                 {"missing": 1},
+                                 {"last_run_at": float("nan")},
+                                 {"last_run_at": float("inf")},
+                                 {"last_run_at": True},
+                                 {"failing_since": float("-inf")},
+                                 {"cleared_at": float("nan")}])
 def test_a_bad_new_field_is_a_fresh_state(tmp_path, run):
     with open(os.path.join(str(tmp_path), ur.STATE_FILE), "w",
               encoding="utf-8") as f:
@@ -1410,8 +1601,8 @@ def test_an_ask_never_answered_is_asked_again_daily_past_three(tmp_path,
     for _ in range(ASK_AT_MOST + 2):
         assert k.a.due(CAPS) is True
         k.a.asked()
-        assert k.a.due(CAPS) is False        # a day apart all the same
-        k.clock[0] += ASK_EVERY_S
+        assert k.a.due(CAPS) is False        # an hour apart
+        k.clock[0] += ur.ASK_RETRY_S
     assert k.ask().times == 0
 
 
@@ -1502,3 +1693,73 @@ def test_the_watch_hands_its_home_to_the_run(tmp_path, monkeypatch):
 
 def test_usage_refresh_does_not_import_ota():
     assert not hasattr(ur, "ota")
+
+
+# --- /code-review max of feat/usage-refresh --------------------------------
+
+def test_a_deeply_nested_state_file_is_a_fresh_state(tmp_path):
+    # V15: json raises RecursionError, not ValueError, for an array nested
+    # thousands deep; `blink status` and `config usage-refresh on` died.
+    home = str(tmp_path)
+    with open(os.path.join(home, ur.STATE_FILE), "w", encoding="utf-8") as f:
+        f.write("[" * 100000)
+    assert load_state(home) == State()
+    assert load_ask(home) == AskState()
+    assert ur.recorded_claude(home) is None
+    ur.clear_off(home, now=5.0)
+    assert load_state(home) == State(cleared_at=5.0)
+
+
+@pytest.mark.parametrize("ask", [{"last_at": float("nan")},
+                                 {"last_at": float("inf")},
+                                 {"sent_at": float("nan")},
+                                 {"sent_at": "x"}])
+def test_a_non_finite_ask_time_is_a_fresh_one(tmp_path, ask):
+    with open(os.path.join(str(tmp_path), ur.STATE_FILE), "w",
+              encoding="utf-8") as f:
+        json.dump({"ask": ask}, f)
+    assert load_ask(str(tmp_path)) == AskState()
+
+
+def test_clear_off_forgets_that_claude_was_missing(tmp_path):
+    home = str(tmp_path)
+    save_state(home, State(last_run_at=7.0, missing=True))
+    ur.clear_off(home, now=9.0)
+    assert load_state(home).missing is False
+
+
+def _project_with_claude(tmp_path, name):
+    proj = tmp_path / "project"
+    proj.mkdir()
+    p = proj / name
+    p.write_text("@echo off\n" if name.endswith(".cmd") else "#!/bin/sh\n")
+    p.chmod(0o755)
+    return proj
+
+
+@pytest.mark.parametrize("entry", ["", ".", "cwd"])
+def test_a_claude_in_the_current_folder_is_never_found(tmp_path, monkeypatch,
+                                                       entry):
+    # V18: shutil.which on Windows looks in the current folder first, so a
+    # project's claude.cmd was recorded by `blink config usage-refresh on`
+    # and run by the daemon. Never the current folder, however PATH names
+    # it.
+    proj = _project_with_claude(tmp_path, CLAUDE if not WIN else "claude.cmd")
+    monkeypatch.chdir(proj)
+    named = {"": str(tmp_path / "empty"), ".": ".", "cwd": str(proj)}[entry]
+    monkeypatch.setenv("PATH", named)
+    assert find_claude(str(tmp_path / "h")) is None
+
+
+def test_a_claude_cmd_in_the_current_folder_is_never_found_on_windows(
+        tmp_path, monkeypatch):
+    proj = _project_with_claude(tmp_path, "claude.cmd")
+    monkeypatch.chdir(proj)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert find_claude(str(tmp_path / "h")) is None
+    # The same file in a PATH folder that is not the current one is found.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(proj))
+    assert _same(find_claude(str(tmp_path / "h")), str(proj / "claude.CMD"))
