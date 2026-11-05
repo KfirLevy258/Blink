@@ -499,7 +499,7 @@ def test_a_paced_rise_is_written_at_exit(tmp_path):
     c.observe("a", 1.70, 110)
     tick.t += 5
     c.save()                                 # paced: not written
-    spend_count._flush_at_exit()
+    spend_count.flush_all()
     d = mk(tmp_path)
     d.bind("fp", 0)
     assert d.since(0) == 70
@@ -514,7 +514,7 @@ def test_the_exit_flush_writes_only_where_the_counter_wrote(tmp_path,
     monkeypatch.setenv("HOME", str(tmp_path))
     c = SpendCounter()
     c.observe("a", 1.00, 100)
-    spend_count._flush_at_exit()
+    spend_count.flush_all()
     assert not (tmp_path / ".blink").exists()
 
 
@@ -798,7 +798,7 @@ def _paced(tmp_path):
 
 def _restart(tmp_path):
     import spend_count
-    spend_count._flush_at_exit()
+    spend_count.flush_all()
     d = mk(tmp_path)
     d.bind("fp", 0)
     return d
@@ -884,7 +884,7 @@ def test_an_exit_inside_bind_does_not_save_a_torn_count(tmp_path):
     c._clear = boom
     with pytest.raises(SystemExit):
         c.bind("other", 0)
-    spend_count._flush_at_exit()
+    spend_count.flush_all()
     d = mk(tmp_path)
     d.bind("other", 0)
     assert d.since(0) == 0
@@ -933,3 +933,105 @@ def test_the_margin_and_the_fold_agree_on_a_file_this_build_writes(
 def SKEW():
     import spend_count
     return spend_count.SKEW_S
+
+
+# ------------------------------- review of the WSL work, 2026-11-05: D-1
+
+def test_a_counter_its_owner_dropped_is_still_flushed(tmp_path):
+    """The exit flush kept counters in a WeakSet. The daemon's only counter
+    is reachable from main()'s frame alone, and CPython frees that frame
+    (clearing the SIGTERM SystemExit and its traceback) before atexit runs:
+    the set was empty and the held-back rise was lost. The registry now
+    holds its counters strongly until close()."""
+    import gc
+    import spend_count
+    tick = Tick()
+    c = mk(tmp_path, clock=tick)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    c.save()
+    c.observe("a", 1.70, 110)
+    tick.t += 5
+    c.save()                                 # paced: not written
+    del c
+    gc.collect()
+    spend_count.flush_all()
+    d = mk(tmp_path)
+    d.bind("fp", 0)
+    assert d.since(0) == 70
+
+
+def test_a_closed_counter_is_flushed_and_let_go(tmp_path):
+    import spend_count
+    tick = Tick()
+    c = mk(tmp_path, clock=tick)
+    c.bind("fp", 0)
+    c.observe("a", 1.00, 100)
+    c.save()
+    c.observe("a", 1.70, 110)
+    tick.t += 5
+    c.close()
+    assert c not in spend_count._LIVE
+    d = mk(tmp_path)
+    d.bind("fp", 0)
+    assert d.since(0) == 70
+
+
+_DAEMON_LIKE = r"""
+import json, os, signal, sys, time
+import claude_usage_bridge as cub
+from pc import update
+
+HOME = os.environ["HOME"]
+blink = os.path.join(HOME, ".blink")
+os.makedirs(blink, exist_ok=True)
+with open(os.path.join(HOME, ".claude.json"), "w") as f:
+    json.dump({"oauthAccount": {"accountUuid": "acc-1",
+                                "organizationUuid": "org-1",
+                                "seatTier": "enterprise_usage_based"}}, f)
+payload = os.path.join(blink, "statusline.json")
+
+def render(cost, at):
+    with open(payload, "w") as f:
+        json.dump({"session_id": "s1", "cost": {"total_cost_usd": cost}}, f)
+    os.utime(payload, (at, at))
+
+def main():
+    # As claude_usage_bridge.main holds it: a local of one frame.
+    bus = cub.build_bus()
+    now = time.time()
+    render(1.00, now - 30)
+    bus.poll()                      # first sighting: written at once
+    render(1.70, now - 20)
+    bus.poll()                      # a rise: paced, held back
+    if sys.argv[1] == "sigterm":
+        cub.exit_on_sigterm()
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(5)
+    else:
+        update.restart_from_daemon(sys.executable)
+
+main()
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="SIGTERM and the self-update exit are POSIX here")
+@pytest.mark.parametrize("how", ["sigterm", "update"])
+def test_the_daemon_writes_a_held_back_rise_when_it_stops(tmp_path, how):
+    """The daemon's own objects, wired as main() wires them, stopped the two
+    ways a desk stops it: launchd/systemd's SIGTERM, and a self-update's
+    restart_from_daemon, which ends in os._exit and skips atexit. Both
+    lost the 70-cent rise the pacing held back (the reviewer's
+    daemon_like.py saved sessions {'s1': 100} and no rise)."""
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    env = dict(os.environ, HOME=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
+    run = subprocess.run([sys.executable, "-c", _DAEMON_LIKE, how],
+                         cwd=root, env=env, capture_output=True, timeout=60)
+    assert run.returncode == 0, run.stderr.decode(errors="replace")[-2000:]
+    with open(tmp_path / ".blink" / "spend-count.json") as f:
+        doc = json.load(f)
+    assert doc["sessions"]["s1"][0] == 170
+    assert [a[2] for a in doc["adds"]] == [70]

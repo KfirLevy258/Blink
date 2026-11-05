@@ -19,8 +19,8 @@ from serial.tools import list_ports
 
 from pc import ota as ota_mod
 from pc import (ingest, install_statusline, interval, logbook, protocol,
-                status_page, statusline_source, theme, theme_server, update,
-                usage_refresh, win_driver)
+                spend_count, status_page, statusline_source, theme,
+                theme_server, update, usage_refresh, win_driver)
 from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
@@ -890,7 +890,17 @@ def _self_update_tick(target):
 # that will not boot until somebody reflashes it by hand (review,
 # 2026-10-27). So inside no_exit_while() the handler only notes the signal,
 # and the exit happens the moment the guarded work returns.
+#
+# Either way the spend count's held-back rises are written first, before the
+# SystemExit unwinds main()'s frame and the counter with it: atexit came too
+# late for a counter only that frame held (the review of the WSL work,
+# 2026-11-05; spend_count.flush_all).
 _TERM = {"holding": None, "pending": False}
+
+
+def _exit_on_term():
+    spend_count.flush_all()
+    sys.exit(0)
 
 
 def _on_sigterm(signum, frame):
@@ -900,7 +910,7 @@ def _on_sigterm(signum, frame):
                   " finished", file=sys.stderr)
         _TERM["pending"] = True
         return
-    sys.exit(0)
+    _exit_on_term()
 
 
 def exit_on_sigterm():
@@ -919,7 +929,7 @@ def no_exit_while(what):
     finally:
         _TERM["holding"] = None
         if _TERM["pending"]:
-            sys.exit(0)
+            _exit_on_term()
 
 
 def main(argv=None):

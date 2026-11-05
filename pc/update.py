@@ -442,6 +442,12 @@ def restart_from_daemon(target):
                   file=sys.stderr)
             return                            # stay up rather than vanish
     print("[update] restarting into the new version", file=sys.stderr)
+    # os._exit skips atexit, and with it the spend count's exit flush: the
+    # rises its pacing held back were lost at every self-update (the review
+    # of the WSL work, 2026-11-05). Imported here, as the one caller that
+    # needs it, so importing update does not import the counter.
+    from pc import spend_count
+    spend_count.flush_all()
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(0)

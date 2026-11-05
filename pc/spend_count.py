@@ -110,7 +110,8 @@ all month and was rewritten on nearly every render. Now:
   had closed never does, so until the final review of 2026-11-04 (U12) a
   restart lost the last minute of a closed session's rises ($10.70 on the
   page fell to $10.20). An ordinary exit now writes whatever the pacing
-  held back (_flush_at_exit; the daemon's SIGTERM is an ordinary exit).
+  held back (flush_all: at exit, in the daemon's SIGTERM handler, and before
+  a self-update's restart).
   What a crash or a kill -9 loses is still at most the last minute of rises
   on sessions that do not render again. A session's first sighting and an
   emptied count (bind()) are written at once. A restart that missed the
@@ -127,7 +128,6 @@ import json
 import math
 import os
 import time
-import weakref
 
 # As a package import, like every other module under pc/. A bare
 # `import protocol` worked only where pc/ itself was on sys.path (its own
@@ -208,25 +208,32 @@ def _cents(x, ceiling=MAX_CENTS) -> bool:
     return _num(x) and 0 <= x <= ceiling
 
 
-# Every counter that has written its file, for the exit flush (U12 in the
-# final review of 2026-11-04). A WeakSet, so a counter dropped by its owner
-# (a test's, a bus replaced) is not kept alive by this, and registered with
-# atexit on the first one rather than at import: importing a module of ours
-# does nothing (CLAUDE.md).
-_WRITTEN = weakref.WeakSet()
+# Every counter that has written its file and not been closed, for the exit
+# flush (U12 in the final review of 2026-11-04). Held strongly. It was a
+# WeakSet, so that a counter dropped by its owner would not be kept alive,
+# and that emptied it at the one moment it is read: the daemon's counter is
+# reachable only from claude_usage_bridge.main()'s frame, and CPython frees
+# that frame -- clearing the SIGTERM's SystemExit and its traceback --
+# before atexit runs, so the flush found nothing and the held-back rise was
+# lost (the review of the WSL work, 2026-11-05, with the daemon's own
+# objects). An owner that drops a counter calls close(). Registered with
+# atexit on the first write rather than at import: importing a module of
+# ours does nothing (CLAUDE.md).
+_LIVE = set()
 _HOOKED = []
 
 
-def _flush_at_exit():
-    """Write what the pacing held back, at an ordinary exit.
+def flush_all():
+    """Write what the pacing held back, for every live counter.
 
-    The daemon's SIGTERM is an ordinary exit (claude_usage_bridge's
-    exit_on_sigterm), so this runs when launchd or systemd stops it. Each
-    counter writes to the file it last wrote and nowhere else: by exit the
-    test sandbox has handed HOME back, and resolving the default path again
-    then would name the real ~/.blink. A failure is ignored; there is no
-    later save to hand it to."""
-    for counter in list(_WRITTEN):
+    Called at an ordinary exit (atexit), from the daemon's SIGTERM handler
+    before its SystemExit unwinds anything (claude_usage_bridge), and by
+    update.restart_from_daemon before its os._exit, which skips atexit
+    altogether. Each counter writes to the file it last wrote and nowhere
+    else: by exit the test sandbox has handed HOME back, and resolving the
+    default path again then would name the real ~/.blink. A failure is
+    ignored; there is no later save to hand it to."""
+    for counter in list(_LIVE):
         try:
             counter._flush()
         except Exception:
@@ -530,8 +537,17 @@ class SpendCounter:
             return
         self._write(self._file(), tick)
 
+    def close(self) -> None:
+        """Write what is held back and leave the exit flush's registry.
+        For an owner done with this counter; one that never closes it is
+        flushed at exit."""
+        try:
+            self._flush()
+        finally:
+            _LIVE.discard(self)
+
     def _flush(self):
-        """The exit flush (_flush_at_exit): whatever is unwritten, to the
+        """The exit flush (flush_all): whatever is unwritten, to the
         file the last write went to, pacing and back-off aside. An exit
         can land in the middle of observe() or bind(); both are ordered so
         that what it leaves is safe to save (see observe)."""
@@ -566,7 +582,7 @@ class SpendCounter:
         self._saved_at = tick
         self._failed_at = None
         self._written_to = target
-        _WRITTEN.add(self)
+        _LIVE.add(self)
         if not _HOOKED:
             _HOOKED.append(True)
-            atexit.register(_flush_at_exit)
+            atexit.register(flush_all)
