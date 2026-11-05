@@ -12,9 +12,9 @@ rebuild one.
 
 `settings_path()` is `~/.claude/settings.json` whatever `CLAUDE_CONFIG_DIR`
 says, but Claude Code 2.1.316 reads its user settings from
-`$CLAUDE_CONFIG_DIR/settings.json` (not yet measured on a desk). On such a
-desk Blink's status line and hooks are installed where Claude Code never
-looks: no `statusline.json`, no Claude Code figures, no activity light and no
+`$CLAUDE_CONFIG_DIR/settings.json` (not yet measured on a desk). On a desk
+that sets CLAUDE_CONFIG_DIR, Blink's status line and hooks are installed
+where Claude Code never looks: no `statusline.json`, no Claude Code figures, no activity light and no
 status-line evidence for the Ultra verdict, while `blink status` says both are
 installed. Older than the branch. The fix has to agree with the service
 environment question below: the shell may set the variable that the login

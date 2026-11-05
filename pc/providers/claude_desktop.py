@@ -407,7 +407,7 @@ BURN_WINDOW_S = 3600.0
 #
 # Seen in Claude.app 1.37937.3 running, 2026-08-30 (checked again in
 # 1.40609.0 on 2026-08-31: the cadence had already changed once, see
-# BURN_WINDOW_S below -- which is why no interval here is load-bearing).
+# BURN_WINDOW_S above -- which is why no interval here is load-bearing).
 # Both intervals belong to an application we do not control -- if the rate
 # disappears again, measure the gaps in plan-usage-history.json before
 # touching anything else.

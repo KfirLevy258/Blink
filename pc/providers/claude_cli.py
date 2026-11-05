@@ -110,8 +110,9 @@ REPLY_MEMORY_LIMIT = 64
 # the earliest reset, prompt-cache expiry at about an hour -- not every few
 # seconds; API_TIMEOUT_MS bounds only the wait for headers, so a body can
 # stream for half an hour and more; and five_hour leaves the line by the
-# LOCAL clock (resets_at > Date.now()/1000), so on a desk whose clock runs
-# fast it goes before the window does.
+# LOCAL clock (it goes once its resets_at is behind the local time), so on
+# a desk whose clock runs fast it goes before the window does. Found for
+# 2.1.316, not yet measured on a desk.
 #
 # CHAIN_SPAN_S: replies with no five_hour, the first and the latest more than
 # a window and a quarter of an hour apart at the least.

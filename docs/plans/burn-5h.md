@@ -40,50 +40,52 @@ only when it has changed. Pro, Max 5x, any other plan, and a file missing,
 unreadable, corrupt or over 8 MB keep the sustained rule.
 
 That replaced, on 2026-11-01, two replies 25 minutes to 4 h 35 min apart,
-after a re-review found three things about Claude Code 2.1.316: the status line renders
-on events, not every few seconds; `API_TIMEOUT_MS` bounds only the wait for
-headers, so one stream across a reset can render weekly-only rises half an
-hour apart; and `five_hour` leaves the line by the local clock, so a desk
-running fast renders weekly-only replies at the end of every window. On Pro
-and Max a weekly-only reply happens only in those stretches: within S before
-a reset on a clock S fast, and the longest stream plus the half-hour
-baseline after it. The proof rests on the replies themselves, not on seeing
-the `five_hour` renders between them, which is why a poll gap costs the
-safety nothing.
-A chain inside one stretch spans less than 5 h 15 min, and the one-hour cap
+after a re-review found three things about Claude Code 2.1.316 (not yet
+measured on a desk): the status line renders on events, not every few
+seconds; `API_TIMEOUT_MS` bounds only the wait for headers, so one stream
+across a reset can render weekly-only rises half an hour apart; and
+`five_hour` leaves the line by the local clock, so a desk running fast
+renders weekly-only replies at the end of every window. On Pro and Max a
+weekly-only reply happens only in those stretches: within S before a reset
+on a clock S fast, and the longest stream plus the half-hour baseline after
+it. The proof rests on the replies themselves, not on seeing the `five_hour`
+renders between them, which is why a poll gap costs the safety nothing. A
+chain inside one stretch spans less than 5 h 15 min, and the one-hour cap
 keeps two stretches from joining. What is left marks a Pro or Max desk only
-with its clock fast by hours: by three and a half less its longest stream
-if its Claude Code use mid-window goes unseen (used only late in windows
-opened elsewhere, or the board unplugged whenever it is) and some reply's
-own render is written over before a poll, four less it if every reply's
-render is seen; four and three-quarters less it to span one stretch; five
-or more in any case. The cost is on Ultra where the plan cannot be read: a
-desk is marked after about 5 h 15 min of Claude Code use, later if it
-pauses for over an hour. Where it reads Ultra, the first reply marks it,
-and the price is an unverified Ultra account (temporary window) marked by
-a reply streaming across its reset until its next reply lifts it. The
-earlier Desktop rule checked only the later sample, and a window closing
-between two polls passed it. A single Desktop sample with no `fh` proved it
-until the owner's first decision of 2026-11-01: it had been measured on Ultra
-only, and a Pro or Max account idle for over five hours may write the same
-sample. The samples must be one poll apart, not five hours, because usage can
-land at the end of a window that then closes (`claude_desktop._no_window_rise`
-has the example). The measured owner desk's pair (`{fh: 1, sd: 23}` on 10-29,
-`{sd: 19}` on 10-31) is not Desktop proof under this rule; its Claude Code
-replies are. Proof of a window, which clears the mark: a status line with
-`five_hour`, dated when it was rendered, so any `five_hour` rendered after the
-mark lifts it, even an old terminal's repaint (the safe direction); a Desktop
-sample whose `fh` is a number; a Local Storage reading or reset stamp. The
-evidence kinds were renamed with the rules (`statusline_sustained`,
-`desktop_rise`; `statusline_ultra` is the fast path's own), so a verdict saved under the old ones is read as none and
-decided again. The newest evidence wins. With none either way there is no mark, so Pro and Max never see this
-view at a reset, a laptop asleep across one, or a fresh process. The verdict
-is persisted in `~/.blink/session-window.json`, so a restarted daemon shows
-the view at once and `blink status` agrees with the daemon. A Desktop-only
-Ultra desk gets the view too, from its history alone, once a rise is seen;
-its Code tab writes transcripts, and with none there is no burn line. On that page the usage
-frame carries `session_pct` -1. If a window comes back, the mark goes and the
-board goes back to the session gauge.
+with its clock fast by hours: by three and a half less its longest stream if
+its Claude Code use mid-window goes unseen (used only late in windows opened
+elsewhere, or the board unplugged whenever it is) and some reply's own
+render is written over before a poll, four less it if every reply's render
+is seen; four and three-quarters less it to span one stretch; five or more
+in any case. The cost is on Ultra where the plan cannot be read: a desk is
+marked after about 5 h 15 min of Claude Code use, later if it pauses for
+over an hour. Where it reads Ultra, the first reply marks it, and the price
+is an unverified Ultra account (temporary window) marked by a reply
+streaming across its reset until its next reply lifts it. The earlier
+Desktop rule checked only the later sample, and a window closing between two
+polls passed it. A single Desktop sample with no `fh` proved it until the
+owner's first decision of 2026-11-01: it had been measured on Ultra only,
+and a Pro or Max account idle for over five hours may write the same sample.
+The samples must be one poll apart, not five hours, because usage can land
+at the end of a window that then closes (`claude_desktop._no_window_rise`
+has the example). The measured owner desk's pair (`{fh: 1, sd: 23}` on
+10-29, `{sd: 19}` on 10-31) is not Desktop proof under this rule; its Claude
+Code replies are. Proof of a window, which clears the mark: a status line
+with `five_hour`, dated when it was rendered, so any `five_hour` rendered
+after the mark lifts it, even an old terminal's repaint (the safe
+direction); a Desktop sample whose `fh` is a number; a Local Storage reading
+or reset stamp. The evidence kinds were renamed with the rules
+(`statusline_sustained`, `desktop_rise`; `statusline_ultra` is the fast
+path's own), so a verdict saved under the old ones is read as none and
+decided again. The newest evidence wins. With none either way there is no
+mark, so Pro and Max never see this view at a reset, a laptop asleep across
+one, or a fresh process. The verdict is persisted in
+`~/.blink/session-window.json`, so a restarted daemon shows the view at once
+and `blink status` agrees with the daemon. A Desktop-only Ultra desk gets
+the view too, from its history alone, once a rise is seen; its Code tab
+writes transcripts, and with none there is no burn line. On that page the
+usage frame carries `session_pct` -1. If a window comes back, the mark goes
+and the board goes back to the session gauge.
 
 ## What it measures
 

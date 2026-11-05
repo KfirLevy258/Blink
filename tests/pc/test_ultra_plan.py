@@ -445,9 +445,10 @@ def test_the_file_is_beside_the_config_folder_by_default(tmp_path):
 
 
 def test_claude_config_dir_moves_the_file(tmp_path, monkeypatch):
-    """Claude Code 2.1.316: join(CLAUDE_CONFIG_DIR || homedir(),
-    ".claude.json"). An Ultra file there marks; a Pro file in the home
-    folder, which Claude Code is not using, does not get a say."""
+    """Claude Code 2.1.316 puts .claude.json in CLAUDE_CONFIG_DIR, or in
+    the home folder when the variable is unset. An Ultra file there marks;
+    a Pro file in the home folder, which Claude Code is not using, does not
+    get a say."""
     cfg = str(tmp_path / "work-config")
     env = {"CLAUDE_CONFIG_DIR": cfg}
     assert claude_plan.config_path(env) == os.path.join(cfg, ".claude.json")

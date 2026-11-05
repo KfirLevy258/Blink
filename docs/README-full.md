@@ -6,7 +6,7 @@
 Your 5-hour session and 7-day week, as two live dials you can glance at all day.
 
 <p>
-  <a href="https://github.com/KfirLevy258/Blink/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/KfirLevy258/Blink?style=flat-square&labelColor=171B22&color=D97757&label=release"></a>
+  <a href="https://github.com/KfirLevy258/Blink/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/KfirLevy258/Blink?style=flat-square&labelColor=171B22&color=E8E8E8&label=release"></a>
   <img src="https://img.shields.io/badge/board-ESP32%20%C2%B7%20CYD-8A8F98?style=flat-square&labelColor=171B22">
   <img src="https://img.shields.io/badge/RTOS-Zephyr-6FBF8B?style=flat-square&labelColor=171B22">
   <img src="https://img.shields.io/badge/updates-over--the--air-E8A05C?style=flat-square&labelColor=171B22">

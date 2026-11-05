@@ -10,13 +10,13 @@ at `--%` for most of a working day. Knowing the plan rules those Pro and Max
 cases out at the source: on a plan that is not Ultra, the fast path is never
 taken and the sustained rule is all there is.
 
-WHERE. Claude Code's rule, as of 2.1.316 (2026-11-01): a legacy
-`.config.json` in the config directory --
+WHERE. Claude Code's rule, in 2.1.316 (checked 2026-11-01, not yet
+measured on a desk): a legacy `.config.json` in the config directory --
 $CLAUDE_CONFIG_DIR when that is set, else ~/.claude -- wins when it is a
 regular file and not empty; otherwise the file is .claude.json in
 $CLAUDE_CONFIG_DIR, or in the home folder when the variable is unset. Not
 ~/.claude/.claude.json: with the variable unset the config directory and
-.claude.json sit side by side. Current releases are not known to create a
+.claude.json sit side by side. 2.1.316 is not known to create a
 non-empty .config.json, but a desk that kept one from an old release is read
 there, as Claude Code reads it. Resolved when called, never at import
 (tests/test_sandbox.py fails on the other shape), and like

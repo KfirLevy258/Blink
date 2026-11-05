@@ -1946,10 +1946,11 @@ def test_a_cost_too_big_for_a_float_is_no_cost(tmp_path):
 # --- the re-review of 2026-11-01 ---------------------------------------------
 #
 # A second /code-review max, of 592efa7...feat/ultra-burn, found the
-# two-reply proof unsound. For Claude Code 2.1.316:
-# the status line renders on events, not every few seconds; API_TIMEOUT_MS
-# bounds only the wait for headers, so a body streams for half an hour and
-# more; five_hour leaves the line by the LOCAL clock. The proof is now
+# two-reply proof unsound. For Claude Code 2.1.316 (not yet measured on a
+# desk): the status line renders on events, not every few seconds;
+# API_TIMEOUT_MS bounds only the wait for headers, so a body streams for
+# half an hour and more; five_hour leaves the line by the LOCAL clock. The
+# proof is now
 # sustained absence (claude_cli._reply_without_window). The desks below are
 # simulated from those three facts, on generated status lines.
 
