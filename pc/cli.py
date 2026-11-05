@@ -540,14 +540,20 @@ def desktop_app_installed() -> bool:
     PR #3, 2026-11-05).
     """
     from pc import desktop_idb, desktop_local_storage
-    try:
-        # The "Local Storage" and "IndexedDB" folders, one above each
-        # leveldb store: the Windows measurement saw the folders, not what
-        # was inside them.
-        return any(os.path.isdir(os.path.dirname(path)) for path in (
-            desktop_local_storage.store_path(), desktop_idb.store_path()))
-    except Exception:
-        return False
+    # The "Local Storage" and "IndexedDB" folders, one above each leveldb
+    # store: the Windows measurement saw the folders, not what was inside
+    # them. Each looked up on its own: the pair used to be built in one
+    # tuple inside one try, so a lookup that raised for IndexedDB threw
+    # away Local Storage's evidence too and printed "not installed"
+    # (review of PR #3, 2026-11-06).
+    for store_path in (desktop_local_storage.store_path,
+                       desktop_idb.store_path):
+        try:
+            if os.path.isdir(os.path.dirname(store_path())):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def desktop_staleness_note(age_s):
@@ -3944,8 +3950,7 @@ def cmd_status(args) -> int:
     # row named (pc/desktop_paths: status holds one answer so its lines
     # cannot contradict each other).
     from pc import desktop_paths
-    held = desk.desktop_paths if desk is not None else None
-    with desktop_paths.one_answer(held):
+    with desktop_paths.one_answer(desk.desktop_paths):
         if getattr(args, "wire", False):
             # The Session rows come out of the same poll as the wire line.
             _wire_line()
@@ -4328,10 +4333,11 @@ def _source_lines_desktop(desk, folder, now):
         _print_other_places_looked(folder)
         if folder.dangling:
             # The app left a note saying where its data went, and that
-            # folder is gone. The answer is then whichever other folder
-            # holds the newest cache (Roaming, or a Store package folder,
-            # which the lines below name); this line is what a Store-build
-            # report needs to say why the marker was not followed.
+            # folder is gone. No folder holds a cache here (a cache always
+            # wins, and this branch is "none found"), so the answer is the
+            # folder whose app files are newest, or Roaming; the lines above
+            # list every place tried. This line is what a Store-build report
+            # needs to say why the marker was not followed.
             print("            Store build marker found but its folder"
                   " is gone")
     if folder.moved:
@@ -4355,8 +4361,21 @@ def _source_lines_desktop(desk, folder, now):
         # Folders with no cache are not here: they are only places looked
         # at (_print_other_places_looked).
         print(f"            other copy not read: {older}")
+    for newer in folder.newer_without_cache:
+        # The cache read is older than app files elsewhere: a Store build
+        # that is running but has not written its cache yet, or never does.
+        # Reading the old cache is the rule; without this line the panel
+        # just stops moving and the report says nothing about why.
+        print(f"            newer app files, no usage cache yet: {newer}")
+    for refused in folder.unreadable:
+        # There, and refused (a permission error, a broken junction): it
+        # ranked on what could be read, so a stale folder may have won.
+        # Said apart from "looked at", which means looked and found nothing.
+        print(f"            could not be read: {refused}")
     if folder.resolve_failed:
-        print("            folder lookup failed, Roaming used as a fallback")
+        why = f" ({folder.error})" if folder.error else ""
+        print(f"            folder lookup failed{why}, Roaming used as a"
+              f" fallback")
 
 
 def _print_other_places_looked(folder):
@@ -4382,7 +4401,10 @@ def _print_other_places_looked(folder):
             continue
         seen.add(key)
         print(f"            also looked at {os.path.join(where, cache)}")
-    if folder.packages_root and not folder.packages:
+    if (folder.packages_root and not folder.packages
+            and folder.packages_root not in folder.unreadable):
+        # A Packages folder that could not be listed is named on its own
+        # line ("could not be read") and is not "no Store package folder".
         print(f"            no Store package folder under"
               f" {folder.packages_root} (looked for Claude_*)")
 

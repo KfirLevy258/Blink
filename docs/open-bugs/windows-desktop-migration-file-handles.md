@@ -2,7 +2,8 @@
 
 **Status:** OPEN, measured 2026-11-05 on the Windows 11 ARM VM. Not a failure
 we have seen on a desk: the exposure is real but tiny, and nothing here is
-fixed. Raised by the PR 3 review (finding 12).
+fixed. Raised by the PR 3 review, as the finding that the daemon's reads
+may block Desktop's folder move.
 
 ## Why it matters now
 
@@ -79,7 +80,7 @@ is.
 
 ## Cheap mitigations
 
-1. Do nothing. The window is about 0.01 percent per read.
+1. Do nothing. A handle is open about 0.01 percent of the time.
 2. Skip the Store package folder while the migration is running, for example
    while the newest file in it was written a few seconds ago. This removes the
    overlap with the 11 s migration rather than shrinking it, and needs no

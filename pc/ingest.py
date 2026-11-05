@@ -142,6 +142,9 @@ class IngestionBus:
         # a key here because self._providers holds every provider for the life
         # of the bus, so no id can be recycled underneath us.
         self._broken = {}
+        # (source, error) of the Desktop folder answer last logged; see
+        # _note_desktop_folder.
+        self._desktop_folder = None
         # (label, n) for the frame the last poll() chose. Recorded there
         # rather than recomputed here, so session_pair() answers for the same
         # poll the board's usage message came from -- polling the providers a
@@ -272,8 +275,34 @@ class IngestionBus:
         # One Desktop data folder for the whole poll. Four readers here ask
         # for it, every 2 s on the serial thread; held, they resolve it once
         # and cannot split across two folders mid-poll. See pc/desktop_paths.
-        with desktop_paths.one_answer():
+        with desktop_paths.one_answer() as folder:
+            self._note_desktop_folder(folder)
             return self._collect_frames()
+
+    def _note_desktop_folder(self, folder):
+        """Log which Desktop data folder is read, once per change.
+
+        A resolver failure falls back to Roaming every poll, and Roaming may
+        hold an old exe-build cache the panel then shows as current; before
+        this, only `blink status` knew, and the log customers send said
+        nothing (review of PR #3, 2026-11-06). Source label and exception
+        class only, never a path: a path carries the account name. Logged on
+        change, like a provider breaking, so a steady desk logs it once. The
+        off-Windows "default" answer is the only one there is and says
+        nothing, so it is not logged.
+        """
+        key = (folder.source, folder.error)
+        if key == self._desktop_folder:
+            return
+        first = self._desktop_folder is None
+        self._desktop_folder = key
+        if folder.resolve_failed:
+            print(f"[ingest] Desktop folder lookup failed"
+                  f" ({folder.error or 'error'}); reading Roaming",
+                  file=sys.stderr)
+        elif not (first and folder.source == desktop_paths.SOURCE_DEFAULT):
+            print(f"[ingest] Desktop data folder: {folder.source}",
+                  file=sys.stderr)
 
     def _collect_frames(self):
         """poll_frames()'s body, run under one Desktop folder answer."""

@@ -884,27 +884,27 @@ def test_a_usage_cache_that_is_a_folder_is_not_data(win, tmp_path):
 # "M", "A" or "B".
 
 ROWS = [
-    # id,                          R,    M,    A,    B,    want, (unused: where the marker sits)
-    ("package alone",              None, None, 5,    None, "A",  "A"),
-    ("roaming alone",              5,    None, None, None, "R",  "R"),
-    ("nothing at all",             None, None, None, None, "R",  "R"),
-    ("package fresher than R",     1,    None, 2,    None, "A",  "A"),
-    ("package stale beside R",     2,    None, 1,    None, "R",  "R"),
-    ("package ties R",             3,    None, 3,    None, "A",  "A"),
-    ("two packages, B fresher",    None, None, 1,    2,    "B",  "B"),
-    ("two packages, A fresher",    None, None, 2,    1,    "A",  "A"),
-    ("two packages tie",           None, None, 2,    2,    "B",  "B"),
-    ("M fresher than package",     None, 2,    1,    None, "M",  "M"),
-    ("package fresher than M",     None, 1,    2,    None, "A",  "A"),
-    ("M ties package",             None, 2,    2,    None, "M",  "M"),
-    ("M stale, R fresher",         3,    1,    None, None, "R",  "R"),
-    ("M fresh, R stale",           1,    3,    None, None, "M",  "M"),
-    ("M ties R",                   2,    2,    None, None, "M",  "M"),
-    ("R freshest of all three",    9,    2,    3,    None, "R",  "R"),
-    ("M freshest of all three",    1,    9,    3,    None, "M",  "M"),
-    ("package freshest of three",  1,    2,    9,    None, "A",  "A"),
-    ("R ties the best package",    4,    2,    4,    None, "A",  "A"),
-    ("B beats A beats M beats R",  1,    2,    3,    4,    "B",  "B"),
+    # id,                          R,    M,    A,    B,    want
+    ("package alone",              None, None, 5,    None, "A"),
+    ("roaming alone",              5,    None, None, None, "R"),
+    ("nothing at all",             None, None, None, None, "R"),
+    ("package fresher than R",     1,    None, 2,    None, "A"),
+    ("package stale beside R",     2,    None, 1,    None, "R"),
+    ("package ties R",             3,    None, 3,    None, "A"),
+    ("two packages, B fresher",    None, None, 1,    2,    "B"),
+    ("two packages, A fresher",    None, None, 2,    1,    "A"),
+    ("two packages tie",           None, None, 2,    2,    "B"),
+    ("M fresher than package",     None, 2,    1,    None, "M"),
+    ("package fresher than M",     None, 1,    2,    None, "A"),
+    ("M ties package",             None, 2,    2,    None, "M"),
+    ("M stale, R fresher",         3,    1,    None, None, "R"),
+    ("M fresh, R stale",           1,    3,    None, None, "M"),
+    ("M ties R",                   2,    2,    None, None, "M"),
+    ("R freshest of all three",    9,    2,    3,    None, "R"),
+    ("M freshest of all three",    1,    9,    3,    None, "M"),
+    ("package freshest of three",  1,    2,    9,    None, "A"),
+    ("R ties the best package",    4,    2,    4,    None, "A"),
+    ("B beats A beats M beats R",  1,    2,    3,    4,    "B"),
 ]
 
 
@@ -930,7 +930,7 @@ def _expected(want, home):
 
 @pytest.mark.parametrize("row", ROWS, ids=[r[0] for r in ROWS])
 def test_the_freshest_candidate_wins(win, tmp_path, row):
-    _, r, m, a, b, want, _ = row
+    _, r, m, a, b, want = row
     _scene(tmp_path, r, m, a, b)
     assert dp.windows_data_dir() == _expected(want, tmp_path)
 
@@ -939,7 +939,7 @@ def test_the_freshest_candidate_wins(win, tmp_path, row):
 def test_the_same_contest_with_the_marker_in_the_package(win, tmp_path, row):
     """A marker may sit in the package's Roaming instead (Mor Gal's layout
     had it in both). Where it sits changes nothing: the same folder wins."""
-    _, r, m, a, b, want, _ = row
+    _, r, m, a, b, want = row
     _scene(tmp_path, r, m, a, b, marker_in="package")
     assert dp.windows_data_dir() == _expected(want, tmp_path)
 
@@ -1518,7 +1518,8 @@ def test_status_says_when_the_folder_lookup_failed(win, tmp_path, capsys,
     monkeypatch.setattr(dp, "_packages", boom)
     assert dp.resolve().resolve_failed
     row = _desktop_row(capsys)
-    assert "            folder lookup failed, Roaming used as a fallback" in row
+    assert ("            folder lookup failed (RuntimeError), Roaming used"
+            " as a fallback") in row
     assert not any("no Store package folder" in l or "also looked" in l
                    for l in row)
 
@@ -1746,7 +1747,7 @@ def test_a_symlink_is_not_a_file_write(win, tmp_path):
                      9_000_000)
     ls = os.path.join(folder, *dp.LOCAL_STORAGE_LEAF)
     os.symlink(outside, inside(tmp_path, os.path.join(ls, "link.log")))
-    assert dp._newest_file(ls) == 1_000_000
+    assert dp._newest_file(ls) == (1_000_000, False)
 
 
 def test_a_pin_inside_an_outer_hold_is_ignored(win, tmp_path):
@@ -1757,3 +1758,202 @@ def test_a_pin_inside_an_outer_hold_is_ignored(win, tmp_path):
         with dp.one_answer(pinned) as got:
             assert got is outer and got is not pinned
         assert dp.windows_data_dir()[0] == _roaming(tmp_path)
+
+
+# --- review of PR #3, 2026-11-06: failures said, not swallowed ---------------
+
+def _refuse(monkeypatch, name, target):
+    """Make os.<name>(target) raise PermissionError, everything else real.
+    A permission error simulated rather than made with chmod: root and
+    Windows ACLs both ignore a mode bit, and the test must mean the same
+    everywhere."""
+    real = getattr(os, name)
+
+    def refusing(path, *a, **k):
+        if os.fspath(path) == target:
+            raise PermissionError(13, "refused")
+        return real(path, *a, **k)
+    monkeypatch.setattr(os, name, refusing)
+
+
+def test_a_failed_lookup_carries_the_exception_class(win, tmp_path,
+                                                     monkeypatch):
+    def broken():
+        raise TypeError("C:\\Users\\someone\\secret")
+    monkeypatch.setattr(dp, "_resolve_windows", broken)
+    answer = dp.resolve()
+    assert answer.resolve_failed and answer.source == "roaming"
+    assert answer.error == "TypeError"
+
+
+def test_the_daemon_logs_a_failed_lookup_once_without_a_path(
+        win, tmp_path, monkeypatch, capsys):
+    """The fallback repeats every poll; the log says so once, by class name.
+    The exception's message holds a path, and a path holds the account
+    name, so it must not reach the log."""
+    from pc import ingest
+
+    def broken():
+        raise TypeError("C:\\Users\\someone\\secret")
+    monkeypatch.setattr(dp, "_resolve_windows", broken)
+    bus = ingest.IngestionBus(providers=[], now=lambda: 1_000_000)
+    bus.poll()
+    bus.poll()
+    err = capsys.readouterr().err
+    assert err.count("Desktop folder lookup failed (TypeError)") == 1
+    assert "someone" not in err and "secret" not in err
+
+
+def test_the_daemon_logs_the_folder_source_when_it_changes(
+        win, tmp_path, capsys):
+    from pc import ingest
+    bus = ingest.IngestionBus(providers=[], now=lambda: 1_000_000)
+    bus.poll()
+    assert capsys.readouterr().err.count("Desktop data folder: roaming") == 1
+    bus.poll()
+    assert capsys.readouterr().err == ""
+    _cache(tmp_path, _pkg_roaming(tmp_path))
+    bus.poll()
+    err = capsys.readouterr().err
+    assert f"Desktop data folder: {PKG_SOURCE_A}" in err
+    assert str(tmp_path) not in err
+
+
+def test_off_windows_the_one_folder_is_not_logged(tmp_path, capsys):
+    from pc import ingest
+    bus = ingest.IngestionBus(providers=[], now=lambda: 1_000_000)
+    bus.poll()
+    assert capsys.readouterr().err == ""
+
+
+def test_a_refused_cache_is_unreadable_not_absent(win, tmp_path,
+                                                  monkeypatch):
+    """isfile() said False for a cache it was refused, so the live package
+    folder dropped to "no cache" and an older Roaming cache won with no
+    trace. It may still lose, but status now names it."""
+    _cache(tmp_path, _roaming(tmp_path), mtime=1_000_000)
+    live = _pkg_roaming(tmp_path)
+    _cache(tmp_path, live, mtime=2_000_000)
+    _refuse(monkeypatch, "stat",
+            os.path.join(live, "plan-usage-history.json"))
+    answer = dp.resolve()
+    assert answer.path == _roaming(tmp_path)
+    assert live in answer.unreadable
+
+
+def test_a_refused_leveldb_listing_is_unreadable(win, tmp_path, monkeypatch):
+    folder = _pkg_roaming(tmp_path)
+    ls = os.path.join(folder, *dp.LOCAL_STORAGE_LEAF)
+    _ldb(tmp_path, folder, "ls", mtime=1_000_000)
+    _refuse(monkeypatch, "scandir", ls)
+    assert dp._newest_file(ls) == (float("-inf"), True)
+    assert folder in dp.resolve().unreadable
+
+
+def test_an_absent_folder_is_not_unreadable(win, tmp_path):
+    missing = os.path.join(str(tmp_path), "nowhere")
+    assert dp._newest_file(missing) == (float("-inf"), False)
+    assert not dp._evidence(missing).unreadable
+    assert dp.resolve().unreadable == ()
+
+
+def test_a_file_gone_between_listing_and_stat_is_skipped(tmp_path,
+                                                         monkeypatch):
+    """A leveldb compaction deletes files all the time; one that goes
+    between the listing and its stat must not cost the rest of the folder
+    its evidence."""
+    folder = str(tmp_path / "ldb")
+    kept = _touch(tmp_path, os.path.join(folder, "000005.log"), 2_000_000)
+
+    class Gone:
+        name = "000004.log"
+
+        def is_file(self, follow_symlinks=True):
+            return True
+
+        def stat(self, follow_symlinks=True):
+            raise FileNotFoundError(2, "gone")
+
+    real = os.scandir
+
+    class Listing:
+        def __init__(self, path):
+            self._it = real(path)
+
+        def __enter__(self):
+            return iter([Gone()] + list(self._it))
+
+        def __exit__(self, *exc):
+            self._it.close()
+
+    monkeypatch.setattr(os, "scandir", Listing)
+    assert dp._newest_file(folder) == (os.path.getmtime(kept), False)
+
+
+def test_an_unlistable_packages_folder_is_not_called_absent(
+        win, tmp_path, monkeypatch, capsys):
+    root = _mkdir(tmp_path, os.path.join(_local(tmp_path), "Packages"))
+    _refuse(monkeypatch, "listdir", root)
+    answer = dp.resolve()
+    assert answer.packages == () and root in answer.unreadable
+    row = _desktop_row(capsys)
+    assert f"            could not be read: {root}" in row
+    assert not any("no Store package folder" in l for l in row)
+
+
+def test_a_missing_packages_folder_is_still_said_plainly(win, tmp_path,
+                                                         capsys):
+    row = _desktop_row(capsys)
+    assert any("no Store package folder under" in l for l in row)
+    assert not any("could not be read" in l for l in row)
+
+
+def test_status_names_a_newer_folder_that_has_no_cache_yet(win, tmp_path,
+                                                           capsys):
+    """Roaming's old exe-build cache is read over a Store folder with newer
+    app files and no cache: the rule. Status says so, or a panel that never
+    moves has no visible reason."""
+    _cache(tmp_path, _roaming(tmp_path), mtime=1_000_000)
+    store = _pkg_roaming(tmp_path)
+    _ldb(tmp_path, store, "ls", mtime=2_000_000)
+    answer = dp.resolve()
+    assert answer.path == _roaming(tmp_path)
+    assert answer.newer_without_cache == (store,)
+    row = _desktop_row(capsys)
+    assert f"            newer app files, no usage cache yet: {store}" in row
+
+
+def test_an_older_folder_without_a_cache_is_not_called_newer(win, tmp_path):
+    _cache(tmp_path, _roaming(tmp_path), mtime=2_000_000)
+    _ldb(tmp_path, _pkg_roaming(tmp_path), "ls", mtime=1_000_000)
+    assert dp.resolve().newer_without_cache == ()
+
+
+def test_one_failed_store_lookup_does_not_hide_the_other(win, tmp_path,
+                                                         monkeypatch):
+    """Both paths used to be built in one tuple inside one try: an IndexedDB
+    lookup that raised threw Local Storage's evidence away with it."""
+    _mkdir(tmp_path, os.path.join(_roaming(tmp_path), "Local Storage"))
+
+    def broken():
+        raise OSError("x")
+    monkeypatch.setattr(desktop_idb, "store_path", broken)
+    assert cli.desktop_app_installed()
+    monkeypatch.setattr(desktop_local_storage, "store_path", broken)
+    assert not cli.desktop_app_installed()
+
+
+def test_a_marker_name_breaks_a_tie_before_the_path(win, tmp_path):
+    """Two marker targets with equal caches. OTHER sorts first by name but
+    sits under the package's virtualised Local, which sorts after the real
+    Claude-Data by path, so only the name tie-break picks OTHER."""
+    _marker(tmp_path, _roaming(tmp_path), NAME)
+    _marker(tmp_path, _roaming(tmp_path), OTHER)
+    real = _target(tmp_path, NAME)
+    virt = os.path.join(_local(tmp_path), "Packages", PKG_A, "LocalCache",
+                        "Local", "Claude-Data", OTHER)
+    _mkdir(tmp_path, _pkg_roaming(tmp_path))
+    _cache(tmp_path, real, mtime=1_000_000)
+    _cache(tmp_path, virt, mtime=1_000_000)
+    assert sorted([real, virt]) == [real, virt]
+    assert dp.windows_data_dir() == (virt, "marker:" + OTHER)

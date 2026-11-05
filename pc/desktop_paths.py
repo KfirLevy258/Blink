@@ -87,11 +87,14 @@ The rules:
     signed-out desk): Roaming is read until the Store folder writes its own
     cache. Chosen, not missed: a cache is the one thing the readers need,
     a folder that has none cannot answer them, and a signed-in app writes
-    its cache within minutes. Main ranked that target on its Local Storage
-    directory mtime, which a cleanup moves. Among folders with the cache the newest cache_mtime
-    wins. Among folders without, the newest other_mtime wins; that is the
-    "installed, never signed in" desk, whose Local Storage is live and which
-    has no cache yet.
+    its cache within minutes. Before PR #3 the resolver ranked that target
+    by its Local Storage directory's mtime, which a cleanup moves. Among
+    folders with the cache the newest cache_mtime wins. Among folders
+    without, the newest other_mtime wins; that is the "installed, never
+    signed in" desk, whose Local Storage is live and which has no cache yet.
+    When a cache wins over a folder whose app files are newer than that
+    cache, `blink status` names the newer folder (Answer.newer_without_cache)
+    so a reading that never moves has a visible reason.
   - A folder with no evidence at all never beats one with some. The weakest
     evidence is an empty Local Storage or IndexedDB folder: the app's folder,
     nothing written yet. A package folder with not even that (the Store
@@ -107,8 +110,15 @@ The rules:
     a marker named a folder that was gone (`dangling`).
   - There is no special case for a package folder that carries a marker,
     and no notion of a "live" target. A leftover copy keeps the cache it
-    had, which is older than the one in the live target, and a cleanup that
-    touches its directories changes nothing the ranking reads.
+    had, which is older than the one in the folder the app now writes, and
+    a cleanup that touches its directories changes nothing the ranking
+    reads.
+  - A folder that exists but cannot be read (a permission error, a broken
+    junction) ranks on what could be read of it, which may be nothing, so
+    it can lose to an older folder. It is never silently the same as an
+    absent one: Answer.unreadable names it, and so does the Packages folder
+    when it cannot be listed, so `blink status` does not say "no Store
+    package folder" about a folder it was refused.
   - A folder that holds a cache and lost is not read, and `blink status`
     says so by path (Answer.not_read). Folders without a cache are only
     listed as places looked at.
@@ -125,7 +135,10 @@ The rules:
 
 Everything resolves when called. Nothing touches home at import
 (tests/test_sandbox.py enforces that), and the resolver never raises into
-the daemon: any failure falls back to Roaming.
+the daemon: any failure falls back to Roaming, with the exception's class
+in Answer.error, which pc/ingest logs once when the answer changes so a
+fallback that repeats every poll is not invisible in the log customers
+send.
 
 What it costs, and why one_answer() exists. The daemon polls every 2 s
 (claude_usage_bridge.FAST_POLL_INTERVAL_S), on the thread that reads the
@@ -134,8 +147,10 @@ Desktop cache, Local Storage, the weekly history and the anchor seeders. A
 resolve is a listdir of %APPDATA%\\Claude, one glob of
 %LOCALAPPDATA%\\Packages\\Claude_*, a listdir of each package's Roaming, a
 few stats per candidate folder, and, for a folder without the cache, a
-listing of its two leveldb folders. Measured 2026-10-30 on macOS APFS, warm, against a synthetic
-profile with 400 Packages entries in the Store layout: 0.39 ms per resolve,
+listing of its two leveldb folders. Measured 2026-10-30 on macOS APFS,
+warm, before the leveldb listing was added (its cost is below), against a
+synthetic profile with 400 Packages entries in the Store layout: 0.39 ms
+per resolve,
 1.6 ms a poll, while the virtualised-Local glob still ran once per marker
 name; 0.20 ms per resolve with one Packages glob, and one resolve a poll.
 NTFS with Defender is unmeasured and will be several times that. So
@@ -158,6 +173,7 @@ Defender is still unmeasured.
 import contextlib
 import glob
 import os
+import stat
 import sys
 import threading
 from typing import NamedTuple
@@ -315,18 +331,30 @@ class Evidence(NamedTuple):
         always -inf when has_cache: those folders are then not listed).
     skeleton: a Local Storage or IndexedDB folder exists, empty or not: the
         app's own folder, nothing written yet.
+    unreadable: the cache or a leveldb folder exists but stat or listing it
+        failed with something other than "not there" (a permission error, a
+        broken junction), so the evidence above may be short.
     """
     has_cache: bool
     cache_mtime: float
     other_mtime: float
     skeleton: bool
+    unreadable: bool = False
+
+
+# "Not there" errors: absence, the normal state, and not worth a word.
+# Anything else from a stat or a listing (PermissionError above all) means
+# the folder is there and refused us, which status has to say.
+_ABSENT = (FileNotFoundError, NotADirectoryError)
 
 
 def _newest_file(folder):
-    """The newest mtime among the FILES directly in `folder`, -inf when
-    there are none. Names and stats only: a file is never opened, and a
-    directory entry is never counted, because a directory's mtime moves with
-    every create and delete under it and says nothing of the app writing."""
+    """(mtime, unreadable): the newest mtime among the FILES directly in
+    `folder`, -inf when there are none, and whether the folder exists but
+    could not be listed. Names and stats only: a file is never opened, and
+    a directory entry is never counted, because a directory's mtime moves
+    with every create and delete under it and says nothing of the app
+    writing."""
     best = float("-inf")
     try:
         with os.scandir(folder) as it:
@@ -336,21 +364,35 @@ def _newest_file(folder):
                         best = max(best, entry.stat(
                             follow_symlinks=False).st_mtime)
                 except OSError:
+                    # Listed, then gone or refused before the stat: a
+                    # leveldb compaction deletes files all the time. One
+                    # file is not the folder; the rest still count.
                     continue
-    except OSError:
+    except _ABSENT:
         pass
-    return best
+    except OSError:
+        return best, True
+    return best, False
 
 
 def _evidence(folder):
     """The one place a folder is judged: ranking, "holds anything" and what
     `blink status` says all come from this."""
     cache = os.path.join(folder, USAGE_CACHE_NAME)
-    has_cache = os.path.isfile(cache)
+    # One stat, not isfile() then getmtime(): isfile() answers False for a
+    # file it was refused, which made an unreadable live cache look absent
+    # and handed the reading to an older folder with no trace (review of
+    # PR #3, 2026-11-06). A file gone between listing and stat (moved
+    # mid-resolve) is absent, as before.
+    unreadable = False
     try:
-        cache_mtime = os.path.getmtime(cache) if has_cache else float("-inf")
+        st = os.stat(cache)
+    except _ABSENT:
+        st = None
     except OSError:
-        has_cache, cache_mtime = False, float("-inf")
+        st, unreadable = None, True
+    has_cache = st is not None and stat.S_ISREG(st.st_mode)
+    cache_mtime = st.st_mtime if has_cache else float("-inf")
     # A folder with the cache is ranked by the cache alone (_standing), so
     # the two leveldb listings could not change the answer and are skipped:
     # the winner in every signed-in layout is such a folder, and the listing
@@ -359,11 +401,13 @@ def _evidence(folder):
     if has_cache:
         other = float("-inf")
     else:
-        other = max(_newest_file(os.path.join(folder, *LOCAL_STORAGE_LEAF)),
-                    _newest_file(os.path.join(folder, *INDEXEDDB_LEAF)))
+        ls, ls_bad = _newest_file(os.path.join(folder, *LOCAL_STORAGE_LEAF))
+        idb, idb_bad = _newest_file(os.path.join(folder, *INDEXEDDB_LEAF))
+        other = max(ls, idb)
+        unreadable = unreadable or ls_bad or idb_bad
     skeleton = (os.path.isdir(os.path.join(folder, LOCAL_STORAGE_LEAF[0]))
                 or os.path.isdir(os.path.join(folder, INDEXEDDB_LEAF[0])))
-    return Evidence(has_cache, cache_mtime, other, skeleton)
+    return Evidence(has_cache, cache_mtime, other, skeleton, unreadable)
 
 
 def _standing(ev):
@@ -386,6 +430,14 @@ class Answer(NamedTuple):
     not_read: folders that hold a usage cache and lost to a newer one (or
         to a cache against none), so what is in them was not read.
     resolve_failed: the lookup itself raised, and Roaming is the fallback.
+    error: with resolve_failed, the exception's class name, for the daemon
+        log and status. A class name, never a message: a message can carry
+        a path, and a path carries the account name.
+    unreadable: candidate folders that exist but refused a stat or a
+        listing, and the Packages folder when it could not be listed.
+    newer_without_cache: folders with no usage cache whose app files are
+        newer than the cache that won. Reading the older cache is the rule
+        (a cache beats none); this is so status can say why it is old.
     packages: the Claude_* package folders found, whether or not they hold
         data.
     roaming, local, names: what `looked` and `packages_root` are worked out
@@ -404,6 +456,9 @@ class Answer(NamedTuple):
     dangling: bool = False
     not_read: tuple = ()
     resolve_failed: bool = False
+    error: str = ""
+    unreadable: tuple = ()
+    newer_without_cache: tuple = ()
     packages: tuple = ()
     roaming: str = ""
     local: str = ""
@@ -438,6 +493,19 @@ class Answer(NamedTuple):
 def _resolve_windows():
     roaming, local = _windows_roots()
     packages = _packages(local)
+    unreadable = []
+    if not packages:
+        # glob gives [] for a Packages folder it could not list as well as
+        # for one with no Claude_* in it, and status says "no Store package
+        # folder" on []: wrong advice for a desk that refused us. Probed
+        # only when the glob found nothing, so a normal desk pays nothing.
+        root = os.path.join(local, "Packages")
+        try:
+            os.listdir(root)
+        except _ABSENT:
+            pass
+        except OSError:
+            unreadable.append(root)
     names = []
     seen = set()
     for folder in _marker_folders(roaming, packages):
@@ -448,10 +516,10 @@ def _resolve_windows():
     targets = _candidate_targets(names, local, packages) if names else []
     where = dict(packages=tuple(packages), roaming=roaming, local=local,
                  names=tuple(names))
-    # One list, one judge. (-tier, -mtime, kind, name, folder, source,
-    # has_cache): best first; on a tie a marker's target (kind 0) before a
-    # package (1) before Roaming (2); then name, then path, so one tree
-    # always gives one answer. A target that exists is always a candidate
+    # One list, one judge. Sort key (-tier, -mtime, kind, name, folder):
+    # best first; on a tie a marker's target (kind 0) before a package (1)
+    # before Roaming (2); then name, then path, so one tree always gives one
+    # answer. A target that exists is always a candidate
     # (an empty one is a desk that has not signed in); a package folder
     # must show at least an empty Local Storage or IndexedDB folder, since
     # the Store makes its LocalCache on install; Roaming always competes.
@@ -459,10 +527,11 @@ def _resolve_windows():
 
     def add(folder, kind, name, source, always):
         ev = _evidence(folder)
+        if ev.unreadable:
+            unreadable.append(folder)
         tier, mtime = _standing(ev)
         if tier or always:
-            ranked.append((-tier, -mtime, kind, name, folder, source,
-                           ev.has_cache))
+            ranked.append(((-tier, -mtime, kind, name, folder), source, ev))
     for n, f in targets:
         add(f, 0, n, SOURCE_MARKER_PREFIX + n, True)
     for p in packages:
@@ -470,11 +539,16 @@ def _resolve_windows():
         add(_package_roaming(p), 1, name, SOURCE_PACKAGE_PREFIX + name,
             False)
     add(roaming, 2, "", SOURCE_ROAMING, True)
-    ranked.sort()
-    _, _, _, _, folder, source, _ = ranked[0]
-    not_read = tuple(r[4] for r in ranked[1:] if r[6])
+    ranked.sort(key=lambda r: r[0])
+    (_, _, _, _, folder), source, best = ranked[0]
+    losers = [(r[0][4], r[2]) for r in ranked[1:]]
+    not_read = tuple(f for f, ev in losers if ev.has_cache)
+    newer = tuple(f for f, ev in losers
+                  if best.has_cache and not ev.has_cache
+                  and ev.other_mtime > best.cache_mtime)
     return Answer(folder, source, dangling=bool(names) and not targets,
-                  not_read=not_read, **where)
+                  not_read=not_read, unreadable=tuple(unreadable),
+                  newer_without_cache=newer, **where)
 
 
 def _resolve():
@@ -485,14 +559,15 @@ def _resolve():
         return Answer(os.path.expanduser("~/.config/Claude"), SOURCE_DEFAULT)
     try:
         return _resolve_windows()
-    except Exception:
+    except Exception as e:
         # Never into the daemon. Roaming is where every build before the
         # relocation wrote, so it is the least surprising wrong answer.
         # resolve_failed, so `blink status` can say the lookup failed and
-        # not pass this off as a desk where only Roaming exists.
+        # not pass this off as a desk where only Roaming exists; error, so
+        # the daemon log says it too (pc/ingest), by class name only.
         roaming = _windows_roots()[0]
         return Answer(roaming, SOURCE_ROAMING, resolve_failed=True,
-                      roaming=roaming)
+                      error=type(e).__name__, roaming=roaming)
 
 
 _held = threading.local()
