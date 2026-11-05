@@ -455,7 +455,7 @@ def test_status_says_when_a_fresher_roaming_beat_the_marker(win, tmp_path,
     _cache(tmp_path, _target(tmp_path), mtime=1_000_000)
     _cache(tmp_path, _roaming(tmp_path), mtime=2_000_000)
     row = _desktop_row(capsys)
-    assert ("            older copy not read: " + _target(tmp_path)) in row
+    assert ("            other copy not read: " + _target(tmp_path)) in row
     assert not any("moved by" in l or "is gone" in l or "ignored" in l
                    for l in row)
 
@@ -1090,7 +1090,7 @@ def test_an_empty_target_does_not_hide_a_package_that_holds_data(
     row = _desktop_row(capsys)
     assert row[0].startswith("Desktop     usage cache parsed")
     assert not any(w in l for l in row
-                   for w in ("ignored", "skipped", "passed over", "older copy"))
+                   for w in ("ignored", "skipped", "passed over", "other copy"))
 
 
 def test_a_target_holding_only_empty_folders_does_not_hide_the_cache(
@@ -1388,7 +1388,7 @@ def test_status_says_when_roaming_beat_a_package(win, tmp_path, capsys):
     _cache(tmp_path, _pkg_roaming(tmp_path), mtime=1_000_000)
     _cache(tmp_path, _roaming(tmp_path), mtime=2_000_000)
     row = _desktop_row(capsys)
-    assert ("            older copy not read: " + _pkg_roaming(tmp_path)
+    assert ("            other copy not read: " + _pkg_roaming(tmp_path)
             ) in row
     assert not any("data found in" in l for l in row)
 
@@ -1451,7 +1451,7 @@ def test_status_says_when_a_package_beat_a_marker_target(win, tmp_path,
     row = _desktop_row(capsys)
     assert ("            data found in the Store package folder: " + folder
             ) in row
-    assert ("            older copy not read: " + _target(tmp_path)) in row
+    assert ("            other copy not read: " + _target(tmp_path)) in row
     assert not any("skipped" in l or "ignored" in l for l in row)
 
 
@@ -1463,7 +1463,7 @@ def test_status_names_an_older_leftover_copy_it_did_not_read(
     row = _desktop_row(capsys)
     assert ("            data moved by the Store build: " + _target(tmp_path)
             ) in row
-    assert ("            older copy not read: " + _pkg_roaming(tmp_path)
+    assert ("            other copy not read: " + _pkg_roaming(tmp_path)
             ) in row
     assert not any("data found in" in l or "skipped" in l for l in row)
 
@@ -1474,7 +1474,7 @@ def test_status_is_quiet_for_the_ordinary_after_state(win, tmp_path, capsys):
     _cache(tmp_path, _target(tmp_path))
     row = _desktop_row(capsys)
     assert not any(w in l for l in row
-                   for w in ("skipped", "ignored", "data found", "older copy"))
+                   for w in ("skipped", "ignored", "data found", "other copy"))
 
 
 def test_status_is_quiet_when_the_package_keeps_empty_folders(
@@ -1487,7 +1487,7 @@ def test_status_is_quiet_when_the_package_keeps_empty_folders(
     _cache(tmp_path, _target(tmp_path))
     row = _desktop_row(capsys)
     assert not any(w in l for l in row
-                   for w in ("skipped", "ignored", "data found", "older copy"))
+                   for w in ("skipped", "ignored", "data found", "other copy"))
 
 
 def test_status_does_not_list_a_cache_holder_as_a_place_with_nothing(
@@ -1505,7 +1505,7 @@ def test_status_does_not_list_a_cache_holder_as_a_place_with_nothing(
     with dp.one_answer(held):
         row = _desktop_row(capsys)
     assert row[0].startswith("Desktop     no usage cache")
-    assert ("            older copy not read: " + pkg) in row
+    assert ("            other copy not read: " + pkg) in row
     assert not any("also looked at" in l and pkg in l for l in row)
 
 
@@ -1708,3 +1708,52 @@ def test_status_reads_its_session_row_from_the_desktop_rows_folder(
     monkeypatch.setattr(cli, "_codex_session_line", lambda *a, **k: None)
     cli.cmd_status(argparse.Namespace(wire=wire))
     assert seen == [held.path]
+
+
+# --- final review of PR #3, 2026-11-05 ---------------------------------------
+
+def test_a_cache_holders_leveldb_folders_are_never_listed(win, tmp_path,
+                                                          monkeypatch):
+    """A folder with the cache is ranked by the cache alone, so listing its
+    two leveldb folders is cost with no effect on the answer. Both the
+    helper and a whole resolve must leave them alone, while a folder
+    without the cache is still listed (the ranking needs it)."""
+    held = _roaming(tmp_path)
+    _cache(tmp_path, held, mtime=1_000_000)
+    _ldb(tmp_path, held, "ls", mtime=2_000_000)
+    _ldb(tmp_path, held, "idb", mtime=2_000_000)
+    bare = _pkg_roaming(tmp_path)
+    _ldb(tmp_path, bare, "ls", mtime=3_000_000)
+    listed = []
+    real = dp._newest_file
+    monkeypatch.setattr(dp, "_newest_file",
+                        lambda folder: listed.append(folder) or real(folder))
+    ev = dp._evidence(held)
+    assert listed == [] and ev.has_cache and ev.other_mtime == float("-inf")
+    dp.resolve()
+    assert all(not f.startswith(held) for f in listed)
+    assert any(f.startswith(bare) for f in listed)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or sys.platform == "win32",
+                    reason="needs an unprivileged symlink")
+def test_a_symlink_is_not_a_file_write(win, tmp_path):
+    """_newest_file stats with follow_symlinks=False and counts only real
+    files: a link to a fresh file elsewhere is not the app writing here."""
+    folder = _pkg_roaming(tmp_path)
+    _ldb(tmp_path, folder, "ls", mtime=1_000_000)
+    outside = _touch(tmp_path, os.path.join(str(tmp_path), "elsewhere.log"),
+                     9_000_000)
+    ls = os.path.join(folder, *dp.LOCAL_STORAGE_LEAF)
+    os.symlink(outside, inside(tmp_path, os.path.join(ls, "link.log")))
+    assert dp._newest_file(ls) == 1_000_000
+
+
+def test_a_pin_inside_an_outer_hold_is_ignored(win, tmp_path):
+    """The docstring's promise: the outer answer is yielded, not the pin."""
+    _cache(tmp_path, _roaming(tmp_path))
+    pinned = dp.Answer(_pkg_roaming(tmp_path), "package:x")
+    with dp.one_answer() as outer:
+        with dp.one_answer(pinned) as got:
+            assert got is outer and got is not pinned
+        assert dp.windows_data_dir()[0] == _roaming(tmp_path)

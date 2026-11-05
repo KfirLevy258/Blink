@@ -4328,8 +4328,10 @@ def _source_lines_desktop(desk, folder, now):
         _print_other_places_looked(folder)
         if folder.dangling:
             # The app left a note saying where its data went, and that
-            # folder is gone. Reading Roaming instead is the right fallback,
-            # and this line is what a Store-build report needs to say why.
+            # folder is gone. The answer is then whichever other folder
+            # holds the newest cache (Roaming, or a Store package folder,
+            # which the lines below name); this line is what a Store-build
+            # report needs to say why the marker was not followed.
             print("            Store build marker found but its folder"
                   " is gone")
     if folder.moved:
@@ -4347,11 +4349,12 @@ def _source_lines_desktop(desk, folder, now):
         print(f"            data found in the Store package folder:"
               f" {folder.path}")
     for older in folder.not_read:
-        # A folder that holds a usage cache and lost to a newer one. Said by
+        # A folder that holds a usage cache and lost to a newer one (or
+        # tied with it: a copy-then-delete migration whose delete failed). Said by
         # path, so a report never reads like the only copy was the one used.
         # Folders with no cache are not here: they are only places looked
         # at (_print_other_places_looked).
-        print(f"            older copy not read: {older}")
+        print(f"            other copy not read: {older}")
     if folder.resolve_failed:
         print("            folder lookup failed, Roaming used as a fallback")
 

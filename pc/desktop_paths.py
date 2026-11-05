@@ -81,7 +81,14 @@ writes it. Per folder:
 The rules:
 
   - A folder with the cache beats every folder without one, however fresh
-    the others look. Among folders with the cache the newest cache_mtime
+    the others look. That includes a classic Roaming cache left behind by
+    the exe build, however old, against a Store folder that has Local
+    Storage files but no cache yet (the first minutes after sign-in, or a
+    signed-out desk): Roaming is read until the Store folder writes its own
+    cache. Chosen, not missed: a cache is the one thing the readers need,
+    a folder that has none cannot answer them, and a signed-in app writes
+    its cache within minutes. Main ranked that target on its Local Storage
+    directory mtime, which a cleanup moves. Among folders with the cache the newest cache_mtime
     wins. Among folders without, the newest other_mtime wins; that is the
     "installed, never signed in" desk, whose Local Storage is live and which
     has no cache yet.
@@ -125,8 +132,9 @@ What it costs, and why one_answer() exists. The daemon polls every 2 s
 board's serial port, and one poll asked for the folder four times: the
 Desktop cache, Local Storage, the weekly history and the anchor seeders. A
 resolve is a listdir of %APPDATA%\\Claude, one glob of
-%LOCALAPPDATA%\\Packages\\Claude_*, a listdir of each package's Roaming, and
-a few stats. Measured 2026-10-30 on macOS APFS, warm, against a synthetic
+%LOCALAPPDATA%\\Packages\\Claude_*, a listdir of each package's Roaming, a
+few stats per candidate folder, and, for a folder without the cache, a
+listing of its two leveldb folders. Measured 2026-10-30 on macOS APFS, warm, against a synthetic
 profile with 400 Packages entries in the Store layout: 0.39 ms per resolve,
 1.6 ms a poll, while the virtualised-Local glob still ran once per marker
 name; 0.20 ms per resolve with one Packages glob, and one resolve a poll.
@@ -140,7 +148,12 @@ under a test that moves HOME between calls.
 
 Nothing here opens a file. It lists names and reads mtimes, and logs neither.
 The file evidence adds a listing of the two leveldb folders for every
-candidate folder to a resolve; that cost is unmeasured on every platform.
+candidate folder WITHOUT the cache (a folder with it is ranked by the cache
+alone and is not listed). Measured by a reviewer on macOS APFS, warm
+(2026-11-05), three candidates all listed: about 1.7 us per file, so 0.12 ms
+with empty folders, 9.4 ms at 1000 files each and 31 ms at 3000; this Mac's
+real Desktop holds 7 files per folder, about 0.2 ms a poll. NTFS with
+Defender is still unmeasured.
 """
 import contextlib
 import glob
@@ -298,7 +311,8 @@ class Evidence(NamedTuple):
     has_cache / cache_mtime: plan-usage-history.json exists as a file, and
         its mtime (-inf without).
     other_mtime: the newest FILE inside Local Storage\\leveldb and the
-        claude.ai IndexedDB leveldb (-inf when neither holds a file).
+        claude.ai IndexedDB leveldb (-inf when neither holds a file, and
+        always -inf when has_cache: those folders are then not listed).
     skeleton: a Local Storage or IndexedDB folder exists, empty or not: the
         app's own folder, nothing written yet.
     """
@@ -337,8 +351,16 @@ def _evidence(folder):
         cache_mtime = os.path.getmtime(cache) if has_cache else float("-inf")
     except OSError:
         has_cache, cache_mtime = False, float("-inf")
-    other = max(_newest_file(os.path.join(folder, *LOCAL_STORAGE_LEAF)),
-                _newest_file(os.path.join(folder, *INDEXEDDB_LEAF)))
+    # A folder with the cache is ranked by the cache alone (_standing), so
+    # the two leveldb listings could not change the answer and are skipped:
+    # the winner in every signed-in layout is such a folder, and the listing
+    # is the one part of a resolve that grows with the app's data (final
+    # review of PR #3, 2026-11-05). Nothing else reads other_mtime.
+    if has_cache:
+        other = float("-inf")
+    else:
+        other = max(_newest_file(os.path.join(folder, *LOCAL_STORAGE_LEAF)),
+                    _newest_file(os.path.join(folder, *INDEXEDDB_LEAF)))
     skeleton = (os.path.isdir(os.path.join(folder, LOCAL_STORAGE_LEAF[0]))
                 or os.path.isdir(os.path.join(folder, INDEXEDDB_LEAF[0])))
     return Evidence(has_cache, cache_mtime, other, skeleton)
