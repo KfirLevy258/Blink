@@ -980,7 +980,13 @@ def _run_program(cmd, env, runner, name, what, ours=True):
     are captured and decoded here instead, where there is somewhere to fall
     back to.
     """
-    kwargs = {"env": env, "capture_output": True, "timeout": BUNDLE_TIMEOUT_S}
+    # stdin from nowhere: `blink install` and `blink update` ask a question
+    # when stdin is a terminal, and with the operator's inherited and the
+    # output captured, the prompt sat unseen until BUNDLE_TIMEOUT_S failed
+    # the gate (/code-review max of feat/usage-refresh, V24). No program
+    # run here reads stdin for anything else.
+    kwargs = {"env": env, "capture_output": True, "timeout": BUNDLE_TIMEOUT_S,
+              "stdin": subprocess.DEVNULL}
     if ours:
         kwargs.update(encoding="utf-8", errors="replace")
     try:
