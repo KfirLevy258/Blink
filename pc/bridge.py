@@ -186,6 +186,11 @@ class Bridge:
         # The page a spend plan left with no reading to replace its share,
         # sent blank and restated blank until a line comes: see _outgoing.
         self._blanked = None
+        # self._now() when that blank was made: a restatement is aged by
+        # the time since (protocol.aged_usage).
+        self._blanked_at = None
+        # Whether the last heartbeat had a usage line to send (greet).
+        self._had_usage = False
         # Themes (pc/theme.py). theme_sync owns the files and what the
         # board is believed to hold; open_builder starts the builder and a
         # browser on it, returning whether one opened, and is rate-limited
@@ -318,6 +323,22 @@ class Bridge:
         # The status level needs no reset here: poll_once re-states it on
         # every heartbeat, and this is one (see protocol.svc's contract).
         self.poll_once()                 # push current data immediately
+        # A new process has seen no spend reading, so it has no plan to
+        # send, and with no reading it sends no usage line either: a
+        # restart (an update, an install, a crash) between a /login away
+        # from a spend seat and the new login's first render left the old
+        # seat's dollars on a board that was already running, for as long
+        # as nobody rendered (the review of the WSL work, 2026-11-05). The
+        # first usage line after a welcome is what tells the board there is
+        # no plan (proto.c, plan_unconfirmed), so the blank line goes, and
+        # is held and restated as the in-process switch's is. Not with a
+        # spend plan on the bus, which is the page and was just sent, and
+        # not to a board that cannot draw plans, which has no spend page.
+        plan = self._plan_msg()
+        if (not self._had_usage and self._blanked is None
+                and self._board_can(protocol.BOARD_CAP_PLAN)
+                and (plan is None or plan.get("plan") != protocol.PLAN_SPEND)):
+            self._send_blank(protocol.PLAN_PROVIDER)
         # Only once the board has been heard. On the no-reset connect path
         # greet() runs before any message has reached on_message, so
         # _board_proto is still None -- and _board_ahead() reads None as
@@ -1104,10 +1125,11 @@ class Bridge:
             # blank line is restated, as every heartbeat restates the line:
             # one lost on the wire, or a board that just connected, would
             # otherwise be left with the old login's share.
+            self._had_usage = False
             held = self._blanked
             self._outgoing(None)
             if held is not None and self._last_usage is not None:
-                self._write(self._last_usage)
+                self._write(self._restated_blank())
             # No statusline payload yet. The board keeps its last values and
             # its own dot, which is right -- but the daemon used to say nothing
             # at all, so a machine where Claude Code has simply never rendered
@@ -1118,6 +1140,7 @@ class Bridge:
                 self._said_no_source = True
             return
         self._said_no_source = False
+        self._had_usage = True
 
         # Unconditional. The heartbeat is what re-states everything to a board
         # that may have missed a message, and what keeps a panel that has been
@@ -1253,12 +1276,27 @@ class Bridge:
             return usage
         page = self._spend_page_gone(replaced)
         if page is not None:
-            self._blanked = page
-            blank = protocol.blank_page(self._last_usage, page)
-            self._write(blank)
-            self._last_pushed = protocol.meaningful_usage(blank)
-            self._last_usage = blank
+            self._send_blank(page)
         return None
+
+    def _send_blank(self, page):
+        """Take `page` down out of the last line sent, and hold that blank
+        for the heartbeat to restate (_outgoing)."""
+        self._blanked = page
+        self._blanked_at = self._now()
+        blank = protocol.blank_page(self._last_usage, page)
+        self._write(blank)
+        self._last_pushed = protocol.meaningful_usage(blank)
+        self._last_usage = blank
+
+    def _restated_blank(self):
+        """The held blank as it reads now: its ages advanced and its
+        countdowns run down by the time since it was made, which is how
+        every line the bus builds reads (protocol.aged_usage)."""
+        if self._blanked_at is None:
+            return self._last_usage
+        return protocol.aged_usage(self._last_usage,
+                                   self._now() - self._blanked_at)
 
     def _plan_msg(self):
         """Asked of the fetch when it can answer; None otherwise. A plain

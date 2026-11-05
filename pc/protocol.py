@@ -896,6 +896,38 @@ def blank_page(last_usage, page) -> dict:
     return out
 
 
+# The fields of a usage line that move with the clock alone, by which way:
+# ages grow, countdowns run down. A subset of VOLATILE_USAGE_KEYS, which
+# also holds the session and weekly countdowns -- the same kind as p2's.
+_AGES = ("age_s", "p2_age_s", "active_age_s")
+_COUNTDOWNS = ("session_resets_in_s", "weekly_resets_in_s",
+               "p2_s_in_s", "p2_w_in_s")
+
+
+def aged_usage(msg, elapsed) -> dict:
+    """`msg`, a usage line made `elapsed` seconds ago, as it reads now.
+
+    For a line the daemon restates without the bus rebuilding it (the
+    blank Bridge._outgoing holds): every other line is built from stamps
+    at each poll, and this one kept its ages from the moment it was made.
+    The board resets its idle clock from active_age_s on every usage line,
+    so a blank held for hours said "active 5 s ago" every minute and the
+    board never dozed (the review of the WSL work, 2026-11-05). An unknown
+    (-1) stays unknown; a countdown stops at 0. The message passed in is
+    never changed."""
+    out = dict(msg)
+    step = max(0, int(elapsed))
+    for k in _AGES:
+        v = out.get(k)
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            out[k] = v + step
+    for k in _COUNTDOWNS:
+        v = out.get(k)
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            out[k] = max(0, v - step)
+    return out
+
+
 def _active_age(frame, secondary, now_epoch: float) -> int:
     """The age of the freshest contact on the bus, or -1 when nothing says.
 

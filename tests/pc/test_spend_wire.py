@@ -914,3 +914,76 @@ def test_a_gateway_figure_is_not_an_estimate():
     g = spend()
     g.src = "scripted"
     assert protocol.plan_for(g)["est"] == 1
+
+
+# ------------------------------ review of the WSL work, 2026-11-05: A3-1/2
+
+def test_a_restated_blank_ages_with_the_clock():
+    """The heartbeat restated the blank line exactly as it was made, so
+    its active_age_s (5 s when the spend page came down) went out again
+    every minute: the board resets its idle clock to it on every usage
+    line and never dozed while the blank was held (the reviewer's
+    sim_blank.py, +1 h to +5 h all at 5). The ages advance and the second
+    page's countdowns run down, as on any line the bus builds."""
+    clock = {"t": 1000.0}
+    sent = []
+    codex = windows(provider="codex", s=33.0, w=7.0)
+    f = _Fetch(protocol.frame_to_usage(spend(), NOW, secondary=codex),
+               protocol.plan_for(spend()))
+    b = Bridge(write_msg=sent.append, fetch_usage=f,
+               now=lambda: clock["t"], wall=lambda: (1752444000, 0),
+               **_NO_FEED)
+    _hello(b, "1.4.0")
+    f.usage, f.plan = None, protocol.plan("claude", "windows")
+    b.poll_if_changed()
+    blank = [m for m in sent if m["t"] == "usage"][-1]
+    assert blank["session_pct"] == -1
+    for hour in range(1, 6):
+        clock["t"] = 1000.0 + hour * 3600
+        n = len(sent)
+        b.poll_once()
+        (u,) = _usages_after(sent, n)
+        assert u["session_pct"] == -1
+        assert u["active_age_s"] == blank["active_age_s"] + hour * 3600
+        assert u["age_s"] == blank["age_s"] + hour * 3600
+        assert u["p2_s_in_s"] == max(0, blank["p2_s_in_s"] - hour * 3600)
+        assert u["p2_w_in_s"] == blank["p2_w_in_s"] - hour * 3600
+        assert protocol.encode_checked(u)[1] is None
+
+
+def test_a_restart_with_nothing_to_show_clears_the_old_page():
+    """A daemon restarted under a running board between a /login away from
+    a spend seat and the new login's first render. The new process has
+    seen no spend reading, so it has no plan to send, and nothing to draw:
+    it wrote only welcome and time, and the board kept the old seat's
+    dollars indefinitely (the reviewer's sim_restart.py). The greeting now
+    sends the blank line, which a board that was just welcomed reads as
+    "windows" and draws as nothing known, and the heartbeat restates it."""
+    sent = []
+    f = _Fetch(None, None)
+    b = Bridge(write_msg=sent.append, fetch_usage=f, now=lambda: 1000.0,
+               wall=lambda: (1752444000, 0),
+               board_caps_hint=[protocol.BOARD_CAP_PLAN], **_NO_FEED)
+    b.greet()
+    (u,) = [m for m in sent if m["t"] == "usage"]
+    assert u["provider"] == "claude" and u["session_pct"] == -1
+    assert [m["t"] for m in sent].index("usage") > \
+        [m["t"] for m in sent].index("welcome")
+    n = len(sent)
+    b.poll_once()
+    assert [m["session_pct"] for m in _usages_after(sent, n)] == [-1]
+    # The first reading ends it.
+    f.usage = protocol.frame_to_usage(windows(), NOW)
+    n = len(sent)
+    b.poll_once()
+    assert [m["session_pct"] for m in _usages_after(sent, n)] == [41.0]
+
+
+def test_a_restart_on_a_board_without_plans_sends_no_blank():
+    """A board that cannot hold a spend page is left as it always was."""
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=_Fetch(None, None),
+               now=lambda: 1000.0, wall=lambda: (1752444000, 0), **_NO_FEED)
+    b.greet()
+    b.poll_once()
+    assert "usage" not in [m["t"] for m in sent]
