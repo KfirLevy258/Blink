@@ -75,10 +75,44 @@ def test_ask_yes_prompt_tail_follows_default(monkeypatch, capsys):
     assert "Q? [Y/n] " in out and "Q? [y/N] " in out
 
 
-def test_ask_yes_gives_up_after_three_and_takes_default(monkeypatch):
-    asked = _tty(monkeypatch, ["maybe", "what", "huh", "y"])
-    assert cli._ask_yes("Q? ", False) is False
+@pytest.mark.parametrize("default", [True, False])
+def test_ask_yes_gives_up_after_three_with_no_answer(monkeypatch, default):
+    # V10 of the /code-review max: three unrecognised replies took the
+    # default, so "no thanks", "nope", "nah" on a personal login saved yes.
+    # Only Enter takes the default; anything else unanswered is no answer.
+    asked = _tty(monkeypatch, ["no thanks", "nope", "nah", "y"])
+    assert cli._ask_yes("Q? ", default) is None
     assert len(asked) == 3
+
+
+@pytest.mark.parametrize("raised", [EOFError, KeyboardInterrupt])
+def test_ask_yes_end_of_input_or_ctrl_c_is_no_answer(monkeypatch, capsys,
+                                                    raised):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+
+    def fake_input(*a):
+        raise raised
+    monkeypatch.setattr("builtins.input", fake_input)
+    assert cli._ask_yes("Q? ", True) is None
+    # The prompt's line is ended, so what follows starts on its own.
+    assert capsys.readouterr().out.endswith("\n")
+
+
+@pytest.mark.parametrize("answers", [["nah", "nope", "no thanks"], None])
+def test_install_left_unanswered_leaves_the_key_absent(monkeypatch, capsys,
+                                                       claude_found, answers):
+    if answers is None:
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+
+        def fake_input(*a):
+            raise KeyboardInterrupt
+        monkeypatch.setattr("builtins.input", fake_input)
+    else:
+        _tty(monkeypatch, answers)
+    _work(monkeypatch, False)
+    got = cli._install_refresh_step(_native())
+    assert got == "off (turn on with: blink config usage-refresh on)"
+    assert ur.SETTING not in user_config.load(_bh())
 
 
 def test_ask_yes_does_not_ask_without_a_terminal(monkeypatch):
@@ -193,6 +227,14 @@ def test_config_off_keeps_state(monkeypatch):
     ({"set": False, "reason": "failing"},
      "off: /usage kept failing; run claude and /login, then turn it on"
      " again"),
+    # A failure streak is said as one, not as "on, last ran" (item 18 of the
+    # /code-review max's cut list).
+    ({"set": True, "ago": 5 * 60, "fails": 4},
+     "on, but the last 4 runs failed; run claude and /login if it keeps"
+     " failing"),
+    ({"set": True, "ago": 5 * 60, "fails": 1},
+     "on, but the last run failed; run claude and /login if it keeps"
+     " failing"),
 ])
 def test_status_row(setup, row):
     import time
@@ -202,6 +244,7 @@ def test_status_row(setup, row):
     if "ago" in setup or "reason" in setup:
         ur.save_state(_bh(), ur.State(
             last_run_at=time.time() - setup.get("ago", 0),
+            fails=setup.get("fails", 0),
             off_reason=setup.get("reason", "")))
     assert cli._refresh_status(False) == row
 
@@ -222,6 +265,39 @@ def test_uninstall_removes_state_temp_siblings_and_folder(tmp_path):
     assert not os.path.exists(state)
     assert not os.path.exists(sib)
     assert not os.path.exists(os.path.join(_bh(), "refresh"))
+
+
+def _up_to_date(monkeypatch):
+    monkeypatch.setattr(cli, "_update_reaches_the_service", lambda: True)
+    monkeypatch.setattr(cli.update, "fetch_signed_manifest", lambda: {})
+    monkeypatch.setattr(cli.update, "available", lambda _m: None)
+    monkeypatch.setattr(cli.update, "platform_key", lambda: "k")
+
+
+def test_update_already_up_to_date_still_asks(monkeypatch, capsys,
+                                              claude_found):
+    # The /code-review max of feat/usage-refresh: the release that brings the question is the
+    # one `blink update` installs, and the old code doing the installing
+    # cannot ask it; the next `blink update` said "Already up to date" and
+    # returned before asking. It asks there too.
+    _up_to_date(monkeypatch)
+    _tty(monkeypatch, [""])
+    _work(monkeypatch, False)
+    assert cli.main(["update"]) == 0
+    out = capsys.readouterr().out
+    assert "Already up to date." in out
+    assert QUESTION + "[Y/n] " in out and "Usage refresh ... on" in out
+    assert user_config.load(_bh())[ur.SETTING] is True
+
+
+def test_update_already_up_to_date_asks_nothing_once_answered(
+        monkeypatch, capsys, claude_found):
+    _up_to_date(monkeypatch)
+    os.makedirs(_bh(), exist_ok=True)
+    user_config.put(_bh(), ur.SETTING, False)
+    asked = _tty(monkeypatch, [""])
+    assert cli.main(["update"]) == 0
+    assert asked == [] and "Usage refresh" not in capsys.readouterr().out
 
 
 def test_update_asks_only_when_interactive_and_absent(monkeypatch, capsys,
@@ -295,3 +371,20 @@ def test_uninstall_removes_a_refresh_folder_with_subfolders():
     open(os.path.join(deep, "f"), "w").write("")
     assert cli.main(["uninstall"]) == 0
     assert not os.path.exists(os.path.join(_bh(), "refresh"))
+
+
+def test_config_on_clears_wasnt_found(monkeypatch, claude_found):
+    os.makedirs(_bh(), exist_ok=True)
+    user_config.put(_bh(), ur.SETTING, True)
+    ur.save_state(_bh(), ur.State(last_run_at=5.0, missing=True))
+    assert cli._refresh_status(False) == "on, but Claude Code wasn't found"
+    cli.main(["config", "usage-refresh", "on"])
+    assert cli._refresh_status(False) != "on, but Claude Code wasn't found"
+
+
+def test_update_says_nothing_without_claude_code(monkeypatch, capsys):
+    _up_to_date(monkeypatch)
+    monkeypatch.setattr(ur, "find_claude", lambda home: None)
+    asked = _tty(monkeypatch, [""])
+    assert cli.main(["update"]) == 0
+    assert asked == [] and "Usage refresh" not in capsys.readouterr().out

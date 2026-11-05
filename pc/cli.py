@@ -3724,13 +3724,17 @@ _ASK_TRIES = 3
 
 def _ask_yes(question: str, default: bool):
     """Ask a yes/no question on the terminal. True or False for the answer;
-    None, without asking, when nobody is there to answer.
+    None when there was none: nobody there to ask, or nothing answered.
 
     "Nobody" is a stdin that is not a terminal: an installer run from a
     script, a pipe or CI, where a prompt would hang or read whatever was
-    piped. Enter is the default, y/yes/n/no in any case are the answers, and
-    anything else asks again, three times in all, then takes the default
-    rather than looping on a person who is typing something else."""
+    piped; it is not asked at all. Enter takes the default, and only Enter:
+    y/yes/n/no in any case are the answers, anything else asks again, and
+    three of those, end of input or Ctrl-C are no answer. They took the
+    default until the /code-review max of feat/usage-refresh (V10), so
+    "no thanks", "nope", "nah" on a personal login saved yes, and Ctrl-C,
+    asked after the service step, was a traceback that cut off the rest of
+    install's output."""
     try:
         if not sys.stdin.isatty():
             return None
@@ -3741,15 +3745,16 @@ def _ask_yes(question: str, default: bool):
         print(question + tail, end="", flush=True)
         try:
             got = input().strip().lower()
-        except EOFError:
-            return default
+        except (EOFError, KeyboardInterrupt):
+            print()             # end the prompt's line
+            return None
         if got == "":
             return default
         if got in ("y", "yes"):
             return True
         if got in ("n", "no"):
             return False
-    return default
+    return None
 
 
 def _refresh_view(home):
@@ -5517,6 +5522,13 @@ def _refresh_status(wsl_home) -> str:
         return "off"
     if state.missing:
         return "on, but Claude Code wasn't found"
+    if state.fails:
+        # A streak said as one: "on, last ran 4 min ago" read as working
+        # through a day of failures (/code-review max, cut list).
+        runs = ("the last run" if state.fails == 1
+                else f"the last {state.fails} runs")
+        return (f"on, but {runs} failed; run claude and /login if it keeps"
+                " failing")
     if state.last_run_at > 0:
         mins = max(0, int((time.time() - state.last_run_at) // 60))
         return f"on, last ran {mins} min ago"
@@ -6028,6 +6040,12 @@ def cmd_update(_args) -> int:
                   f" {os.uname().machine if hasattr(os, 'uname') else ''}.")
             return 1
         print("Already up to date.")
+        # And the question, here too: the release that brings it is the one
+        # an update installs, and the old code doing the installing cannot
+        # ask it, so the next `blink update` is the first that can. It
+        # returned here before asking (/code-review max of
+        # feat/usage-refresh).
+        _say_update_refresh()
         return 0
     version, artifact = found
     print(f"Downloading {version} ...")
@@ -6069,11 +6087,15 @@ def cmd_update(_args) -> int:
     # something this release brings. Whoever never answered it is asked here
     # (a person who updates by hand is at a terminal); the daemon's own
     # automatic updates ask on the board instead.
+    _say_update_refresh()
+    return 0
+
+
+def _say_update_refresh() -> None:
     refresh = _update_refresh_question()
     if refresh:
         print()
         print("Usage refresh ... " + refresh)
-    return 0
 
 
 def _update_refresh_question() -> str:
@@ -6089,6 +6111,10 @@ def _update_refresh_question() -> str:
         if usage_refresh.chosen(blink_home()) is not None:
             return ""
         if not sys.stdin.isatty():
+            return ""
+        # Nothing to say without Claude Code: every `blink update` would
+        # otherwise end on "isn't installed".
+        if not usage_refresh.find_claude(_home()):
             return ""
     except Exception:
         return ""
