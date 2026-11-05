@@ -1897,7 +1897,7 @@ def test_a_file_gone_between_listing_and_stat_is_skipped(tmp_path,
 def test_an_unlistable_packages_folder_is_not_called_absent(
         win, tmp_path, monkeypatch, capsys):
     root = _mkdir(tmp_path, os.path.join(_local(tmp_path), "Packages"))
-    _refuse(monkeypatch, "listdir", root)
+    _refuse(monkeypatch, "scandir", root)
     answer = dp.resolve()
     assert answer.packages == () and root in answer.unreadable
     row = _desktop_row(capsys)

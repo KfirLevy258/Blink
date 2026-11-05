@@ -113,12 +113,16 @@ The rules:
     had, which is older than the one in the folder the app now writes, and
     a cleanup that touches its directories changes nothing the ranking
     reads.
-  - A folder that exists but cannot be read (a permission error, a broken
-    junction) ranks on what could be read of it, which may be nothing, so
-    it can lose to an older folder. It is never silently the same as an
-    absent one: Answer.unreadable names it, and so does the Packages folder
-    when it cannot be listed, so `blink status` does not say "no Store
-    package folder" about a folder it was refused.
+  - A folder whose cache or leveldb folders refuse a stat or a listing (a
+    permission error) ranks on what could be read of it, which may be
+    nothing, so it can lose to an older folder. Answer.unreadable names it,
+    and so does the Packages folder when it cannot be listed, so `blink
+    status` does not say "no Store package folder" about a folder it was
+    refused. Not covered, on purpose: a broken junction, which Windows
+    reports as "not there" and so reads as absent, and a refused listing
+    of a folder that holds markers (marker_names). None has been seen on a
+    desk; each would cost another error path through every caller, and a
+    stale reading still shows its age (review of PR #3, 2026-11-06).
   - A folder that holds a cache and lost is not read, and `blink status`
     says so by path (Answer.not_read). Folders without a cache are only
     listed as places looked at.
@@ -332,8 +336,8 @@ class Evidence(NamedTuple):
     skeleton: a Local Storage or IndexedDB folder exists, empty or not: the
         app's own folder, nothing written yet.
     unreadable: the cache or a leveldb folder exists but stat or listing it
-        failed with something other than "not there" (a permission error, a
-        broken junction), so the evidence above may be short.
+        failed with something other than "not there" (a permission error),
+        so the evidence above may be short.
     """
     has_cache: bool
     cache_mtime: float
@@ -498,10 +502,13 @@ def _resolve_windows():
         # glob gives [] for a Packages folder it could not list as well as
         # for one with no Claude_* in it, and status says "no Store package
         # folder" on []: wrong advice for a desk that refused us. Probed
-        # only when the glob found nothing, so a normal desk pays nothing.
+        # only when the glob found nothing, which is every desk without the
+        # Store build, every poll -- so it opens the listing and reads one
+        # entry, not the hundreds a Packages folder holds.
         root = os.path.join(local, "Packages")
         try:
-            os.listdir(root)
+            with os.scandir(root) as it:
+                next(it, None)
         except _ABSENT:
             pass
         except OSError:

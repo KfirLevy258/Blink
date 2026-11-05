@@ -4368,7 +4368,7 @@ def _source_lines_desktop(desk, folder, now):
         # just stops moving and the report says nothing about why.
         print(f"            newer app files, no usage cache yet: {newer}")
     for refused in folder.unreadable:
-        # There, and refused (a permission error, a broken junction): it
+        # There, and refused (a permission error): it
         # ranked on what could be read, so a stale folder may have won.
         # Said apart from "looked at", which means looked and found nothing.
         print(f"            could not be read: {refused}")
