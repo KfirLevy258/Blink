@@ -62,6 +62,18 @@ RUNNING_EVERY_S = 15
 # (IngestionBus.burn).
 WANT_TTL_S = 180
 
+# How long after the watch thread's last real walk of the transcripts its
+# buckets are offered as current. The thread walks a wanted page every
+# RUNNING_EVERY_S while the distribution is in use, so a minute is four
+# missed walks. Past it the bus is told nothing (None) rather than handed
+# held() buckets judged from the file sizes of the last walk: after a page
+# went unasked past WANT_TTL_S while Claude Code kept working, the first
+# asks got 100 tokens where a native walk said 25,100, and a watch thread
+# held in wsl.exe or a hung 9P call kept handing over one tick's q for
+# hours (the review of the WSL work, 2026-11-05). Natively BurnReader.poll
+# walks first and says None while it is behind; this is that promise.
+BURN_STALE_S = 60
+
 # How often the thread wakes. The work is gated by the constants above; a
 # tick that is not due does one stat and one listing of the drop folder.
 TICK_S = 5
@@ -205,6 +217,9 @@ class WslWatch:
         # Read by the serial loop, under the lock.
         self._view = None
         self._burn = None
+        # self._clock() of the tick that last made self._burn current: a
+        # real walk, or a quiet desk with nothing written since one.
+        self._burn_at = None
         self._live = False
         # Written by the serial loop (burn_source), under the lock.
         self._wanted_at = None
@@ -215,6 +230,8 @@ class WslWatch:
         self._swept_at = None
         self._idle_at = None
         self._said = None
+        # When the reader last walked the transcripts (the thread's own).
+        self._walked_at = None
 
     # -- the serial loop's side: memory only -------------------------------
 
@@ -241,9 +258,14 @@ class WslWatch:
         burn_snapshot() and asks for the transcripts to be read."""
         return _BurnSource(self)
 
-    def _asked(self):
+    def _asked(self, now):
+        """Note the ask, and answer it: the buckets, or None when they are
+        not known to be current at `now` (BURN_STALE_S)."""
         with self._lock:
             self._wanted_at = self._clock()
+            at = self._burn_at
+            if at is None or not (-TICK_S <= now - at <= BURN_STALE_S):
+                return None
             return _copy(self._burn)
 
     # -- the thread's side -------------------------------------------------
@@ -314,6 +336,7 @@ class WslWatch:
                 notes.append(f"[watchdog] {msg}")
             if wanted:
                 got = self._reader.poll(now)
+                self._walked_at = now
             else:
                 got = self._reader.held(now)
         else:
@@ -325,8 +348,18 @@ class WslWatch:
                 if msg:
                     notes.append(f"[watchdog] {msg}")
             got = self._reader.held(now)
+        # Current when this tick walked, or when nothing has been written
+        # since the last walk: every render and every prompt touches the
+        # drop folder, so a newest file older than the walk means the
+        # transcripts hold nothing it missed. Otherwise the held buckets
+        # keep the time they were last current, and age out (_asked).
+        current = self._walked_at is not None and (
+            self._walked_at == now
+            or (not live and (newest is None or newest <= self._walked_at)))
         with self._lock:
             self._burn = got
+            if current:
+                self._burn_at = now
         for line in notes:
             print(line, file=sys.stderr)
 
@@ -408,7 +441,7 @@ class _BurnSource:
         self._watch = watch
 
     def poll(self, now, budget=None):
-        return self._watch._asked()
+        return self._watch._asked(now)
 
 
 def _unreachable(e):

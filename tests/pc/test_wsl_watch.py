@@ -824,3 +824,93 @@ def test_the_watch_reads_the_config_as_plan_reader_does(tmp_path,
     assert w._look() is None and len(calls) == 2      # parsed 1 s ago
     clock.t += claude_plan.FIRST_ANSWER_RETRY_S
     assert w._look().spend_seat and len(calls) == 3
+
+
+# ------------------------------- review of the WSL work, 2026-11-05: E-4
+
+class _CountingReader:
+    """A reader whose walk is counted, and whose held() answers from the
+    last walk, as BurnReader.held does: news since then is not in it."""
+
+    def __init__(self):
+        self.polls = []
+        self.total = 100
+
+    def poll(self, now, budget=None):
+        self.polls.append(now)
+        self.walked = self.total
+        return 1, [self.walked] + [0] * 19
+
+    def held(self, now):
+        return (1, [self.walked] + [0] * 19) if self.polls else None
+
+
+def test_a_page_asked_again_after_a_gap_gets_nothing_until_a_walk(tmp_path):
+    """The page is marked again after more than WANT_TTL_S unasked while
+    Claude Code kept working in the distribution: every tick meanwhile ran
+    held() only, and the first asks were handed the pre-gap buckets as
+    current (100 tokens where a native walk said 25,100). Now a snapshot
+    is current only for BURN_STALE_S after a real walk."""
+    home, _ = _home(tmp_path)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0)
+    r = _CountingReader()
+    w = _watch(home, clock, _Running(True), burn_reader=r)
+    src = w.burn_source()
+    src.poll(clock.t)
+    w.tick()
+    assert src.poll(clock.t) == (1, [100] + [0] * 19)
+    # Unasked for longer than WANT_TTL_S, the desk busy all the while:
+    # the walks stop once the last ask is WANT_TTL_S old.
+    end = clock.t + wsl_watch.WANT_TTL_S + wsl_watch.BURN_STALE_S + 30
+    while clock.t < end:
+        clock.t += wsl_watch.TICK_S
+        _touch_drop(home, clock.t)
+        r.total += 5000
+        w.tick()
+    walks = len(r.polls)
+    assert r.polls[-1] < clock.t - wsl_watch.BURN_STALE_S
+    assert src.poll(clock.t) is None            # asked: nothing stale
+    clock.t += wsl_watch.RUNNING_EVERY_S
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert len(r.polls) == walks + 1
+    assert src.poll(clock.t) == (1, [r.total] + [0] * 19)
+
+
+def test_a_blocked_watch_thread_does_not_look_current(tmp_path):
+    """The watch thread held in wsl.exe or a hung 9P call: every ask got the
+    old tick's q and buckets, and two hours on the bars had not slid."""
+    home, _ = _home(tmp_path)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0)
+    r = _CountingReader()
+    w = _watch(home, clock, _Running(True), burn_reader=r)
+    src = w.burn_source()
+    src.poll(clock.t)
+    w.tick()
+    assert src.poll(clock.t) is not None
+    assert src.poll(clock.t + wsl_watch.BURN_STALE_S) is not None
+    assert src.poll(clock.t + wsl_watch.BURN_STALE_S + 1) is None
+    assert src.poll(clock.t + 7200) is None
+
+
+def test_a_quiet_desk_keeps_the_last_walk_current(tmp_path):
+    """Nothing written since the last walk: the drop folder, which every
+    render and every prompt touches, is older than it, so the transcripts
+    have nothing the walk missed and the held buckets, slid to now, are
+    the truth."""
+    home, _ = _home(tmp_path)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0)
+    r = _CountingReader()
+    w = _watch(home, clock, _Running(True), burn_reader=r)
+    src = w.burn_source()
+    src.poll(clock.t)
+    w.tick()
+    clock.t += wsl_watch.LIVE_S + 1             # walked away
+    w.tick()
+    assert src.poll(clock.t) == (1, [100] + [0] * 19)
