@@ -80,10 +80,14 @@ is.
 ## Cheap mitigations
 
 1. Do nothing. The window is about 0.01 percent per read.
-2. Stop reading the Store package folder once the migration marker exists, or
-   while its mtime is under a few seconds old. This removes the overlap with
-   the 11 s migration rather than shrinking it, and needs no handle tricks.
-   Best option if one is wanted.
+2. Skip the Store package folder while the migration is running, for example
+   while the newest file in it was written a few seconds ago. This removes the
+   overlap with the 11 s migration rather than shrinking it, and needs no
+   handle tricks. Best option if one is wanted. Keying it on the marker alone
+   no longer fits the resolver: it has no leftover exclusion any more (a
+   package folder with a marker is ranked by the files it holds, like any
+   other folder), and the marker is written at the start of the migration, so
+   it says nothing about whether the move is still going.
 3. Open with `FILE_SHARE_DELETE` using stdlib only: `ctypes.windll.kernel32
    .CreateFileW` with share mode 7, then `msvcrt.open_osfhandle` and
    `os.fdopen`. Works (the control above), but does not cover a directory
