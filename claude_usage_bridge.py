@@ -340,6 +340,37 @@ def board_ask(blink_home, bus=None):
         other_at=None if bus is None else (lambda: claude_activity_at(bus)))
 
 
+def _bus_for(home):
+    """The real bus for `home`, a claude_home.ClaudeHome: see build_bus."""
+    from pc import claude_home
+    from pc.burn_reader import BurnReader, CodexBurnReader
+    if home.kind == claude_home.WSL:
+        # Claude Code inside a WSL distribution: its config and its
+        # transcripts are UNC paths, read by the watch on its own
+        # thread and only while the distribution is in use, and handed
+        # to the bus from memory (pc/wsl_watch). Built only here, so a
+        # native desk never has one, and once per process: `blink
+        # install --wsl` restarts the service, which rebuilds the bus
+        # with it. The status line and the hook state stay with the
+        # providers, read from the Windows drop folder.
+        from pc import wsl_watch
+        watch = wsl_watch.WslWatch(home)
+        watch.start()
+        return ingest.IngestionBus(
+            burn={"claude": watch.burn_source(),
+                  "codex": CodexBurnReader()},
+            plan_source=watch.view, home=lambda: home)
+    # Pinned to this computer's own Claude Code, which a record can
+    # move between folders but never into a distribution: the bus
+    # lives for the process, and asking current() on each poll
+    # followed `install --wsl`'s record onto UNC paths before the
+    # restart that rebuilds it (IngestionBus's `home`).
+    native = claude_home.native
+    return ingest.IngestionBus(burn={"claude": BurnReader(home=native),
+                                     "codex": CodexBurnReader()},
+                               home=native)
+
+
 def build_bus():
     """The daemon's usage source: scripted when BLINK_SCENARIO says so.
 
@@ -363,33 +394,19 @@ def build_bus():
     scenario = os.environ.get("BLINK_SCENARIO")
     if not scenario:
         from pc import claude_home
-        from pc.burn_reader import BurnReader, CodexBurnReader
-        home = claude_home.current()
-        if home.kind == claude_home.WSL:
-            # Claude Code inside a WSL distribution: its config and its
-            # transcripts are UNC paths, read by the watch on its own
-            # thread and only while the distribution is in use, and handed
-            # to the bus from memory (pc/wsl_watch). Built only here, so a
-            # native desk never has one, and once per process: `blink
-            # install --wsl` restarts the service, which rebuilds the bus
-            # with it. The status line and the hook state stay with the
-            # providers, read from the Windows drop folder.
-            from pc import wsl_watch
-            watch = wsl_watch.WslWatch(home)
-            watch.start()
-            return ingest.IngestionBus(
-                burn={"claude": watch.burn_source(),
-                      "codex": CodexBurnReader()},
-                plan_source=watch.view, home=lambda: home)
-        # Pinned to this computer's own Claude Code, which a record can
-        # move between folders but never into a distribution: the bus
-        # lives for the process, and asking current() on each poll
-        # followed `install --wsl`'s record onto UNC paths before the
-        # restart that rebuilds it (IngestionBus's `home`).
-        native = claude_home.native
-        return ingest.IngestionBus(burn={"claude": BurnReader(home=native),
-                                         "codex": CodexBurnReader()},
-                                   home=native)
+        if claude_home.record_state()[0] == claude_home.UNKNOWN:
+            # config.json is there and cannot be read (a lock at logon, a
+            # hand edit) or names a home this release does not know. Built
+            # as native, the bus was pinned so for the process, and a WSL
+            # desk read Windows' own Claude Code until the next restart
+            # (the review of the WSL work, 2026-11-05). It knows nothing
+            # until the record reads, and is then built for that home.
+            print("[bridge] Blink's config.json could not be read; waiting"
+                  " for it", file=sys.stderr)
+            return ingest.DeferredBus(
+                lambda: _bus_for(claude_home.current()),
+                lambda: claude_home.record_state()[0] != claude_home.UNKNOWN)
+        return _bus_for(claude_home.current())
     from pc.providers.scripted import ScriptedProvider
     scripted = ScriptedProvider(scenario)
     # verdict=None: a step says itself whether the account has a five-hour
@@ -960,7 +977,7 @@ def main(argv=None):
     # a path that does not exist -- and would go on doing so at every boot,
     # silently. This is the one moment that can notice.
     from pc.cli import (_frozen, _self_path, blink_home as _blink_home,
-                        drift_watchdog, installed_bin)
+                        daemon_watchdog, installed_bin)
     self_bin = installed_bin()
     # Decided once, and everything that replaces this program keys off it:
     # the daily check below and the board-tapped update the Bridge runs. The
@@ -1063,11 +1080,11 @@ def main(argv=None):
                  "plan": plan_frames, "sburn": sburn_frames}
     # For this computer's own Claude Code, in the folder `blink install`
     # recorded (pc/claude_home): a login service does not see the shell's
-    # CLAUDE_CONFIG_DIR, so the watchdog guards the file install wrote.
-    # A WSL home's is checked by its pc/wsl_watch, off this thread, and
-    # drift_watchdog gives it one that does nothing here.
-    from pc import claude_home as _claude_home
-    watchdog = drift_watchdog(_claude_home.current())
+    # CLAUDE_CONFIG_DIR, so the watchdog guards the file install wrote --
+    # the one the record names at each tick, never one it named at start.
+    # A WSL home's settings are checked by its pc/wsl_watch, off this
+    # thread; here only the native hook shim Codex runs (drift_watchdog).
+    watchdog = daemon_watchdog()
 
     # Before the port is touched. The lock lives for the life of the process --
     # the file object is bound here so it is not garbage collected, which would

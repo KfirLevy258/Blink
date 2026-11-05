@@ -216,32 +216,62 @@ def from_record(rec):
     return None
 
 
-# config.json path -> (signature, home or None): the last good read of each
-# file. Keyed by path so a test's HOME never sees another test's answer.
+# What record_state() can answer.
+RECORDED = "recorded"     # a whole record, of a kind this release knows
+NO_RECORD = "none"        # no config.json, or one with no record in it
+UNKNOWN = "unknown"       # config.json there, but unreadable, or a record
+                          # that is not one this release can rebuild
+
+# config.json path -> (signature, state, home or None): the last good read
+# of each file. Keyed by path so a test's HOME never sees another test's
+# answer.
 _last = {}
 
 
-def recorded():
-    """The recorded home, or None. Read through a stat signature, since the
-    readers ask on every poll; a file that cannot be read gives the last
-    good answer, because a half-written config.json must not move the
-    daemon to another folder for a poll."""
+def record_state():
+    """(state, home): what config.json says about where Claude Code is.
+
+    Read through a stat signature, since the readers ask on every poll; a
+    file that cannot be read gives the last good answer, because a
+    half-written config.json must not move the daemon to another folder for
+    a poll. A process with no last good answer says UNKNOWN, which is not
+    NO_RECORD: no record at all is a desk a release before the record set
+    up, whose status line is in ~/.claude, while a config.json that exists
+    and does not read could name any folder. Taking the second for the
+    first, the daemon's watchdog installed Blink into ~/.claude and
+    overwrote the chain file with that folder's command (the review of the
+    WSL work, 2026-11-05)."""
     path = user_config.path(_blink_home())
     try:
         st = os.stat(path)
         sig = (st.st_mtime_ns, st.st_size, st.st_ino)
+    except FileNotFoundError:
+        sig = "absent"
     except OSError:
         sig = None
     seen = _last.get(path)
     if seen is not None and seen[0] == sig and sig is not None:
-        return seen[1]
-    try:
-        doc = user_config.load(_blink_home())
-    except (user_config.Unreadable, OSError):
-        return seen[1] if seen is not None else None
-    home = from_record(doc.get(KEY))
-    _last[path] = (sig, home)
-    return home
+        return seen[1], seen[2]
+    if sig == "absent":
+        state, home = NO_RECORD, None
+    else:
+        try:
+            doc = user_config.load(_blink_home())
+        except (user_config.Unreadable, OSError):
+            if seen is not None:
+                return seen[1], seen[2]
+            return UNKNOWN, None
+        rec = doc.get(KEY)
+        home = from_record(rec)
+        state = (NO_RECORD if rec is None
+                 else UNKNOWN if home is None else RECORDED)
+    _last[path] = (sig, state, home)
+    return state, home
+
+
+def recorded():
+    """The recorded home, or None: record_state()'s home."""
+    return record_state()[1]
 
 
 def native(environ=None):

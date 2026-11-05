@@ -184,30 +184,39 @@ def test_the_daemon_hands_the_watchdog_both_shims():
     only that the constructor works -- which is what let the original gap
     through.
     """
-    # The daemon builds it through cli.drift_watchdog (so that the folder
-    # `blink install` recorded is the one it guards, pc/claude_home): one
-    # call there, and one DriftWatchdog inside that function.
+    # The daemon builds it through cli.daemon_watchdog, which builds a
+    # cli.drift_watchdog for whatever folder the record names at each tick
+    # (pc/claude_home): one call there, and inside drift_watchdog one
+    # DriftWatchdog per kind of home -- the native one with both shims, the
+    # WSL desk's with the Codex hook shim's check.
     src = open("claude_usage_bridge.py", encoding="utf-8").read()
     built = [n for n in ast.walk(ast.parse(src))
              if isinstance(n, ast.Call)
              and getattr(n.func, "id", getattr(n.func, "attr", None))
-             == "drift_watchdog"]
+             == "daemon_watchdog"]
     assert len(built) == 1, "expected the daemon to build one watchdog"
 
     tree = ast.parse(open("pc/cli.py", encoding="utf-8").read())
+    follow = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.ClassDef)
+                  and n.name == "_RecordWatchdog")
+    assert any(isinstance(n, ast.Call)
+               and getattr(n.func, "id", None) == "drift_watchdog"
+               for n in ast.walk(follow))
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == "drift_watchdog")
     calls = [n for n in ast.walk(fn)
              if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Attribute)
              and n.func.attr == "DriftWatchdog"]
-    assert len(calls) == 1, "expected exactly one watchdog"
+    assert len(calls) == 2, "expected a native watchdog and a WSL one"
 
-    kwargs = {k.arg for k in calls[0].keywords}
-    assert "shims" in kwargs, (
+    kwargs = [{k.arg for k in c.keywords} for c in calls]
+    assert any("shims" in k for k in kwargs), (
         "the daemon builds a DriftWatchdog without shims=, so the hook shim "
         "is never checked and the naming feature is dead on every install "
         "that arrived by `blink update`")
+    assert any("shim_check" in k for k in kwargs)
 
 
 def test_status_reports_a_stale_shim(tmp_path, monkeypatch):

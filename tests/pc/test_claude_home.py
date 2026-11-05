@@ -459,3 +459,150 @@ def _no_recapture_wait(monkeypatch):
     hooks out and removing the script they run; not here."""
     from pc import cli as _cli
     monkeypatch.setattr(_cli, "HOOK_RECAPTURE_S", 0)
+
+
+# ------------------- review of the WSL work, 2026-11-05: A5-6, B-1, A5-5
+
+def _install_into(work):
+    """A native install recorded for folder `work`, as `blink install`
+    leaves it: the record, the shims, the markers, the status line."""
+    home = claude_home._native(work, True)
+    claude_home.save(home)
+    cli._write_shim(cli.shim_path(home), "blink-statusline.sh")
+    cli._write_shim(cli.hook_shim_path(home), "blink-hook.sh")
+    os.makedirs(work, exist_ok=True)
+    install_statusline.install(cli.settings_path(home), cli.shim_path(home),
+                               home=home)
+    return home
+
+
+def _status_line(work):
+    try:
+        with open(os.path.join(work, "settings.json")) as f:
+            return json.load(f).get("statusLine")
+    except FileNotFoundError:
+        return None
+
+
+def test_the_daemon_watchdog_follows_a_record_that_moves(tmp_path):
+    """A native install moving the record from X to Y left the running
+    daemon's watchdog guarding X (it was built once, at start): its next
+    tick put Blink back into X and overwrote the shared chain file. The
+    daemon's watchdog reads the record at every tick and guards only the
+    folder it names now."""
+    x, y = _j(tmp_path, "x"), _j(tmp_path, "y")
+    hx = _install_into(x)
+    dog = cli.daemon_watchdog()
+    assert dog.tick() is None                    # guarding X, all well
+    # install moves to Y: X's status line goes back to the customer's.
+    with open(os.path.join(x, "settings.json"), "w") as f:
+        json.dump({"statusLine": {"type": "command", "command": "mine"}}, f)
+    _install_into(y)
+    del hx
+    # Y is the one it now repairs, at once: a new folder's first check is
+    # due on the tick that first sees it.
+    with open(os.path.join(y, "settings.json"), "w") as f:
+        json.dump({}, f)
+    msg = dog.tick()
+    assert msg and "restored" in msg
+    assert "blink-statusline.sh" in _status_line(y)["command"]
+    assert _status_line(x) == {"type": "command", "command": "mine"}
+
+
+@pytest.mark.parametrize("damage", ["garbage", "unknown-kind"])
+def test_an_unusable_record_guards_nothing(tmp_path, damage):
+    """config.json exists but does not parse, or names a kind this release
+    does not know (a hand edit, a downgrade): the watchdog guarded the
+    legacy ~/.claude/settings.json, and its first tick installed Blink
+    there and overwrote the chain file with that folder's command. Now it
+    guards nothing until the record reads again, and then the recorded
+    folder only. Only a desk with no record at all is a pre-record install,
+    whose status line is in ~/.claude."""
+    work = _j(tmp_path, "work")
+    _install_into(work)
+    legacy = claude_home.legacy_settings_path()
+    os.makedirs(os.path.dirname(legacy))
+    with open(legacy, "w") as f:
+        json.dump({"statusLine": {"type": "command", "command": "origX"}}, f)
+    path = user_config.path(cli.blink_home())
+    with open(path) as f:
+        good = f.read()
+    claude_home._last.clear()                    # a new process
+    with open(path, "w") as f:
+        if damage == "garbage":
+            f.write("{not json")
+        else:
+            json.dump({"claude_home": {"kind": "later", "config_dir": "q",
+                                       "config_dir_set": False}}, f)
+    dog = cli.daemon_watchdog()
+    assert dog.tick() is None
+    with open(legacy) as f:
+        assert json.load(f) == {"statusLine": {"type": "command",
+                                               "command": "origX"}}
+    # Readable again: the recorded folder is guarded.
+    with open(path, "w") as f:
+        f.write(good)
+    with open(os.path.join(work, "settings.json"), "w") as f:
+        json.dump({}, f)
+    msg = dog.tick()
+    assert msg and "restored" in msg
+    assert "blink-statusline.sh" in _status_line(work)["command"]
+    with open(legacy) as f:
+        assert json.load(f)["statusLine"]["command"] == "origX"
+
+
+def test_record_state_tells_no_record_from_an_unusable_one(tmp_path):
+    assert claude_home.record_state() == (claude_home.NO_RECORD, None)
+    user_config.put(cli.blink_home(), "status-page", True)
+    assert claude_home.record_state() == (claude_home.NO_RECORD, None)
+    with open(user_config.path(cli.blink_home()), "w") as f:
+        f.write("{")
+    # The last good answer, within a process; a new one cannot know.
+    assert claude_home.record_state() == (claude_home.NO_RECORD, None)
+    claude_home._last.clear()
+    assert claude_home.record_state() == (claude_home.UNKNOWN, None)
+    home = claude_home.from_environ()
+    with open(user_config.path(cli.blink_home()), "w") as f:
+        json.dump({"claude_home": claude_home.to_record(home)}, f)
+    assert claude_home.record_state() == (claude_home.RECORDED, home)
+
+
+def _codex_marker(present):
+    p = os.path.expanduser("~/.blink/codex-hooks-installed-commands")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    if present:
+        with open(p, "w") as f:
+            f.write("bash x codex\n")
+    elif os.path.exists(p):
+        os.remove(p)
+
+
+@pytest.mark.parametrize("fault", ["stale", "deleted"])
+def test_a_wsl_desk_still_keeps_the_codex_hook_shim(tmp_path, fault):
+    """On a WSL desk the Claude settings are inside the distribution and
+    checked by pc/wsl_watch, so the daemon's watchdog did nothing at all.
+    But Codex on Windows runs the native ~/.blink/blink-hook.sh, and a
+    self-update never rewrites shims: it stayed at the old release, and a
+    deleted one stayed deleted. The native check now runs for that shim,
+    while Codex's hooks are registered."""
+    claude_home.save(_wsl())
+    shim = cli.hook_shim_path()
+    os.makedirs(os.path.dirname(shim), exist_ok=True)
+    if fault == "stale":
+        with open(shim, "w") as f:
+            f.write("# an older release\n")
+    _codex_marker(True)
+    dog = cli.daemon_watchdog()
+    msg = dog.tick()
+    assert msg and "blink-hook.sh" in msg
+    assert cli.shim_is_current(shim, "blink-hook.sh")
+    # Never the Claude settings or shims on Windows: those are WSL's.
+    assert not os.path.exists(_j(tmp_path, ".claude", "settings.json"))
+    assert not os.path.exists(cli.shim_path())
+
+
+def test_a_wsl_desk_without_codex_hooks_writes_no_shim(tmp_path):
+    claude_home.save(_wsl())
+    _codex_marker(False)
+    assert cli.daemon_watchdog().tick() is None
+    assert not os.path.exists(cli.hook_shim_path())

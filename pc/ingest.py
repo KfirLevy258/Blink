@@ -801,6 +801,60 @@ class IngestionBus:
         return _BusFetch(self)
 
 
+class DeferredBus:
+    """An IngestionBus not built yet: one that knows nothing until `ready()`
+    says so, then `build()`'s, for the rest of the process.
+
+    For a daemon started while its config.json could not be read
+    (claude_usage_bridge.build_bus): the record decides between a native bus
+    and a WSL one, and a guess is pinned for the process. Everything else is
+    the built bus's, through __getattr__; what is wired before it is built
+    -- the owner's choice of main provider, the usage refresh's activity --
+    is kept and handed to it. fetch() goes through this object, so a Bridge
+    built first reads the real bus once there is one."""
+
+    def __init__(self, build, ready):
+        self._build = build
+        self._ready = ready
+        self._bus = IngestionBus(providers=[], verdict=None)
+        self._built = False
+        self._preferred = None
+        self._refresh = None
+
+    def _resolve(self):
+        if self._built or not self._ready():
+            return
+        bus = self._build()
+        self._built = True
+        if self._preferred is not None:
+            bus.set_preferred(self._preferred)
+        if self._refresh is not None:
+            bus.credit_refresh(self._refresh)
+        self._bus = bus
+
+    def poll(self):
+        self._resolve()
+        return self._bus.poll()
+
+    def fetch(self):
+        return _BusFetch(self)
+
+    def set_preferred(self, provider):
+        if not self._built:
+            # Kept for the bus once it is built, which knows its providers:
+            # this one has none, and would refuse every name.
+            self._preferred = provider
+            return bool(provider)
+        return self._bus.set_preferred(provider)
+
+    def credit_refresh(self, activity_for):
+        self._refresh = activity_for
+        self._bus.credit_refresh(activity_for)
+
+    def __getattr__(self, name):
+        return getattr(self.__dict__["_bus"], name)
+
+
 class _BusFetch:
     """A zero-arg callable that also knows the project name, and the burn
     line (IngestionBus.burn) for the same poll.

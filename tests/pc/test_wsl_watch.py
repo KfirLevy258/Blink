@@ -539,9 +539,10 @@ def test_native_home_builds_no_watch(tmp_path, monkeypatch):
     assert bus._plan_reader._source is not None
     assert not isinstance(bus._burn["claude"], burn_reader.BurnReader)
     assert isinstance(bus._burn["codex"], burn_reader.CodexBurnReader)
-    # And no DriftWatchdog for it on the main thread.
+    # And on the main thread only the native Codex hook shim's check,
+    # which with no Codex hooks registered does nothing.
     dog = cli.drift_watchdog(home)
-    assert not isinstance(dog, install_statusline.DriftWatchdog)
+    assert dog._settings == "" and dog._shims == ()
     assert dog.tick() is None
 
 
@@ -914,3 +915,51 @@ def test_a_quiet_desk_keeps_the_last_walk_current(tmp_path):
     clock.t += wsl_watch.LIVE_S + 1             # walked away
     w.tick()
     assert src.poll(clock.t) == (1, [100] + [0] * 19)
+
+
+def test_an_unreadable_record_at_start_waits_for_the_real_one(
+        tmp_path, monkeypatch):
+    """config.json could not be read when the daemon started (a lock at
+    logon, a hand edit): the record read as none, build_bus built a native
+    bus, and a WSL desk ran on native readers until the next restart. Now
+    the bus knows nothing until the record reads, and is then built for
+    the home it names (B-1 / A4-4 in the review of the WSL work)."""
+    import claude_usage_bridge as cub
+    from pc import user_config
+    built = []
+
+    class Recorder:
+        def __init__(self, home, **kw):
+            built.append(home)
+
+        def start(self):
+            pass
+
+        def view(self):
+            return None
+
+        def burn_source(self):
+            return object()
+
+    monkeypatch.setattr(wsl_watch, "WslWatch", Recorder)
+    monkeypatch.delenv("BLINK_SCENARIO", raising=False)
+    home, _ = _home(tmp_path)
+    blink = cli.blink_home()
+    os.makedirs(blink, exist_ok=True)
+    path = user_config.path(blink)
+    with open(path, "w") as f:
+        f.write("{half a file")
+    claude_home._last.clear()
+    bus = cub.build_bus()
+    fetch = bus.fetch()
+    bus.set_preferred("codex")
+    assert fetch() is None
+    assert built == []
+    with open(path, "w") as f:
+        json.dump({"claude_home": claude_home.to_record(home)}, f)
+    fetch()
+    assert [h.distro_guid for h in built] == [GUID]
+    assert bus._plan_reader._source is not None
+    assert bus._preferred == "codex"
+    fetch()
+    assert len(built) == 1                      # built once

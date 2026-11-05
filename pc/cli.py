@@ -3677,26 +3677,57 @@ def _take_out_of(path, home, statusline=True, hooks=True):
 
 
 class _NoWatchdog:
-    """drift_watchdog's answer for a WSL home: ticks, does nothing."""
+    """daemon_watchdog's answer while the record cannot be read: ticks,
+    does nothing."""
 
     def tick(self):
         return None
 
 
-def drift_watchdog(home=None):
-    """The daemon's DriftWatchdog, for `home` (claude_home.native() when
-    None): its settings.json, its shims and its marker. Built here so the
-    daemon and the tests build the same one.
+def _codex_hook_shim_check():
+    """The native ~/.blink/blink-hook.sh, rewritten when it is missing or
+    not the one this release writes, while Codex's hooks are registered
+    (their marker): () -> message or None, for a DriftWatchdog's
+    shim_check. A WSL desk's own: there the native statusline marker is
+    absent, so shim_content_check, which asks that marker, never looks."""
+    if os.environ.get(install_statusline.WATCHDOG_DISABLE_ENV):
+        return None
+    if not install_codex_hooks._read_marker():
+        return None
+    path = hook_shim_path()
+    if shim_is_current(path, "blink-hook.sh"):
+        return None
+    try:
+        _write_shim(path, "blink-hook.sh")
+    except Exception as e:
+        # The type, not the text: an OSError's names the path.
+        return ("blink-hook.sh is out of date and could not be replaced"
+                f" ({type(e).__name__})")
+    return "blink-hook.sh was out of date; replaced it"
 
-    A WSL home gets one that does nothing. This watchdog ticks on the
+
+def drift_watchdog(home=None):
+    """The DriftWatchdog for `home` (claude_home.native() when None): its
+    settings.json, its shims and its marker. The daemon's is
+    daemon_watchdog(), which builds one of these for whatever the record
+    names at each tick.
+
+    A WSL home gets one that checks only the native hook shim Codex on
+    Windows runs (_codex_hook_shim_check). This watchdog ticks on the
     daemon's main thread, beside the serial loop, and a WSL drift check
     starts wsl.exe (30 s timeout) and reads through the distribution; its
     shim check would write the shims through UNC paths. The WSL check runs
     in pc/wsl_watch instead, on its own thread and only while the
-    distribution is in use (install_statusline.wsl_drift_watchdog)."""
+    distribution is in use (install_statusline.wsl_drift_watchdog). It
+    returned a watchdog that did nothing at all until the review of the WSL
+    work (2026-11-05), and the Codex shim, which nothing else rewrites after
+    a self-update, stayed at the old release; a deleted one stayed
+    deleted."""
     home = home or claude_home.native()
     if home.kind == claude_home.WSL:
-        return _NoWatchdog()
+        return install_statusline.DriftWatchdog(
+            "", "", check=lambda *_: None,
+            shim_check=_codex_hook_shim_check)
     # A desk with no record was installed by a release that wrote
     # ~/.claude/settings.json whatever CLAUDE_CONFIG_DIR said, and that is
     # the file to guard until `blink install` records another. Not the one
@@ -3712,6 +3743,54 @@ def drift_watchdog(home=None):
         shims=((shim_path(home), "blink-statusline.sh"),
                (hook_shim_path(home), "blink-hook.sh")),
         home=home)
+
+
+class _RecordWatchdog:
+    """The daemon's watchdog: drift_watchdog() for the home the record
+    names at each tick, built again when that changes.
+
+    Built once at start until the review of the WSL work (2026-11-05). A
+    native `blink install` that moved the record from folder X to Y left
+    the running daemon guarding X, and a tick before the restart put Blink
+    back into X and overwrote the one chain file with X's command: Y's own
+    status line lost, Y chaining X's. On Linux, where the service step's
+    `enable --now` leaves a running daemon running, that was every time.
+    Now nothing is written to a folder the record no longer names, and
+    `blink install` stops the service around the record change as well.
+
+    A config.json that exists but cannot be read, or holds a record this
+    release does not know, guards nothing until it reads again
+    (claude_home.record_state): taken for "no record", the legacy
+    ~/.claude/settings.json was guarded and its first tick, due at once,
+    overwrote the chain file. Only a desk with no record at all is a
+    pre-record install, guarded at the legacy path."""
+
+    def __init__(self):
+        self._key = ()
+        self._dog = _NoWatchdog()
+
+    def tick(self):
+        state, rec = claude_home.record_state()
+        if state == claude_home.UNKNOWN:
+            key = None
+        elif state == claude_home.NO_RECORD:
+            key = claude_home.NO_RECORD
+        else:
+            key = rec
+        if key != self._key:
+            self._key = key
+            if key is None:
+                self._dog = _NoWatchdog()
+            elif key == claude_home.NO_RECORD:
+                self._dog = drift_watchdog(claude_home.from_environ())
+            else:
+                self._dog = drift_watchdog(rec)
+        return self._dog.tick()
+
+
+def daemon_watchdog():
+    """The watchdog claude_usage_bridge ticks: see _RecordWatchdog."""
+    return _RecordWatchdog()
 
 
 REFRESH_QUESTION = (
