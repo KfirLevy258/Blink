@@ -298,11 +298,11 @@ class Answer(NamedTuple):
     ignored: a marker's data folder exists, but Roaming is fresher and won.
     package_ignored: a package folder holds data, but Roaming is fresher
         and won.
-    marker_passed_over: a marker's data folder exists, but a package folder
+    marker_passed_over: a marker's data folder holds data, but a package folder
         with no marker of its own is fresher and won.
     package_skipped: package folders that hold data and were not
         considered, because a marker in the same folder points at a data
-        folder that exists: what is left in them is the copy Desktop moved
+        folder that holds data: what is left in them is the copy Desktop moved
         away from.
     packages: the Claude_* package folders found, whether or not they hold
         data.
@@ -374,7 +374,18 @@ def _resolve_windows():
                 seen.add(name.lower())
                 names.append(name)
     targets = _candidate_targets(names, local, packages) if names else []
-    live = {n.lower() for n, _ in targets}
+    # A target is LIVE, the app's current copy, only when it holds Desktop
+    # data by the same test a package folder must pass. "The directory
+    # exists" is not enough: a fresh install creates Claude-Data/<name> with
+    # only a README.txt before sign-in, and a move that aborts after mkdir
+    # leaves it empty. Counting that as live would make the package folder,
+    # the only copy of the data, a skipped leftover, and Desktop would read
+    # as "never signed in" for as long as the target stayed empty (review,
+    # 2026-11-05). The empty target still ranks (at -inf, so any data beats
+    # it, and it still answers "installed, never signed in" when nothing
+    # else holds data); it just cannot hide a folder that holds data.
+    held = [(n, f) for n, f in targets if _holds_data(f)]
+    live = {n.lower() for n, _ in held}
     where = dict(packages=tuple(packages), roaming=roaming, local=local,
                  names=tuple(names))
     # (-freshness, kind, name, folder, source): freshest first; on a tie a
@@ -391,9 +402,10 @@ def _resolve_windows():
         # app saying "my data left here". What is still in the folder is the
         # copy it moved away from, and a directory mtime bumped by a cleanup
         # (IndexedDB emptied after the move, say) must not make it outrank
-        # the live target (review, 2026-11-04). A marker whose
-        # target is not there (yet) says nothing of the kind: the data has
-        # not landed, and this folder is the only copy.
+        # the live target (review, 2026-11-04). A marker whose target is not
+        # there (yet), or is there but holds no data yet, says nothing of
+        # the kind: the data has not landed, and this folder is the only
+        # copy.
         if any(n.lower() in live for n in package_names.get(folder, ())):
             skipped.append(folder)
             continue
@@ -414,7 +426,7 @@ def _resolve_windows():
                       package_ignored=any(r[1] == 1 for r in ranked),
                       **where)
     return Answer(folder, source, dangling=dangling,
-                  marker_passed_over=(kind == 1 and bool(targets)), **where)
+                  marker_passed_over=(kind == 1 and bool(held)), **where)
 
 
 def _resolve():

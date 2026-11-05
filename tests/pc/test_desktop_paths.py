@@ -1002,6 +1002,37 @@ def test_a_bumped_leftover_directory_does_not_beat_the_live_target(
     assert not answer.marker_passed_over
 
 
+def test_an_empty_target_does_not_hide_a_package_that_holds_data(
+        win, tmp_path, capsys):
+    """The marker's folder exists but is empty: the package folder is the
+    only copy and must be read, not skipped as a leftover."""
+    import time
+    _marker(tmp_path, _pkg_roaming(tmp_path))
+    _mkdir(tmp_path, _target(tmp_path))
+    _cache(tmp_path, _pkg_roaming(tmp_path),
+           content=_dc.doc([_dc.sample(int(time.time() * 1000))]))
+    answer = dp.resolve()
+    assert answer.source == PKG_SOURCE_A
+    assert answer.package_skipped == ()
+    assert not answer.marker_passed_over
+    row = _desktop_row(capsys)
+    assert row[0].startswith("Desktop     usage cache parsed")
+    assert not any(w in l for l in row
+                   for w in ("ignored", "skipped", "passed over"))
+
+
+def test_a_readme_only_target_does_not_hide_a_package_that_holds_data(
+        win, tmp_path):
+    """A fresh install creates Claude-Data/<name> with only README.txt
+    before sign-in."""
+    _marker(tmp_path, _pkg_roaming(tmp_path))
+    _touch(tmp_path, os.path.join(_target(tmp_path), "README.txt"))
+    _cache(tmp_path, _pkg_roaming(tmp_path), mtime=1_000_000)
+    answer = dp.resolve()
+    assert answer.source == PKG_SOURCE_A
+    assert answer.package_skipped == ()
+
+
 def test_a_marker_that_dangles_does_not_exclude_its_package(win, tmp_path):
     """The exclusion needs the target to EXIST: with the marker in the
     package and no data folder yet, the package is the only copy."""
@@ -1193,6 +1224,12 @@ def test_status_for_the_friends_layout(win, tmp_path, capsys):
     assert row[0].startswith("Desktop     usage cache parsed")
     assert ("            data found in the Store package folder: " + folder
             ) in row
+    # The whole block, pinned. The friend's layout has no marker, so no line
+    # may claim one was ignored, passed over or skipped (the guard on
+    # marker_passed_over once went unpinned: review, 2026-11-05).
+    assert len(row) == 2, row
+    assert not any(w in l for l in row
+                   for w in ("ignored", "skipped", "passed over", "marker"))
 
 
 def test_status_for_a_package_with_no_cache_yet(win, tmp_path, capsys):
