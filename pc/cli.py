@@ -495,7 +495,11 @@ def claude_version(home=None):
     home = home or claude_home.current()
     if home.kind == claude_home.WSL:
         return None, None
-    exe = shutil.which("claude")
+    # usage_refresh's PATH search, never shutil.which: that one finds a
+    # `claude` in the current folder (first, on Windows), and `blink
+    # install` run inside a clone ran the clone's (review of
+    # 277b81a..4003b0b, item 10).
+    exe = usage_refresh._on_path("claude")
     if not exe:
         return None, None
     try:
@@ -645,7 +649,7 @@ def claude_on_path(home=None) -> bool:
     home = home or claude_home.current()
     if home.kind == claude_home.WSL:
         return False
-    return shutil.which("claude") is not None
+    return usage_refresh._on_path("claude") is not None   # as claude_version
 
 
 class ClaudeHooks(NamedTuple):
@@ -3145,11 +3149,15 @@ def _announce(home=None, wsl_name=None, named=False):
     elif _config_unreadable():
         # user_config.put refuses to write over it, so saying "Changes"
         # here would be false (review of b3abec4).
+        # "Reads the one its own environment names" until the review of
+        # 277b81a..4003b0b (item 2): the service now waits for the record,
+        # showing what it can read meanwhile and writing nothing.
         print(f"  Leaves     {config}")
         print("             alone: it does not parse, so which Claude Code")
-        print("             folder this is for is not recorded, and the")
-        print("             background service reads the one its own")
-        print("             environment names.")
+        print("             folder this is for is not recorded. The")
+        print("             background service shows this computer's own")
+        print("             readings and changes no Claude Code settings")
+        print("             until it parses.")
     else:
         print(f"  Changes    {config}")
         print("             records which Claude Code folder this is for, so")
@@ -3642,7 +3650,11 @@ def _holds_ours(path, home):
         for group in groups if isinstance(groups, list) else ():
             inner = group.get("hooks") if isinstance(group, dict) else None
             for h in inner if isinstance(inner, list) else ():
-                if isinstance(h, dict) and h.get("command") in ours:
+                # A non-string is never ours, as install_hooks._ours says:
+                # tested with `in`, a list there was a TypeError out of
+                # install and uninstall (review of 277b81a..4003b0b, 14).
+                cmd = h.get("command") if isinstance(h, dict) else None
+                if isinstance(cmd, str) and cmd in ours:
                     return True
     return False
 
@@ -3767,7 +3779,7 @@ def drift_watchdog(home=None):
 
 class _RecordWatchdog:
     """The daemon's watchdog: drift_watchdog() for the home the record
-    names at each tick, built again when that changes.
+    names (claude_home.Settled), built again when that changes.
 
     Built once at start until the review of the WSL work (2026-11-05). A
     native `blink install` that moved the record from folder X to Y left
@@ -3779,32 +3791,29 @@ class _RecordWatchdog:
     `blink install` stops the service around the record change as well.
 
     A config.json that exists but cannot be read, or holds a record this
-    release does not know, guards nothing until it reads again
-    (claude_home.record_state): taken for "no record", the legacy
-    ~/.claude/settings.json was guarded and its first tick, due at once,
-    overwrote the chain file. Only a desk with no record at all is a
-    pre-record install, guarded at the legacy path."""
+    release does not know, guards nothing until it reads again: taken for
+    "no record", the legacy ~/.claude/settings.json was guarded and its
+    first tick, due at once, overwrote the chain file. Only a process that
+    started with no record, and never saw one, guards the legacy path; a
+    config.json caught absent for a moment guards nothing, and the
+    watchdog built for the last record is the one used when it reads
+    again (Settled; the review of 277b81a..4003b0b, item 5)."""
 
     def __init__(self):
-        self._key = ()
+        self._settled = claude_home.Settled()
+        self._key = None
         self._dog = _NoWatchdog()
 
     def tick(self):
-        state, rec = claude_home.record_state()
-        if state == claude_home.UNKNOWN:
-            key = None
-        elif state == claude_home.NO_RECORD:
-            key = claude_home.NO_RECORD
-        else:
-            key = rec
+        key = self._settled.read()
+        if key is None:
+            return None
         if key != self._key:
             self._key = key
-            if key is None:
-                self._dog = _NoWatchdog()
-            elif key == claude_home.NO_RECORD:
+            if key == claude_home.NO_RECORD:
                 self._dog = drift_watchdog(claude_home.from_environ())
             else:
-                self._dog = drift_watchdog(rec)
+                self._dog = drift_watchdog(key)
         return self._dog.tick()
 
 
@@ -4300,8 +4309,8 @@ def _install_native_claude(home, step) -> None:
     # Before settings.json, so a daemon that restarts in between already
     # reads the folder the entries are going into. A config.json that does
     # not parse is not ours to overwrite (user_config.put refuses), and
-    # costs only the record: the daemon then reads the folder its own
-    # environment names, as every release before this did.
+    # costs the record: until it parses, the daemon shows this computer's
+    # own readings and guards and refreshes nothing (build_bus).
     # The files to take our entries out of, asked before the save: one of
     # them is the folder recorded until now.
     olds = _old_settings(home)
@@ -4514,7 +4523,11 @@ def _announce_wsl_record(home, named) -> None:
         print("             Claude Code's folder or your Linux account there has")
         print("             changed since: takes Blink's status line and hooks")
         print("             back out of it.")
-    elif rec.kind == claude_home.WSL:
+    elif rec.kind == claude_home.WSL and not (
+            rec.distro_name.casefold() == name.casefold()
+            and _wsl_distro(rec) is None):
+        # Not for a re-registered one of the same name: that is the one
+        # being set up, and nothing is taken out of it (item 1).
         print(f"  Changes    Claude Code inside WSL ({rec.distro_name}), which")
         print("             Blink was set up for until now: takes Blink's status")
         print("             line, hooks and scripts back out of it.")
@@ -4904,8 +4917,17 @@ def _setup_wsl(d):
             return _StoppedOnto(home)
         _undo_wsl_setup(home, d.name)
         print()
-        print(f"Blink setup stopped, so Blink still reads"
-              f" {prev.distro_name}, not {d.name}.")
+        if _wsl_distro(prev) is None:
+            # Gone, with another distribution under its name that could not
+            # be undone: "still reads Ubuntu" named a distribution Blink has
+            # never read (item 1 of the same review).
+            print(f"Blink setup stopped, and {d.name} was not set up. The"
+                  f" distribution Blink was set up for, {prev.distro_name},"
+                  " is no longer on this computer; its record is kept until"
+                  " Blink is out of the one called that now.")
+        else:
+            print(f"Blink setup stopped, so Blink still reads"
+                  f" {prev.distro_name}, not {d.name}.")
         return None
 
     blink_dir = probe.home.rstrip("/") + "/.blink"
@@ -4957,6 +4979,16 @@ def _take_blink_out_of_previous(old, new) -> bool:
         return True
     if old.kind == claude_home.WSL:
         if (old.distro_guid or "").lower() == (new.distro_guid or "").lower():
+            return True
+        if (old.distro_name.casefold() == new.distro_name.casefold()
+                and _wsl_distro(old) is None):
+            # Re-registered: its GUID is gone and the distribution now
+            # called what it was is the one just written. Taken out "by that
+            # name" (_uninstall_wsl's same-name branch), it lost Blink again
+            # straight after install_into and the install said Done (the
+            # /code-review max of 277b81a..4003b0b, item 1). The new install
+            # supersedes the record; only its drop folder goes.
+            _rm_wsl_drop(old)
             return True
         if not _uninstall_wsl(old, again=(
                 f"install --wsl {new.distro_name}")):

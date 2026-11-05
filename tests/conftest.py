@@ -535,7 +535,7 @@ def _no_real_claude(request, monkeypatch):
 def _no_real_claude_version(request, monkeypatch):
     """cli.claude_version() is the one helper that runs `claude --version`.
     Stubbed to "no Claude Code" for every test; a test that wants an answer
-    patches it itself, after this. claude_on_path only calls shutil.which and
+    patches it itself, after this. claude_on_path only searches PATH and
     stays real."""
     if request.node.get_closest_marker("allow_claude_launch"):
         return

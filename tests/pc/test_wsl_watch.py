@@ -917,31 +917,31 @@ def test_a_quiet_desk_keeps_the_last_walk_current(tmp_path):
     assert src.poll(clock.t) == (1, [100] + [0] * 19)
 
 
-def test_an_unreadable_record_at_start_waits_for_the_real_one(
-        tmp_path, monkeypatch):
-    """config.json could not be read when the daemon started (a lock at
-    logon, a hand edit): the record read as none, build_bus built a native
-    bus, and a WSL desk ran on native readers until the next restart. Now
-    the bus knows nothing until the record reads, and is then built for
-    the home it names (B-1 / A4-4 in the review of the WSL work)."""
+class _WatchRecorder:
+    """wsl_watch.WslWatch, recording the homes it was built for and
+    starting nothing."""
+    built = None
+
+    def __init__(self, home, **kw):
+        type(self).built.append(home)
+
+    def start(self):
+        pass
+
+    def view(self):
+        return None
+
+    def burn_source(self):
+        return object()
+
+
+def _unreadable_at_start(tmp_path, monkeypatch):
+    """A daemon started over a config.json that does not parse: its bus,
+    the WSL home to record later, and config.json's path."""
     import claude_usage_bridge as cub
     from pc import user_config
-    built = []
-
-    class Recorder:
-        def __init__(self, home, **kw):
-            built.append(home)
-
-        def start(self):
-            pass
-
-        def view(self):
-            return None
-
-        def burn_source(self):
-            return object()
-
-    monkeypatch.setattr(wsl_watch, "WslWatch", Recorder)
+    _WatchRecorder.built = []
+    monkeypatch.setattr(wsl_watch, "WslWatch", _WatchRecorder)
     monkeypatch.delenv("BLINK_SCENARIO", raising=False)
     home, _ = _home(tmp_path)
     blink = cli.blink_home()
@@ -950,19 +950,146 @@ def test_an_unreadable_record_at_start_waits_for_the_real_one(
     with open(path, "w") as f:
         f.write("{half a file")
     claude_home._last.clear()
-    bus = cub.build_bus()
-    fetch = bus.fetch()
-    bus.set_preferred("codex")
-    assert fetch() is None
-    assert built == []
+    return cub.build_bus(), home, path
+
+
+def _record(path, home):
     with open(path, "w") as f:
         json.dump({"claude_home": claude_home.to_record(home)}, f)
+
+
+def test_an_unreadable_record_at_start_waits_for_the_real_one(
+        tmp_path, monkeypatch):
+    """config.json could not be read when the daemon started (a lock at
+    logon, a hand edit): the record read as none, build_bus built a native
+    bus, and a WSL desk ran on native readers until the next restart
+    (B-1 / A4-4 in the review of the WSL work). Then for the fix wave's
+    review (item 2) the bus knew nothing at all meanwhile, and a file that
+    stayed unparseable left the board with no usage, Codex and Claude
+    Desktop included. Reading is harmless: it reads what a native bus
+    reads until the record does, and is then handed over to the bus for
+    the home it names, with the board's main provider and the refresh's
+    activity credit."""
+    bus, home, path = _unreadable_at_start(tmp_path, monkeypatch)
+    fetch = bus.fetch()
+    assert {"claude", "codex"} <= set(bus.provider_ids())
+    assert bus.set_preferred("codex") is True
+    credit = lambda fetched_at: None  # noqa: E731
+    bus.credit_refresh(credit)
     fetch()
-    assert [h.distro_guid for h in built] == [GUID]
-    assert bus._plan_reader._source is not None
-    assert bus._preferred == "codex"
+    assert _WatchRecorder.built == []
+    _record(path, home)
     fetch()
-    assert len(built) == 1                      # built once
+    assert [h.distro_guid for h in _WatchRecorder.built] == [GUID]
+    inner = bus.__dict__["_bus"]
+    assert inner._plan_reader._source is not None
+    # The inner bus's own fields: bus._preferred is the wrapper's, and
+    # read so this test passed with the handover deleted (C36).
+    assert inner._preferred == "codex"
+    assert inner._refresh_activity is credit
+    fetch()
+    assert len(_WatchRecorder.built) == 1       # built once
+
+
+@pytest.mark.parametrize("gap", ["moved aside", "rename then write",
+                                 "absent then torn"])
+def test_a_save_caught_half_done_still_reaches_the_wsl_bus(
+        tmp_path, monkeypatch, gap):
+    """Item 5 (verify/v4/c9_absent_gap.py): the owner fixes config.json
+    with an editor that renames the file away and writes a new one. A poll
+    between the two read "no record", and the deferred bus pinned a native
+    one for the process. A process that started unreadable never settles
+    on "no record"."""
+    bus, home, path = _unreadable_at_start(tmp_path, monkeypatch)
+    fetch = bus.fetch()
+    fetch()
+    os.rename(path, path + "~")
+    fetch()
+    fetch()
+    if gap == "absent then torn":
+        with open(path, "w") as f:
+            f.write("{\"clau")
+        fetch()
+    if gap == "moved aside":
+        _record(path + "~", home)
+        os.rename(path + "~", path)
+    else:
+        _record(path, home)
+        os.remove(path + "~")
+    fetch()
+    assert [h.distro_guid for h in _WatchRecorder.built] == [GUID]
+
+
+def test_the_stand_in_bus_never_walks_the_seeders(tmp_path, monkeypatch):
+    """verify/v4/c10_extra_walk.py: the stand-in's first poll ran the
+    one-shot Cowork / IndexedDB anchor seeder, an os.walk and a decode of
+    Claude Desktop's conversation store, for a bus about to be replaced.
+    The seeder waits for the bus that stays."""
+    from pc import cowork_audit, desktop_idb
+    calls = []
+    monkeypatch.setattr(cowork_audit, "seven_day_reset",
+                        lambda: calls.append("cowork"))
+    monkeypatch.setattr(desktop_idb, "seven_day_reset",
+                        lambda: calls.append("idb"))
+    bus, home, path = _unreadable_at_start(tmp_path, monkeypatch)
+    fetch = bus.fetch()
+    fetch()
+    fetch()
+    assert calls == []
+    _record(path, claude_home._native(str(tmp_path / "cc"), True))
+    fetch()
+    fetch()
+    assert calls == ["cowork", "idb"]
+
+
+def test_unknown_record_runs_no_refresh_and_asks_nothing(tmp_path,
+                                                         monkeypatch):
+    """Item 2 (C8): a config.json that parses but holds a record this
+    release cannot rebuild left current() guessing the service's own
+    environment, so the /usage refresh ran Claude Code against a folder
+    the record does not name and the board was asked "Keep figures
+    fresh?". Both wait for the record."""
+    import claude_usage_bridge as cub
+    from pc import usage_refresh, user_config
+    blink = cli.blink_home()
+    os.makedirs(blink, exist_ok=True)
+    with open(user_config.path(blink), "w") as f:
+        json.dump({"claude_home": {"kind": "native", "config_dir": "/x",
+                                   "config_dir_set": "true"}}, f)
+    claude_home._last.clear()
+    from pc import idle
+    monkeypatch.setattr(idle, "seconds_idle", lambda: 0.0)
+    monkeypatch.setattr(usage_refresh, "locate_claude",
+                        lambda *a: "/fake/claude")
+    monkeypatch.delenv("BLINK_SCENARIO", raising=False)
+    ask = cub.board_ask(blink)
+    assert ask.due({"ask"}) is False
+    # The refresh's home, as start_usage_refresh wires it.
+    homes = []
+
+    class Watch:
+        def __init__(self, blink_home, home, **kw):
+            homes.append(home)
+
+        def activity_for(self, fetched_at):
+            return None
+
+        def start(self):
+            return None
+    monkeypatch.setattr(usage_refresh, "RefreshWatch", Watch)
+    cub.start_usage_refresh(blink, ingest.IngestionBus(providers=[]),
+                            lambda: True)
+    assert [h() for h in homes] == [None]
+    # And a watch handed None runs nothing.
+    ran = []
+    monkeypatch.undo()
+    w = usage_refresh.RefreshWatch(
+        blink, lambda: None, enabled=lambda: True,
+        board_alive=lambda: True, view=lambda now: None,
+        other_at=lambda: None, idle=lambda: 0.0,
+        runner=lambda *a, **k: ran.append(a))
+    w.tick_once()
+    assert ran == []
 
 
 # ------------------------------- review of the WSL work, 2026-11-05: A4-2

@@ -552,8 +552,10 @@ class BoardAsk:
                           work_login=False, idle_s=0.0, **ask):
             return False
         h = self._home()
-        if h.kind != claude_home.NATIVE:
-            return False                # before anything stats a UNC path
+        if h is None or h.kind != claude_home.NATIVE:
+            # Before anything stats a UNC path; None is a record that
+            # cannot be read (claude_home.known).
+            return False
         view = self._view(now)
         ask.update(native=True,
                    claude_found=locate_claude(self._blink_home,
@@ -786,9 +788,10 @@ class RefreshWatch:
                                   cleared_at=self._mem.cleared_at)
             return
         h = self._home()
-        if h.kind != claude_home.NATIVE:
+        if h is None or h.kind != claude_home.NATIVE:
             # Before the config is read: a WSL home's is a UNC path, and
-            # nothing here may stat one.
+            # nothing here may stat one. None: the record cannot be read
+            # (claude_home.known), and a guess is not run against.
             return
         state = self._floor(load_state(self._blink_home))
         if state.last_run_at > now:

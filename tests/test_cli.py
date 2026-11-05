@@ -4843,3 +4843,105 @@ def test_uninstall_cleans_a_same_named_distribution_and_says_so(
         == "zoe"
     assert "another distribution now has its name" in out
     assert claude_home.recorded() is None
+
+
+# ---------------------- /code-review max of the fix wave (277b81a..4003b0b)
+
+def test_install_into_a_re_registered_same_name_keeps_what_it_wrote(
+        tmp_path, monkeypatch, capsys):
+    """Item 1 of the review: Ubuntu re-registered (new GUID, same name) and
+    `install --wsl Ubuntu` run. The take-out of the record it replaces
+    reached the distribution by name, which is the one just written, and
+    took Blink straight back out of it under "Done". The new install
+    supersedes the old record: nothing is taken out by that name."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg([(OTHER_GUID, "Ubuntu")]),
+                      probe=_probe())
+    old = _recorded_wsl(tmp_path)
+    os.makedirs(old.state_dir)
+    assert cli.main(["install", "--wsl", "Ubuntu"]) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert _inside(calls) == ["probe", "install_into"]
+    assert claude_home.recorded().distro_guid == OTHER_GUID
+    assert not os.path.exists(old.drop_dir)
+    assert "Done." in out
+    assert "takes Blink's status line, hooks and scripts back out" not in out
+
+
+def test_a_gone_previous_whose_name_another_holds_is_named_as_such(
+        tmp_path, monkeypatch, capsys):
+    """Item 1, the second half: the record names Ubuntu (gone), another
+    distribution now called Ubuntu cannot be undone, and the install was for
+    Debian. "Blink still reads Ubuntu" was not true: the one it was set up
+    for is gone, and the Ubuntu there now is another distribution."""
+    from pc import claude_home
+    deb = "{22222222-3333-4444-8555-666666666666}"
+    calls = _wsl_desk(monkeypatch, _FakeReg([(OTHER_GUID, "Ubuntu"),
+                                             (deb, "Debian")]),
+                      probe=_probe())
+    old = _recorded_wsl(tmp_path)
+
+    def from_(home, wsl_run, **k):
+        calls.append(("uninstall_from", home))
+        raise install_statusline.WslInstallError("nope")
+    monkeypatch.setattr(install_statusline, "uninstall_from", from_)
+    assert cli.main(["install", "--wsl", "Debian"]) == 1
+    out = " ".join(capsys.readouterr().out.split())
+    assert claude_home.recorded() == old
+    assert "Blink still reads Ubuntu" not in out
+    assert "no longer on this computer" in out
+    assert "Debian was not set up" in out
+
+
+def test_a_hook_command_that_is_not_a_string_is_not_ours(tmp_path):
+    """Item 14: _holds_ours tested a hook's raw command for membership in a
+    set, so a list there (a hand edit) was a TypeError out of install,
+    uninstall and the --wsl disclosure before anything was changed.
+    install_hooks._ours already says a non-string is never ours."""
+    from pc import claude_home
+    p = str(tmp_path / "settings.json")
+    with open(p, "w") as f:
+        json.dump({"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": ["sh", "x"]},
+            {"type": "command", "command": {"a": 1}}]}]}}, f)
+    assert cli._holds_ours(p, claude_home.from_environ({})) is False
+
+
+@pytest.mark.allow_claude_launch      # the real claude_version, on a fake
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX shell script")
+def test_claude_in_the_current_folder_is_never_run(tmp_path, monkeypatch):
+    """Item 10: claude_version and claude_on_path used shutil.which, which
+    finds a `claude` in the current folder through a relative PATH entry
+    (and on Windows looks there first): `blink install` run inside a clone
+    holding one ran it. They search PATH as usage_refresh does."""
+    from pc import claude_home
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    ran = tmp_path / "ran"
+    exe = proj / "claude"
+    exe.write_text(f"#!/bin/sh\n: > '{ran}'\necho 9.9.9\n")
+    exe.chmod(0o755)
+    monkeypatch.chdir(proj)
+    monkeypatch.setenv("PATH", "." + os.pathsep + str(proj))
+    home = claude_home.from_environ({})
+    assert cli.claude_on_path(home) is False
+    assert cli.claude_version(home) == (None, None)
+    assert not ran.exists()
+
+
+def test_install_over_an_unparseable_config_says_what_the_service_does(
+        tmp_path, monkeypatch, capsys):
+    """Item 2: over a config.json that does not parse, a default desk's
+    install said the service "reads the one its own environment names",
+    which the deferred bus made false. It shows this computer's own
+    readings and changes no Claude Code settings until the file parses."""
+    from pc import user_config
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    os.makedirs(cli.blink_home(), exist_ok=True)
+    with open(inside(tmp_path, user_config.path(cli.blink_home())), "w") as f:
+        f.write("{not json")
+    _settings(tmp_path, {})
+    cli.main(["install"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "its own environment names" not in out
+    assert "changes no Claude Code settings until it parses" in out

@@ -802,30 +802,46 @@ class IngestionBus:
 
 
 class DeferredBus:
-    """An IngestionBus not built yet: one that knows nothing until `ready()`
-    says so, then `build()`'s, for the rest of the process.
+    """The daemon's bus while the record that decides it cannot be read:
+    `interim`, a native bus, until `decide()` names the bus to keep -- the
+    interim itself, or another (a WSL one) -- for the rest of the process.
 
     For a daemon started while its config.json could not be read
     (claude_usage_bridge.build_bus): the record decides between a native bus
-    and a WSL one, and a guess is pinned for the process. Everything else is
-    the built bus's, through __getattr__; what is wired before it is built
-    -- the owner's choice of main provider, the usage refresh's activity --
-    is kept and handed to it. fetch() goes through this object, so a Bridge
-    built first reads the real bus once there is one."""
+    and a WSL one, and a guess was pinned for the process. Until the
+    /code-review max of 277b81a..4003b0b this stood on a bus with no
+    providers at all, and a config.json that stayed unparseable left the
+    board with no usage, Codex and Claude Desktop included (item 2).
+    Reading is harmless, so the native readers read meanwhile; only the
+    writing (the watchdog, the /usage refresh) waits for the record.
 
-    def __init__(self, build, ready):
-        self._build = build
-        self._ready = ready
-        self._bus = IngestionBus(providers=[], verdict=None)
+    Everything is the current bus's, through __getattr__; what is wired
+    before the decision -- the owner's choice of main provider, the usage
+    refresh's activity -- is handed to the bus decided on. fetch() goes
+    through this object, so a Bridge built first reads the real bus once
+    there is one. The interim's one-shot anchor seeder (a walk of Cowork's
+    session tree, a decode of Claude Desktop's conversation store) waits
+    until it is the bus kept: run from a bus about to be replaced, it was a
+    walk for nothing (verify/v4/c10_extra_walk.py)."""
+
+    def __init__(self, interim, decide):
+        self._decide = decide
+        self._bus = interim
+        interim._seeded = True
         self._built = False
         self._preferred = None
         self._refresh = None
 
     def _resolve(self):
-        if self._built or not self._ready():
+        if self._built:
             return
-        bus = self._build()
+        bus = self._decide()
+        if bus is None:
+            return
         self._built = True
+        if bus is self._bus:
+            bus._seeded = False
+            return
         if self._preferred is not None:
             bus.set_preferred(self._preferred)
         if self._refresh is not None:
@@ -840,12 +856,14 @@ class DeferredBus:
         return _BusFetch(self)
 
     def set_preferred(self, provider):
-        if not self._built:
-            # Kept for the bus once it is built, which knows its providers:
-            # this one has none, and would refuse every name.
+        # The current bus's known-name check, which keeps a raw name off the
+        # board out of the log: this said True for any non-empty string, and
+        # Bridge logged it as the main source (item 6). Kept for the handover
+        # only once that bus took it.
+        ok = self._bus.set_preferred(provider)
+        if ok:
             self._preferred = provider
-            return bool(provider)
-        return self._bus.set_preferred(provider)
+        return ok
 
     def credit_refresh(self, activity_for):
         self._refresh = activity_for

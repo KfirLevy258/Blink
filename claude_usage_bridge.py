@@ -311,10 +311,14 @@ def start_usage_refresh(blink_home, bus, board_alive):
 
     # current, not native: a record that turns WSL under a running daemon
     # stops the runs at the next tick, before the restart that follows.
+    # known, not current: a record that cannot be read runs nothing, where
+    # current() guessed the service's own environment and ran Claude Code
+    # against a folder the record does not name (item 2 of the review of
+    # 277b81a..4003b0b).
     watch = usage_refresh.RefreshWatch(
-        blink_home, claude_home.current, enabled=enabled,
+        blink_home, claude_home.known, enabled=enabled,
         board_alive=board_alive,
-        view=usage_refresh.config_view(claude_home.current),
+        view=usage_refresh.config_view(claude_home.known),
         other_at=other_at)
     # A refresh run with the person at the computer counts as activity at
     # its time (RefreshWatch.activity_for); every other /usage cache none.
@@ -335,8 +339,8 @@ def board_ask(blink_home, bus=None):
     if os.environ.get("BLINK_SCENARIO"):
         return None
     return usage_refresh.BoardAsk(
-        blink_home, claude_home.current,
-        usage_refresh.config_view(claude_home.current),
+        blink_home, claude_home.known,          # as start_usage_refresh
+        usage_refresh.config_view(claude_home.known),
         other_at=None if bus is None else (lambda: claude_activity_at(bus)))
 
 
@@ -399,13 +403,25 @@ def build_bus():
             # hand edit) or names a home this release does not know. Built
             # as native, the bus was pinned so for the process, and a WSL
             # desk read Windows' own Claude Code until the next restart
-            # (the review of the WSL work, 2026-11-05). It knows nothing
-            # until the record reads, and is then built for that home.
-            print("[bridge] Blink's config.json could not be read; waiting"
-                  " for it", file=sys.stderr)
-            return ingest.DeferredBus(
-                lambda: _bus_for(claude_home.current()),
-                lambda: claude_home.record_state()[0] != claude_home.UNKNOWN)
+            # (the review of the WSL work, 2026-11-05). Then it showed
+            # nothing at all until the record read, which for a file that
+            # stays unparseable was for good (the review of
+            # 277b81a..4003b0b, item 2). Reading is harmless: the native
+            # bus reads meanwhile, and a record that settles on a WSL home
+            # hands over to that one (claude_home.Settled: one read is not
+            # a move, and "no record" is never taken from this process).
+            print("[bridge] Blink's config.json could not be read; showing"
+                  " this computer's own readings until it can",
+                  file=sys.stderr)
+            settled = claude_home.Settled()
+            interim = _bus_for(claude_home.native())
+
+            def decide():
+                s = settled.read()
+                if s is None or s == claude_home.NO_RECORD:
+                    return None
+                return _bus_for(s) if s.kind == claude_home.WSL else interim
+            return ingest.DeferredBus(interim, decide)
         return _bus_for(claude_home.current())
     from pc.providers.scripted import ScriptedProvider
     scripted = ScriptedProvider(scenario)

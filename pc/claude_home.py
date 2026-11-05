@@ -258,7 +258,11 @@ def record_state():
         try:
             doc = user_config.load(_blink_home())
         except (user_config.Unreadable, OSError):
-            if seen is not None:
+            # Not an absent read's answer: a file that is there and does not
+            # read is not "no record", and a rename-then-write save caught
+            # between its two halves made it one for good (review of
+            # 277b81a..4003b0b, item 5).
+            if seen is not None and seen[0] != "absent":
                 return seen[1], seen[2]
             return UNKNOWN, None
         rec = doc.get(KEY)
@@ -269,9 +273,65 @@ def record_state():
     return state, home
 
 
+class Settled:
+    """record_state() as a reader that lives for the process acts on it:
+    read() gives the recorded home, NO_RECORD (a pre-record desk, whose
+    status line is in ~/.claude), or None for "act on nothing now".
+
+    Two rules, from the /code-review max of 277b81a..4003b0b (item 5).
+    NO_RECORD only for a process that started with no record and has
+    never settled on one since: once one has been seen, a config.json
+    caught absent by an editor's rename-then-write save, or unreadable
+    mid-write, read NO_RECORD, and the daemon's watchdog rebuilt itself
+    for the legacy ~/.claude and wrote there at once. Such a read is None
+    now, and the last good record stays the one to come back to. And a
+    change from the record acted on to another is acted on only once two
+    reads in a row, a tick apart, agree: a single read is not a move. The
+    first record read is acted on at once, there being nothing before it
+    to protect."""
+
+    _UNSET = object()
+
+    def __init__(self, read=None):
+        self._read = read or record_state
+        self._legacy_ok = None       # decided by the first read
+        self._settled = self._UNSET  # the answer acted on
+        self._last = self._UNSET     # the previous read
+
+    def read(self):
+        state, home = self._read()
+        if self._legacy_ok is None:
+            self._legacy_ok = state == NO_RECORD
+        if state == RECORDED:
+            raw = home
+        elif state == NO_RECORD and self._legacy_ok:
+            raw = NO_RECORD
+        else:
+            raw = None
+        last, self._last = self._last, raw
+        if raw is None:
+            return None
+        if self._settled is self._UNSET or raw == self._settled \
+                or raw == last:
+            self._settled = raw
+            if raw != NO_RECORD:
+                self._legacy_ok = False
+            return raw
+        return None
+
+
 def recorded():
     """The recorded home, or None: record_state()'s home."""
     return record_state()[1]
+
+
+def known():
+    """current(), or None while config.json holds a record that cannot be
+    read (UNKNOWN): for the writers that must not guess, the /usage
+    refresh and the board's ask (claude_usage_bridge)."""
+    if record_state()[0] == UNKNOWN:
+        return None
+    return current()
 
 
 def native(environ=None):

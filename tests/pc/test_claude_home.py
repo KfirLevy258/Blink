@@ -20,6 +20,7 @@ import pytest
 from pc import (burn_reader, claude_home, claude_plan, cli, install_hooks,
                 install_statusline, statusline_source, user_config)
 from pc.providers import claude_state
+from tests.support.home import inside
 
 GUID = "{5C3D2B1A-0000-4000-8000-00000000ABCD}"
 UNC = "\\\\?\\UNC\\wsl.localhost\\Ubuntu"
@@ -463,10 +464,18 @@ def _no_recapture_wait(monkeypatch):
 
 # ------------------- review of the WSL work, 2026-11-05: A5-6, B-1, A5-5
 
-def _install_into(work):
+def _install_into(tmp, work):
     """A native install recorded for folder `work`, as `blink install`
-    leaves it: the record, the shims, the markers, the status line."""
+    leaves it: the record, the shims, the markers, the status line. `tmp`
+    is the caller's home: every file written lands under ~/.blink or
+    `work`, and each is checked to be inside it first (tests/support/home;
+    the review of 277b81a..4003b0b found this one wrote ~/.blink unchecked)."""
     home = claude_home._native(work, True)
+    for p in (user_config.path(cli.blink_home()), cli.shim_path(home),
+              cli.hook_shim_path(home), cli.settings_path(home),
+              install_statusline._chain_path(home),
+              install_statusline._marker_path(home)):
+        inside(tmp, p)
     claude_home.save(home)
     cli._write_shim(cli.shim_path(home), "blink-statusline.sh")
     cli._write_shim(cli.hook_shim_path(home), "blink-hook.sh")
@@ -491,18 +500,21 @@ def test_the_daemon_watchdog_follows_a_record_that_moves(tmp_path):
     daemon's watchdog reads the record at every tick and guards only the
     folder it names now."""
     x, y = _j(tmp_path, "x"), _j(tmp_path, "y")
-    hx = _install_into(x)
+    hx = _install_into(tmp_path, x)
     dog = cli.daemon_watchdog()
     assert dog.tick() is None                    # guarding X, all well
     # install moves to Y: X's status line goes back to the customer's.
     with open(os.path.join(x, "settings.json"), "w") as f:
         json.dump({"statusLine": {"type": "command", "command": "mine"}}, f)
-    _install_into(y)
+    _install_into(tmp_path, y)
     del hx
-    # Y is the one it now repairs, at once: a new folder's first check is
-    # due on the tick that first sees it.
+    # Y is the one it now repairs, once two reads agree it is the record
+    # (claude_home.Settled): the first tick that sees it guards nothing,
+    # and a new folder's first check is due on the one after.
     with open(os.path.join(y, "settings.json"), "w") as f:
         json.dump({}, f)
+    assert dog.tick() is None
+    assert _status_line(y) is None
     msg = dog.tick()
     assert msg and "restored" in msg
     assert "blink-statusline.sh" in _status_line(y)["command"]
@@ -519,7 +531,7 @@ def test_an_unusable_record_guards_nothing(tmp_path, damage):
     folder only. Only a desk with no record at all is a pre-record install,
     whose status line is in ~/.claude."""
     work = _j(tmp_path, "work")
-    _install_into(work)
+    _install_into(tmp_path, work)
     legacy = claude_home.legacy_settings_path()
     os.makedirs(os.path.dirname(legacy))
     with open(legacy, "w") as f:
@@ -567,8 +579,12 @@ def test_record_state_tells_no_record_from_an_unusable_one(tmp_path):
     assert claude_home.record_state() == (claude_home.RECORDED, home)
 
 
-def _codex_marker(present):
-    p = os.path.expanduser("~/.blink/codex-hooks-installed-commands")
+def _codex_marker(tmp, present):
+    """Codex's hook marker present or not. `tmp` is the caller's home, and
+    the path is checked to lie inside it before anything is written or
+    removed (tests/support/home)."""
+    p = inside(tmp, os.path.expanduser(
+        "~/.blink/codex-hooks-installed-commands"))
     os.makedirs(os.path.dirname(p), exist_ok=True)
     if present:
         with open(p, "w") as f:
@@ -591,7 +607,7 @@ def test_a_wsl_desk_still_keeps_the_codex_hook_shim(tmp_path, fault):
     if fault == "stale":
         with open(shim, "w") as f:
             f.write("# an older release\n")
-    _codex_marker(True)
+    _codex_marker(tmp_path, True)
     dog = cli.daemon_watchdog()
     msg = dog.tick()
     assert msg and "blink-hook.sh" in msg
@@ -603,7 +619,7 @@ def test_a_wsl_desk_still_keeps_the_codex_hook_shim(tmp_path, fault):
 
 def test_a_wsl_desk_without_codex_hooks_writes_no_shim(tmp_path):
     claude_home.save(_wsl())
-    _codex_marker(False)
+    _codex_marker(tmp_path, False)
     assert cli.daemon_watchdog().tick() is None
     assert not os.path.exists(cli.hook_shim_path())
 
@@ -699,3 +715,110 @@ def test_a_record_move_that_fails_starts_the_service_again(tmp_path,
     names = [c[0] for c in calls]
     assert names[-2:] == ["stop", "start"] or names[-1] == "start"
     assert "stop" in names and names.index("stop") < names.index("start")
+
+
+# ---------------------- /code-review max of the fix wave (277b81a..4003b0b)
+
+def _legacy(tmp, command):
+    legacy = inside(tmp, claude_home.legacy_settings_path())
+    os.makedirs(os.path.dirname(legacy), exist_ok=True)
+    with open(legacy, "w") as f:
+        json.dump({"statusLine": {"type": "command", "command": command}}, f)
+    return legacy
+
+
+def _chain(tmp):
+    try:
+        with open(inside(tmp, install_statusline._chain_path())) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return None
+
+
+@pytest.mark.parametrize("gap", ["absent", "absent-then-torn"])
+def test_a_config_json_caught_absent_never_guards_the_legacy_folder(
+        tmp_path, gap):
+    """Item 5 (verify/v4/c11_absent_branch.py): a desk recorded for Y, and
+    config.json renamed away for a moment by an editor's rename-then-write
+    save. That read NO_RECORD, the watchdog rebuilt itself for the legacy
+    ~/.claude and wrote Blink there at once, over the chain file. Once a
+    record has been seen, an absent or unreadable file guards nothing; the
+    record comes back as it was."""
+    y = _j(tmp_path, "cfgY")
+    os.makedirs(y)
+    with open(os.path.join(y, "settings.json"), "w") as f:
+        json.dump({"statusLine": {"type": "command", "command": "echo Y"}},
+                  f)
+    legacy = _legacy(tmp_path, "echo legacy")
+    _install_into(tmp_path, y)
+    dog = cli.daemon_watchdog()
+    assert dog.tick() is None
+    path = user_config.path(cli.blink_home())
+    os.rename(path, path + "~")
+    assert dog.tick() is None
+    if gap == "absent-then-torn":
+        with open(path, "w") as f:
+            f.write("{\"claude_")
+        assert dog.tick() is None
+        os.remove(path)
+    os.rename(path + "~", path)
+    with open(legacy) as f:
+        assert json.load(f)["statusLine"]["command"] == "echo legacy"
+    assert _chain(tmp_path) == "echo Y"
+    # And Y is still the one guarded, by the watchdog built for it.
+    assert dog.tick() is None
+    assert dog._key.config_dir == y
+
+
+def test_a_process_that_started_unreadable_never_guards_the_legacy_folder(
+        tmp_path):
+    """Item 5: legacy guarding is for a process that started with no
+    record. One that started on a config.json that did not parse, and then
+    saw it absent, guarded ~/.claude."""
+    legacy = _legacy(tmp_path, "echo legacy")
+    _install_into(tmp_path, _j(tmp_path, "work"))     # its marker is ours
+    path = user_config.path(cli.blink_home())
+    with open(path, "w") as f:
+        f.write("{not json")
+    claude_home._last.clear()                    # a new process
+    dog = cli.daemon_watchdog()
+    assert dog.tick() is None
+    os.remove(path)
+    for _ in range(3):
+        assert dog.tick() is None
+    with open(legacy) as f:
+        assert json.load(f) == {"statusLine": {"type": "command",
+                                               "command": "echo legacy"}}
+
+
+def test_an_absent_read_is_not_the_last_good_answer_for_a_torn_one(
+        tmp_path):
+    """Item 5: record_state handed an unreadable file the last good answer,
+    and an absent read's NO_RECORD counted as one: the file there, half
+    written, then read as "no record"."""
+    _install_into(tmp_path, _j(tmp_path, "w"))
+    assert claude_home.record_state()[0] == claude_home.RECORDED
+    path = user_config.path(cli.blink_home())
+    os.remove(path)
+    assert claude_home.record_state()[0] == claude_home.NO_RECORD
+    with open(path, "w") as f:
+        f.write("{")
+    assert claude_home.record_state()[0] == claude_home.UNKNOWN
+
+
+def test_settled_acts_on_a_change_only_when_two_reads_agree():
+    """Item 5: a change of record is acted on once two reads a tick apart
+    agree; the first record read is acted on at once."""
+    x, y = claude_home._native("/x", True), claude_home._native("/y", True)
+    reads = iter([(claude_home.RECORDED, x), (claude_home.RECORDED, y),
+                  (claude_home.RECORDED, x), (claude_home.RECORDED, y),
+                  (claude_home.RECORDED, y), (claude_home.NO_RECORD, None),
+                  (claude_home.NO_RECORD, None), (claude_home.UNKNOWN, None),
+                  (claude_home.RECORDED, y)])
+    s = claude_home.Settled(lambda: next(reads))
+    assert [s.read() for _ in range(9)] == [x, None, x, None, y, None, None,
+                                            None, y]
+    # A process that started with no record guards the legacy folder.
+    reads = iter([(claude_home.NO_RECORD, None)] * 2)
+    s = claude_home.Settled(lambda: next(reads))
+    assert [s.read(), s.read()] == [claude_home.NO_RECORD] * 2
