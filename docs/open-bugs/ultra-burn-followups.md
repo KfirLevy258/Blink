@@ -88,7 +88,7 @@ The original entry:
 >
 > `settings_path()` is `~/.claude/settings.json` whatever `CLAUDE_CONFIG_DIR`
 > says, but Claude Code 2.1.316 reads its user settings from
-> `$CLAUDE_CONFIG_DIR/settings.json` (read in its bundle, not run). On such a
+> `$CLAUDE_CONFIG_DIR/settings.json` (not yet measured on a desk). On such a
 > desk Blink's status line and hooks are installed where Claude Code never
 > looks: no `statusline.json`, no Claude Code figures, no activity light and no
 > status-line evidence for the Ultra verdict, while `blink status` says both are

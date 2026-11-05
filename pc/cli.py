@@ -582,14 +582,14 @@ def desktop_staleness_note(age_s):
     just not asking. A reading hours old is therefore the ordinary shape of
     "nobody was here", not a fault, and a panel showing one is not stuck.
 
-    Measured from Claude.app 1.40609.0 on 2026-08-31, by reading its own
-    bundle and then watching it run: the poll is 15 minutes by default and
-    5 only for the half hour after the menubar panel has been opened, it
-    skips the fetch entirely once the system has been idle ten minutes or
-    the screen is locked, and it fetches at launch and again every time the
-    menubar icon is opened. Opening that icon is the one action that
-    refreshes on demand: focusing the app window fetches nothing, because
-    the chat runs in a web view that never touches this file.
+    Seen in Claude.app 1.40609.0 running, 2026-08-31: the poll is 15
+    minutes by default and 5 only for the half hour after the menubar panel
+    has been opened, it skips the fetch entirely once the system has been
+    idle ten minutes or the screen is locked, and it fetches at launch and
+    again every time the menubar icon is opened. Opening that icon is the
+    one action that refreshes on demand: focusing the app window fetches
+    nothing, because the chat runs in a web view that never touches this
+    file.
 
     None of those intervals is quoted below on purpose. They belong to an
     application we do not control, they have already changed twice (a flat

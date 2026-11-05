@@ -25,8 +25,8 @@ to `~/.blink/statusline.json` carries `rate_limits.seven_day`
 rendering as the session replied, so this is not the old "window expired
 while nobody rendered" absence. (Claude Code renders the status line on
 events -- token usage, a new assistant message, a mode change, the earliest
-reset, prompt-cache expiry -- not on a timer: read from 2.1.316's bundle in
-the re-review of 2026-11-01.)
+reset, prompt-cache expiry -- not on a timer: found for 2.1.316 in
+the re-review of 2026-11-01, not yet measured on a desk.)
 
 ## The plan cannot be read from local files
 
@@ -80,22 +80,23 @@ Proof of a window clears the mark: a status line with `five_hour` rendered
 after the mark, a Desktop sample whose `fh` is a number (0 included), or a
 Local Storage reading or reset stamp. The newest evidence wins.
 
-The Claude Code half was two replies 25 minutes to 4 h 35 min apart until the
-re-review of 2026-11-01, which read Claude Code 2.1.316's bundle and found
-three premises false. The status line renders on events, so a ten-minute
-silence was a pause, not a gap, and an Ultra user who read between turns was
-never marked. `API_TIMEOUT_MS` bounds only the wait for headers, so one
-stream across a Pro or Max reset rendered weekly-only rises half an hour
-apart. And `five_hour` leaves the line when its `resets_at` passes the
-*local* clock, so a desk running 30 minutes fast rendered weekly-only replies
-in the last half hour of every window, and was marked every window. On Pro
-and Max those stretches are the only place a weekly-only reply happens, and
-a chain inside one spans less than five hours; the one-hour cap keeps two
-from joining. That rests on the replies alone, not on seeing anything
-between them, so a gap in the polling costs the safety nothing. A Pro or Max desk is
-still marked if its clock is hours fast (about three and a half less its
-longest stream, with unusual use; five or more in any case). A verdict saved under the rejected rules is read as none, because the
-evidence kinds were renamed.
+The Claude Code half was two replies 25 minutes to 4 h 35 min apart until
+the re-review of 2026-11-01, which found three premises false for Claude
+Code 2.1.316 (not yet measured on a desk). The status line renders on
+events, so a ten-minute silence was a pause, not a gap, and an Ultra user
+who read between turns was never marked. `API_TIMEOUT_MS` bounds only the
+wait for headers, so one stream across a Pro or Max reset rendered
+weekly-only rises half an hour apart. And `five_hour` leaves the line when
+its `resets_at` passes the *local* clock, so a desk running 30 minutes fast
+rendered weekly-only replies in the last half hour of every window, and was
+marked every window. On Pro and Max those stretches are the only place a
+weekly-only reply happens, and a chain inside one spans less than five
+hours; the one-hour cap keeps two from joining. That rests on the replies
+alone, not on seeing anything between them, so a gap in the polling costs
+the safety nothing. A Pro or Max desk is still marked if its clock is hours
+fast (about three and a half less its longest stream, with unusual use; five
+or more in any case). A verdict saved under the rejected rules is read as
+none, because the evidence kinds were renamed.
 
 The Desktop half was first a single sample with `sd` and no `fh`, which is
 what the measured Ultra desk wrote. But that was measured on Ultra only. A

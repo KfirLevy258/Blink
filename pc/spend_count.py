@@ -32,7 +32,7 @@ Rules, each from a way the raw number misleads:
 
 Why one mark, and not one per ledger. Each Claude Code process keeps its
 own cost ledger, and /login starts a process's again from zero under the
-same session id (2.1.318's costLedger.reset), so a sign-out and sign-in to
+same session id (2.1.318, not yet measured on a desk), so a sign-out and sign-in to
 the same seat -- same id, same fingerprint -- counts nothing until the
 session passes its old total: $14.34 shown for $16.84 in U9 of the final
 review of 2026-11-04. Rounds 2 and 3 of that review tried a mark per

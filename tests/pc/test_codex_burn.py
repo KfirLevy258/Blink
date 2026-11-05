@@ -1172,10 +1172,10 @@ def _codex_page_bus(tmp_path, marked):
 
 
 def test_an_unmarked_page_holds_no_turn_past_five_hours(tmp_path):
-    """4th review (README.md:183): prune ran only inside poll(), and burn()
-    stops polling a page the moment it is unmarked, so ten turns were
-    still held 8.4 h after the newest. The bus prunes every reader on its
-    own poll, marked or not."""
+    """4th review (README.md, Privacy, line 185): prune ran only inside
+    poll(), and burn() stops polling a page the moment it is unmarked, so
+    ten turns were still held 8.4 h after the newest. The bus prunes every
+    reader on its own poll, marked or not."""
     latest = _ten_turns(tmp_path)
     marked = [True]
     bus, r, clock = _codex_page_bus(tmp_path, marked)
@@ -1617,10 +1617,10 @@ CODEX_FULL_78 = ("on an account with no five-hour limit, every token count"
 
 
 def test_the_codex_summaries_say_every_figure_is_read_and_kept():
-    """3rd review (README.md:183, README-full.md:48 and :78): the short
-    summaries said only the output-token count of each turn was read.
-    CodexBurnReader reads all six figures of both usage objects and keeps
-    them as the turn's key for as long as the turn is inside the window,
+    """3rd review (README.md, Privacy, line 185; README-full.md:48 and :78):
+    the short summaries said only the output-token count of each turn was
+    read. CodexBurnReader reads all six figures of both usage objects and
+    keeps them as the turn's key for as long as the turn is inside the window,
     which the install note and the Reads row already said. The summaries
     say it too, and none still says only the output count."""
     root = os.path.dirname(os.path.dirname(os.path.dirname(

@@ -144,14 +144,15 @@ REPLY_MEMORY_LIMIT = 64
 
 # What proves no window, from the status line. See _reply_without_window for
 # the argument; these are its inputs. Replaced on 2026-11-01, after the
-# re-review of that day measured three premises of the two-reply rule
-# false in Claude Code 2.1.316's bundle (read, not run): the status line
+# re-review of that day found three premises of the two-reply rule
+# false for Claude Code 2.1.316: the status line
 # renders on events -- token usage, a mode change, a new assistant message,
 # the earliest reset, prompt-cache expiry at about an hour -- not every few
 # seconds; API_TIMEOUT_MS bounds only the wait for headers, so a body can
 # stream for half an hour and more; and five_hour leaves the line by the
-# LOCAL clock (resets_at > Date.now()/1000), so on a desk whose clock runs
-# fast it goes before the window does.
+# LOCAL clock (it goes once its resets_at is behind the local time), so on
+# a desk whose clock runs fast it goes before the window does. Found for
+# 2.1.316, not yet measured on a desk.
 #
 # CHAIN_SPAN_S: replies with no five_hour, the first and the latest more than
 # a window and a quarter of an hour apart at the least.
@@ -804,8 +805,8 @@ class ClaudeCliProvider(base.ProviderParser):
         the saved /usage.
 
         The count: Claude Code keeps a session's id across /login and
-        starts its cost again from zero (2.1.318's costLedger.reset, read
-        in the bundle). bind() empties the count only when the fingerprint
+        starts its cost again from zero (2.1.318, not yet measured on a
+        desk). bind() empties the count only when the fingerprint
         differs from the one it holds, so a login away and back to the same
         seat kept the high-water marks, and every render under the old mark
         counted nothing until the session passed it (/code-review max of
