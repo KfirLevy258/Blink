@@ -1146,3 +1146,77 @@ def test_the_recorded_guid_under_its_name_is_watched_as_before(tmp_path):
     w.tick()
     assert drift.ticks == 1
     assert w.view() is not None
+
+
+# ---------------------- /code-review max of the fix wave (277b81a..4003b0b)
+
+OTHER = "{11111111-2222-4333-8444-555555555555}"
+
+
+def test_a_renamed_distribution_is_asked_for_under_its_new_name(tmp_path):
+    """Item 15 (verify/v9/c28_c29.py, C29): Blink's distribution renamed
+    to Ubuntu-old and stopped, a new one called Ubuntu installed and
+    running. The watch asked `running` by the recorded name first, heard
+    yes from the new one, then followed the rename and ran the drift
+    repair, wsl.exe -d Ubuntu-old, which starts a stopped distribution.
+    The GUID is looked up before anything is asked by name."""
+    from pc import wsl
+    # A UNC config folder, which a rename rewrites (claude_home.renamed);
+    # nothing here reads it, the distribution never being in use.
+    home = claude_home.wsl(GUID, "Ubuntu", "zoe", "/home/zoe",
+                           wsl.unc("Ubuntu", "/home/zoe/.claude"), False)
+    t0 = time.time()
+    clock = _Clock(t0)
+
+    class Named(_Running):
+        def __call__(self, name):
+            self.calls.append(name)
+            return name == "Ubuntu"
+    running = Named()
+    drift = _Drift()
+    reg = [wsl.Distro(GUID, "Ubuntu-old", 2, False),
+           wsl.Distro(OTHER, "Ubuntu", 2, True)]
+    w = _watch(home, clock, running, drift=drift, distros=lambda: reg)
+    _touch_drop(home, t0 - wsl_watch.LIVE_S - 100)
+    w.tick()
+    clock.t += wsl_watch.IDLE_REPAIR_EVERY_S
+    w.tick()
+    assert running.calls == ["Ubuntu-old"]
+    assert drift.ticks == 0
+    assert w._home.distro_name == "Ubuntu-old"
+    # And live: asked under the new name too, and nothing read when no.
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert running.calls == ["Ubuntu-old", "Ubuntu-old"]
+    assert drift.ticks == 0 and not w.live()
+
+
+def test_a_distribution_whose_key_is_unsure_is_not_gone(tmp_path, capsys):
+    """Item 15 (C28): the recorded GUID's Lxss key named a state other than
+    installed (converting, being moved) or would not read, with another
+    distribution listed. The watch took it for gone, said so, and stopped;
+    an unsure key proves nothing. Nothing is asked or said meanwhile, and
+    the next look after the key reads again finds it."""
+    from pc import wsl
+    home, _ = _home(tmp_path)
+    t0 = time.time()
+    clock = _Clock(t0)
+    running = _Running(True)
+    drift = _Drift()
+    state = {"unsure": True}
+
+    def scan():
+        others = [wsl.Distro(OTHER, "Debian", 2, True)]
+        if state["unsure"]:
+            return others, {GUID.lower()}
+        return others + [wsl.Distro(GUID, "Ubuntu", 2, False)], set()
+    w = _watch(home, clock, running, drift=drift, distros=scan)
+    _touch_drop(home, t0)
+    w.tick()
+    assert "gone" not in capsys.readouterr().err
+    assert running.calls == [] and drift.ticks == 0
+    state["unsure"] = False
+    clock.t += wsl_watch.TICK_S
+    _touch_drop(home, clock.t)
+    w.tick()
+    assert running.calls == ["Ubuntu"] and drift.ticks == 1 and w.live()

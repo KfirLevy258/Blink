@@ -294,21 +294,29 @@ class WslWatch:
             if self._idle_at is None:
                 self._idle_at = now
             elif not (0 <= now - self._idle_at < IDLE_REPAIR_EVERY_S):
-                self._idle_at = now
-                idle_repair = bool(self._running(self._home.distro_name))
+                # The GUID first, then `running` by the name it has now:
+                # asked by the recorded name, a new distribution under it
+                # said yes, the rename was followed after, and the drift
+                # repair's wsl.exe -d started the renamed one, stopped (the
+                # /code-review max of 277b81a..4003b0b, item 15). Unsure is
+                # asked again next tick, the idle clock left as it was.
+                mine = self._ours()
+                if mine is not None:
+                    self._idle_at = now
+                    idle_repair = mine and bool(
+                        self._running(self._home.distro_name))
         elif (self._ran_at is None or not
                 (0 <= now - self._ran_at < RUNNING_EVERY_S)):
-            # Stamped before the ask, so a check that raises is not
-            # retried on every tick.
-            self._ran_at = now
-            self._ran = False
-            self._ran = bool(self._running(self._home.distro_name))
-            asked_now = True
+            mine = self._ours()          # as above
+            if mine is not None:
+                # Stamped before the ask, so a check that raises is not
+                # retried on every tick.
+                self._ran_at = now
+                self._ran = False
+                self._ran = mine and bool(
+                    self._running(self._home.distro_name))
+                asked_now = True
         live = fresh and self._ran
-        if (live and asked_now or idle_repair) and not self._ours():
-            # Not the distribution Blink was set up for: nothing is read or
-            # written there (_ours).
-            live = asked_now = idle_repair = False
         if fresh:
             # A live spell has its own drift check; the idle one waits a
             # full interval after it.
@@ -390,16 +398,25 @@ class WslWatch:
         settings.json, the shims and the out file into it, on a reinstall a
         distribution nobody set Blink up in (the review of the WSL work,
         2026-11-05, A4-2). A rename is followed (resolve_name). A registry
-        that lists nothing cannot tell, and is taken as yes, as before."""
-        found = self._distros() if self._distros is not None \
-            else _registry_distros()
+        that lists nothing cannot tell, and is taken as yes, as before.
+
+        None for a GUID whose own key is there but unsure (wsl.scan: not
+        read, or a state other than installed): not gone, and not known to
+        be there; the caller asks again later and goes nowhere meanwhile.
+        Taken for gone, a distribution being converted or moved was said to
+        be gone and dropped (item 15 of the review of 277b81a..4003b0b)."""
+        got = self._distros() if self._distros is not None \
+            else _registry_scan()
+        found, unsure = got if isinstance(got, tuple) else (got, set())
+        want = (self._home.distro_guid or "").lower()
+        if want in unsure:
+            return None
         if not found:
             return True
-        want = (self._home.distro_guid or "").lower()
         mine = next((d for d in found if d.guid.lower() == want), None)
         if mine is not None:
             if mine.name != self._home.distro_name:
-                self.resolve_name()
+                self.resolve_name(found)
             self._said_foreign = False
             return True
         if not self._said_foreign:
@@ -411,16 +428,19 @@ class WslWatch:
                   file=sys.stderr)
         return False
 
-    def resolve_name(self):
+    def resolve_name(self, found=None):
         """Follow a rename: find the distribution by its GUID and, when it
         is called something else now, read it under that name. The drop
         folder is named for the GUID and stays; the config and transcripts
         are UNC paths that name the distribution, and the old name leads
         nowhere. Asked once, from start()'s thread (a registry read is
         quick, but it is not the serial loop's). Status says "renamed --
-        run blink install", which writes the new name into the record."""
-        found = self._distros() if self._distros is not None \
-            else _registry_distros()
+        run blink install", which writes the new name into the record.
+        `found` is a listing already read (_ours)."""
+        if found is None:
+            got = self._distros() if self._distros is not None \
+                else _registry_scan()
+            found = got[0] if isinstance(got, tuple) else got
         want = (self._home.distro_guid or "").lower()
         d = next((x for x in found or () if x.guid.lower() == want), None)
         if d is None or d.name == self._home.distro_name:
@@ -491,12 +511,16 @@ def _unreachable(e):
     return getattr(e, "winerror", None) in _NET_UNREACHABLE
 
 
-def _registry_distros():
-    """wsl.distros() on Windows; [] elsewhere, where there is no registry
-    and winreg will not import."""
+def _registry_scan():
+    """wsl.scan() on Windows, (installed, unsure); ([], set()) elsewhere,
+    where there is no registry and winreg will not import, and when the
+    list cannot be read, which cannot tell."""
     if sys.platform != "win32":
-        return []
-    return wsl.distros()
+        return [], set()
+    try:
+        return wsl.scan()
+    except wsl.Unreadable:
+        return [], set()
 
 
 def _burn_reader_for(home):
