@@ -353,9 +353,10 @@ def test_install_into_refuses_a_changed_file(tmp_path, shell):
     home = _home(lin)
 
     def before(argv):
-        # The settings write is the one call that carries a SHA-256.
-        if any(len(a) == 64 and all(c in "0123456789abcdef" for c in a)
-               for a in argv):
+        # The settings write is the one call whose `want` is a SHA-256
+        # (every write carries the SHA-256 of what it writes, after it).
+        if (argv[2] == install_statusline._WRITE and len(argv[5]) == 64
+                and all(c in "0123456789abcdef" for c in argv[5])):
             _write_json(str(target), {"theme": "light"})
 
     run = _runner(lin, _fake_bin(tmp_path), before=before, shell=shell)
@@ -887,3 +888,54 @@ def test_a_command_that_is_not_a_string_is_left_alone_inside(tmp_path,
     doc = json.loads(target.read_text())
     assert doc["hooks"] == {"Stop": [{"hooks": [entry]}]}
     assert "statusLine" not in doc
+
+
+# ------------------------------- review of the WSL work, 2026-11-05: A4-1
+
+@posix_only
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("keep", [0, 1, 20])
+def test_a_write_cut_short_installs_nothing(tmp_path, shell, keep):
+    """The write script installed whatever reached its stdin: when the
+    process feeding wsl.exe died mid-write, `cat` met an early EOF, exited
+    0, and `mv -f` put a prefix of settings.json (or of a shim) in place --
+    b'{\\n  "permissions": {' was the reviewer's. Now the length and SHA-256
+    of the whole document travel as arguments and the script checks the temp
+    file against both before the mv; a short one is deleted, the target is
+    left as it was, and the Windows side reports a failure. `keep` is how
+    many bytes arrive."""
+    lin = _tree(tmp_path, {"theme": "dark"}, link=False)
+    target = lin / ".claude" / "settings.json"
+    before = target.read_bytes()
+    real = _runner(lin, _fake_bin(tmp_path), shell=shell)
+
+    def cut(argv, stdin=None):
+        if argv[2] == install_statusline._WRITE and stdin:
+            stdin = stdin[:keep]
+        return real(argv, stdin)
+
+    new = json.dumps({"permissions": {"allow": ["x"] * 50}},
+                     indent=2).encode()
+    with pytest.raises(install_statusline.WslInstallError):
+        install_statusline._wsl_write(
+            cut, str(target), hashlib.sha256(before).hexdigest(), "keep",
+            new, "Claude Code's settings")
+    assert target.read_bytes() == before
+    assert sorted(os.listdir(lin / ".claude")) == ["settings.json"]
+
+    # The same write, whole, goes in.
+    install_statusline._wsl_write(
+        real, str(target), hashlib.sha256(before).hexdigest(), "keep", new,
+        "Claude Code's settings")
+    assert target.read_bytes() == new
+
+
+@posix_only
+def test_an_empty_document_still_writes(tmp_path):
+    """Length 0 is a real length: an empty chain file is written, not
+    refused as a cut-short one."""
+    lin = _tree(tmp_path)
+    p = lin / ".blink" / "x"
+    install_statusline._wsl_write(_runner(lin, _fake_bin(tmp_path)), str(p),
+                                  "-", "600", b"", "a file")
+    assert p.read_bytes() == b""

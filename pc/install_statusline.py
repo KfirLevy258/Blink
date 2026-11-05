@@ -769,7 +769,17 @@ _ON_WINDOWS = 67
 # the SHA-256 of the bytes read, "absent" for a file that was not there, or
 # "-" for a file of ours that nobody else writes. $3 is "keep" (the mode the
 # customer gave settings.json, 0600 for a new one, as _save does) or an
-# octal mode.
+# octal mode. $4 and $5 are the byte length and SHA-256 of what stdin
+# carries, and the temp file must match both before it replaces $1.
+#
+# Those two exist because `cat` cannot tell a whole stdin from a cut one: an
+# early EOF -- the Windows process feeding wsl.exe killed mid-write, while
+# wsl.exe and this script outlive it -- ends cat with status 0, and the mv
+# then installed the prefix. The review of the WSL work (2026-11-05) got
+# settings.json down to b'{\n  "permissions": {' that way under dash, and
+# 106,496 of a 325,057-byte document through wsl.run with the parent
+# SIGKILLed: every setting gone, with no backup, or a shim cut mid-line,
+# which dash exits 2 on and Claude Code takes as "block" for every tool.
 #
 # The temp file is a sibling of the target, named <target>.<pid>.blink-tmp
 # -- the shape temp_siblings() matches -- because mv is only atomic within
@@ -783,7 +793,7 @@ _ON_WINDOWS = 67
 # the read-to-write gap the check closes is a round trip through wsl.exe.
 # The traps remove the temp on any way out, including `timeout` killing the
 # script, since each temp is a copy of settings that may hold an API key.
-_WRITE = r"""t=$1 want=$2 mode=$3
+_WRITE = r"""t=$1 want=$2 mode=$3 len=$4 sum=$5
 case $t in /*) ;; *) exit 64 ;; esac
 case $want in
   -) ;;
@@ -804,6 +814,10 @@ else
   if [ "$mode" != keep ]; then chmod "$mode" "$tmp" || exit 73; fi
 fi
 cat > "$tmp" || exit 74
+n=$(wc -c < "$tmp") || exit 74
+[ "$n" -eq "$len" ] || exit 76
+got=$(sha256sum < "$tmp") || exit 70
+[ "${got%% *}" = "$sum" ] || exit 76
 mv -f -- "$tmp" "$t" || exit 74
 trap - EXIT
 """
@@ -917,7 +931,8 @@ def _wsl_read_settings(home, wsl_run, purpose="install") -> _WslSettings:
 
 def _wsl_write(wsl_run, path: str, want: str, mode: str, data: bytes,
                what: str) -> None:
-    rc, _, _ = wsl_run(["sh", "-c", _WRITE, "sh", path, want, mode],
+    rc, _, _ = wsl_run(["sh", "-c", _WRITE, "sh", path, want, mode,
+                        str(len(data)), hashlib.sha256(data).hexdigest()],
                        stdin=data)
     if rc == _CHANGED:
         raise WslInstallError(
