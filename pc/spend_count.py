@@ -18,8 +18,11 @@ Rules, each from a way the raw number misleads:
   against. `since(anchor)` counts only rises stamped at or after the
   anchor: a rise from a mark set before the anchor may have happened
   partly before /usage measured, so it is dropped rather than counted
-  twice. For a /usage the anchor is moved SKEW_S later (since_usage),
-  because its time and a render's come from clocks that can disagree.
+  twice. For a /usage on a WSL desk the anchor is moved SKEW_S later
+  (since_usage), because its time and a render's come from clocks that can
+  disagree. A clock step is met in observe(): a render dated in the future
+  is taken as made now, and a rise dated before its own mark counts toward
+  the month only.
 * `at` is the render's own time (the payload's mtime), so reading the same
   render again moves nothing.
 
@@ -148,17 +151,24 @@ SAVE_EVERY_S = 60
 # /usage time is Date.now() inside the distribution, and the two can
 # disagree. A render made before the /usage but dated after it has its rise
 # counted whole although part of it is in the /usage figure. How far they
-# disagree is an owed measurement (Plan B, task 7, in
-# docs/plans/2026-11-04-wsl-plan.md: the owner's checklist item comparing
-# Windows' time with `date -u` in WSL), and the correction will be chosen
-# from it. Until then two minutes, in the direction the count is allowed
-# to err: what it costs is the rises whose previous sighting falls in the
-# two minutes after a /usage, left to the next one, and the page says it
-# is an estimate while there are any (rose_after). Round 5 of the review
-# took the margin out for claiming "exact" over those rises; round 6 put
-# it back with that fixed. Applied by since_usage, which claude_cli asks
-# with a /usage time on a WSL home only: a native desk dates both by one
-# clock (final review of round 7, F1).
+# disagree has not been measured: no checklist or test compares Windows'
+# clock with the distribution's yet (until the review of the WSL work,
+# 2026-11-05, this comment pointed at a Plan B checklist item that does not
+# exist). Two minutes until it is. That errs in the direction the count is
+# allowed to err only while the distribution's clock is within two minutes
+# of Windows': what it costs then is the rises whose previous sighting
+# falls in the two minutes after a /usage, left to the next one, and the
+# page says it is an estimate while there are any (rose_after). Past two
+# minutes of disagreement a render made before the /usage can pass the
+# margin and its rise is counted whole -- an overcount, until the next
+# /usage -- and a distribution clock far enough ahead dates every /usage
+# into the future, where claude_cli refuses it (SPEND_FUTURE_S). Round 5
+# of the 2026-11-04 review took the margin out for claiming "exact" over
+# those rises; round 6 put it back with that fixed. Applied by
+# since_usage, which claude_cli asks with a /usage time on a WSL home
+# only: a native desk dates both by one clock (final review of round 7,
+# F1). observe() also uses it as the tolerance before a render's date is
+# called a fast clock's.
 SKEW_S = 120
 # 2: the carried entry and the newest anchor asked about. A version-1 file
 # (every rise one by one, from before 2026-11-04) is read as empty, as any
@@ -356,6 +366,8 @@ class SpendCounter:
         stamps = [a[1] for a in adds] + [v[1] for v in sessions.values()]
         if fold is not None:
             stamps.append(fold[4])
+        # Possibly past now, from a file saved under a fast clock; the
+        # first observe() that is told the time puts it back (see there).
         self._latest = max(stamps, default=None)
 
     def bind(self, account_fp, period_start) -> None:
@@ -388,8 +400,22 @@ class SpendCounter:
             self._dirty = self._urgent = True
 
     # -- counting --------------------------------------------------------
-    def observe(self, session_id, cost_usd, at) -> bool:
+    def observe(self, session_id, cost_usd, at, now=None) -> bool:
         """Count one render's figure; True when the state changed.
+
+        `now`, the poll's wall clock when the caller has one, is what
+        keeps a clock step from bending the count (the review of the WSL
+        work, 2026-11-05). A render dated past now + SKEW_S was made by a
+        clock that has since been put back, and is taken as made now:
+        unclamped, one render dated two days ahead became the newest render
+        seen, every later rise was folded at once and the burn view stayed
+        empty until real time caught up. A rise whose render is dated
+        before the mark it rose from (the clock went back between the two)
+        cannot be placed against a /usage on the clock that now reads: it
+        is stamped with the period start, so it counts toward the month and
+        toward no /usage. Stamped with its mark, as any other rise is, it
+        was counted on top of a /usage that already held it (a clock 30
+        minutes fast, put right: since() = 30 cents, truth 0).
 
         Ordered for the exit flush (_flush): the daemon's SIGTERM raises
         SystemExit between any two bytecodes of the main thread, the one
@@ -410,6 +436,11 @@ class SpendCounter:
                 or cost_usd > MAX_CENTS / 100):
             return False
         cents = int(round(cost_usd * 100))
+        if now is not None and _num(now):
+            if at > now + SKEW_S:
+                at = now
+            if self._latest is not None and self._latest > now + SKEW_S:
+                self._latest = now
         mark = self._sessions.get(session_id)
         if mark is None:
             self._sessions[session_id] = [cents, at]
@@ -423,6 +454,9 @@ class SpendCounter:
             # docstring). Equal: no news, and possibly another ledger's
             # figure, so not a sighting of this mark's ledger either.
             return False
+        if at < stamp:
+            # Dated before its own mark: see the docstring above.
+            stamp = self._period if self._period is not None else 0
         # The new mark first, in one store, then the rise it covers: see
         # the docstring above.
         self._sessions[session_id] = [cents, at]

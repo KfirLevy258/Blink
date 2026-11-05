@@ -1152,3 +1152,77 @@ def test_a_spend_page_dated_by_the_cache_is_not_activity(tmp_path):
     assert page.plan == base.PLAN_SPEND and page.observed_at == NOW - 90
     assert page.active_at == NOW - 3 * 3600
     assert msg["active_age_s"] == 3 * 3600
+
+
+# ---------------------- review of the WSL work, 2026-11-05: clock steps
+
+def test_a_clock_step_back_after_a_login_does_not_hide_the_new_login(
+        tmp_path):
+    """A desk that has shown a spend page (the login guard armed) /logins
+    to Max at T, and the login watch's floor is T. NTP then steps the clock
+    back an hour: every Max render was dated before the floor and dropped,
+    and the page was empty for the hour (the reviewer's clockstep.py). A
+    clock found before the floor moves the floor to now."""
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 600, fetched=NOW - 600)
+    render(tmp_path, NOW - 500, 1.00)
+    bus = bus_on(clock)
+    bus.poll()
+    assert bus.plan_msg()["plan"] == "spend"
+    _polls(bus, clock, NOW + 70)
+    max_config(tmp_path, NOW + 71)
+    _polls(bus, clock, NOW + 71 + claude_plan.FIRST_ANSWER_RETRY_S + 4)
+    render(tmp_path, clock.t + 1, 0.10, rate_limits=WINDOWS)
+    got = _polls(bus, clock, clock.t + 6)
+    assert got[-1] is not None and got[-1]["session_pct"] == 41.0
+    clock.t -= 3600
+    # The poll that sees the clock before the floor moves the floor; a
+    # render made between the step and that poll is the residual, as one
+    # read before a switch is seen (claude_cli._note_login).
+    _polls(bus, clock, clock.t + 2)
+    five = {"five_hour": {"used_percentage": 42.0, "resets_at": NOW + 3600},
+            "seven_day": {"used_percentage": 12.0,
+                          "resets_at": NOW + 3 * 86400}}
+    render(tmp_path, clock.t + 1, 1.10, rate_limits=five)
+    got = _polls(bus, clock, clock.t + 60)
+    assert got[-1] is not None and got[-1]["session_pct"] == 42.0
+
+
+def test_a_clock_step_back_after_a_login_keeps_a_fresh_usage(tmp_path):
+    """The same step on a switch between two seats billed by usage: the
+    saved /usage's floor is the switch, and a /usage the new login runs
+    after the clock went back was dated before it and dropped, leaving the
+    count since the 1st and "Run /usage" (the reviewer's anchorfloor.py,
+    for about 48 minutes)."""
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 600, fetched=NOW - 600)
+    render(tmp_path, NOW - 500, 1.00)
+    bus = bus_on(clock)
+    bus.poll()
+    _polls(bus, clock, NOW + 70)
+    config(tmp_path, NOW + 71, acct=ACCT_B, org=ORG_B, cache=False)
+    _polls(bus, clock, NOW + 71 + claude_plan.FIRST_ANSWER_RETRY_S + 4)
+    clock.t -= 3600
+    config(tmp_path, clock.t + 5, acct=ACCT_B, org=ORG_B, used=7700,
+           fetched=clock.t + 5)
+    _polls(bus, clock, clock.t + 60)
+    p = bus.plan_msg()
+    assert p["plan"] == "spend"
+    assert p["usd"] == 77.0 and p["lim"] == 250.0
+
+
+def test_a_render_from_a_fast_clock_does_not_keep_the_page_active(tmp_path):
+    """The newest render's time only ever rose: one dated five hours ahead
+    (Windows booted with a fast clock, then put right) dated the spend
+    page active at every poll, and the board never dozed, until real time
+    caught up. The next render on the corrected clock dates it again."""
+    clock = Clock(NOW)
+    config(tmp_path, NOW - 600, fetched=NOW - 600)
+    render(tmp_path, NOW + 5 * 3600, 1.00)
+    bus = bus_on(clock)
+    bus.poll()
+    render(tmp_path, NOW + 10, 1.20)
+    _polls(bus, clock, NOW + 20)
+    clock.t = NOW + 3600
+    bus.poll()
+    assert bus.claude_page().active_at == NOW + 10

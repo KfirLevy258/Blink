@@ -761,7 +761,7 @@ class ClaudeCliProvider(base.ProviderParser):
         if isinstance(payload, dict) and mtime is not None:
             sid = payload.get("session_id")
             if isinstance(sid, str) and sid:
-                counter.observe(sid, _cost(payload), mtime)
+                counter.observe(sid, _cost(payload), mtime, now=now_epoch)
         counter.save()
         # A gateway's own dollar figure (statusline_source._spend_frame) is
         # the page when the status line carries one: it is the gateway's
@@ -773,6 +773,15 @@ class ClaudeCliProvider(base.ProviderParser):
         if live is not None and live.plan == base.PLAN_SPEND:
             return None
         anchor = view.anchor
+        if self._anchor_floor is not None and now_epoch < self._anchor_floor:
+            # The clock went back past the floor (NTP, a dual-boot RTC):
+            # a /usage the new login runs now is dated before it and was
+            # dropped until real time caught up, about 48 minutes in the
+            # review of the WSL work (2026-11-05). The floor is the switch,
+            # and the switch is behind us on any clock, so now stands for
+            # it. Claude Code clears the old login's /usage at a sign-in,
+            # so nothing older slips in under the moved floor.
+            self._anchor_floor = now_epoch
         if (anchor is not None and self._anchor_floor is not None
                 and anchor.fetched_at <= self._anchor_floor):
             anchor = None
@@ -906,6 +915,13 @@ class ClaudeCliProvider(base.ProviderParser):
         if self._old_render is None:
             payload, mtime = ss.read_payload(self.path())
         self._read = (payload, mtime)
+        if (self._render_at is not None
+                and self._render_at > now_epoch + spend_count.SKEW_S):
+            # Kept from a clock that has since gone back: the newest render
+            # only ever rose, so one dated hours ahead dated the spend page
+            # now at every poll and the board never dozed (the review of the
+            # WSL work, 2026-11-05). The file's own date starts it again.
+            self._render_at = None
         if mtime is not None and (self._render_at is None
                                   or mtime > self._render_at):
             self._render_at = mtime

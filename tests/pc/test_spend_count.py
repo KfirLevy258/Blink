@@ -1035,3 +1035,68 @@ def test_the_daemon_writes_a_held_back_rise_when_it_stops(tmp_path, how):
         doc = json.load(f)
     assert doc["sessions"]["s1"][0] == 170
     assert [a[2] for a in doc["adds"]] == [70]
+
+
+# ---------------------- review of the WSL work, 2026-11-05: clock steps
+
+P = 1_793_491_200.0      # a month start
+
+
+def test_a_render_dated_in_the_future_does_not_empty_the_burn_view():
+    """(a) One render dated two days ahead (a clock that was fast, later
+    corrected) pinned the newest render seen there, so every later rise
+    was folded at once and the burn view went empty for as long. A render
+    dated past now + SKEW_S is taken as made now."""
+    c = SpendCounter(persist=False)
+    c.bind("fp", P)
+    now = P + 20 * 86400
+    c.observe("a", 1.00, now - 3600, now=now - 3600)
+    c.observe("a", 2.00, now - 1800, now=now - 1800)
+    c.observe("b", 5.00, now + 86400 * 2, now=now)
+    c.observe("a", 3.00, now - 60, now=now)
+    c.observe("a", 4.00, now, now=now)
+    assert sum(c.buckets(now)) == 300
+    assert c._latest <= now + spend_count_skew()
+
+
+def spend_count_skew():
+    import spend_count
+    return spend_count.SKEW_S
+
+
+def test_a_saved_future_render_is_not_the_newest_after_a_restart(tmp_path):
+    """The newest render is rebuilt from the file at a start; one saved
+    from a fast clock must not pin it there either."""
+    c = mk(tmp_path)
+    c.bind("fp", P)
+    now = P + 20 * 86400
+    c.observe("b", 5.00, now + 86400 * 2)      # an old build: no `now`
+    c.save()
+    d = mk(tmp_path)
+    d.bind("fp", P)
+    d.observe("a", 1.00, now - 60, now=now)
+    d.observe("a", 2.00, now, now=now)
+    assert sum(d.buckets(now)) == 100
+    assert d._latest <= now + spend_count_skew()
+
+
+def test_a_rise_dated_before_its_mark_counts_toward_no_usage():
+    """(b) The clock 30 min fast, a render sets the mark at T; the clock
+    steps back, the session renders 30 cents more, dated T - 1320, and a
+    /usage at T - 1200 already holds those cents. The rise was stamped with
+    its mark's T, after the /usage, and counted again (since() = 30, truth
+    0). A rise whose render is dated before its mark cannot be placed on
+    the clock that now reads, so it counts toward the month and toward no
+    /usage: undercount, which the next /usage corrects."""
+    c = SpendCounter(persist=False)
+    c.bind("fp", P)
+    T = P + 36000
+    c.observe("s", 1.00, T, now=T)
+    c.observe("s", 1.30, T - 1320, now=T - 1320)
+    assert c.since(T - 1200) == 0
+    assert c.since(P) == 30
+    # The rules hold again from the new mark: the next rise straddles the
+    # /usage and is dropped, the one after it is counted.
+    c.observe("s", 1.50, T - 1100, now=T - 1100)
+    c.observe("s", 1.70, T - 1000, now=T - 1000)
+    assert c.since(T - 1200) == 20
