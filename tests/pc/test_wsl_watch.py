@@ -40,6 +40,12 @@ def _home(tmp_path):
                         config_dir=str(unc / "claude"), config_dir_set=True)
     h = dataclasses.replace(h, transcripts=str(unc / "projects"))
     os.makedirs(h.transcripts)
+    # The config folder exists in a real distribution. On Windows the join
+    # is a real one, unc\claude\.claude.json, and without the folder every
+    # _write_config raised FileNotFoundError (thirteen tests on the Windows
+    # VM, 2026-11-05). On POSIX it is unused, the config's name holding the
+    # backslash.
+    os.makedirs(h.config_dir)
     return h, str(unc)
 
 

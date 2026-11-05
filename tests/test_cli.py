@@ -3317,6 +3317,9 @@ def test_plain_install_has_no_wsl_hint_beside_claude_code(tmp_path,
 
 def test_plain_install_has_no_wsl_hint_off_windows(tmp_path, monkeypatch,
                                                   capsys):
+    # Posed off Windows: on a real Windows box the hint is right, and this
+    # test printed it there (Windows VM, 2026-11-05).
+    monkeypatch.setattr(cli, "_windows", lambda: False)
     monkeypatch.setattr(cli, "claude_on_path", lambda home=None: False)
     _settings(tmp_path, {})
     cli.main(["install"])
