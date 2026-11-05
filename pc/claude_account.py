@@ -121,15 +121,11 @@ class AccountWatch:
         self.touched_at = None
 
     def poll(self, now_epoch):
-        if self.since is not None and now_epoch < self.since:
-            # The clock went back past the floor. Every render after the
-            # step is dated before it, and select() dropped them all, the
-            # new login's included, for as long as the step (the review of
-            # the WSL work, 2026-11-05: an hour of nothing after NTP). The
-            # switch is behind us on any clock, so now stands for it; the
-            # old login's renders are held back at their source by read
-            # order (claude_cli._note_login), not by this floor.
-            self.since = now_epoch
+        # `since` is never lowered, not even with the clock put back past
+        # it: moved to now, it let the old login's saved windows, dated in
+        # the fast period, onto the new login's page over its own renders
+        # (the /code-review max of 277b81a..4003b0b, item 7, verify/v8/c24).
+        # The new login's renders dated before it wait for real time.
         view = self._view_source(now_epoch)
         if view.mtime and view.mtime != self._seen_mtime:
             self._seen_mtime = view.mtime

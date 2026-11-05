@@ -1156,59 +1156,165 @@ def test_a_spend_page_dated_by_the_cache_is_not_activity(tmp_path):
 
 # ---------------------- review of the WSL work, 2026-11-05: clock steps
 
-def test_a_clock_step_back_after_a_login_does_not_hide_the_new_login(
-        tmp_path):
-    """A desk that has shown a spend page (the login guard armed) /logins
-    to Max at T, and the login watch's floor is T. NTP then steps the clock
-    back an hour: every Max render was dated before the floor and dropped,
-    and the page was empty for the hour (the reviewer's clockstep.py). A
-    clock found before the floor moves the floor to now."""
+def _windows_config(home, at, *, org, spend, fetched):
+    """A config whose saved /usage carries both windows (77% / 66%) and a
+    spend figure, for `org` of the one person ACCT: a Max login over the
+    cache another organisation's /usage left (U11)."""
+    def iso(t):
+        import datetime
+        return datetime.datetime.fromtimestamp(
+            t, datetime.timezone.utc).isoformat()
+    oauth = {"accountUuid": ACCT, "organizationUuid": org}
+    if spend:
+        oauth.update(organizationType="claude_enterprise",
+                     seatTier="enterprise_usage_based")
+    else:
+        oauth.update(organizationType="claude_max", seatTier="max",
+                     billingType="subscription")
+    doc = {"oauthAccount": oauth, "projects": {"/srv/demo": {}},
+           "cachedUsageUtilization": {
+               "fetchedAtMs": int(fetched * 1000), "accountUuid": ACCT,
+               "utilization": {
+                   "five_hour": {"utilization": 77.0,
+                                 "resets_at": iso(NOW + 3 * 3600)},
+                   "seven_day": {"utilization": 66.0,
+                                 "resets_at": iso(NOW + 3 * 86400)},
+                   "extra_usage": {"is_enabled": True, "monthly_limit": 25000,
+                                   "used_credits": 1234, "utilization": 4.9,
+                                   "currency": "usd"}}}}
+    path = inside(home, claude_plan.config_path())
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(doc, f)
+    os.utime(path, (at, at))
+
+
+@pytest.mark.parametrize("step", [600, 3600])
+def test_a_clock_step_back_never_shows_the_old_orgs_usage(tmp_path, step):
+    """Item 7 of the /code-review max of 277b81a..4003b0b (verify/v8/c23):
+    the same person /logins to another organisation, whose config keeps the
+    first one's /usage (U11). The fix wave moved the saved-/usage floor to
+    now when the clock went back past it, and that let the old org's $300
+    of $500 back onto the new org's page, "exact", for as long as nobody
+    ran /usage. The floor is never lowered."""
     clock = Clock(NOW)
-    config(tmp_path, NOW - 600, fetched=NOW - 600)
-    render(tmp_path, NOW - 500, 1.00)
+    config(tmp_path, NOW - 50, used=30000, limit=50000, fetched=NOW - 60)
     bus = bus_on(clock)
     bus.poll()
-    assert bus.plan_msg()["plan"] == "spend"
-    _polls(bus, clock, NOW + 70)
-    max_config(tmp_path, NOW + 71)
-    _polls(bus, clock, NOW + 71 + claude_plan.FIRST_ANSWER_RETRY_S + 4)
-    render(tmp_path, clock.t + 1, 0.10, rate_limits=WINDOWS)
+    assert bus.plan_msg()["usd"] == 300.0
+    t = NOW + 100
+    config(tmp_path, t, used=30000, limit=50000, fetched=NOW - 60, org=ORG_B)
+    clock.t = t + 1
+    bus.poll()
+    assert bus.plan_msg()["hint"] == 1
+    clock.t = t + 1 - step
+    for at in [clock.t + 2 * k for k in range(1, 4)] + [
+            NOW - 960, NOW - 900, NOW - 60, NOW + 400, NOW + 1200]:
+        if at <= clock.t:
+            continue
+        clock.t = at
+        bus.poll()
+        p = bus.plan_msg()
+        assert p.get("usd") != 300.0 and p.get("hint") == 1, (at - NOW, p)
+
+
+def test_a_clock_step_back_never_shows_the_old_logins_windows(tmp_path):
+    """Item 7 (verify/v8/c24): a spend seat, then a Max login in another
+    org over the same cache. The login watch's floor, moved to now by the
+    step back, let the old login's saved windows (77% / 66%) take the Max
+    page, over the Max login's own renders. Its floor is never lowered."""
+    clock = Clock(NOW)
+    _windows_config(tmp_path, NOW - 50, org=ORG, spend=True,
+                    fetched=NOW - 60)
+    render(tmp_path, NOW - 40, 1.00)
+    bus = bus_on(clock)
+    bus.poll()
+    t = NOW + 100
+    _windows_config(tmp_path, t, org=ORG_B, spend=False, fetched=NOW - 60)
+    _polls(bus, clock, t + 9)
+    clock.t -= 3600
     got = _polls(bus, clock, clock.t + 6)
-    assert got[-1] is not None and got[-1]["session_pct"] == 41.0
-    clock.t -= 3600
-    # The poll that sees the clock before the floor moves the floor; a
-    # render made between the step and that poll is the residual, as one
-    # read before a switch is seen (claude_cli._note_login).
-    _polls(bus, clock, clock.t + 2)
-    five = {"five_hour": {"used_percentage": 42.0, "resets_at": NOW + 3600},
-            "seven_day": {"used_percentage": 12.0,
-                          "resets_at": NOW + 3 * 86400}}
-    render(tmp_path, clock.t + 1, 1.10, rate_limits=five)
-    got = _polls(bus, clock, clock.t + 60)
-    assert got[-1] is not None and got[-1]["session_pct"] == 42.0
+    render(tmp_path, clock.t + 1, 0.10, rate_limits=WINDOWS)
+    got += _polls(bus, clock, clock.t + 6)
+    clock.t += 1800
+    render(tmp_path, clock.t - 1, 0.20, rate_limits=WINDOWS)
+    got.append(bus.poll())
+    assert all(m is None or m.get("session_pct") != 77.0 for m in got)
 
 
-def test_a_clock_step_back_after_a_login_keeps_a_fresh_usage(tmp_path):
-    """The same step on a switch between two seats billed by usage: the
-    saved /usage's floor is the switch, and a /usage the new login runs
-    after the clock went back was dated before it and dropped, leaving the
-    count since the 1st and "Run /usage" (the reviewer's anchorfloor.py,
-    for about 48 minutes)."""
+def test_a_usage_saved_under_a_fast_clock_is_not_seen_until_a_new_one(
+        tmp_path):
+    """Item 7: a /usage fetched "later than now" was saved under a clock
+    that has since been put back. Its windows, dated ahead, outranked every
+    live render, and as an anchor it waited only for real time to pass
+    its stamp. It is not seen at all until a /usage replaces it."""
     clock = Clock(NOW)
-    config(tmp_path, NOW - 600, fetched=NOW - 600)
-    render(tmp_path, NOW - 500, 1.00)
+    _windows_config(tmp_path, NOW - 50, org=ORG_B, spend=False,
+                    fetched=NOW + 5 * 3600)
+    bus = bus_on(clock)
+    got = _polls(bus, clock, NOW + 6)
+    render(tmp_path, clock.t + 1, 0.10, rate_limits=WINDOWS)
+    got += _polls(bus, clock, clock.t + 6)
+    assert got[-1] is not None and got[-1]["session_pct"] == 41.0
+    clock.t = NOW + 5 * 3600 + 60            # its stamp is past now
+    got = _polls(bus, clock, clock.t + 6)
+    assert all(m is None or m.get("session_pct") != 77.0 for m in got)
+    # A /usage run now is seen.
+    _windows_config(tmp_path, clock.t + 1, org=ORG_B, spend=False,
+                    fetched=clock.t + 1)
+    got = _polls(bus, clock, clock.t + claude_plan.FIRST_ANSWER_RETRY_S + 6)
+    assert got[-1] is not None and got[-1]["weekly_pct"] == 66.0
+
+
+def test_rises_from_a_fast_clock_are_not_counted_over_a_later_usage(
+        tmp_path):
+    """Item 13 (verify/v8/c21): the clock 30 minutes fast, two renders
+    30 cents apart, then NTP puts it right and a /usage holds every cent.
+    The rise was stamped by the fast clock, after the /usage, and counted
+    on top of it: $10.60 shown for $10.30, for the rest of the month. At a
+    new /usage, a rise stamped later than now is one it already holds."""
+    D = 1800
+    clock = Clock(NOW - 3000 + D)
+    config(tmp_path, NOW - 3000 + D, used=1000, fetched=NOW - 3000 + D)
     bus = bus_on(clock)
     bus.poll()
-    _polls(bus, clock, NOW + 70)
-    config(tmp_path, NOW + 71, acct=ACCT_B, org=ORG_B, cache=False)
-    _polls(bus, clock, NOW + 71 + claude_plan.FIRST_ANSWER_RETRY_S + 4)
-    clock.t -= 3600
-    config(tmp_path, clock.t + 5, acct=ACCT_B, org=ORG_B, used=7700,
-           fetched=clock.t + 5)
-    _polls(bus, clock, clock.t + 60)
-    p = bus.plan_msg()
-    assert p["plan"] == "spend"
-    assert p["usd"] == 77.0 and p["lim"] == 250.0
+    for real, cost in ((NOW - 1200, 1.00), (NOW - 600, 1.30)):
+        render(tmp_path, real + D, cost)
+        clock.t = real + D + 1
+        bus.poll()
+    clock.t = NOW + 2
+    bus.poll()
+    config(tmp_path, NOW + 300, used=1030, fetched=NOW + 300)
+    for at in (NOW + 310, NOW + 400, NOW + 900, NOW + 3600, NOW + 6 * 3600):
+        clock.t = at
+        bus.poll()
+        assert bus.plan_msg()["usd"] == 10.3, at - NOW
+    # A rise after the /usage, on the corrected clock, still counts.
+    render(tmp_path, NOW + 6 * 3600 + 10, 1.40)
+    clock.t = NOW + 6 * 3600 + 20
+    bus.poll()
+    assert bus.plan_msg()["usd"] == 10.4
+
+
+@pytest.mark.parametrize("desk", ["spend", "max"])
+def test_a_render_dated_ahead_is_dated_when_first_seen(tmp_path, desk):
+    """Item 13 (verify/v8/c22): a render dated five hours ahead (a clock
+    since put right) dated the page active at every poll, active_age_s 0
+    for five hours, and the board never dozed. Its time is taken as the
+    moment it was first seen, and ages from there."""
+    clock = Clock(NOW)
+    if desk == "spend":
+        config(tmp_path, NOW - 600, fetched=NOW - 600)
+        render(tmp_path, NOW + 5 * 3600, 1.00)
+    else:
+        max_config(tmp_path, NOW - 600)
+        render(tmp_path, NOW + 5 * 3600, 1.00, rate_limits=WINDOWS)
+    bus = bus_on(clock)
+    bus.poll()
+    for off in (60, 600, 3600, 4 * 3600):
+        clock.t = NOW + off
+        msg = bus.poll()
+        assert msg["active_age_s"] >= off - 5, (off, msg["active_age_s"])
+        assert bus.claude_page().active_at <= clock.t
 
 
 def test_a_render_from_a_fast_clock_does_not_keep_the_page_active(tmp_path):

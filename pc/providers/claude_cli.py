@@ -308,6 +308,14 @@ class ClaudeCliProvider(base.ProviderParser):
         # A /usage fetched at or before this belongs to an earlier login
         # (_note_login); None while no switch has been seen.
         self._anchor_floor = None
+        # The fetch time of a saved /usage dated later than now could be,
+        # saved under a clock since put back: not seen, as anchor or as
+        # windows, until a /usage with another fetch time replaces it
+        # (_cache_trusted). None while there has been none.
+        self._future_fetch = None
+        # (mtime, first seen at) of a status-line render dated later than
+        # now could be: its time is the moment it was first seen (_dated).
+        self._future_render = None
         # The status-line file's signature when a login switch was seen,
         # while the file still holds that render: the old login's, neither
         # offered nor counted (_note_login, _status_frames). None when the
@@ -712,6 +720,9 @@ class ClaudeCliProvider(base.ProviderParser):
         spend frame owns. A failure costs this frame only, said once."""
         if view is None or view.windows is None or view.spend_seat:
             return None
+        if not self._cache_trusted(view.windows.fetched_at, now_epoch):
+            # Dated ahead, it outranked every live render (item 7).
+            return None
         try:
             return _usage_frame(view.windows, now_epoch)
         except Exception:
@@ -774,20 +785,47 @@ class ClaudeCliProvider(base.ProviderParser):
         if live is not None and live.plan == base.PLAN_SPEND:
             return None
         anchor = view.anchor
-        if self._anchor_floor is not None and now_epoch < self._anchor_floor:
-            # The clock went back past the floor (NTP, a dual-boot RTC):
-            # a /usage the new login runs now is dated before it and was
-            # dropped until real time caught up, about 48 minutes in the
-            # review of the WSL work (2026-11-05). The floor is the switch,
-            # and the switch is behind us on any clock, so now stands for
-            # it. Claude Code clears the old login's /usage at a sign-in,
-            # so nothing older slips in under the moved floor.
-            self._anchor_floor = now_epoch
+        # The floor is never lowered, not even with the clock put back past
+        # it. The fix wave moved it to now, so that a /usage the new login
+        # ran after the step counted; but the config keeps another
+        # organisation's /usage for the same person (U11), and the moved
+        # floor let the old org's figure back onto the new org's page,
+        # "exact", until someone ran /usage (the /code-review max of
+        # 277b81a..4003b0b, item 7). A /usage dated before the floor waits
+        # for real time; one dated ahead of now is not seen at all.
         if (anchor is not None and self._anchor_floor is not None
                 and anchor.fetched_at <= self._anchor_floor):
             anchor = None
+        if anchor is not None and not self._cache_trusted(
+                anchor.fetched_at, now_epoch):
+            anchor = None
         return _spend_frame(anchor, counter, now_epoch, self._render_at,
                             view.mtime, wsl=self._on_wsl())
+
+    def _cache_trusted(self, fetched_at, now_epoch):
+        """Whether a saved /usage fetched at `fetched_at` may be read: not
+        when it is dated later than now + SPEND_FUTURE_S, saved under a
+        clock that has since been put back, and not once real time passes
+        that stamp either -- it was fetched before it, so it would read as
+        newer than it is. Seen again only when a /usage with another fetch
+        time replaces it (item 7 of the review of 277b81a..4003b0b)."""
+        if fetched_at > now_epoch + SPEND_FUTURE_S:
+            self._future_fetch = fetched_at
+        return fetched_at != self._future_fetch
+
+    def _dated(self, mtime, now_epoch):
+        """The time to date a render by: its mtime, or for one dated later
+        than now + SKEW_S, the moment it was first seen. A render five
+        hours ahead (a fast clock, put right) dated the page active at
+        every poll, and the board never dozed (verify/v8/c22, item 13 of
+        the review of 277b81a..4003b0b); dated now at every poll, it would
+        do the same."""
+        if mtime is None or mtime <= now_epoch + spend_count.SKEW_S:
+            return mtime
+        seen = self._future_render
+        if seen is None or seen[0] != mtime:
+            seen = self._future_render = (mtime, now_epoch)
+        return seen[1]
 
     def _on_wsl(self):
         """Whether the Claude home read is a WSL distribution's: its
@@ -915,6 +953,7 @@ class ClaudeCliProvider(base.ProviderParser):
                 self._old_render = None
         if self._old_render is None:
             payload, mtime = ss.read_payload(self.path())
+            mtime = self._dated(mtime, now_epoch)
         self._read = (payload, mtime)
         if (self._render_at is not None
                 and self._render_at > now_epoch + spend_count.SKEW_S):
@@ -1088,8 +1127,8 @@ def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None,
         # renders' clock, and how far the two disagree is an owed
         # measurement (spend_count.SKEW_S). A native desk has one clock,
         # and no margin (final review of round 7, F1).
-        added = (counter.since_usage(a.fetched_at) if wsl
-                 else counter.since(a.fetched_at))
+        added = (counter.since_usage(a.fetched_at, now_epoch) if wsl
+                 else counter.since(a.fetched_at, now_epoch))
         cents, limit = a.used_cents + added, a.limit_cents
     pct = base.UNKNOWN
     if limit is not None:

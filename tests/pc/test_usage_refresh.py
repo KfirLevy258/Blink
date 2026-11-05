@@ -1895,3 +1895,19 @@ def test_the_board_ask_on_linux_needs_other_activity(tmp_path, monkeypatch):
     assert k.a.due(CAPS) is False
     k.a._other_at = lambda: NOW - 60
     assert k.a.due(CAPS) is True
+
+
+def test_a_reading_dated_ahead_is_not_somebody_at_the_computer():
+    """From the cut list of the /code-review max of 277b81a..4003b0b
+    (verify/v6/repro_c27.py): a render dated five hours ahead by a clock
+    since put right counted as activity "now" for five hours, on Linux as
+    somebody at the desk all night, and held every refresh off as a fresh
+    source. A reading dated ahead of now says nothing."""
+    now = 1_800_000_000.0
+    ahead = now + 5 * 3600
+    assert ur.at_computer(now, None, ahead) is False
+    assert ur.at_computer(now, 3 * 3600.0, ahead) is False
+    assert ur.at_computer(now, None, now - 60) is True
+    assert ur.due(now, enabled=True, native=True, board_alive=True,
+                  idle_s=0.0, cache_at=None, other_at=ahead,
+                  state=ur.State()) is True

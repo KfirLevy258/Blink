@@ -353,6 +353,17 @@ def spacing(state):
 MOVED_SLACK_S = 5
 
 
+def _seen_at(now, other_at):
+    """`other_at` as a time it can be: None for one dated past now (by more
+    than MOVED_SLACK_S), which a clock since put back stamped. A render five
+    hours ahead counted as activity now for five hours, somebody at a
+    Linux desk all night and a fresh source holding every refresh off (the
+    /code-review max of 277b81a..4003b0b, verify/v6/repro_c27.py)."""
+    if other_at is None or other_at > now + MOVED_SLACK_S:
+        return None
+    return min(other_at, now)
+
+
 def at_computer(now, idle_s, other_at):
     """Whether somebody is at the computer, as far as it can be known.
 
@@ -366,6 +377,7 @@ def at_computer(now, idle_s, other_at):
     spending its calls on nothing."""
     if idle_s is not None:
         return idle_s < IDLE_LIMIT_S
+    other_at = _seen_at(now, other_at)
     return other_at is not None and now - other_at < IDLE_LIMIT_S
 
 
@@ -380,6 +392,7 @@ def due(now, *, enabled, native, board_alive, idle_s, cache_at, other_at,
     costs. `idle_s` None is an OS that cannot say (Linux): then only another
     source's activity inside IDLE_LIMIT_S says someone is here (at_computer).
     `cache_at` None is no cache of this login's yet, which is due."""
+    other_at = _seen_at(now, other_at)
     return bool(
         enabled and native and board_alive
         and state.off_reason == ""

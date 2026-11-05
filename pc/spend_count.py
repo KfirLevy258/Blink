@@ -512,13 +512,39 @@ class SpendCounter:
             return from_boundary
         return 0
 
-    def since(self, anchor_at) -> int:
+    def since(self, anchor_at, now=None) -> int:
+        """The cents counted after the /usage made at `anchor_at`.
+
+        `now`, the poll's wall clock: at a new anchor, a rise stamped later
+        than it (past SKEW_S, observe's own allowance) was recorded under a
+        clock since put back, before this /usage, which already holds it. It is dropped, and a mark stamped
+        so is moved to now, so the next rise is placed on the clock that
+        reads. Counted, the clock 30 minutes fast and put right showed
+        $10.60 for $10.30 for the rest of the month (verify/v8/c21, item 13
+        of the /code-review max of 277b81a..4003b0b)."""
         if self._anchor is None or anchor_at > self._anchor:
             # Not dirty: the anchor is written with the next rise, and
             # until then nothing has been folded against it.
             self._anchor = anchor_at
+            if now is not None and _num(now):
+                self._drop_ahead_of(now + SKEW_S, now)
         return (self._folded_since(anchor_at)
                 + sum(c for prev, _at, c in self._adds if prev >= anchor_at))
+
+    def _drop_ahead_of(self, bound, now):
+        kept = [a for a in self._adds if a[0] <= bound]
+        if len(kept) != len(self._adds):
+            self._adds = kept
+            self._dirty = True
+        if self._fold is not None and self._fold[3] > bound:
+            self._fold = None           # every rise in it is ahead of now
+            self._dirty = True
+        for sid, (hw, stamp) in list(self._sessions.items()):
+            if stamp > bound:
+                self._sessions[sid] = [hw, now]
+                self._dirty = True
+        if self._latest is not None and self._latest > bound:
+            self._latest = now
 
     def rose_after(self, t) -> bool:
         """Whether any rise was seen in a render after `t`, counted toward
@@ -529,13 +555,13 @@ class SpendCounter:
             return True
         return any(at > t for _prev, at, _c in self._adds)
 
-    def since_usage(self, fetched_at) -> int:
+    def since_usage(self, fetched_at, now=None) -> int:
         """since() for a /usage made at `fetched_at`: counted from SKEW_S
         after it, for the clocks the two times come from. The period start
         needs no such margin -- bind() empties the count there, so a rise
         dated into the month that was made before it is counted once, in
         the month it is dated to."""
-        return self.since(fetched_at + SKEW_S)
+        return self.since(fetched_at + SKEW_S, now)
 
     def buckets(self, now) -> list:
         out = [0] * _BUCKETS
