@@ -146,7 +146,8 @@ the cap is reached (draw it red, at or over 100%), not "not a spend seat".
    to run `/usage` in Claude Code. The hint also shows when the anchor is more than a
    day old.
 
-Known gaps, stated in the install note and the README:
+Known gaps, stated in docs/README-full.md ("The spend page's limits") and in
+the install note (cli._announce_spend_seat):
 - The status line is one file shared by all sessions and sampled every 2 s;
   a render overwritten before it is read can lose a session's last rise.
 - Claude Desktop's Code tab, `claude -p` and Agent SDK use never run the

@@ -2989,6 +2989,9 @@ SPEND_NOTE = (
     " other computers appears only after the next /usage, and a session's last"
     " reply can be missed. Between /usage runs the figure is an estimate and"
     " may differ from your bill; run /usage in Claude Code to make it exact."
+    " Just after a /login to another account the page can be blank until"
+    " Claude Code next draws its status line, or show the old account's"
+    " figures once."
     " Nothing about it leaves this computer except the figure on the board.")
 
 
@@ -4035,6 +4038,13 @@ def test_install_wsl_over_a_native_record(tmp_path, monkeypatch, capsys):
     assert cli.main(["install", "--wsl", "Ubuntu"]) == 0
     got = json.loads((cc / "settings.json").read_text())
     assert "statusLine" not in got and not got.get("hooks")
+    # A5-7: the disclosure named the file it was about to edit, and did
+    # not say Claude Code on Windows was left alone over it.
+    out = capsys.readouterr().out
+    before = out.split("To undo all of it:")[0]
+    assert f"Changes    {cc / 'settings.json'}" in before
+    assert "Claude Code on Windows itself alone" not in before
+    assert "Claude Code on Windows otherwise alone" in before
 
 
 def test_install_wsl_puts_this_build_in_place(tmp_path, monkeypatch,

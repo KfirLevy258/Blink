@@ -14,9 +14,10 @@
 # `cost.total_cost_usd` out of it -- the last two, held in memory and never
 # logged or saved, only to tell a reply that came back without a five-hour
 # window (pc/session_verdict). On a usage-billed seat they are saved after
-# all: the daemon keeps each session's highest cost estimate, each rise
-# counted in the last five hours with its time, the month's total of the
-# older ones and the time of the last /usage, in ~/.blink/spend-count.json
+# all: the daemon keeps each session's id with its highest cost estimate
+# and when that was first seen or last rose, each rise counted in the last
+# five hours with its time, the month's total of the older ones and the
+# time of the last /usage, in ~/.blink/spend-count.json
 # (pc/spend_count), because the month's spend between two /usage runs is
 # those rises added up, and a total that dies with the process would start
 # the month again at every restart. Older rises are folded into the one

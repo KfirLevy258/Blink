@@ -38,7 +38,8 @@ FILE_NAME = "config.json"
 # claude_home.to_record for the whole shape. One key for both kinds: `blink
 # install` writes "native", `blink install --wsl <name>` writes "wsl" (the
 # distribution's GUID and name, the Linux user and home, the config folder
-# found by the probe -- never a value from the shell's environment). The
+# found by the probe, which is the one value taken from the shell's
+# environment: CLAUDE_CONFIG_DIR, as the folder it names). The
 # Claude page reads one home, so `--wsl` replaces whatever was recorded,
 # taking Blink out of that home first; a plain `blink install` keeps a WSL
 # record whose distribution is still installed, and replaces it with the

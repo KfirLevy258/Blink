@@ -3377,7 +3377,24 @@ def _announce_wsl_files(home, name) -> None:
     print("             below), and one small file per open session (event")
     print("             name, time, session and agent ids). Nothing in it")
     print("             leaves this machine.")
-    print("  Leaves     Claude Code on Windows itself alone: it is not read.")
+    # "Leaves ... alone" was said whatever was recorded, and over a native
+    # record install --wsl then took Blink out of Windows' own settings.json
+    # under an unnamed "Changes" line (review of the WSL work, 2026-11-05,
+    # A5-7). The files are the ones _take_blink_out_of_previous edits.
+    prev = claude_home.recorded()
+    native = (_native_files_holding_ours(prev)
+              if prev is not None and prev.kind == claude_home.NATIVE else [])
+    for path in native:
+        print(f"  Changes    {path}")
+        print("             takes Blink's status line and hooks back out of")
+        print("             Claude Code on Windows; a status line of yours that")
+        print("             Blink had kept is put back. Nothing else in it is")
+        print("             touched.")
+    if native:
+        print("  Leaves     Claude Code on Windows otherwise alone: after this")
+        print("             it is not read.")
+    else:
+        print("  Leaves     Claude Code on Windows itself alone: it is not read.")
 
 
 def _spend_seat(home=None) -> bool:
@@ -3421,8 +3438,10 @@ def _announce_spend_seat(home=None, seat=None) -> None:
         "the Agent SDK or on other computers appears only after the next",
         "/usage, and a session's last reply can be missed. Between /usage runs",
         "the figure is an estimate and may differ from your bill; run /usage in",
-        "Claude Code to make it exact. Nothing about it leaves this computer",
-        "except the figure on the board."):
+        "Claude Code to make it exact. Just after a /login to another account",
+        "the page can be blank until Claude Code next draws its status line,",
+        "or show the old account's figures once. Nothing about it leaves this",
+        "computer except the figure on the board."):
         print("  " + line)
     print()
 
@@ -4495,9 +4514,11 @@ def _announce_wsl_record(home, named) -> None:
         print("             Claude Code's folder or your Linux account there has")
         print("             changed since: takes Blink's status line and hooks")
         print("             back out of it.")
-    else:
-        print("  Changes    the Claude Code Blink was set up for until now:")
-        print("             takes Blink's status line and hooks back out of it.")
+    elif rec.kind == claude_home.WSL:
+        print(f"  Changes    Claude Code inside WSL ({rec.distro_name}), which")
+        print("             Blink was set up for until now: takes Blink's status")
+        print("             line, hooks and scripts back out of it.")
+    # A native record: its files are named above (_announce_wsl_files).
 
 
 def _moved_inside(prev, home, config_dir) -> bool:
@@ -4724,9 +4745,14 @@ def _setup_wsl(d):
     review of feat/enterprise-spend (U25) a save that failed came after
     it, and left the desk with neither."""
     print()
+    # "Nothing from that shell's environment is kept" until the review of
+    # the WSL work (A5-8): the probe reads CLAUDE_CONFIG_DIR there, and the
+    # record keeps the folder it names and whether it was set.
     print(f"  This starts {d.name} if it is not running, and runs your login")
-    print("  shell there once to find Claude Code and its folder. Nothing")
-    print("  from that shell's environment is kept.")
+    print("  shell there once to find Claude Code and its folder. Of that")
+    print("  shell's environment only CLAUDE_CONFIG_DIR is kept: the folder it")
+    print("  names, and whether it was set, are recorded so the background")
+    print("  service reads the same one.")
     probe = wsl.probe(d.name)
     if probe is None:
         print()
@@ -4937,16 +4963,24 @@ def _take_blink_out_of_previous(old, new) -> bool:
             return False
         _rm_wsl_drop(old)
         return True
+    for p in _native_files_holding_ours(old):
+        for line in _take_out_of(p, old):
+            print(f"      {p}: {line}")
+    return True
+
+
+def _native_files_holding_ours(old):
+    """The settings.json files of the native home `old` that hold Blink's
+    entries: its own, and the legacy ~/.claude one if that does too
+    (_old_settings). What _take_blink_out_of_previous edits, and what the
+    disclosure names before it does."""
     paths = []
     own = settings_path(old)
     if _holds_ours(own, old):
         paths.append(own)
     paths += [p for p in _old_settings(old)
               if not any(_same_file(p, q) for q in paths)]
-    for p in paths:
-        for line in _take_out_of(p, old):
-            print(f"      {p}: {line}")
-    return True
+    return paths
 
 
 def cmd_uninstall(_args) -> int:
