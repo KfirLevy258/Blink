@@ -617,6 +617,17 @@ class IngestionBus:
         if fresh:
             self._claude_fresh_at = max(fresh)
 
+    def spend_seen(self):
+        """Whether a spend page can have been shown on this desk: this
+        process has seen a plan, or the count is bound to a seat billed by
+        usage, kept in ~/.blink/spend-count.json across restarts. For the
+        greeting's blank (Bridge.greet), which only takes such a page
+        down."""
+        if self._plans_seen:
+            return True
+        c = self._counter
+        return isinstance(c, spend_count.SpendCounter) and c.bound()
+
     def claude_fresh_at(self):
         """When another Claude source last gave a figure (the status line,
         Claude Desktop's Code tab, chat or Cowork), as the last poll() that
@@ -915,6 +926,9 @@ class _BusFetch:
 
     def plan_msg(self):
         return self._bus.plan_msg()
+
+    def spend_seen(self):
+        return self._bus.spend_seen()
 
 
 # Which count describes which state. STATE_FAILED reads n_stuck because that

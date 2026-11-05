@@ -913,14 +913,16 @@ def aged_usage(msg, elapsed) -> dict:
     The board resets its idle clock from active_age_s on every usage line,
     so a blank held for hours said "active 5 s ago" every minute and the
     board never dozed (the review of the WSL work, 2026-11-05). An unknown
-    (-1) stays unknown; a countdown stops at 0. The message passed in is
-    never changed."""
+    (-1) stays unknown; a countdown stops at 0; an age stops at SECS_MAX,
+    past which the board refuses the figure as absent -- "cannot say",
+    which wakes it (the /code-review max of 277b81a..4003b0b, C20). The
+    message passed in is never changed."""
     out = dict(msg)
     step = max(0, int(elapsed))
     for k in _AGES:
         v = out.get(k)
         if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
-            out[k] = v + step
+            out[k] = min(v + step, SECS_MAX)
     for k in _COUNTDOWNS:
         v = out.get(k)
         if isinstance(v, int) and not isinstance(v, bool) and v >= 0:

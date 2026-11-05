@@ -386,6 +386,11 @@ class SpendCounter:
             self._clear()
             self._fp, self._period = account_fp, period_start
 
+    def bound(self) -> bool:
+        """Bound to a seat billed by usage, now or in the file it loaded:
+        bind() is only called for one."""
+        return self._fp is not None
+
     def forget_sessions(self) -> None:
         """Drop every session's high-water mark, keeping what was counted.
 

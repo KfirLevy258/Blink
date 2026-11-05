@@ -189,6 +189,12 @@ class Bridge:
         # self._now() when that blank was made: a restatement is aged by
         # the time since (protocol.aged_usage).
         self._blanked_at = None
+        # self._now() when _last_usage went out: the greeting's blank is
+        # aged from it (greet).
+        self._last_usage_at = None
+        # Whether a status error went out since the greeting began: its
+        # blank must not follow one (greet).
+        self._said_error = False
         # Whether the last heartbeat had a usage line to send (greet).
         self._had_usage = False
         # Themes (pc/theme.py). theme_sync owns the files and what the
@@ -322,6 +328,7 @@ class Bridge:
         self._last_plan = None
         # The status level needs no reset here: poll_once re-states it on
         # every heartbeat, and this is one (see protocol.svc's contract).
+        self._said_error = False
         self.poll_once()                 # push current data immediately
         # A new process has seen no spend reading, so it has no plan to
         # send, and with no reading it sends no usage line either: a
@@ -334,11 +341,21 @@ class Bridge:
         # is held and restated as the in-process switch's is. Not with a
         # spend plan on the bus, which is the page and was just sent, and
         # not to a board that cannot draw plans, which has no spend page.
+        #
+        # The /code-review max of 277b81a..4003b0b (item 9) found the line
+        # woke a dozed board and hid an error. It went with no ages, which
+        # the board reads as "cannot say" and never as "nobody is here"
+        # (firmware sleep_gate.c), and after a status error, which any usage
+        # line sets back to OK. So it carries the last line's ages, grown
+        # since, or SECS_MAX when there was none; it goes only where a spend
+        # page can have been shown (IngestionBus.spend_seen); and never
+        # after an error in this greeting.
         plan = self._plan_msg()
         if (not self._had_usage and self._blanked is None
+                and not self._said_error and self._spend_maybe_shown()
                 and self._board_can(protocol.BOARD_CAP_PLAN)
                 and (plan is None or plan.get("plan") != protocol.PLAN_SPEND)):
-            self._send_blank(protocol.PLAN_PROVIDER)
+            self._send_blank(protocol.PLAN_PROVIDER, greeting=True)
         # Only once the board has been heard. On the no-reset connect path
         # greet() runs before any message has reached on_message, so
         # _board_proto is still None -- and _board_ahead() reads None as
@@ -1115,6 +1132,7 @@ class Bridge:
             # returns None. Anything that reaches here is a bug worth putting
             # on the panel rather than only in a log nobody opens.
             self._write(protocol.status("error", str(e)[:80]))
+            self._said_error = True
             return
 
         if usage is None:
@@ -1279,15 +1297,38 @@ class Bridge:
             self._send_blank(page)
         return None
 
-    def _send_blank(self, page):
+    def _send_blank(self, page, greeting=False):
         """Take `page` down out of the last line sent, and hold that blank
-        for the heartbeat to restate (_outgoing)."""
+        for the heartbeat to restate (_outgoing). `greeting`: greet's, whose
+        last line may be hours old: its ages are grown to now, and an age
+        nothing knows is SECS_MAX, "very old", never absent (greet)."""
+        now = self._now()
+        last = self._last_usage
+        if greeting and last is not None and self._last_usage_at is not None:
+            last = protocol.aged_usage(last, now - self._last_usage_at)
+        blank = protocol.blank_page(last, page)
+        if greeting:
+            for k in ("age_s", "active_age_s"):
+                v = blank.get(k)
+                if not (isinstance(v, int) and not isinstance(v, bool)
+                        and v >= 0):
+                    blank[k] = protocol.SECS_MAX
         self._blanked = page
-        self._blanked_at = self._now()
-        blank = protocol.blank_page(self._last_usage, page)
+        self._blanked_at = now
         self._write(blank)
         self._last_pushed = protocol.meaningful_usage(blank)
         self._last_usage = blank
+        self._last_usage_at = now
+
+    def _spend_maybe_shown(self):
+        """Whether a spend page can be on the board: the bus has seen a
+        seat billed by usage on this desk (IngestionBus.spend_seen). A
+        fetch that cannot say has never shown one."""
+        ask = getattr(self._fetch, "spend_seen", None)
+        try:
+            return bool(ask is not None and ask())
+        except Exception:
+            return False
 
     def _restated_blank(self):
         """The held blank as it reads now: its ages advanced and its
@@ -1317,6 +1358,7 @@ class Bridge:
         # re-sending the same message every two seconds forever.
         self._last_pushed = protocol.meaningful_usage(usage)
         self._last_usage = usage
+        self._last_usage_at = self._now()
 
         self._send_session_if_changed()
 

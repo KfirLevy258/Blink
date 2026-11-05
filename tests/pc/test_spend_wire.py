@@ -254,13 +254,20 @@ def test_an_account_that_raises_costs_nothing():
 
 
 class _Fetch:
-    """A fetch with the bus's accessors, driven by hand."""
+    """A fetch with the bus's accessors, driven by hand. `seen`: whether a
+    spend page may have been shown on this desk (IngestionBus.spend_seen).
+    `boom` makes the read raise."""
 
-    def __init__(self, usage, plan=None):
-        self.usage, self.plan = usage, plan
+    def __init__(self, usage, plan=None, seen=True, boom=False):
+        self.usage, self.plan, self.seen, self.boom = usage, plan, seen, boom
 
     def __call__(self):
+        if self.boom:
+            raise RuntimeError("bus")
         return self.usage
+
+    def spend_seen(self):
+        return self.seen
 
     def session_pair(self):
         return ("", 0)
@@ -987,3 +994,85 @@ def test_a_restart_on_a_board_without_plans_sends_no_blank():
     b.greet()
     b.poll_once()
     assert "usage" not in [m["t"] for m in sent]
+
+
+
+# ---------------------- /code-review max of the fix wave (277b81a..4003b0b)
+
+def _blank_greet(fetch, caps=(protocol.BOARD_CAP_PLAN,), clock=None):
+    sent = []
+    clock = clock or {"t": 1000.0}
+    b = Bridge(write_msg=sent.append, fetch_usage=fetch,
+               now=lambda: clock["t"], wall=lambda: (1752444000, 0),
+               board_caps_hint=list(caps), **_NO_FEED)
+    b.greet()
+    return b, sent, clock
+
+
+def test_the_greeting_blank_never_wakes_a_dozed_board():
+    """Item 9 (verify/v7/sim.py, C19): the greeting's blank on a fresh
+    daemon carried no ages, which the board reads as "cannot say" -- never
+    "nobody is here" (sleep_gate.c) -- so a restart woke a dozed board and
+    held it awake for as long as the blank was restated. With nothing
+    known it says "very old", SECS_MAX, and stays there."""
+    b, sent, clock = _blank_greet(_Fetch(None, None))
+    (u,) = [m for m in sent if m["t"] == "usage"]
+    assert u["age_s"] == protocol.SECS_MAX
+    assert u["active_age_s"] == protocol.SECS_MAX
+    for k in range(1, 4):
+        clock["t"] = 1000.0 + k * 3600
+        n = len(sent)
+        b.poll_once()
+        (u,) = _usages_after(sent, n)
+        assert u["active_age_s"] == protocol.SECS_MAX
+        assert protocol.encode_checked(u)[1] is None
+
+
+def test_a_held_line_never_ages_past_what_the_board_accepts():
+    """C20: aged_usage added the elapsed time to SECS_MAX, and the board
+    refuses a figure past it (proto.c num()) as absent: -1, "cannot say",
+    which wakes it."""
+    m = {"t": "usage", "age_s": 30, "active_age_s": protocol.SECS_MAX - 5}
+    out = protocol.aged_usage(m, 60)
+    assert out["active_age_s"] == protocol.SECS_MAX
+    assert out["age_s"] == 90
+
+
+def test_the_greeting_blank_ages_from_the_last_line_sent():
+    """C17: the same connection's Bridge, a real line, hours with nothing,
+    then the board resets and says hello again. The blank went out with the
+    old line's ages from hours before, "active 5 s ago": the board woke.
+    Its ages are the last line's, grown by the time since it was sent."""
+    f = _Fetch(protocol.frame_to_usage(windows(), NOW), None)
+    clock = {"t": 1000.0}
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=f,
+               now=lambda: clock["t"], wall=lambda: (1752444000, 0),
+               **_NO_FEED)
+    _hello(b, "1.4.0")
+    first = [m for m in sent if m["t"] == "usage"][-1]
+    f.usage = None
+    clock["t"] += 3 * 3600
+    n = len(sent)
+    _hello(b, "1.4.0")
+    (u,) = _usages_after(sent, n)
+    assert u["session_pct"] == -1
+    assert u["active_age_s"] == first["active_age_s"] + 3 * 3600
+
+
+def test_no_greeting_blank_where_no_spend_page_can_have_been_shown():
+    """Item 9: the blank exists to take down a spend page a board may still
+    hold. On a desk that has never had a seat billed by usage there is
+    none, and the line only woke the board."""
+    _, sent, _ = _blank_greet(_Fetch(None, None, seen=False))
+    assert "usage" not in [m["t"] for m in sent]
+
+
+def test_no_greeting_blank_after_a_status_error():
+    """C18: the read failed at connect, the greeting said status error,
+    and the blank usage line after it set the board's status back to OK
+    (usage_view_update), hiding the error."""
+    b, sent, _ = _blank_greet(_Fetch(None, None, boom=True))
+    types = [m["t"] for m in sent]
+    assert "status" in types
+    assert "usage" not in types[types.index("status"):]
