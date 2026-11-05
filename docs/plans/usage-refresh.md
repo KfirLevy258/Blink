@@ -277,5 +277,5 @@ Who carries the risk: mostly the customer (their account could be flagged
 for automated use; a work seat answers to the employer), and the seller
 through them. Hence: off unless the person answers yes, default No on work
 logins, fallback only, a cost guard, and turning itself off on repeated
-failure. Owner to also ask Anthropic through support/sales; shipping does
-not wait for the answer.
+failure. The owner decided not to ask Anthropic: those guards are the answer
+to the risk above, and shipping rests on them.
