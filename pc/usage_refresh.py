@@ -207,7 +207,7 @@ def run_once(exe, blink_home, runner=wsl._bounded_run, home=None):
 class State:
     last_run_at: float = 0.0
     fails: int = 0
-    failing_since: float | None = None
+    failing_since: "float | None" = None
     off_reason: str = ""
     # When `blink config usage-refresh on` last cleared the above
     # (clear_off): a watch that sees a newer one than it holds takes the
