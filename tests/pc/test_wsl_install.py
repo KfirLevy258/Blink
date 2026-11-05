@@ -939,3 +939,107 @@ def test_an_empty_document_still_writes(tmp_path):
     install_statusline._wsl_write(_runner(lin, _fake_bin(tmp_path)), str(p),
                                   "-", "600", b"", "a file")
     assert p.read_bytes() == b""
+
+
+# ------------------------------- review of the WSL work, 2026-11-05: A5-1
+
+def _folder(lin, sub, name="Ubuntu"):
+    lin = str(lin)
+    return claude_home.wsl(distro_guid=GUID, distro_name=name,
+                           linux_user="zoe", linux_home=lin,
+                           config_dir=wsl.unc(name, lin + "/" + sub),
+                           config_dir_set=True)
+
+
+@posix_only
+def test_a_move_inside_writes_the_new_folder_then_takes_out_the_old(
+        tmp_path):
+    """Two folders of one Linux home: the new one is written first, then
+    Blink taken out of the old one from what was read of it before -- the
+    chain file the write overwrites, and the markers -- leaving the shims
+    they share. Each folder keeps its own status line through the move and
+    an uninstall after it."""
+    lin = tmp_path / "lin"
+    for sub, mine in (("old", "mine-old"), ("new", "mine-new")):
+        (lin / sub).mkdir(parents=True)
+        _write_json(str(lin / sub / "settings.json"),
+                    {"statusLine": {"type": "command", "command": mine}})
+    run = _runner(lin, _fake_bin(tmp_path))
+    old, new = _folder(lin, "old"), _folder(lin, "new")
+    install_statusline.install_into(old, run)
+
+    snap = install_statusline.snapshot_wsl(old, run)
+    assert snap.chain == "mine-old\n"
+    install_statusline.install_into(new, run)
+    install_statusline.take_out_of_folder(old, run, snap, files=False)
+
+    doc_old = json.loads((lin / "old" / "settings.json").read_text())
+    assert doc_old == {"statusLine": {"type": "command",
+                                      "command": "mine-old"}}
+    doc_new = json.loads((lin / "new" / "settings.json").read_text())
+    assert doc_new["statusLine"]["command"] == _sl_cmd(lin)
+    assert (lin / ".blink" / "statusline-chain").read_text() == "mine-new\n"
+    for name in ("blink-statusline.sh", "blink-hook.sh", "out"):
+        assert (lin / ".blink" / name).exists()
+    assert install_statusline._read_marker(new) == _sl_cmd(lin)
+
+    install_statusline.uninstall_from(new, run)
+    doc_new = json.loads((lin / "new" / "settings.json").read_text())
+    assert doc_new == {"statusLine": {"type": "command",
+                                      "command": "mine-new"}}
+
+
+@posix_only
+def test_a_move_that_cannot_be_recorded_puts_the_old_folder_back(tmp_path):
+    """The new folder written, its record not saved: it comes back out,
+    and the chain file and markers the old folder relies on are put back,
+    so the old folder, never touched, works exactly as it did."""
+    lin = tmp_path / "lin"
+    for sub, mine in (("old", "mine-old"), ("new", "mine-new")):
+        (lin / sub).mkdir(parents=True)
+        _write_json(str(lin / sub / "settings.json"),
+                    {"statusLine": {"type": "command", "command": mine}})
+    run = _runner(lin, _fake_bin(tmp_path))
+    old, new = _folder(lin, "old"), _folder(lin, "new")
+    install_statusline.install_into(old, run)
+    before_old = (lin / "old" / "settings.json").read_text()
+    markers = (install_statusline._read_marker(old),
+               install_hooks._read_marker(old))
+    snap = install_statusline.snapshot_wsl(old, run)
+    install_statusline.install_into(new, run)
+
+    now = install_statusline.snapshot_wsl(new, run)
+    install_statusline.take_out_of_folder(new, run, now, files=False)
+    install_statusline.restore_snapshot(new, run, snap)
+
+    assert json.loads((lin / "new" / "settings.json").read_text()) == {
+        "statusLine": {"type": "command", "command": "mine-new"}}
+    assert (lin / "old" / "settings.json").read_text() == before_old
+    assert (lin / ".blink" / "statusline-chain").read_text() == "mine-old\n"
+    assert (install_statusline._read_marker(old),
+            install_hooks._read_marker(old)) == markers
+    assert (lin / ".blink" / "blink-hook.sh").exists()
+
+
+@posix_only
+@pytest.mark.parametrize("bad", [b"{not json", None])
+def test_a_first_install_that_stops_writes_nothing(tmp_path, monkeypatch,
+                                                   bad):
+    """settings.json read before anything is written: a first
+    `install --wsl` that stopped on it used to leave the shims, the out
+    file and the drop folder behind (review of the WSL work, 2026-11-05).
+    None: a settings.json on the Windows drive."""
+    lin = _tree(tmp_path)
+    p = lin / ".claude" / "settings.json"
+    if bad is not None:
+        p.write_bytes(bad)
+        body = None
+    else:
+        body = '[ "$1" = -u ] && shift\nprintf \'C:\\\\x\\n\'\n'
+    home = _home(lin)
+    run = _runner(lin, _fake_bin(tmp_path, body))
+    with pytest.raises((install_statusline.SettingsUnreadable,
+                        install_statusline.WslInstallError)):
+        install_statusline.install_into(home, run)
+    assert not (lin / ".blink").exists()
+    assert not os.path.exists(home.drop_dir)

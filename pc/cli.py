@@ -19,6 +19,7 @@ prompt. A few lines of sh start in single-digit milliseconds.
 """
 import argparse
 import contextlib
+import dataclasses
 import glob
 import json
 import os
@@ -3993,6 +3994,11 @@ def cmd_install(args) -> int:
         print(f"Claude Code inside WSL ({rec.distro_name}): that"
               " distribution is no longer on this computer, so Blink is"
               " set up for Claude Code on Windows instead.")
+        same = _wsl_same_name(rec)
+        if same is not None:
+            print(f"Another distribution is called {same.name} now; run"
+                  f" `{command_to_type()} install --wsl {same.name}` to set"
+                  " Blink up there instead.")
         print()
         _rm_wsl_drop(rec)
 
@@ -4040,6 +4046,15 @@ def cmd_install(args) -> int:
                 print(message)
                 print()
                 print("Nothing else was changed.")
+                # halt_service() stopped it above, and the Windows task
+                # starts only at logon: returned here, the board sat on HOST
+                # LOST under "nothing else was changed" (since 1.4.1; review
+                # of the WSL work, 2026-11-05, A5-3). The old program is
+                # still in place, so it runs that.
+                if restart_left_it_down(restart_service()):
+                    print("The background service did not start again;"
+                          f" run `{_repair_command()} install` once the"
+                          " download is fixed.")
                 return 1
         print(installed_bin())
     else:
@@ -4089,7 +4104,10 @@ def cmd_install(args) -> int:
             print(f"folder this is for ({e}), and without that the")
             print("background service would read another one. Claude Code's")
             print("settings were not changed. Fix that, then run this again.")
-            if halted:
+            if e.stopped:
+                # Stopped for the move; it reads what it read before.
+                _start_after_move()
+            elif halted:
                 # The program swap stopped it; it reads what it read before.
                 restart_service()
             return 1
@@ -4182,7 +4200,46 @@ def cmd_install(args) -> int:
 
 class _RecordFailed(Exception):
     """_install_native_claude could not save a record the service needs;
-    the text is the error's type, the path being in the message above."""
+    the text is the error's type, the path being in the message above.
+    `stopped`: the service was stopped for the record change, and is to be
+    started again."""
+
+    def __init__(self, what, stopped=False):
+        super().__init__(what)
+        self.stopped = stopped
+
+
+def _stop_for_move() -> bool:
+    """Stop the installed service before a native install moves the record
+    to another Claude Code folder; True when it was stopped and so must be
+    started again. On every platform: halt_service() stops only on Windows,
+    and on Linux `enable --now` then left the old daemon running, whose
+    watchdog, guarding the old folder, put Blink back there and overwrote
+    the chain file within 300 s, every time (the review of the WSL work,
+    2026-11-05; macOS and Windows had a window of under a second). The
+    daemon now follows the record itself (daemon_watchdog); this closes
+    the window between the record and the folders. The service step starts
+    it again, as tools/burn.sh restores one: bootstrap and a plain
+    kickstart, after waiting out the stop grace (_LaunchdBackend.install)."""
+    if _skip_service():
+        return False
+    try:
+        said = backend().stop()
+    except Exception:
+        return False
+    return said == "stopped"
+
+
+def _start_after_move() -> None:
+    """Start the service _stop_for_move stopped, when the install stops
+    before its service step; said only when it does not come back."""
+    try:
+        said = backend().start()
+    except Exception as e:
+        said = type(e).__name__
+    if said != "started":
+        print(f"The background service could not be started again ({said}).")
+        print(f"Run `{_repair_command()} install` to start it.")
 
 
 def _record_matters(home) -> bool:
@@ -4230,6 +4287,22 @@ def _install_native_claude(home, step) -> None:
     # them is the folder recorded until now.
     olds = _old_settings(home)
     matters = _record_matters(home)
+    # Stopped before the record changes, and started by the service step
+    # (or below, if this stops first): see _stop_for_move.
+    stopped = matters and _stop_for_move()
+    try:
+        _install_native_files(home, step, olds, matters, stopped)
+    except _RecordFailed:
+        raise
+    except BaseException:
+        if stopped:
+            _start_after_move()
+        raise
+
+
+def _install_native_files(home, step, olds, matters, stopped) -> None:
+    """_install_native_claude's writes, with the service stopped when the
+    record moves."""
     try:
         claude_home.save(home)
     except (user_config.Unreadable, OSError) as e:
@@ -4237,7 +4310,7 @@ def _install_native_claude(home, step) -> None:
             # Nothing of Claude Code's has been touched yet: stop here
             # rather than move Blink into a folder the service, reading
             # the old record or none, does not guard (U23).
-            raise _RecordFailed(type(e).__name__)
+            raise _RecordFailed(type(e).__name__, stopped)
         print(f"      Could not record the Claude Code folder: {e}")
     for old in olds:
         for line in _take_out_of(old, home):
@@ -4311,6 +4384,26 @@ def _wsl_distro(home):
         if d.guid.lower() == want:
             return d
     return WSL_UNCHECKED if want in unsure else None
+
+
+def _wsl_same_name(home):
+    """The distribution now called what `home`'s was, when it is another
+    one (another GUID): Ubuntu exported and imported again, or
+    unregistered and reinstalled. None when there is none, or the registry
+    could not say. The GUID is the identity; a name is only what a
+    distribution is called today (review of the WSL work, 2026-11-05,
+    A4-2)."""
+    reg = _wsl_registry()
+    if reg is None:
+        return None
+    try:
+        found, _ = wsl.scan(reg)
+    except wsl.Unreadable:
+        return None
+    want = (home.distro_guid or "").lower()
+    name = (home.distro_name or "").casefold()
+    return next((d for d in found if d.name.casefold() == name
+                 and d.guid.lower() != want), None)
 
 
 def _wsl_list(found) -> None:
@@ -4437,39 +4530,29 @@ def _undo_said(e) -> str:
     return type(e).__name__ if isinstance(e, OSError) else str(e)
 
 
-_MOVED_OUT = "out"
-_MOVED_LEFT = "left"
+def _moved_snapshot(prev, probe, name):
+    """_setup_wsl's moved-inside step, before anything is written: (old,
+    snap) -- the folder `prev` recorded inside distribution `name`, as the
+    account to reach it as, and install_statusline.snapshot_wsl of it --
+    or (old, None) when that folder is to be left as it was (said, with how
+    to take Blink out by hand); None when the install stopped, said why.
 
-
-def _take_out_of_moved(prev, probe, name):
-    """_setup_wsl's moved-inside step: take Blink out of the folder `prev`
-    recorded inside distribution `name`, before the folder `probe` found
-    is written. _MOVED_OUT when Blink was taken out of it; _MOVED_LEFT
-    when the install goes on with that folder as it was (below); None
-    when it stopped, said why. Two ways to go on, because what a later
-    failure says depends on which: C1's message said the old folder had
-    been taken out on both, and on _MOVED_LEFT nothing had (review of
-    round 2, D3).
-
-    Run as the account Blink was set up for, since the folder is its. If
+    Read as the account Blink was set up for, since the folder is its. If
     that account is gone (deleted, or renamed with usermod -l), wsl.exe -u
     for it fails every time, and until the second review round (C3) the
     install stopped for good with advice to act as a user nobody could be.
-    Then it is tried as the account there now: a rename keeps the uid and
+    Then it is read as the account there now: a rename keeps the uid and
     the home, so that works. Failing that too, the old account's folder is
-    left -- nobody signs in as it -- and the install goes on, unless the
-    new account lives in the same home: there the chain file still holds
-    the old folder's own status line, and writing now would overwrite it
+    left -- nobody signs in as it -- unless the new account lives in the
+    same home: there the chain file still holds the old folder's own
+    status line, and writing now would overwrite it with nothing kept
     (U21), so it stops."""
     try:
         old = _wsl_under(prev, name)
-        said = install_statusline.uninstall_from(
+        return old, install_statusline.snapshot_wsl(
             old, install_statusline.default_wsl_run(old))
     except _UNDO_FAILED as e:
         first = e
-    else:
-        print(f"      The folder Blink used before inside {name}: {said}")
-        return _MOVED_OUT
     norm = claude_home.linux_norm
     if not prev.linux_user or prev.linux_user == probe.user:
         return _stop_over_moved(name, first, None)
@@ -4485,22 +4568,71 @@ def _take_out_of_moved(prev, probe, name):
     print(f"      The Linux account Blink was set up for inside {name}"
           f" ({prev.linux_user}) is no longer there.")
     try:
-        said = install_statusline.uninstall_from(
+        return now, install_statusline.snapshot_wsl(
             now, install_statusline.default_wsl_run(now))
     except _UNDO_FAILED as e:
         if norm(prev.linux_home or "") == norm(probe.home):
             return _stop_over_moved(name, e, probe.user)
-        print(f"      Blink could not be taken out of {norm(linux)} as"
-              f" {probe.user} ({_undo_said(e)}). Claude Code reads that")
-        print("      folder only when started with it; to take Blink out by")
-        print(f"      hand, as an account that can edit it, remove"
-              f" {norm(prev.linux_home or '/')}/.blink/blink-*.sh")
-        print("      and the statusLine and hooks entries in its settings.json")
-        print("      that name them.")
-        return _MOVED_LEFT
-    print(f"      The folder Blink used before inside {name}, taken out as"
-          f" {probe.user}: {said}")
-    return _MOVED_OUT
+        _say_left_in(name, norm(linux), probe.user, e, prev.linux_home)
+        return now, None
+
+
+def _say_left_in(name, folder, user, e, linux_home) -> None:
+    norm = claude_home.linux_norm
+    print(f"      Blink could not be taken out of {folder} as"
+          f" {user} ({_undo_said(e)}). Claude Code reads that")
+    print("      folder only when started with it; to take Blink out by")
+    print(f"      hand, as an account that can edit it, remove"
+          f" {norm(linux_home or '/')}/.blink/blink-*.sh")
+    print("      and the statusLine and hooks entries in its settings.json")
+    print("      that name them.")
+
+
+def _shares_files(old, home) -> bool:
+    """Do `old` and `home`, two folders of one distribution, share the
+    shims, the out file and the chain file? They do when their Linux homes
+    are one, which is where those live."""
+    norm = claude_home.linux_norm
+    return norm(old.linux_home or "") == norm(home.linux_home or "")
+
+
+def _take_out_of_old(old, snap, home, name) -> None:
+    """After the new folder `home` is written and recorded: Blink out of
+    the folder it used before, from `snap`. A failure is said as what it
+    is -- Blink is set up and recorded in the new folder, and still in the
+    old one -- with how to finish by hand; the install has worked."""
+    try:
+        said = install_statusline.take_out_of_folder(
+            old, install_statusline.default_wsl_run(old), snap,
+            files=not _shares_files(old, home))
+    except _UNDO_FAILED as e:
+        print(f"      Blink is set up in the new folder inside {name}, but"
+              " could not be taken out of the one it used")
+        print(f"      before ({_undo_said(e)}). To do that by hand, as"
+              f" {old.linux_user}, remove the statusLine and hooks")
+        print("      entries that name ~/.blink/blink-*.sh from that"
+              " folder's settings.json.")
+        return
+    print(f"      The folder Blink used before inside {name}: {said}")
+
+
+def _undo_moved_setup(home, old, snap, name) -> None:
+    """Take the new folder `home` back out when its record could not be
+    saved, and put back what the old folder relies on: the chain file when
+    the two share a Linux home, and the markers. The old folder was never
+    touched, and the record still names it."""
+    run = install_statusline.default_wsl_run(home)
+    shared = _shares_files(old, home)
+    try:
+        now = install_statusline.snapshot_wsl(home, run)
+        install_statusline.take_out_of_folder(home, run, now,
+                                              files=not shared)
+        install_statusline.restore_snapshot(home, run, snap, chain=shared)
+    except _UNDO_FAILED:
+        print(f"      Blink could not take itself back out of the new folder"
+              f" inside {name};")
+        print("      to do it by hand,")
+        _say_wsl_manual_steps(name)
 
 
 def _account_gone(home, user) -> bool:
@@ -4532,8 +4664,12 @@ def _stop_over_moved(name, e, as_user):
     print(f"Claude Code inside {name} was not changed. To take it"
           f" out by hand, {who}")
     _say_wsl_manual_steps(name)
+    # `install --wsl <name>`, never "this" again: a plain install with
+    # config.json moved aside has no WSL record, and set up Windows' own
+    # Claude Code instead, abandoning the distribution (review of the WSL
+    # work, 2026-11-05, A5-2).
     print(f"      Then move {user_config.path(blink_home())} aside")
-    print("      and run this again.")
+    print(f"      and run `{command_to_type()} install --wsl {name}`.")
     return None
 
 
@@ -4614,31 +4750,46 @@ def _setup_wsl(d):
     same = (prev is not None and prev.kind == claude_home.WSL
             and (prev.distro_guid or "").lower() == d.guid.lower())
     moved = same and _moved_inside(prev, home, probe.config_dir)
-    old_folder = None
+    old = snap = None
     if moved:
         # The same distribution, another folder or Linux account: Claude
         # Code's folder there or the default user changed since Blink was
-        # set up. Taken out FIRST, while its chain file still holds that
-        # folder's own status line: the chain file and the shims live in
-        # the Linux home, the markers in the drop folder named for the
-        # GUID, so writing the new folder first overwrote that status line
-        # and the uninstall after it deleted the shims the new one runs.
-        # Until the review of feat/enterprise-spend (U21) the old folder
-        # was left with Blink's status line and ten hooks, which ran
-        # deleted shims after an uninstall -- an exit 2 that blocks every
-        # prompt.
-        old_folder = _take_out_of_moved(prev, probe, d.name)
-        if old_folder is None:
+        # set up. The new folder is written FIRST, and Blink taken out of
+        # the old one only once that worked and is recorded: taken out
+        # first, an install that then failed left Blink in neither folder
+        # while the screen said nothing had changed, and the service
+        # "reading what it read before" read nothing (the review of the WSL
+        # work, 2026-11-05). What the old folder's undo needs is read
+        # before the write, because the write overwrites it: the chain file
+        # and the shims live in the Linux home, the markers in the drop
+        # folder named for the GUID (U21 found the chain file overwritten).
+        # Until U21 the old folder kept Blink's status line and ten hooks,
+        # which ran deleted shims after an uninstall -- an exit 2 that
+        # blocks every prompt.
+        got = _moved_snapshot(prev, probe, d.name)
+        if got is None:
             return None
+        old, snap = got
+    left = ("" if not moved else
+            f" Blink is still set up in the folder it used before inside"
+            f" {d.name}, which the background service reads.")
 
     try:
         said = install_statusline.install_into(
             home, install_statusline.default_wsl_run(home))
     except (install_statusline.WslInstallError,
             install_statusline.SettingsUnreadable) as e:
+        if snap is not None and _shares_files(old, home):
+            # The chain file may have been written before the settings
+            # write that failed; it is the old folder's again.
+            try:
+                install_statusline.restore_snapshot(
+                    home, install_statusline.default_wsl_run(home), snap)
+            except _UNDO_FAILED:
+                pass
         print()
         print(f"Blink setup stopped. {e}")
-        print("Claude Code's settings inside WSL were not changed.")
+        print("Claude Code's settings inside WSL were not changed." + left)
         return None
     except OSError as e:
         # Making the drop folder or writing a marker, on this computer.
@@ -4649,7 +4800,7 @@ def _setup_wsl(d):
         print()
         print("Blink setup stopped. It could not write its own folder on")
         print(f"this computer ({type(e).__name__}). Check that your user")
-        print("folder's .blink can be written, then run this again.")
+        print("folder's .blink can be written, then run this again." + left)
         return None
     try:
         claude_home.save(home)
@@ -4666,23 +4817,26 @@ def _setup_wsl(d):
                   " folder, so they stay, and uninstall will find them.")
         else:
             # Unrecorded, the new folder would be wired with nothing to
-            # find it. Moved inside, the old folder has usually just been
-            # taken out as well, so leaving this one used to mean an
-            # uninstall later deleted the shims its hooks run (C1). What is
-            # said of the old folder is what _take_out_of_moved did (D3).
+            # find it, and an uninstall later deleted the shims its hooks
+            # run (C1).
             print(f"Blink setup stopped. The settings inside {d.name} were"
                   " written, but Blink could not record them"
                   f" ({type(e).__name__}), so they are being taken back out.")
-            if old_folder == _MOVED_OUT:
-                print(f"Blink was already taken out of the folder it used"
-                      f" before inside {d.name}, so Claude Code there runs"
-                      " without it until this runs again.")
-            elif old_folder == _MOVED_LEFT:
+            if moved:
+                if snap is not None:
+                    _undo_moved_setup(home, old, snap, d.name)
+                else:
+                    # The old folder was left (its account gone): nothing
+                    # of it to keep wired.
+                    _undo_wsl_setup(home, d.name)
                 print(f"The folder Blink used before inside {d.name} was"
                       " left as it was, and Blink's record still names it.")
-            _undo_wsl_setup(home, d.name)
+            else:
+                _undo_wsl_setup(home, d.name)
         print(f"Fix {user_config.path(blink_home())} and run this again.")
         return None
+    if snap is not None:
+        _take_out_of_old(old, snap, home, d.name)
     # The home recorded until now has just lost its record, and uninstall
     # reads only the record: left in place, its entries would point at
     # shims nobody removes, and a second distribution's would go on
@@ -5189,32 +5343,93 @@ def _uninstall_wsl(home, again="uninstall") -> bool:
     and nothing could undo the distribution afterwards."""
     d = _wsl_distro(home)
     if d is None:
-        print(f"      Claude Code inside WSL ({home.distro_name}): that"
-              " distribution is no longer on this computer, so there is"
-              " nothing to take out of it.")
-        return True
+        same = _wsl_same_name(home)
+        if same is None:
+            print(f"      Claude Code inside WSL ({home.distro_name}): that"
+                  " distribution is no longer on this computer, so there is"
+                  " nothing to take out of it.")
+            return True
+        # Re-registered under the same name: the watch stopped writing
+        # there (wsl_watch), but what install put in is still there and
+        # still runs, its shims writing session ids into the drop folder.
+        # This is the person's own uninstall, so Blink is taken out of it
+        # by that name, as the account it was set up for. Until the review
+        # of the WSL work (A4-2) it said "nothing to take out" and left it.
+        print(f"      Claude Code inside WSL ({home.distro_name}): the"
+              " distribution Blink was set up for is gone, and another"
+              " distribution now has its name. Blink takes itself out of"
+              f" that one too, as {home.linux_user}, since what it put"
+              " there may have come with it.")
+        return _uninstall_inside(home, same.name, again)
     if d is WSL_UNCHECKED:
         print(f"      Claude Code inside WSL ({home.distro_name}): could not"
               " check WSL, so it was left as it was.")
         _say_wsl_manual_undo(home.distro_name, home, again)
         return False
+    return _uninstall_inside(home, d.name, again)
+
+
+def _uninstall_inside(home, name, again) -> bool:
+    """_uninstall_wsl's undo inside the distribution called `name`: as the
+    account Blink was set up for, or, when that account is gone, as the
+    one there now (_account_now). True when Blink is out; False, said
+    with what to do, when not."""
     try:
-        home = _wsl_under(home, d.name)
+        home = _wsl_under(home, name)
         said = install_statusline.uninstall_from(
             home, install_statusline.default_wsl_run(home))
-    except (install_statusline.WslInstallError,
-            install_statusline.SettingsUnreadable) as e:
-        print(f"      Claude Code inside WSL ({d.name}), left alone: {e}")
-        _say_wsl_manual_undo(d.name, home, again)
+    except install_statusline.WslInstallError as e:
+        now = _account_now(home, name)
+        if now is None:
+            print(f"      Claude Code inside WSL ({name}), left alone: {e}")
+            _say_wsl_manual_undo(name, home, again)
+            return False
+        print(f"      The Linux account Blink was set up for inside {name}"
+              f" ({home.linux_user}) is no longer there; taking Blink out"
+              f" as {now.linux_user}, the account there now.")
+        try:
+            said = install_statusline.uninstall_from(
+                now, install_statusline.default_wsl_run(now))
+        except (install_statusline.WslInstallError,
+                install_statusline.SettingsUnreadable) as e2:
+            print(f"      Claude Code inside WSL ({name}), left alone: {e2}")
+            _say_wsl_manual_undo(name, home, again)
+            return False
+        except OSError as e2:
+            print(f"      Claude Code inside WSL ({name}):"
+                  f" {_said_partly(e2)}")
+            _say_wsl_manual_undo(name, home, again)
+            return False
+    except install_statusline.SettingsUnreadable as e:
+        print(f"      Claude Code inside WSL ({name}), left alone: {e}")
+        _say_wsl_manual_undo(name, home, again)
         return False
     except OSError as e:
         # A marker in the drop folder that would not go: by type, since
         # the text names the folder.
-        print(f"      Claude Code inside WSL ({d.name}): {_said_partly(e)}")
-        _say_wsl_manual_undo(d.name, home, again)
+        print(f"      Claude Code inside WSL ({name}): {_said_partly(e)}")
+        _say_wsl_manual_undo(name, home, again)
         return False
-    print(f"      Claude Code inside WSL ({d.name}): {said}")
+    print(f"      Claude Code inside WSL ({name}): {said}")
     return True
+
+
+def _account_now(home, name):
+    """`home` as the distribution's account now, when the one it records
+    is gone (deleted, or renamed with usermod -l, which keeps the uid and
+    the home): every wsl.exe -u for a gone account fails, so uninstall
+    failed on every run, the record put back each time (review of the WSL
+    work, 2026-11-05, A5-4). The fallback install's moved-inside step has
+    (_account_gone): the distribution's default account, found by the
+    probe, and getent's own "no such key" for the recorded one. None when
+    the recorded account is still there, or nothing can tell."""
+    probe = wsl.probe(name)
+    if probe is None or not probe.user or probe.user == home.linux_user:
+        return None
+    now = dataclasses.replace(home, linux_user=probe.user)
+    if not _account_gone(now, home.linux_user):
+        return None
+    return now
 
 
 def _said_partly(e) -> str:
@@ -5372,6 +5587,14 @@ def cmd_status(args) -> int:
             "gone": "not found -- removed or reinstalled?",
             "unchecked": "could not check -- Windows did not list WSL's"
                          " distributions"}[wsl_state])
+        same = _wsl_same_name(home) if wsl_state == "gone" else None
+        if same is not None:
+            # A4-2: a new distribution under the recorded name is not the
+            # one Blink was set up for, and Blink does not write into it.
+            print("            the one Blink was set up for is gone;"
+                  f" another distribution is called {same.name} now --")
+            print(f"            run `{_repair_command()} install --wsl"
+                  f" {same.name}` to set Blink up there")
         if wsl_state in ("running", "stopped") and \
                 wsl_name != recorded_name:
             # Found by its GUID under another name. The panel still works

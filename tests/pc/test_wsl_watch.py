@@ -963,3 +963,59 @@ def test_an_unreadable_record_at_start_waits_for_the_real_one(
     assert bus._preferred == "codex"
     fetch()
     assert len(built) == 1                      # built once
+
+
+# ------------------------------- review of the WSL work, 2026-11-05: A4-2
+
+@pytest.mark.parametrize("idle", [False, True])
+def test_a_same_named_distribution_with_another_guid_is_left_alone(
+        tmp_path, monkeypatch, capsys, idle):
+    """Ubuntu exported and imported again (or reinstalled) has a new GUID
+    under the recorded name. The watch went on reading it and its drift
+    repair wrote settings.json, the shims and the out file into it -- on a
+    fresh reinstall, into a distribution nobody installed Blink in. The
+    GUID is the identity: nothing is read or written there, and one line
+    says so, naming nothing."""
+    from pc import wsl
+    home, unc = _home(tmp_path)
+    _write_config(home)
+    hits = _count_unc(monkeypatch, unc)
+    t0 = time.time()
+    clock = _Clock(t0)
+    other = "{11111111-2222-4333-8444-555555555555}"
+    drift = _Drift()
+    w = _watch(home, clock, _Running(True), drift=drift,
+               distros=lambda: [wsl.Distro(other, "Ubuntu", 2, True)])
+    w.burn_source().poll(clock.t)
+    if idle:
+        _touch_drop(home, t0 - wsl_watch.LIVE_S - 1)
+        w.tick()
+        clock.t += wsl_watch.IDLE_REPAIR_EVERY_S
+    else:
+        _touch_drop(home, t0)
+    for _ in range(3):
+        w.tick()
+        clock.t += wsl_watch.RUNNING_EVERY_S
+        if not idle:
+            _touch_drop(home, clock.t)
+    assert drift.ticks == 0
+    assert hits == []
+    assert w.view() is None
+    err = capsys.readouterr().err
+    assert err.count("[wsl]") == 1
+    assert "Ubuntu" not in err and other not in err.lower()
+
+
+def test_the_recorded_guid_under_its_name_is_watched_as_before(tmp_path):
+    from pc import wsl
+    home, _ = _home(tmp_path)
+    _write_config(home)
+    t0 = time.time()
+    clock = _Clock(t0)
+    _touch_drop(home, t0)
+    drift = _Drift()
+    w = _watch(home, clock, _Running(True), drift=drift,
+               distros=lambda: [wsl.Distro(GUID, "Ubuntu", 2, True)])
+    w.tick()
+    assert drift.ticks == 1
+    assert w.view() is not None

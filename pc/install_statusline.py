@@ -996,6 +996,14 @@ def install_into(home, wsl_run, *, hooks=True, files=True) -> str:
     """
     from pc import install_hooks
 
+    # settings.json read, and refused, before anything is written: a first
+    # `install --wsl` that stopped here (a settings.json that does not
+    # parse, one on the Windows drive) used to leave the shims, the out file
+    # and the drop folder behind it, in a distribution nothing recorded
+    # (the review of the WSL work, 2026-11-05). The read's SHA-256 is what
+    # the settings write checks, so the time the files below take is a
+    # change seen, not one written over.
+    st = _wsl_read_settings(home, wsl_run)
     if files:
         # Windows makes the drop folder first: wslpath's answer is checked
         # for existence, and the shims could not create a folder on an NTFS
@@ -1014,7 +1022,6 @@ def install_into(home, wsl_run, *, hooks=True, files=True) -> str:
         _wsl_write(wsl_run, wsl_shim_path(home, "out"), "-", "600",
                    (out_dir + "\n").encode("utf-8"), "Blink's out file")
 
-    st = _wsl_read_settings(home, wsl_run)
     doc, sl_marker, action, msg = merge_install(
         st.doc, _read_marker(home), None, wsl_statusline_command(home))
     lines = [msg]
@@ -1103,6 +1110,90 @@ def uninstall_from(home, wsl_run) -> str:
         lines.append("Could not remove Blink's shims inside WSL; they do"
                      " nothing without the settings above.")
     return " ".join(lines)
+
+
+class WslSnapshot:
+    """What uninstall_from needs to take Blink out of one folder of a
+    distribution, read before another folder of the same distribution is
+    set up: the chain file in the folder's Linux home, and the markers in
+    the drop folder, which is named for the distribution and so shared.
+
+    For a move inside a distribution (cli._setup_wsl), where the new folder
+    is written first and the old one taken out only once that worked: the
+    write overwrites both the markers and, when the Linux home is the same,
+    the chain file holding the old folder's own status line."""
+
+    def __init__(self, chain, sl_marker, hk_marker):
+        self.chain = chain              # the chain file's text, or None
+        self.sl_marker = sl_marker
+        self.hk_marker = hk_marker
+
+
+def snapshot_wsl(home, wsl_run) -> WslSnapshot:
+    """WslSnapshot for `home`, through `wsl_run` (its user). Raises
+    WslInstallError when the chain file cannot be read, as uninstall_from
+    does: read as empty, the old folder's status line would be lost."""
+    from pc import install_hooks
+    chain = wsl_shim_path(home, os.path.basename(CHAIN_PATH))
+    rc, out, _ = wsl_run(["sh", "-c", _CAT_OR_NOTHING, "sh", chain])
+    if rc != 0:
+        raise WslInstallError("Could not read Blink's status line chain file"
+                              " inside WSL.")
+    return WslSnapshot(decode_chain(out) if out else None,
+                       _read_marker(home), install_hooks._read_marker(home))
+
+
+def take_out_of_folder(home, wsl_run, snap, files) -> str:
+    """uninstall_from for one folder of a distribution, from `snap` rather
+    than from what is on disk now: settings.json there loses Blink's status
+    line (the chain's command put back) and hooks. `files` also removes the
+    shims, the out file and the chain file in `home`'s Linux home; False
+    when those are shared with the folder now set up there. The markers
+    are never touched: they are the drop folder's, and the drop folder is
+    the distribution's. The text is for the screen only, as
+    uninstall_from's."""
+    from pc import install_hooks
+    st = _wsl_read_settings(home, wsl_run, "any")
+    sl_doc, _, action, msg = merge_uninstall(
+        st.doc, snap.sl_marker, snap.chain, wsl_statusline_command(home))
+    _, removed = install_hooks.merge_uninstall(
+        st.doc, snap.hk_marker,
+        lambda ev: install_hooks.wsl_hook_command(home, ev))
+    if sl_doc is not None or removed:
+        _wsl_write(wsl_run, st.path, st.sha, "keep",
+                   _dump(st.doc, st.indent,
+                         st.trailing_newline).encode("utf-8"),
+                   "Claude Code's settings.json")
+    lines = [msg, install_hooks.uninstall_message(removed)]
+    if not files:
+        return " ".join(lines)
+    if sl_doc is not None:
+        _wsl_apply_chain(home, wsl_run, action)
+    if removed and HOOK_RECAPTURE_S > 0:
+        time.sleep(HOOK_RECAPTURE_S)    # as uninstall_from
+    if not _wsl_rm(wsl_run,
+                   *(wsl_shim_path(home, n) for n in WSL_SHIMS + ("out",))):
+        lines.append("Could not remove Blink's shims inside WSL; they do"
+                     " nothing without the settings above.")
+    return " ".join(lines)
+
+
+def restore_snapshot(home, wsl_run, snap, chain=True) -> None:
+    """Put back what `snap` read: the markers, and with `chain` the chain
+    file in `home`'s Linux home. For a move inside a distribution that
+    could not finish, so the old folder is wired exactly as it was."""
+    from pc import install_hooks
+    if chain:
+        _wsl_apply_chain(home, wsl_run, ("write", snap.chain)
+                         if snap.chain is not None else ("delete",))
+    if snap.sl_marker:
+        _write_marker(snap.sl_marker, home)
+    else:
+        _remove_marker(home)
+    if snap.hk_marker:
+        install_hooks._write_marker(snap.hk_marker, home)
+    else:
+        install_hooks._remove_marker(home)
 
 
 # --- anti-drift watchdog --------------------------------------------------

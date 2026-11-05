@@ -230,6 +230,7 @@ class WslWatch:
         self._swept_at = None
         self._idle_at = None
         self._said = None
+        self._said_foreign = False
         # When the reader last walked the transcripts (the thread's own).
         self._walked_at = None
 
@@ -304,6 +305,10 @@ class WslWatch:
             self._ran = bool(self._running(self._home.distro_name))
             asked_now = True
         live = fresh and self._ran
+        if (live and asked_now or idle_repair) and not self._ours():
+            # Not the distribution Blink was set up for: nothing is read or
+            # written there (_ours).
+            live = asked_now = idle_repair = False
         if fresh:
             # A live spell has its own drift check; the idle one waits a
             # full interval after it.
@@ -374,6 +379,37 @@ class WslWatch:
         except (OSError, ValueError):
             return None                 # not knowing is not "no seat"
         return self._config.look(path, self._clock(), _unreachable)
+
+    def _ours(self):
+        """Whether the distribution called the recorded name is still the
+        one Blink was set up for: the GUID is the identity. Asked before
+        each tick that would go into it -- a registry read, quick, and at
+        most every RUNNING_EVERY_S or IDLE_REPAIR_EVERY_S. A distribution
+        exported and imported again, or reinstalled, under the recorded name
+        has a new GUID; the watch read it and its drift repair wrote
+        settings.json, the shims and the out file into it, on a reinstall a
+        distribution nobody set Blink up in (the review of the WSL work,
+        2026-11-05, A4-2). A rename is followed (resolve_name). A registry
+        that lists nothing cannot tell, and is taken as yes, as before."""
+        found = self._distros() if self._distros is not None \
+            else _registry_distros()
+        if not found:
+            return True
+        want = (self._home.distro_guid or "").lower()
+        mine = next((d for d in found if d.guid.lower() == want), None)
+        if mine is not None:
+            if mine.name != self._home.distro_name:
+                self.resolve_name()
+            self._said_foreign = False
+            return True
+        if not self._said_foreign:
+            self._said_foreign = True
+            # One line, naming nothing: a distribution's name is the
+            # person's own word for it.
+            print("[wsl] the WSL distribution Blink was set up for is gone;"
+                  " not reading or writing another one in its place",
+                  file=sys.stderr)
+        return False
 
     def resolve_name(self):
         """Follow a rename: find the distribution by its GUID and, when it

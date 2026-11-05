@@ -606,3 +606,96 @@ def test_a_wsl_desk_without_codex_hooks_writes_no_shim(tmp_path):
     _codex_marker(False)
     assert cli.daemon_watchdog().tick() is None
     assert not os.path.exists(cli.hook_shim_path())
+
+
+class _Service(cli._Backend):
+    """A backend that records what install asks of the service, and when
+    the record changed relative to it. The rest is _Backend's."""
+
+    def __init__(self, calls):
+        self.calls = calls
+
+    def _note(self, what):
+        rec = claude_home.recorded()
+        self.calls.append((what, None if rec is None else rec.config_dir))
+
+    def stop(self, runner=None):
+        self._note("stop")
+        return "stopped"
+
+    def start(self, runner=None):
+        self._note("start")
+        return "started"
+
+    def install(self):
+        self._note("install")
+        return "running (launchd)"
+
+    def halt(self):
+        self._note("halt")
+
+    def restart(self):
+        self._note("restart")
+        return "restarted"
+
+
+def _with_service(monkeypatch):
+    calls = []
+    svc = _Service(calls)
+    monkeypatch.setattr(cli, "_skip_service", lambda: False)
+    monkeypatch.setattr(cli, "backend", lambda: svc)
+    return calls
+
+
+def test_a_record_move_stops_the_service_first_and_starts_it_after(
+        tmp_path, monkeypatch):
+    """A5-6/B-2: a native install that moves the record left the running
+    daemon up while the folders changed under it; its watchdog, guarding
+    the old folder, could reinstall there before the restart (on Linux,
+    whose `enable --now` leaves a running daemon running, every time). The
+    service is stopped before the record changes, on every platform, and
+    the service step starts it again on the new record."""
+    x, y = _j(tmp_path, "x"), _j(tmp_path, "y")
+    os.makedirs(x)
+    os.makedirs(y)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", x)
+    calls = _with_service(monkeypatch)
+    assert cli.main(["install"]) == 0
+    calls.clear()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", y)
+    assert cli.main(["install"]) == 0
+    names = [c[0] for c in calls]
+    assert names.index("stop") < names.index("install")
+    assert calls[names.index("stop")] == ("stop", x)
+    assert calls[names.index("install")] == ("install", y)
+
+
+def test_a_reinstall_into_the_same_folder_does_not_stop_the_service(
+        tmp_path, monkeypatch):
+    calls = _with_service(monkeypatch)
+    assert cli.main(["install"]) == 0
+    calls.clear()
+    assert cli.main(["install"]) == 0
+    assert "stop" not in [c[0] for c in calls]
+
+
+def test_a_record_move_that_fails_starts_the_service_again(tmp_path,
+                                                           monkeypatch):
+    """Stopped for the move, and the record then could not be saved: the
+    service is started again, reading what it read before."""
+    x, y = _j(tmp_path, "x"), _j(tmp_path, "y")
+    os.makedirs(x)
+    os.makedirs(y)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", x)
+    calls = _with_service(monkeypatch)
+    assert cli.main(["install"]) == 0
+    calls.clear()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", y)
+
+    def refuse(home):
+        raise OSError("read-only")
+    monkeypatch.setattr(claude_home, "save", refuse)
+    assert cli.main(["install"]) == 1
+    names = [c[0] for c in calls]
+    assert names[-2:] == ["stop", "start"] or names[-1] == "start"
+    assert "stop" in names and names.index("stop") < names.index("start")

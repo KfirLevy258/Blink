@@ -3235,10 +3235,25 @@ def _wsl_desk(monkeypatch, reg, probe=None, running=False):
         calls.append(("uninstall_from", home))
         return "Statusline removed. Activity hooks removed."
 
+    def fake_snapshot(home, wsl_run):
+        calls.append(("snapshot", home))
+        return install_statusline.WslSnapshot("theirs\n", "m", {"h"})
+
+    def fake_take_out(home, wsl_run, snap, files):
+        calls.append(("take_out", home, files))
+        return "Statusline restored. Activity hooks removed."
+
+    def fake_restore(home, wsl_run, snap, chain=True):
+        calls.append(("restore", home, chain))
+
     monkeypatch.setattr(wsl, "probe", fake_probe)
     monkeypatch.setattr(wsl, "running", fake_running)
     monkeypatch.setattr(install_statusline, "install_into", fake_into)
     monkeypatch.setattr(install_statusline, "uninstall_from", fake_from)
+    monkeypatch.setattr(install_statusline, "snapshot_wsl", fake_snapshot)
+    monkeypatch.setattr(install_statusline, "take_out_of_folder",
+                        fake_take_out)
+    monkeypatch.setattr(install_statusline, "restore_snapshot", fake_restore)
     monkeypatch.setattr(cli, "restart_service",
                         lambda: calls.append(("restart",)) or "restarted")
     monkeypatch.setattr(cli, "halt_service",
@@ -3261,7 +3276,8 @@ def _wsl_desk(monkeypatch, reg, probe=None, running=False):
 def _inside(calls):
     """The calls that reach into a distribution, in order."""
     return [c[0] for c in calls
-            if c[0] in ("probe", "install_into", "uninstall_from")]
+            if c[0] in ("probe", "install_into", "uninstall_from",
+                        "snapshot", "take_out", "restore")]
 
 
 def _recorded_wsl(home, name="Ubuntu", guid=WSL_GUID, **kw):
@@ -3789,7 +3805,10 @@ def test_reinstall_into_a_moved_folder_takes_blink_out_of_the_old(
     status line and ten hooks, which ran deleted shims after an uninstall
     and blocked every prompt; and the one chain file per Linux home was
     overwritten with the new folder's. The old folder is taken out first,
-    under the old record, then the new one written."""
+    under the old record. Since the review of the WSL work (2026-11-05,
+    A5-1) the new one is written first and the old one taken out only once
+    that worked and is recorded, from what was read of it before the write
+    (the chain file and the markers), leaving the shared shims alone."""
     from pc import claude_home, wsl
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       probe=_probe(config_dir="/home/zoe/work-claude",
@@ -3797,8 +3816,10 @@ def test_reinstall_into_a_moved_folder_takes_blink_out_of_the_old(
     old = _recorded_wsl(tmp_path)
     os.makedirs(old.state_dir)
     assert cli.main(["install"]) == 0
-    assert _inside(calls) == ["probe", "uninstall_from", "install_into"]
-    assert calls[[c[0] for c in calls].index("uninstall_from")][1] == old
+    assert _inside(calls) == ["probe", "snapshot", "install_into",
+                              "take_out"]
+    took = next(c for c in calls if c[0] == "take_out")
+    assert took[1] == old and took[2] is False     # one Linux home: shared
     new = claude_home.recorded()
     assert new.config_dir == wsl.unc("Ubuntu", "/home/zoe/work-claude")
     assert os.path.isdir(new.drop_dir)
@@ -3818,23 +3839,27 @@ def test_a_moved_folder_that_will_not_undo_stops_the_install(
     old = _recorded_wsl(tmp_path)
 
     def fails(home, wsl_run, **k):
-        calls.append(("uninstall_from", home))
+        calls.append(("snapshot", home))
         raise install_statusline.WslInstallError("nope")
-    monkeypatch.setattr(install_statusline, "uninstall_from", fails)
+    monkeypatch.setattr(install_statusline, "snapshot_wsl", fails)
     assert cli.main(["install", "--wsl", "Ubuntu"]) == 1
-    out = capsys.readouterr().out
-    assert _inside(calls) == ["probe", "uninstall_from"]
+    out = " ".join(capsys.readouterr().out.split())
+    assert _inside(calls) == ["probe", "snapshot"]
     assert claude_home.recorded() == old
     assert "another folder inside Ubuntu" in out
     assert "inside Ubuntu remove ~/.blink/out" in out
+    # A5-2: the way back in names the distribution; a plain install with
+    # config.json aside would set up Windows' own Claude Code.
+    assert "install --wsl Ubuntu`." in out
     assert "Done." not in out
 
 
 def _old_account_gone(monkeypatch, calls, gone="zoe", undo_ok=()):
     """A distribution where Linux account `gone` no longer exists:
-    getent says so (exit 2) and wsl.exe -u for it fails, so uninstall_from
-    as that account raises. As anyone else it succeeds when that account
-    is in `undo_ok`, and raises otherwise."""
+    getent says so (exit 2) and wsl.exe -u for it fails, so reading its
+    folder (snapshot_wsl) or taking Blink out of it (uninstall_from) as
+    that account raises. As anyone else it succeeds when that account is in
+    `undo_ok`, and raises otherwise."""
     def run_in(home):
         def run(argv, stdin=None):
             calls.append(("wsl_run", home.linux_user, argv[0]))
@@ -3848,8 +3873,15 @@ def _old_account_gone(monkeypatch, calls, gone="zoe", undo_ok=()):
         if home.linux_user in undo_ok:
             return "Statusline removed. Activity hooks removed."
         raise install_statusline.WslInstallError("nope")
+
+    def snap(home, wsl_run):
+        calls.append(("snapshot", home))
+        if home.linux_user in undo_ok:
+            return install_statusline.WslSnapshot(None, "m", set())
+        raise install_statusline.WslInstallError("nope")
     monkeypatch.setattr(install_statusline, "default_wsl_run", run_in)
     monkeypatch.setattr(install_statusline, "uninstall_from", from_)
+    monkeypatch.setattr(install_statusline, "snapshot_wsl", snap)
 
 
 def test_a_renamed_account_is_taken_out_as_the_one_there_now(
@@ -3866,10 +3898,12 @@ def test_a_renamed_account_is_taken_out_as_the_one_there_now(
     _old_account_gone(monkeypatch, calls, undo_ok=("zoey",))
     assert cli.main(["install"]) == 0
     out = " ".join(capsys.readouterr().out.split())
-    undone = [c[1] for c in calls if c[0] == "uninstall_from"]
-    assert [h.linux_user for h in undone] == ["zoe", "zoey"]
-    assert undone[1].config_dir == old.config_dir
-    assert _inside(calls)[-1] == "install_into"
+    read = [c[1] for c in calls if c[0] == "snapshot"]
+    assert [h.linux_user for h in read] == ["zoe", "zoey"]
+    assert read[1].config_dir == old.config_dir
+    assert _inside(calls)[-2:] == ["install_into", "take_out"]
+    took = next(c for c in calls if c[0] == "take_out")
+    assert took[1].linux_user == "zoey"
     assert claude_home.recorded().linux_user == "zoey"
     assert "Linux account Blink was set up for inside Ubuntu (zoe)" in out
     assert "no longer there" in out
@@ -3889,6 +3923,7 @@ def test_a_deleted_account_with_its_folder_out_of_reach_does_not_block(
     assert cli.main(["install"]) == 0
     out = " ".join(capsys.readouterr().out.split())
     assert _inside(calls)[-1] == "install_into"
+    assert "take_out" not in _inside(calls)
     assert claude_home.recorded().linux_user == "amy"
     assert "no longer there" in out
     assert "could not be taken out of /home/zoe/.claude as amy" in out
@@ -3915,6 +3950,7 @@ def test_a_save_that_fails_after_an_untouched_old_folder_says_so(
     assert "being taken back out" in out
     assert "The folder Blink used before inside Ubuntu was left as it was" \
         in out
+    # Nothing read of the old folder, so the new one comes back out whole.
     assert [h.linux_user for h in (c[1] for c in calls
                                    if c[0] == "uninstall_from")][-1] == "amy"
 
@@ -4031,6 +4067,29 @@ def test_install_wsl_puts_this_build_in_place(tmp_path, monkeypatch,
     assert "Blink reads Claude Code inside Ubuntu only" in out
 
 
+def test_a_failed_program_swap_starts_the_service_again(tmp_path,
+                                                       monkeypatch, capsys):
+    """A5-3 (since 1.4.1): the swap halted the service, then failed (an
+    antivirus quarantining the self-test, a rename refused), and install
+    said "Nothing else was changed." and returned with the daemon stopped.
+    The Windows task starts only at logon, so the board sat on HOST LOST
+    while the installer said nothing had changed."""
+    from pc import update
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe())
+    as_frozen(monkeypatch)
+    download = tmp_path / "Downloads" / "blink"
+    download.mkdir(parents=True)
+    (download / "blink").write_text("new build")
+    monkeypatch.setattr(cli, "_self_path", lambda: str(download / "blink"))
+    monkeypatch.setattr(update, "swap_in",
+                        lambda *a: (False, "the copy did not start"))
+    assert cli.main(["install"]) == 1
+    out = capsys.readouterr().out
+    assert [c[0] for c in calls] == ["halt", "restart"]
+    assert "Nothing else was changed." in out
+
+
 def test_install_wsl_stops_over_a_config_json_it_cannot_record_in(
         tmp_path, monkeypatch, capsys):
     """U25: the record is the WSL desk. With a config.json that does not
@@ -4103,11 +4162,12 @@ def test_a_same_folder_save_that_fails_keeps_what_the_record_names(
 
 def test_a_moved_folder_save_that_fails_takes_the_new_one_back_out(
         tmp_path, monkeypatch, capsys):
-    """C1, moved inside: the old folder was already taken out, so a new
-    one left written but unrecorded would be wired with nothing to find
-    it, and an uninstall after would delete the shims its hooks run --
-    the exit 2 that blocks every prompt. It is taken back out, and the
-    message says Blink is now in neither folder."""
+    """C1, moved inside: a new folder left written but unrecorded would be
+    wired with nothing to find it, and an uninstall after would delete the
+    shims its hooks run -- the exit 2 that blocks every prompt. It is taken
+    back out. Until the review of the WSL work (A5-1) the old folder had
+    been taken out first, and the message said Blink was in neither; now
+    the old folder is untouched and still recorded, and is said to be."""
     from pc import claude_home, wsl
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       probe=_probe(config_dir="/home/zoe/work-claude",
@@ -4116,14 +4176,18 @@ def test_a_moved_folder_save_that_fails_takes_the_new_one_back_out(
     _save_fails(monkeypatch)
     assert cli.main(["install"]) == 1
     out = " ".join(capsys.readouterr().out.split())
-    assert _inside(calls) == ["probe", "uninstall_from", "install_into",
-                              "uninstall_from"]
-    undone = [c[1] for c in calls if c[0] == "uninstall_from"]
-    assert undone[0] == old
-    assert undone[1].config_dir == wsl.unc("Ubuntu", "/home/zoe/work-claude")
+    # The old folder was never touched; the new one comes back out without
+    # its shared shims, and the chain file and markers are put back.
+    assert _inside(calls) == ["probe", "snapshot", "install_into",
+                              "snapshot", "take_out", "restore"]
+    took = next(c for c in calls if c[0] == "take_out")
+    assert took[1].config_dir == wsl.unc("Ubuntu", "/home/zoe/work-claude")
+    assert took[2] is False
+    assert next(c for c in calls if c[0] == "restore")[2] is True
     assert claude_home.recorded() == old
     assert "being taken back out" in out
-    assert "already taken out of the folder it used before" in out
+    assert "was left as it was, and Blink's record still names it" in out
+    assert "already taken out" not in out
     assert "Done." not in out
 
 
@@ -4659,9 +4723,14 @@ def test_install_wsl_says_a_drop_folder_it_cannot_make(tmp_path,
     real_into = install_statusline.install_into
     _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]), probe=_probe())
     monkeypatch.setattr(install_statusline, "install_into", real_into)
+    def run(argv, stdin=None):
+        # settings.json is read first (nothing is written before it can
+        # be); nothing else may reach Linux.
+        if argv[:3] == ["sh", "-c", install_statusline._READ]:
+            return 0, argv[3].encode() + b"\nabsent\n", b""
+        pytest.fail("reached Linux")
     monkeypatch.setattr(install_statusline, "default_wsl_run",
-                        lambda home: (lambda argv, stdin=None:
-                                      pytest.fail("reached Linux")))
+                        lambda home: run)
     drop = claude_home.wsl(WSL_GUID, "Ubuntu", "", "", "", False).drop_dir
     os.makedirs(os.path.dirname(drop), exist_ok=True)
     with open(drop, "w") as f:          # a file where the folder goes
@@ -4687,4 +4756,80 @@ def test_install_wsl_says_a_marker_it_cannot_write(monkeypatch, capsys):
     after = capsys.readouterr().out.split("To undo all of it:")[1]
     assert "Blink setup stopped." in after and "PermissionError" in after
     assert "wsl-" not in after
+    assert claude_home.recorded() is None
+
+
+# ------------------------- review of the WSL work, 2026-11-05: A5-4, A4-2
+
+def test_uninstall_takes_blink_out_as_the_account_there_now(
+        tmp_path, monkeypatch, capsys):
+    """A5-4: uninstall always ran as the recorded Linux account. Renamed
+    (usermod -l) or deleted, every wsl.exe -u for it fails, the record was
+    put back, and every rerun failed the same way with advice that could
+    not succeed. As install's moved-inside step does, it now asks who the
+    distribution's account is, checks the recorded one is gone, and takes
+    Blink out as that one, saying so."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe(user="zoey"))
+    home = _recorded_wsl(tmp_path)
+    os.makedirs(home.state_dir)
+    _old_account_gone(monkeypatch, calls, undo_ok=("zoey",))
+    assert cli.main(["uninstall"]) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    undone = [c[1].linux_user for c in calls if c[0] == "uninstall_from"]
+    assert undone == ["zoe", "zoey"]
+    assert "(zoe) is no longer there" in out
+    assert "as zoey" in out
+    assert claude_home.recorded() is None
+    assert not os.path.exists(home.drop_dir)
+
+
+def test_uninstall_does_not_switch_account_while_the_old_one_exists(
+        tmp_path, monkeypatch, capsys):
+    """A failure for any other reason is not a gone account: getent finds
+    zoe, so nothing is tried as anyone else and the record is kept."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe(user="amy"))
+    home = _recorded_wsl(tmp_path)
+    _old_account_gone(monkeypatch, calls, gone="nobody", undo_ok=("amy",))
+    assert cli.main(["uninstall"]) == 1
+    undone = [c[1].linux_user for c in calls if c[0] == "uninstall_from"]
+    assert undone == ["zoe"]
+    assert claude_home.recorded() == home
+
+
+def test_status_says_a_same_named_distribution_is_not_the_recorded_one(
+        tmp_path, monkeypatch, capsys):
+    """A4-2: Ubuntu exported and imported again (or unregistered and
+    reinstalled) has a new GUID under the old name. The GUID is the
+    identity: status says the one Blink was set up for is gone, that
+    another has its name, and how to set that one up."""
+    _wsl_desk(monkeypatch, _FakeReg([(OTHER_GUID, "Ubuntu")]))
+    _recorded_wsl(tmp_path)
+    assert cli.main(["status"]) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "another distribution is called Ubuntu now" in out
+    assert "install --wsl Ubuntu" in out
+
+
+def test_uninstall_cleans_a_same_named_distribution_and_says_so(
+        tmp_path, monkeypatch, capsys):
+    """A4-2: uninstall said "nothing to take out of it" and left Blink's
+    status line, hooks and shims running in the re-registered Ubuntu, whose
+    shims kept writing session ids into a drop folder recreated for them.
+    It is the person's own uninstall, so Blink is taken out of the
+    distribution by that name, as the recorded account, and it says so."""
+    from pc import claude_home
+    calls = _wsl_desk(monkeypatch, _FakeReg([(OTHER_GUID, "Ubuntu")]))
+    home = _recorded_wsl(tmp_path)
+    os.makedirs(home.state_dir)
+    assert cli.main(["uninstall"]) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert [c[0] for c in calls if c[0] == "uninstall_from"] == \
+        ["uninstall_from"]
+    assert [c[1] for c in calls if c[0] == "uninstall_from"][0].linux_user \
+        == "zoe"
+    assert "another distribution now has its name" in out
     assert claude_home.recorded() is None
