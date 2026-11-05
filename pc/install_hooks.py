@@ -138,7 +138,16 @@ def _ours(command: str, expected: set, marker: set) -> bool:
     The marker is passed in rather than read here: this is called once per
     hook entry inside two nested loops, and reading the same small file a
     couple of dozen times per install is a file read for no new information.
+
+    A "command" that is not a string is never ours: we only ever write
+    strings. It used to be tested with `in` like any other, and a hand-edited
+    {"command": ["sh", "x"]} raised TypeError (a list is unhashable) out of
+    install and uninstall alike -- natively since 1.0, and on WSL after the
+    service had already been stopped, so the desk lost its status line
+    (found in the review of the WSL work, 2026-11-05).
     """
+    if not isinstance(command, str):
+        return False
     return command in marker or command in expected
 
 

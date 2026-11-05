@@ -236,3 +236,22 @@ def _no_recapture_wait(monkeypatch):
     hooks out and removing the script they run; not here."""
     from pc import cli as _cli
     monkeypatch.setattr(_cli, "HOOK_RECAPTURE_S", 0)
+
+
+@pytest.mark.parametrize("theirs", [["sh", "/home/zoe/x.sh"], {"run": "x"}, 5])
+def test_a_command_that_is_not_a_string_is_someone_elses(settings, theirs):
+    """A hand-edited hook whose "command" is a list or an object is not ours
+    and is left exactly as it was. `command in marker` on a list raised
+    TypeError out of install and uninstall both (review of the WSL work,
+    2026-11-05; natively the same since 1.0)."""
+    entry = {"type": "command", "command": theirs}
+    with open(settings, "w") as f:
+        json.dump({"hooks": {"Stop": [{"hooks": [entry]}]}}, f)
+
+    ih.install(settings, SHIM)
+    stop = _read(settings)["hooks"]["Stop"]
+    assert {"hooks": [entry]} in stop
+    assert ih.hook_command(SHIM, "Stop") in _commands(settings, "Stop")
+
+    ih.uninstall(settings, SHIM)
+    assert _read(settings)["hooks"] == {"Stop": [{"hooks": [entry]}]}

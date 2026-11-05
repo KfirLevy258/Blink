@@ -861,3 +861,29 @@ def test_uninstall_waits_for_claude_code_to_drop_the_hooks(tmp_path,
     order.clear()
     install_statusline.uninstall_from(home, run)
     assert ("sleep", 2.0) not in order
+
+
+@posix_only
+@pytest.mark.parametrize("theirs", [["sh", "/home/zoe/x.sh"], {"run": "x"}])
+def test_a_command_that_is_not_a_string_is_left_alone_inside(tmp_path,
+                                                              theirs):
+    """A hook inside the distribution whose "command" is a list or object.
+    install_into and uninstall_from step over it; both used to raise
+    TypeError, and `blink install --wsl` did so after stopping the service
+    (review of the WSL work, 2026-11-05)."""
+    entry = {"type": "command", "command": theirs}
+    lin = _tree(tmp_path, {"hooks": {"Stop": [{"hooks": [entry]}]}},
+                link=False)
+    home = _home(lin)
+    run = _runner(lin, _fake_bin(tmp_path))
+    target = lin / ".claude" / "settings.json"
+
+    install_statusline.install_into(home, run)
+    doc = json.loads(target.read_text())
+    assert {"hooks": [entry]} in doc["hooks"]["Stop"]
+    assert _hook_cmd(lin, "Stop") in _all_commands(doc)
+
+    install_statusline.uninstall_from(home, run)
+    doc = json.loads(target.read_text())
+    assert doc["hooks"] == {"Stop": [{"hooks": [entry]}]}
+    assert "statusLine" not in doc
