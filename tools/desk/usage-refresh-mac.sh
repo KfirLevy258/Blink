@@ -19,8 +19,8 @@
 #   --dry-run            say what each phase would do; read-only looks only
 #   --skip-flash         do not run tools/burn.sh
 #   --skip-install       do not build and install the daemon from this tree
-#   --logo FILE          the company logo burn.sh writes (default
-#                        logos/<your-logo>.bin)
+#   --logo FILE          the logo burn.sh writes; required unless --skip-flash
+#                        (or BLINK_DESK_LOGO). No default: logos stay local
 #   --port DEV           the board's port, for burn.sh (found by USB id else)
 #   --phase-a-min N      minutes of "nobody home" (default 90)
 #   --total-hours N      the whole watch ends this long after it starts (8)
@@ -64,7 +64,9 @@ LOG="$BLINK_DIR/bridge.log"
 AGENT="gui/$(id -u)/com.blink.bridge"
 OUTDIR="$BLINK_DIR/desk-check"
 
-LOGO="logos/logo.bin"
+# No default: a logo names the customer it was made for, the logos/ folder
+# is never committed, and this repository is public.
+LOGO="${BLINK_DESK_LOGO:-}"
 PORT=""
 DRY=0
 SKIP_FLASH=0
@@ -342,6 +344,7 @@ HELPERS=$(claude_helpers)
 [ -z "$HELPERS" ] || say "Claude Code helpers running (they write no transcript, left alone): $(printf '%s' "$HELPERS" | tr '\n' ';')"
 
 if [ "$SKIP_FLASH" = 0 ]; then
+	[ -n "$LOGO" ] || die "no logo given (pass --logo FILE or set BLINK_DESK_LOGO, or --skip-flash)."
 	[ -f "$LOGO" ] || die "no logo at $LOGO (pass --logo, or --skip-flash)."
 fi
 
@@ -412,7 +415,9 @@ else
 	banner "1. Flash (tools/burn.sh, company logo kept)"
 	say "This builds, checks FLASH_CRYPT_CNT, flashes, boot-verifies and puts the daemon back."
 	t_flash=$(now)
-	if sh "$ROOT/tools/burn.sh" --edition claude --logo "$LOGO" --port "$PORT" </dev/null; then
+	# PYTHONDONTWRITEBYTECODE: burn.sh's logo check runs encode_logo.py,
+	# which would leave tools/__pycache__ in the tree (CLAUDE.md).
+	if PYTHONDONTWRITEBYTECODE=1 sh "$ROOT/tools/burn.sh" --edition claude --logo "$LOGO" --port "$PORT" </dev/null; then
 		check PASS "Flash with burn.sh" "burn.sh PASS (booted fw $FW_WANT, edition and logo survived a power cycle)"
 	else
 		check FAIL "Flash with burn.sh" "burn.sh exited non-zero; its output is in console.log"
