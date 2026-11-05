@@ -5,12 +5,12 @@
 **Your Claude Code and Codex usage, as two live dials on your desk.**
 
 <p>
-  <a href="https://github.com/KfirLevy258/Blink/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/KfirLevy258/Blink?style=for-the-badge&labelColor=171B22&color=E8E8E8&label=release&logo=github&logoColor=white"></a>
+  <a href="https://github.com/KfirLevy258/Blink/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/KfirLevy258/Blink?style=for-the-badge&labelColor=171B22&color=E8E8E8&label=release"></a>
   <a href="https://docs.anthropic.com/en/docs/claude-code"><img alt="Works with Claude Code" src="https://img.shields.io/badge/works%20with-Claude%20Code-E8E8E8?style=for-the-badge&labelColor=171B22"></a>
   <a href="https://github.com/openai/codex"><img alt="Works with Codex" src="https://img.shields.io/badge/works%20with-Codex-E8E8E8?style=for-the-badge&labelColor=171B22"></a>
 </p>
 <p>
-  <img alt="Board: ESP32 CYD" src="https://img.shields.io/badge/board-ESP32%20%C2%B7%20CYD-3D444D?style=for-the-badge&labelColor=171B22&logo=espressif&logoColor=white">
+  <img alt="Board: ESP32 CYD" src="https://img.shields.io/badge/board-ESP32%20%C2%B7%20CYD-3D444D?style=for-the-badge&labelColor=171B22">
   <img alt="Runs on macOS, Linux and Windows" src="https://img.shields.io/badge/runs%20on-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-3D444D?style=for-the-badge&labelColor=171B22">
   <img alt="Updates over the air" src="https://img.shields.io/badge/updates-over%20the%20air-3D444D?style=for-the-badge&labelColor=171B22">
   <a href="LICENSE"><img alt="Licence: PolyForm Noncommercial 1.0.0" src="https://img.shields.io/badge/licence-noncommercial-3D444D?style=for-the-badge&labelColor=171B22"></a>

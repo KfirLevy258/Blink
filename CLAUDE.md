@@ -216,6 +216,13 @@ Comments explain *why*, with the measurement or the incident that produced the
 rule — that is the house style throughout this codebase, and it is why the
 comments are long. Match it rather than trimming it.
 
+When the rule rests on how another product behaves (Claude Code, Claude
+Desktop, Codex), state the behaviour and the version it was seen in, not
+how it was learned: "Claude Code 2.1.318 resets the session cost at
+/login", never "read in its bundle". This repository is public. Anything
+not yet seen on a running copy says "(not yet measured on a desk)", so a
+reading is never mistaken for a measurement.
+
 Commit messages: a plain subject line, then prose explaining what was wrong and
 how it was found. No trailers (see the top of this file).
 
