@@ -1587,6 +1587,19 @@ static void upd_timer_cb(lv_timer_t *t)
 	case OTA_UI_FAILED:
 		if (upd_seen != OTA_UI_FAILED) {
 			/*
+			 * Not over the eye clip. ui_anim_run pumps this timer
+			 * while it plays, and a notice made now is created
+			 * after the clip hid lv_layer_top: drawn over its
+			 * frames, and the first thing any exit stroke landed
+			 * on (the /code-review max of 277b81a..4003b0b, C33).
+			 * upd_seen is left as it was, so the tick after the
+			 * clip raises it; the offer and the ask wait the same
+			 * way above.
+			 */
+			if (ui_anim_showing()) {
+				return;
+			}
+			/*
 			 * AVAILABLE counts as an update, not as a check.
 			 *
 			 * A consent the daemon never answered lands here

@@ -92,3 +92,19 @@ def test_the_timer_withdraws_the_offer_when_the_version_changes():
     withdrawn = body[check:step]
     assert "upd_prompt_close();" in withdrawn
     assert "upd_prompt_done = false;" in withdrawn
+
+
+def test_the_failure_notice_waits_out_the_eye_clip():
+    """The /code-review max of 277b81a..4003b0b (C33): a FAILED notice
+    raised by this timer while the eye clip played was created after the
+    clip hid lv_layer_top, drawn over its frames, and took any exit stroke
+    that began on it. The notice waits until the clip is over: the FAILED
+    case asks ui_anim_showing() before ui_settings_notice, and returns
+    without moving upd_seen, so the next tick raises it."""
+    body = _body("upd_timer_cb")
+    case = body[body.index("case OTA_UI_FAILED:"):]
+    case = case[:case.index("break;\n\tdefault:")]
+    wait = case.index("ui_anim_showing()")
+    assert wait < case.index("ui_settings_notice(")
+    guard = case[wait:case.index("}", wait)]
+    assert "return;" in guard and "upd_seen =" not in guard
