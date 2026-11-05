@@ -86,22 +86,20 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**3989 passing, 1 skipped** (os.startfile, Windows only) as of 2026-11-05, on
-macOS, on the pr3-combined tree at 2cdf14d (3990 collected). Windows (ARM64
-VM) full run the same day, on a git-archive zip of a692b10, the tree before
-2cdf14d, which adds 3 tests: 3568 passed and 408 skipped, one failure,
-`test_theme_ended.py::test_a_refused_request_is_not_counted` (a loopback
-WinError 10053 reset); the file alone passed on re-run, 8 passed and 1
-skipped. The two totals are therefore of different trees (3987 collected on
-a692b10 on the Mac, 3977 on the VM) and the gap of 10 is by design: Windows
-collects 10 fewer tests, all in `tests/pc/test_desktop_paths.py`, because
-parametrize lists filter at collection on what that filesystem lets a
-fixture create (6 unsafe marker names, 4 glob-hostile profile names). On
-2cdf14d the VM collects 3980 against the Mac's 3990, the same gap, and
-`test_desktop_paths.py` plus `test_cli.py` ran there at 442 passed, 5
-skipped; the Windows full suite was not repeated on 2cdf14d. The VM full run took 510 s against 153 s on the Mac. Ubuntu
-(Docker, x86_64) was last run on 2026-11-01, on an earlier tree: 3661 passed
-and 198 skipped. Two one-off failures were seen on 2026-11-01 on earlier trees
+**4003 passing, 1 skipped** (os.startfile, Windows only) as of 2026-11-06,
+on macOS, on PR #3's tree after its review fixes (4004 collected). The same
+tree the same day, each its own count: Ubuntu (Docker, x86_64) 3806 passed
+and 198 skipped; Windows (ARM64 VM, a git-archive zip) 3583 passed and 409
+skipped, with two failures. One was a new test that assumed it ran off
+Windows, fixed, after which `test_desktop_paths.py`, `test_ingest.py` and
+`test_theme_server.py` ran there at 346 passed and 3 skipped; the other was
+`test_theme_server.py::test_no_write_is_taken_without_the_token[/api/closed]`,
+a loopback WinError 10053 reset, which passed in that re-run. Windows
+collects 10 fewer tests (3994), all in `tests/pc/test_desktop_paths.py`, by
+design: parametrize lists filter at collection on what that filesystem lets
+a fixture create (6 unsafe marker names, 4 glob-hostile profile names). The
+VM full run took 470 s against 161 s on the Mac and 370 s on Ubuntu.
+Two one-off failures were seen on 2026-11-01 on earlier trees
 and passed on every re-run:
 `test_sandbox.py::test_ordinary_commands_are_untouched` on Ubuntu (the child
 Python printed nothing) and `test_theme_server.py::test_an_oversize_body_is_refused`

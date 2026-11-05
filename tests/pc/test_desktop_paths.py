@@ -1819,8 +1819,12 @@ def test_the_daemon_logs_the_folder_source_when_it_changes(
     assert str(tmp_path) not in err
 
 
-def test_off_windows_the_one_folder_is_not_logged(tmp_path, capsys):
+def test_off_windows_the_one_folder_is_not_logged(tmp_path, capsys,
+                                                  monkeypatch):
+    """macOS forced, so the Windows VM runs it too: there the real platform
+    answers "roaming", which is logged."""
     from pc import ingest
+    monkeypatch.setattr(sys, "platform", "darwin")
     bus = ingest.IngestionBus(providers=[], now=lambda: 1_000_000)
     bus.poll()
     assert capsys.readouterr().err == ""
