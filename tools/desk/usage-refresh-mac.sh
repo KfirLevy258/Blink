@@ -156,6 +156,11 @@ probe() {
 # and write no transcript; they are listed apart.
 claude_procs() {
 	ps -axo pid=,comm= 2>/dev/null | while read -r pid comm; do
+		# The Claude Code that launched this script is left out: it is
+		# an ancestor of ours and cannot be quit before the script it
+		# started has finished. Its own transcript is in another project
+		# folder, which is a finding below, not a failure.
+		case " $ANCESTORS " in *" $pid "*) continue ;; esac
 		case "$comm" in
 		*/Claude.app/Contents/MacOS/Claude)
 			echo "$pid Claude Desktop" ;;
@@ -170,6 +175,17 @@ claude_procs() {
 		esac
 	done
 }
+# This shell's ancestors, "pid pid ...", walked once through ppid. If none
+# of them is Claude Code the list is harmless: only a Claude process whose
+# pid is on it is left out.
+ancestors() {
+	a=""; p=$$
+	while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
+		p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+		[ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && a="$a $p"
+	done
+	echo "$a"
+}
 claude_helpers() {
 	ps -axo pid=,comm= 2>/dev/null | while read -r pid comm; do
 		case "$comm" in "claude bg-"*) echo "$pid $comm" ;; esac
@@ -177,6 +193,7 @@ claude_helpers() {
 }
 
 # --------------------------------------------------------------- the report
+ANCESTORS=$(ancestors)
 REPORTED=0
 CAF_PID=""
 START_TS=$(now)
@@ -222,7 +239,7 @@ write_report() {
 		echo
 		echo "## Runs seen"
 		echo
-		echo "Each is a change of \`last_run_at\` in usage-refresh.json, with the daemon's own log line beside it. \"Idle before\" is HIDIdleTime at the look before the run, \"new transcripts\" the *.jsonl files under the transcripts folder newer than the phase's start."
+		echo "Each is a change of \`last_run_at\` in usage-refresh.json, with the daemon's own log line beside it. \"Idle before\" is HIDIdleTime at the look before the run, \"new transcripts\" the files in the refresh project folder newer than the phase's start."
 		echo
 		echo "| Phase | Started | Log says | Cache moved | Idle before (min) | New transcripts | Setting | Off reason | Gap (min) |"
 		echo "|---|---|---|---|---|---|---|---|---|"
@@ -305,6 +322,13 @@ HOME_KIND=$(printf '%s\n' "$HOME_LINES" | sed -n 1p)
 TRANSCRIPTS=$(printf '%s\n' "$HOME_LINES" | sed -n 2p)
 [ "$HOME_KIND" = native ] || die "the Claude home is $HOME_KIND; the refresh runs for a native home only."
 say "Transcripts folder $TRANSCRIPTS"
+# Where a refresh run's transcript would land: the folder for its cwd,
+# $BLINK_HOME/refresh (pc/usage_refresh.py), named the way Claude Code names
+# it, the absolute path with every "/" and "." made "-". Only this folder
+# can judge "no transcript"; the first real run counted *.jsonl anywhere
+# under the projects folder and failed on other open sessions' writes.
+REFRESH_PROJ="$TRANSCRIPTS/$(printf '%s' "$BLINK_DIR/refresh" | sed 's/[/.]/-/g')"
+say "A refresh run's transcript would be in $REFRESH_PROJ"
 
 CLAUDE_EXE=$(probe claude 2>/dev/null) ||
 	die "Claude Code not found (PATH, ~/.local/bin, Homebrew, npm, nvm). Install it and log in first."
@@ -508,31 +532,51 @@ PREV_IDLE=0
 PREV_RUN_AT=0
 SL_PREV=""
 
-# New lines of bridge.log since the last look that name a refresh event.
-# A rotation (logbook.rotate_if_full, at 4 MB) shows as a file smaller than
-# the offset: the rest of bridge.log.1 is read first, then the new file.
+# New lines of bridge.log since the last look that name a refresh event,
+# left in NEWLOG. It sets a global rather than printing because the caller
+# used to read it through $(...): the subshell threw LOG_OFF away, so every
+# look re-read the file from the start of the watch and the console repeated
+# every "usage refresh ran" line each minute (seen from phase A2 on, the real
+# run of 2026-11-05). A rotation (logbook.rotate_if_full, at 4 MB) shows as a
+# file smaller than the offset: the rest of bridge.log.1 is read first, then
+# the new file.
 new_log_lines() {
+	NEWLOG=""
 	[ -f "$LOG" ] || return 0
 	size=$(wc -c <"$LOG" | tr -d ' ')
 	if [ "$size" -lt "$LOG_OFF" ]; then
-		[ -f "$LOG.1" ] && tail -c +"$((LOG_OFF + 1))" "$LOG.1" 2>/dev/null | grep 'usage refresh'
+		[ -f "$LOG.1" ] && NEWLOG=$(tail -c +"$((LOG_OFF + 1))" "$LOG.1" 2>/dev/null | grep 'usage refresh')
 		LOG_OFF=0
 	fi
-	tail -c +"$((LOG_OFF + 1))" "$LOG" 2>/dev/null | head -c "$((size - LOG_OFF))" | grep 'usage refresh'
+	# BSD head rejects -c 0 ("illegal byte count"), so an unchanged file
+	# is skipped before it is asked for zero bytes.
+	if [ "$size" -gt "$LOG_OFF" ]; then
+		more=$(tail -c +"$((LOG_OFF + 1))" "$LOG" 2>/dev/null | head -c "$((size - LOG_OFF))" | grep 'usage refresh')
+		[ -z "$more" ] || NEWLOG="${NEWLOG:+$NEWLOG
+}$more"
+	fi
 	LOG_OFF=$size
 }
 
+# Files in the refresh's own project folder newer than the mark. Any file
+# there is a transcript (or something a run left); an empty memory/ folder
+# is not a file, so -type f leaves it out. This is the only count that fails.
 new_jsonl() {
-	find "$TRANSCRIPTS" -name '*.jsonl' -newer "$1" 2>/dev/null | wc -l | tr -d ' '
+	find "$REFRESH_PROJ" -type f -newer "$1" 2>/dev/null | wc -l | tr -d ' '
+}
+# Transcripts changed in every other project: open sessions, not the
+# refresh. A finding, never a failure.
+other_jsonl() {
+	find "$TRANSCRIPTS" -name '*.jsonl' -newer "$1" -not -path "$REFRESH_PROJ/*" 2>/dev/null | wc -l | tr -d ' '
 }
 
 # watch PHASE_NAME END PULSE MARK -- looks until END; PULSE 1 sends
 # caffeinate -u first. Sets W_RUNS, W_BAD_IDLE (runs with idle past the
-# limit), W_MAX_IDLE, W_MIN_GAP, W_FAILS, W_OFF, W_JSONL, W_PROCS, W_SL.
+# limit), W_MAX_IDLE, W_MIN_GAP, W_FAILS, W_OFF, W_JSONL, W_OTHER, W_PROCS, W_SL.
 watch() {
 	name=$1; end=$2; pulse=$3; mark=$4
 	W_RUNS=0; W_BAD_IDLE=0; W_MAX_IDLE=0; W_MIN_GAP=""; W_FAILS=0; W_OFF=0
-	W_PROCS=0; W_SL=0; W_NOTMOVED=0; last_note=0
+	W_PROCS=0; W_SL=0; W_OTHER=0; W_NOTMOVED=0; last_note=0
 	while [ "$(now)" -lt "$end" ]; do
 		if [ "$pulse" = 1 ]; then
 			# In the background: it holds its assertion for 5 s, and
@@ -540,7 +584,8 @@ watch() {
 			caffeinate -u -t 5 >/dev/null 2>&1 &
 			sleep 1
 		fi
-		LINES=$(new_log_lines)
+		new_log_lines
+		LINES=$NEWLOG
 		set -f
 		# shellcheck disable=SC2046
 		set -- $(probe sample 2>/dev/null)
@@ -597,6 +642,7 @@ watch() {
 		sleep 59
 	done
 	W_JSONL=$(new_jsonl "$mark")
+	W_OTHER=$(other_jsonl "$mark")
 }
 
 # The look before the first watch, so a run is only a change after it.
@@ -629,10 +675,11 @@ else
 	check FAIL "Phase A: no run while nobody is home" "$W_BAD_IDLE run(s) with idle past 31 min"
 fi
 if [ "$W_JSONL" = 0 ]; then
-	check PASS "Phase A: no new transcript" "no *.jsonl newer than the phase start"
+	check PASS "Phase A: no new transcript" "nothing new in the refresh project folder since the phase start"
 else
-	check FAIL "Phase A: no new transcript" "$W_JSONL *.jsonl changed (a run's, or an open Claude session's: processes seen in $W_PROCS looks)"
+	check FAIL "Phase A: no new transcript" "$W_JSONL file(s) changed in $REFRESH_PROJ (processes seen in $W_PROCS looks)"
 fi
+[ "$W_OTHER" = 0 ] || finding "Phase A: $W_OTHER *.jsonl changed in other projects (open sessions, not the refresh)."
 [ "$W_SL" = 0 ] || finding "Phase A: the status line file was written $W_SL time(s); a Claude Code session was in use."
 
 # --------------------------------------------- 4. does caffeinate -u reset idle
@@ -714,10 +761,11 @@ if [ "$RESETS" = yes ]; then
 		check FAIL "Phase B: no failed run, no shutdown" "$W_FAILS look(s) with a failed line, $W_OFF with an off line"
 	fi
 	if [ "$W_JSONL" = 0 ]; then
-		check PASS "Phase B: no new transcript" "no *.jsonl newer than the phase start"
+		check PASS "Phase B: no new transcript" "nothing new in the refresh project folder since the phase start"
 	else
-		check FAIL "Phase B: no new transcript" "$W_JSONL *.jsonl changed (processes seen in $W_PROCS looks)"
+		check FAIL "Phase B: no new transcript" "$W_JSONL file(s) changed in $REFRESH_PROJ (processes seen in $W_PROCS looks)"
 	fi
+	[ "$W_OTHER" = 0 ] || finding "Phase B: $W_OTHER *.jsonl changed in other projects (open sessions, not the refresh)."
 	[ "$W_MAX_IDLE" -lt "$IDLE_LIMIT" ] ||
 		finding "Phase B: idle still reached $(mins "$W_MAX_IDLE") min despite the pulses."
 	[ "$W_SL" = 0 ] || finding "Phase B: the status line file was written $W_SL time(s); runs were held off for 15 min after each."
@@ -757,13 +805,15 @@ else
 	fi
 	j=$(new_jsonl "$MARK_D")
 	if [ "$j" = 0 ]; then
-		check PASS "Direct run: no transcript" "no *.jsonl newer than the run"
+		check PASS "Direct run: no transcript" "nothing new in the refresh project folder since the run"
 	else
-		check FAIL "Direct run: no transcript" "$j *.jsonl changed"
+		check FAIL "Direct run: no transcript" "$j file(s) changed in $REFRESH_PROJ"
 	fi
 	printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "direct" "$( [ "$started" = - ] && echo - || at "$started")" \
 		"run_once $v" "$( [ "$after" != - ] && [ "$started" != - ] && [ "$after" -ge $((started - 5)) ] && echo yes || echo no)" \
 		"-" "$j" "-" "-" "-" >>"$RUNS"
+	o=$(other_jsonl "$MARK_D")
+	[ "$o" = 0 ] || finding "Direct run: $o *.jsonl changed in other projects (open sessions, not the refresh)."
 	# The direct run moved last_run_at not at all (run_once writes no state),
 	# so the watch below still sees only the daemon's own runs.
 	PHASE="phase A, continued"
