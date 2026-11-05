@@ -1732,7 +1732,8 @@ def _project_with_claude(tmp_path, name):
     proj = tmp_path / "project"
     proj.mkdir()
     p = proj / name
-    p.write_text("@echo off\n" if name.endswith(".cmd") else "#!/bin/sh\n")
+    p.write_text("@echo off\n" if name.lower().endswith(".cmd")
+                 else "#!/bin/sh\n")
     p.chmod(0o755)
     return proj
 
@@ -1753,7 +1754,9 @@ def test_a_claude_in_the_current_folder_is_never_found(tmp_path, monkeypatch,
 
 def test_a_claude_cmd_in_the_current_folder_is_never_found_on_windows(
         tmp_path, monkeypatch):
-    proj = _project_with_claude(tmp_path, "claude.cmd")
+    # Spelled as PATHEXT spells it: posing as Windows on Linux, the file
+    # system still tells claude.cmd from claude.CMD.
+    proj = _project_with_claude(tmp_path, "claude.CMD")
     monkeypatch.chdir(proj)
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
