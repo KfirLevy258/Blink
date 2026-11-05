@@ -1006,10 +1006,14 @@ static void draw_spent(void)
  * An account that reports nothing: the gauge names the kind of login, so the
  * empty rings read as "this account does not say" and not as a broken panel.
  * "--%" as on every other gauge with no figure, the left one beside it
- * included.
+ * included. `shown` is -1 as on the spend page: Focus's dim line takes its
+ * colour from it, and without the reset "Not reported" wore the previous
+ * page's weekly severity -- red after a windows page at 96%, for good (the
+ * review of the WSL work, 2026-11-05).
  */
 static void draw_unreported_account(void)
 {
+	weekly.shown = -1;
 	lv_label_set_text(weekly.name, plan_rec.team ? "TEAM" : "ENTERPRISE");
 	lv_label_set_text(weekly.pct, "--%");
 	if (!focus_on) {
