@@ -1,6 +1,9 @@
 # Usage refresh: keeping the figures fresh with Claude Code's own /usage
 
-Status: built (tasks 1-8), 2026-11-05; Task 9, the desk check with the owner, is outstanding. Design agreed with the owner 2026-11-05. Plan:
+Status: built (tasks 1-8) and desk-checked (Task 9), 2026-11-05: macOS
+unattended run (tools/desk/usage-refresh-mac.sh), board ask on a bench
+touch-inject image, a logged-in Windows run, suites green on all three
+platforms. Only a login with a 5-hour window is unseen (Open questions). Design agreed with the owner 2026-11-05. Plan:
 `docs/plans/2026-11-05-usage-refresh-plan.md`.
 
 ## Why
@@ -225,6 +228,12 @@ See `docs/plans/2026-11-05-usage-refresh-plan.md`.
   Task 0); the failure guard is built to those strings.
 - Whether a login with a 5-hour window fills `five_hour` in the cache
   (Task 0). Until seen, a null `five_hour` leaves the session dial unknown.
+  Still unseen after the desk check (2026-11-05): the owner's login has no
+  5-hour window on macOS or Windows, and the owner chose not to buy a
+  second account. The weekly figure, read by the same code from the same
+  object, refreshed on both. Shipped as "should work, not yet seen"; a Pro
+  user can confirm with a command that prints only whether `five_hour` is
+  present.
 
 ## Legal review (owner discussion, 2026-11-04/05; not legal advice)
 
