@@ -31,6 +31,7 @@ import importlib.util
 import json
 import pathlib
 import subprocess
+import sys
 
 import pytest
 
@@ -874,3 +875,44 @@ def test_a_ctrl_c_during_a_handback_stops_the_run_and_says_so(tmp_path):
     doc = json.loads(state.read_text(encoding="utf-8"))
     assert doc["ok"] is False
     assert ["may still be in that VM" in w for w in doc["warnings"]] == [True]
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="SIGHUP is POSIX; the fleet runs on this Mac")
+@pytest.mark.parametrize("name", ["SIGHUP", "SIGTERM"])
+def test_a_closed_terminal_still_starts_the_service_again(tmp_path, name):
+    """The /code-review max of 277b81a..4003b0b (C32): only Ctrl-C was
+    handled. Closing the terminal window (SIGHUP) or a kill (SIGTERM)
+    during the VM phase ended run.py with no finally, so this Mac's
+    booted-out service was never started again and the board was never
+    asked back from the VM. Either now unwinds like a Ctrl-C."""
+    import os as _os
+    import signal
+    sig = getattr(signal, name)
+
+    class Signalling(VmRunner):
+        def __call__(self, cmd, **kw):
+            if self._kind(list(cmd)) == "guest_wait":
+                self.calls.append(list(cmd))
+                self.kinds.append("guest_wait")
+                _os.kill(_os.getpid(), sig)
+            return super().__call__(cmd, **kw)
+
+    def unhandled(signum, frame):
+        # Stands in for the default action, which would end pytest itself.
+        raise RuntimeError("the signal reached the default action")
+
+    (tmp_path / "wd").mkdir()
+    before = signal.signal(sig, unhandled)
+    try:
+        runner = Signalling(local_workdir=tmp_path / "wd")
+        with pytest.raises(SystemExit):
+            fleet_run.main(["--inventory", str(_vm_inventory(tmp_path)),
+                            "--state", str(tmp_path / "s.json")],
+                           runner=runner, ask=lambda p: None,
+                           interactive=False, leases=tmp_path / "none")
+        assert "disconnect" in runner.kinds
+        assert runner.kinds[-1] == "release"
+        assert signal.getsignal(sig) is unhandled
+    finally:
+        signal.signal(sig, before)

@@ -4973,3 +4973,24 @@ def test_install_over_an_unparseable_config_says_what_the_service_does(
     out = " ".join(capsys.readouterr().out.split())
     assert "its own environment names" not in out
     assert "changes no Claude Code settings until it parses" in out
+
+
+def test_turning_the_refresh_on_keeps_wasnt_found_while_it_still_is_not(
+        tmp_path, monkeypatch, capsys):
+    """From the cut list (verify/v11/s3_missing.py): `blink config
+    usage-refresh on` cleared "Claude Code wasn't found" whatever it found,
+    so `blink status` said all was well over a desk with no Claude Code,
+    and the daemon, seeing it cleared, never said "skipped" again. It is
+    kept while claude still cannot be found, and cleared once it can."""
+    import time as _time
+    from pc import usage_refresh as ur
+    os.makedirs(cli.blink_home(), exist_ok=True)
+    inside(tmp_path, ur._path(cli.blink_home()))
+    ur.save_state(cli.blink_home(), ur.State(last_run_at=_time.time() - 3600,
+                                             missing=True))
+    monkeypatch.setattr(ur, "find_claude", lambda home: None)
+    assert cli.main(["config", "usage-refresh", "on"]) == 0
+    assert ur.load_state(cli.blink_home()).missing is True
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    assert cli.main(["config", "usage-refresh", "on"]) == 0
+    assert ur.load_state(cli.blink_home()).missing is False

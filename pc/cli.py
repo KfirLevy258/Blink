@@ -6798,14 +6798,19 @@ def cmd_config(args) -> int:
             # reason (cost, or a day of failures) that is on disk as well,
             # and the watch would otherwise stay off for it.
             try:
-                usage_refresh.clear_off(home)
-            except OSError as e:
-                print(f"Could not clear the earlier reason it was off: {e}")
-                return 1
-            try:
                 native = claude_home.current().kind == claude_home.NATIVE
             except Exception:
                 native = False
+            try:
+                lost = native and usage_refresh.locate_claude(
+                    home, _home()) is None
+            except Exception:
+                lost = False
+            try:
+                usage_refresh.clear_off(home, missing=lost)
+            except OSError as e:
+                print(f"Could not clear the earlier reason it was off: {e}")
+                return 1
             if native:
                 _remember_claude()
     print(f"{name}: {state(setting)}")

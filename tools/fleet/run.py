@@ -1008,23 +1008,50 @@ def _utm_worked(done):
     return "error" not in said and "cannot be found" not in said
 
 
+# The signals that end a run from outside it: Ctrl-C, a terminal window
+# closed (SIGHUP), a kill (SIGTERM). SIGHUP is POSIX only.
+_ENDING = tuple(getattr(signal, n) for n in ("SIGINT", "SIGHUP", "SIGTERM")
+                if hasattr(signal, n))
+
+
+def _set_handlers(handler, signals):
+    """`handler` for each of `signals`; {signal: the one it replaced}, with
+    those that cannot be set (not the main thread) left out."""
+    previous = {}
+    for sig in signals:
+        try:
+            previous[sig] = signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
+    return previous
+
+
 def _ignore_interrupt():
-    """Ignore SIGINT; the handler it replaced, or None where it cannot be
-    set (not the main thread). Children started meanwhile inherit the
+    """Ignore every signal that ends a run (_ENDING); what they replaced,
+    for _restore_interrupt. Children started meanwhile inherit the
     ignore."""
-    try:
-        return signal.signal(signal.SIGINT, signal.SIG_IGN)
-    except (ValueError, OSError):
-        return None
+    return _set_handlers(signal.SIG_IGN, _ENDING)
 
 
 def _restore_interrupt(previous):
-    if previous is None:
-        return
-    try:
-        signal.signal(signal.SIGINT, previous)
-    except (ValueError, OSError):
-        pass
+    for sig, handler in (previous or {}).items():
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
+
+
+def _exit_on_hangup():
+    """SIGHUP and SIGTERM unwind the run as Ctrl-C does, through every
+    finally: the board asked back from the VM, this Mac's service started
+    again, the result written. With their default action, a terminal
+    window closed during the VM phase ended run.py on the spot and left
+    the launchd agent booted out (the /code-review max of
+    277b81a..4003b0b, C32). What they replaced, for _restore_interrupt."""
+    def end(signum, frame):
+        raise SystemExit(128 + signum)
+    return _set_handlers(end, tuple(s for s in _ENDING
+                                    if s != signal.SIGINT))
 
 
 class Bench:
@@ -1669,6 +1696,7 @@ def main(argv=None, runner=subprocess.run, ask=input, interactive=None,
           f"{', one at a time' if sequential else ''}.")
     if interactive is None:
         interactive = _interactive()
+    hangup = _exit_on_hangup()
     try:
         if sequential:
             _run_in_turn(inventory, settings, args, runner, doc, ask,
@@ -1687,6 +1715,7 @@ def main(argv=None, runner=subprocess.run, ask=input, interactive=None,
         doc["ok"] = (summary["ok"] and not doc["problems"]
                      and doc["sha"] != "unknown")
         _write_state(state, doc)
+        _restore_interrupt(hangup)
 
     # The verdict is already on disk by here. Whatever the table does, it
     # must not be the last thing that happens: a traceback in place of the

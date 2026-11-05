@@ -653,7 +653,7 @@ def chosen(blink_home):
     return v if isinstance(v, bool) else None
 
 
-def clear_off(blink_home, now=None):
+def clear_off(blink_home, now=None, missing=False):
     """Forget why the refresh turned itself off, so that turning it on again
     is a fresh start: no off_reason, no failure count, and `cleared_at` set
     to now. Written every time, even with nothing on disk to correct: the
@@ -662,12 +662,14 @@ def clear_off(blink_home, now=None):
     _floor). The last run's time stays, so the spacing still holds.
     "Wasn't found" goes too: the command has just recorded where claude is
     (cli._remember_claude), and `blink status` kept saying it was missing
-    until a run happened."""
+    until a run happened -- unless `missing`, claude still not found: then
+    it stays, or `blink status` says all is well over a desk with no
+    Claude Code (the /code-review max of 277b81a..4003b0b, cut list)."""
     state = load_state(blink_home)
     state.off_reason = ""
     state.fails = 0
     state.failing_since = None
-    state.missing = False
+    state.missing = bool(missing and state.missing)
     state.cleared_at = time.time() if now is None else now
     save_state(blink_home, state)
 
