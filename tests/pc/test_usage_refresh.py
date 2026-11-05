@@ -70,8 +70,18 @@ def _fake_claude(tmp_path, stdout, exit_code=0, sleep=0, config=None):
         p.write_text(f'@echo off\n"{sys.executable}" "{script}" %*\n'
                      "exit /b %ERRORLEVEL%\n")
     else:
+        # Written by a child, never by this process. Linux refuses to exec
+        # a file that any process holds open for writing (ETXTBSY), and a
+        # thread an earlier test left running can fork while our write is
+        # open, the child keeping the descriptor until its own exec. Once
+        # in Ubuntu's full suite (2026-11-05, not reproduced in two more
+        # full runs) a fake written here came back FAILED from run_once.
         p = d / "claude"
-        p.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{script}' \"$@\"\n")
+        subprocess.run(
+            [sys.executable, "-c",
+             "import sys; open(sys.argv[1], 'w').write(sys.argv[2])", str(p),
+             f"#!/bin/sh\nexec '{sys.executable}' '{script}' \"$@\"\n"],
+            check=True)
         p.chmod(0o755)
     return str(p), rec
 
