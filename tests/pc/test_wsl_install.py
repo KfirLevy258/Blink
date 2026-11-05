@@ -951,74 +951,148 @@ def _folder(lin, sub, name="Ubuntu"):
                            config_dir_set=True)
 
 
-@posix_only
-def test_a_move_inside_writes_the_new_folder_then_takes_out_the_old(
-        tmp_path):
-    """Two folders of one Linux home: the new one is written first, then
-    Blink taken out of the old one from what was read of it before -- the
-    chain file the write overwrites, and the markers -- leaving the shims
-    they share. Each folder keeps its own status line through the move and
-    an uninstall after it."""
+def _move_desk(tmp_path, monkeypatch, old_doc, new_doc):
+    """A desk set up in folder `old` of one Linux home, about to move to
+    `new` in the same home, run through the real cli._setup_wsl with the
+    real scripts under sh. Only wsl.probe and the runner are stand-ins.
+    The record is written under the caller's home (tests/support/home)."""
+    from pc import user_config
+    from tests.support.home import inside
     lin = tmp_path / "lin"
-    for sub, mine in (("old", "mine-old"), ("new", "mine-new")):
+    for sub, doc in (("old", old_doc), ("new", new_doc)):
         (lin / sub).mkdir(parents=True)
-        _write_json(str(lin / sub / "settings.json"),
-                    {"statusLine": {"type": "command", "command": mine}})
+        p = lin / sub / "settings.json"
+        if isinstance(doc, bytes):
+            p.write_bytes(doc)
+        elif doc is not None:
+            _write_json(str(p), doc)
     run = _runner(lin, _fake_bin(tmp_path))
+    monkeypatch.setattr(install_statusline, "default_wsl_run", lambda h: run)
     old, new = _folder(lin, "old"), _folder(lin, "new")
-    install_statusline.install_into(old, run)
+    if not isinstance(new_doc, bytes):
+        install_statusline.install_into(old, run)
+    else:
+        # The new folder's file does not parse: old is set up as before.
+        install_statusline.install_into(old, run)
+    inside(tmp_path, user_config.path(cli.blink_home()))
+    claude_home.save(old)
+    probe = wsl.Probe(user="zoe", home=str(lin), shell="/bin/sh",
+                      config_dir=str(lin) + "/new", claude_exe="/x/claude",
+                      config_dir_set=True)
+    monkeypatch.setattr(wsl, "probe", lambda name, *a, **k: probe)
+    return lin, run, old, new, wsl.Distro(GUID, "Ubuntu", 2, True)
 
-    snap = install_statusline.snapshot_wsl(old, run)
-    assert snap.chain == "mine-old\n"
-    install_statusline.install_into(new, run)
-    install_statusline.take_out_of_folder(old, run, snap, files=False)
 
-    doc_old = json.loads((lin / "old" / "settings.json").read_text())
-    assert doc_old == {"statusLine": {"type": "command",
-                                      "command": "mine-old"}}
+def _state(lin, old):
+    """Everything the old folder relies on, byte for byte."""
+    def read(p):
+        return p.read_bytes() if p.exists() else None
+    return (read(lin / "old" / "settings.json"),
+            read(lin / ".blink" / "statusline-chain"),
+            install_statusline._read_marker(old),
+            install_hooks._read_marker(old))
+
+
+@posix_only
+def test_a_move_inside_takes_the_old_folder_out_then_writes_the_new(
+        tmp_path, monkeypatch, capsys):
+    """Item 3 of the /code-review max of 277b81a..4003b0b (cr1/c/
+    move_chain.py): two folders of one Linux home share the chain file. The
+    new one was written first, with the old folder's command still in the
+    chain, so a new folder with no status line of its own kept the old
+    one's, and an uninstall of it later put "mine-old" into the new folder.
+    The old folder is now taken out first (its command put back, the chain
+    and markers gone), and the new one installed after."""
+    lin, run, old, new, d = _move_desk(
+        tmp_path, monkeypatch,
+        {"statusLine": {"type": "command", "command": "mine-old"}},
+        {"theme": "dark"})
+    got = cli._setup_wsl(d)
+    assert got is not None and got.config_dir == new.config_dir
+    assert claude_home.recorded() == new
+    assert json.loads((lin / "old" / "settings.json").read_text()) == {
+        "statusLine": {"type": "command", "command": "mine-old"}}
     doc_new = json.loads((lin / "new" / "settings.json").read_text())
     assert doc_new["statusLine"]["command"] == _sl_cmd(lin)
-    assert (lin / ".blink" / "statusline-chain").read_text() == "mine-new\n"
+    assert not (lin / ".blink" / "statusline-chain").exists()
     for name in ("blink-statusline.sh", "blink-hook.sh", "out"):
         assert (lin / ".blink" / name).exists()
-    assert install_statusline._read_marker(new) == _sl_cmd(lin)
-
     install_statusline.uninstall_from(new, run)
-    doc_new = json.loads((lin / "new" / "settings.json").read_text())
-    assert doc_new == {"statusLine": {"type": "command",
-                                      "command": "mine-new"}}
+    assert json.loads((lin / "new" / "settings.json").read_text()) == {
+        "theme": "dark"}
 
 
 @posix_only
-def test_a_move_that_cannot_be_recorded_puts_the_old_folder_back(tmp_path):
-    """The new folder written, its record not saved: it comes back out,
-    and the chain file and markers the old folder relies on are put back,
-    so the old folder, never touched, works exactly as it did."""
-    lin = tmp_path / "lin"
-    for sub, mine in (("old", "mine-old"), ("new", "mine-new")):
-        (lin / sub).mkdir(parents=True)
-        _write_json(str(lin / sub / "settings.json"),
-                    {"statusLine": {"type": "command", "command": mine}})
-    run = _runner(lin, _fake_bin(tmp_path))
-    old, new = _folder(lin, "old"), _folder(lin, "new")
-    install_statusline.install_into(old, run)
-    before_old = (lin / "old" / "settings.json").read_text()
-    markers = (install_statusline._read_marker(old),
-               install_hooks._read_marker(old))
-    snap = install_statusline.snapshot_wsl(old, run)
-    install_statusline.install_into(new, run)
+@pytest.mark.parametrize("fault", ["unparseable", "marker", "record"])
+def test_a_move_that_cannot_finish_puts_the_old_folder_back_exactly(
+        tmp_path, monkeypatch, capsys, fault):
+    """Item 3: the new folder's install fails (its settings.json does not
+    parse; the marker write on this computer fails, the OSError arm), or
+    its record cannot be saved. The old folder, already taken out, is put
+    back exactly from what was read before anything was written --
+    settings.json, the chain file and the markers -- the new folder is as
+    it was, and the record still names the old one."""
+    lin, run, old, new, d = _move_desk(
+        tmp_path, monkeypatch,
+        {"statusLine": {"type": "command", "command": "mine-old"}},
+        b"{not json" if fault == "unparseable" else {"theme": "dark"})
+    before = _state(lin, old)
+    new_before = (lin / "new" / "settings.json").read_bytes()
+    assert before[1] == b"mine-old\n"
+    if fault == "marker":
+        real_into, failing = install_statusline.install_into, []
 
-    now = install_statusline.snapshot_wsl(new, run)
-    install_statusline.take_out_of_folder(new, run, now, files=False)
-    install_statusline.restore_snapshot(new, run, snap)
+        def into(home, wsl_run, **k):
+            failing.append(True)
+            try:
+                return real_into(home, wsl_run, **k)
+            finally:
+                failing.clear()
+        real_marker = install_statusline._write_marker
 
-    assert json.loads((lin / "new" / "settings.json").read_text()) == {
-        "statusLine": {"type": "command", "command": "mine-new"}}
-    assert (lin / "old" / "settings.json").read_text() == before_old
-    assert (lin / ".blink" / "statusline-chain").read_text() == "mine-old\n"
-    assert (install_statusline._read_marker(old),
-            install_hooks._read_marker(old)) == markers
-    assert (lin / ".blink" / "blink-hook.sh").exists()
+        def marker(command, home=None):
+            if failing:
+                raise PermissionError("marker")
+            return real_marker(command, home)
+        monkeypatch.setattr(install_statusline, "install_into", into)
+        monkeypatch.setattr(install_statusline, "_write_marker", marker)
+    if fault == "record":
+        def save(home):
+            raise OSError("disk")
+        monkeypatch.setattr(claude_home, "save", save)
+    assert cli._setup_wsl(d) is None
+    out = " ".join(capsys.readouterr().out.split())
+    assert _state(lin, old) == before
+    assert (lin / "new" / "settings.json").read_bytes() == new_before
+    assert claude_home.recorded() == old
+    assert "put back as it was" in out
+    for name in ("blink-statusline.sh", "blink-hook.sh", "out"):
+        assert (lin / ".blink" / name).exists()
+
+
+@posix_only
+def test_a_renamed_account_with_the_same_folder_is_not_a_move(
+        tmp_path, monkeypatch):
+    """Item 4 (cr1/c/rename_same_folder.py): `usermod -l` renamed the
+    account and kept its home and folder. That was called a move, the
+    "new" folder -- the same one -- written, and then Blink taken out of
+    it from the snapshot: the desk left with no status line and no hooks.
+    A move is the config folder changing; a rename updates the record's
+    user."""
+    lin, run, old, new, d = _move_desk(
+        tmp_path, monkeypatch,
+        {"statusLine": {"type": "command", "command": "mine"}}, None)
+    probe = wsl.Probe(user="zoe2", home=str(lin), shell="/bin/sh",
+                      config_dir=str(lin) + "/old", claude_exe="/x/claude",
+                      config_dir_set=True)
+    monkeypatch.setattr(wsl, "probe", lambda name, *a, **k: probe)
+    got = cli._setup_wsl(d)
+    assert got is not None and got.linux_user == "zoe2"
+    assert claude_home.recorded().linux_user == "zoe2"
+    doc = json.loads((lin / "old" / "settings.json").read_text())
+    assert doc["statusLine"]["command"] == _sl_cmd(lin)
+    assert doc.get("hooks")
+    assert (lin / ".blink" / "statusline-chain").read_text() == "mine\n"
 
 
 @posix_only

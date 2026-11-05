@@ -4520,9 +4520,9 @@ def _announce_wsl_record(home, named) -> None:
             == (home.distro_guid or "").lower():
         # The same distribution: only if the folder inside moved (U21).
         print(f"  Changes    the folder Blink used inside {name} until now, if")
-        print("             Claude Code's folder or your Linux account there has")
-        print("             changed since: takes Blink's status line and hooks")
-        print("             back out of it.")
+        print("             Claude Code's folder there has changed since:")
+        print("             takes Blink's status line and hooks back out of")
+        print("             it, and puts it back if this install cannot finish.")
     elif rec.kind == claude_home.WSL and not (
             rec.distro_name.casefold() == name.casefold()
             and _wsl_distro(rec) is None):
@@ -4548,10 +4548,14 @@ def _moved_inside(prev, home, config_dir) -> bool:
         old = install_statusline._linux_path(prev, prev.config_dir)
     except install_statusline.WslInstallError:
         return False
+    # The folder alone. An account renamed with `usermod -l` keeps its
+    # home and folder: taken for a move, the "new" folder -- the same one --
+    # was written and then Blink taken out of it from the snapshot, leaving
+    # no status line and no hooks (the review of 277b81a..4003b0b, item 4).
+    # A rename only updates the record's user.
+    del home
     norm = claude_home.linux_norm
-    return (norm(old) != norm(config_dir)
-            or prev.linux_user != home.linux_user
-            or norm(prev.linux_home or "") != norm(home.linux_home or ""))
+    return norm(old) != norm(config_dir)
 
 
 _UNDO_FAILED = (install_statusline.WslInstallError,
@@ -4630,42 +4634,50 @@ def _shares_files(old, home) -> bool:
     return norm(old.linux_home or "") == norm(home.linux_home or "")
 
 
-def _take_out_of_old(old, snap, home, name) -> None:
-    """After the new folder `home` is written and recorded: Blink out of
-    the folder it used before, from `snap`. A failure is said as what it
-    is -- Blink is set up and recorded in the new folder, and still in the
-    old one -- with how to finish by hand; the install has worked."""
+def _take_out_of_old(old, snap, name):
+    """The moved-inside step's first write: Blink out of the folder it
+    used before, from `snap`, before the new one is installed. The text
+    said on success; None when it could not, with the old folder put back
+    from `snap` and the stop said (nothing else has been written)."""
+    run = install_statusline.default_wsl_run(old)
     try:
-        said = install_statusline.take_out_of_folder(
-            old, install_statusline.default_wsl_run(old), snap,
-            files=not _shares_files(old, home))
+        return install_statusline.take_out_of_folder(old, run, snap)
     except _UNDO_FAILED as e:
-        print(f"      Blink is set up in the new folder inside {name}, but"
-              " could not be taken out of the one it used")
-        print(f"      before ({_undo_said(e)}). To do that by hand, as"
-              f" {old.linux_user}, remove the statusLine and hooks")
-        print("      entries that name ~/.blink/blink-*.sh from that"
-              " folder's settings.json.")
-        return
-    print(f"      The folder Blink used before inside {name}: {said}")
+        first = e
+    put_back = _put_back(((old, snap),))
+    print()
+    print(f"Blink setup stopped. It could not take itself out of the folder"
+          f" it used before inside {name} ({_undo_said(first)}).")
+    if put_back:
+        print("That folder was put back as it was, and the background"
+              " service reads it.")
+    else:
+        print("That folder could not be put back as it was either; to set"
+              " it up again, run this again once it can be written.")
+    return None
 
 
-def _undo_moved_setup(home, old, snap, name) -> None:
-    """Take the new folder `home` back out when its record could not be
-    saved, and put back what the old folder relies on: the chain file when
-    the two share a Linux home, and the markers. The old folder was never
-    touched, and the record still names it."""
-    run = install_statusline.default_wsl_run(home)
-    shared = _shares_files(old, home)
-    try:
-        now = install_statusline.snapshot_wsl(home, run)
-        install_statusline.take_out_of_folder(home, run, now,
-                                              files=not shared)
-        install_statusline.restore_snapshot(home, run, snap, chain=shared)
-    except _UNDO_FAILED:
-        print(f"      Blink could not take itself back out of the new folder"
-              f" inside {name};")
-        print("      to do it by hand,")
+def _put_back(snaps) -> bool:
+    """Restore each (home, snapshot) in turn, the last one's markers and
+    chain winning (they are the old folder's, which the record still
+    names); False when any of it could not be."""
+    ok = True
+    for home, snap in snaps:
+        try:
+            install_statusline.restore_snapshot(
+                home, install_statusline.default_wsl_run(home), snap)
+        except _UNDO_FAILED:
+            ok = False
+    return ok
+
+
+def _say_put_back(ok, name) -> None:
+    if ok:
+        print(f"The folder Blink used before inside {name} was put back as"
+              " it was, and Blink's record still names it.")
+    else:
+        print(f"The folder Blink used before inside {name} could not be put"
+              " back as it was; to finish by hand,")
         _say_wsl_manual_steps(name)
 
 
@@ -4789,57 +4801,67 @@ def _setup_wsl(d):
     same = (prev is not None and prev.kind == claude_home.WSL
             and (prev.distro_guid or "").lower() == d.guid.lower())
     moved = same and _moved_inside(prev, home, probe.config_dir)
-    old = snap = None
+    old = snap = new_snap = None
     if moved:
-        # The same distribution, another folder or Linux account: Claude
-        # Code's folder there or the default user changed since Blink was
-        # set up. The new folder is written FIRST, and Blink taken out of
-        # the old one only once that worked and is recorded: taken out
-        # first, an install that then failed left Blink in neither folder
-        # while the screen said nothing had changed, and the service
-        # "reading what it read before" read nothing (the review of the WSL
-        # work, 2026-11-05). What the old folder's undo needs is read
-        # before the write, because the write overwrites it: the chain file
-        # and the shims live in the Linux home, the markers in the drop
-        # folder named for the GUID (U21 found the chain file overwritten).
-        # Until U21 the old folder kept Blink's status line and ten hooks,
-        # which ran deleted shims after an uninstall -- an exit 2 that
-        # blocks every prompt.
+        # The same distribution, another Claude Code folder. Both folders
+        # are read first -- settings.json byte for byte, the chain file and
+        # the markers -- then Blink is taken out of the old one, and only
+        # then installed into the new one; an install or a record that then
+        # fails puts both back exactly from what was read. The review of
+        # the WSL work (2026-11-05) had the new folder written first, which
+        # was wrong for two folders of one Linux home: they share the chain
+        # file and the drop folder's markers, and a new folder with no
+        # status line of its own kept the old one's command, which an
+        # uninstall then put into the new folder (the review of
+        # 277b81a..4003b0b, items 3 and 12). Until U21 the old folder kept
+        # Blink's status line and ten hooks, which ran deleted shims after
+        # an uninstall -- an exit 2 that blocks every prompt.
         got = _moved_snapshot(prev, probe, d.name)
         if got is None:
             return None
         old, snap = got
-    left = ("" if not moved else
-            f" Blink is still set up in the folder it used before inside"
-            f" {d.name}, which the background service reads.")
+        if snap is not None:
+            try:
+                new_snap = install_statusline.snapshot_wsl(
+                    home, install_statusline.default_wsl_run(home))
+            except _UNDO_FAILED as e:
+                print()
+                print(f"Blink setup stopped. {_undo_said(e)}")
+                print("Claude Code's settings inside WSL were not changed.")
+                return None
+            took = _take_out_of_old(old, snap, d.name)
+            if took is None:
+                return None
+            print(f"      The folder Blink used before inside {d.name}:"
+                  f" {took}")
+    # The new folder first, then the old one: the old one's markers and
+    # chain file are the ones that stay.
+    undo = (((home, new_snap), (old, snap)) if snap is not None else ())
 
     try:
         said = install_statusline.install_into(
             home, install_statusline.default_wsl_run(home))
     except (install_statusline.WslInstallError,
             install_statusline.SettingsUnreadable) as e:
-        if snap is not None and _shares_files(old, home):
-            # The chain file may have been written before the settings
-            # write that failed; it is the old folder's again.
-            try:
-                install_statusline.restore_snapshot(
-                    home, install_statusline.default_wsl_run(home), snap)
-            except _UNDO_FAILED:
-                pass
         print()
         print(f"Blink setup stopped. {e}")
-        print("Claude Code's settings inside WSL were not changed." + left)
+        if undo:
+            _say_put_back(_put_back(undo), d.name)
+        else:
+            print("Claude Code's settings inside WSL were not changed.")
         return None
     except OSError as e:
         # Making the drop folder or writing a marker, on this computer.
         # Said by type: the text names the folder, under the user's
         # profile. The settings inside may already have been written, so
-        # this does not say they were not; the record is not, and the
-        # next run writes them again.
+        # this does not say they were not, unless they were put back; the
+        # record is not, and the next run writes them again.
         print()
         print("Blink setup stopped. It could not write its own folder on")
         print(f"this computer ({type(e).__name__}). Check that your user")
-        print("folder's .blink can be written, then run this again." + left)
+        print("folder's .blink can be written, then run this again.")
+        if undo:
+            _say_put_back(_put_back(undo), d.name)
         return None
     try:
         claude_home.save(home)
@@ -4861,21 +4883,26 @@ def _setup_wsl(d):
             print(f"Blink setup stopped. The settings inside {d.name} were"
                   " written, but Blink could not record them"
                   f" ({type(e).__name__}), so they are being taken back out.")
-            if moved:
-                if snap is not None:
-                    _undo_moved_setup(home, old, snap, d.name)
-                else:
-                    # The old folder was left (its account gone): nothing
-                    # of it to keep wired.
-                    _undo_wsl_setup(home, d.name)
+            if undo:
+                _say_put_back(_put_back(undo), d.name)
+            elif moved:
+                # The old folder was left (its account gone): nothing of it
+                # to keep wired.
+                _undo_wsl_setup(home, d.name)
                 print(f"The folder Blink used before inside {d.name} was"
                       " left as it was, and Blink's record still names it.")
             else:
                 _undo_wsl_setup(home, d.name)
         print(f"Fix {user_config.path(blink_home())} and run this again.")
         return None
-    if snap is not None:
-        _take_out_of_old(old, snap, home, d.name)
+    if snap is not None and not _shares_files(old, home):
+        # Recorded, so the move has worked: the old Linux home's shims and
+        # out file go, as uninstall would take them (shared ones are the
+        # new folder's now).
+        gone = install_statusline.remove_wsl_files(
+            old, install_statusline.default_wsl_run(old))
+        if gone:
+            print(f"      {gone}")
     # The home recorded until now has just lost its record, and uninstall
     # reads only the record: left in place, its entries would point at
     # shims nobody removes, and a second distribution's would go on

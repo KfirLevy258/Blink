@@ -900,9 +900,10 @@ class _WslSettings:
         self.trailing_newline = trailing_newline
 
 
-def _wsl_read_settings(home, wsl_run, purpose="install") -> _WslSettings:
-    """settings.json inside the distribution. `purpose` "install" refuses
-    one on a Windows drive (_READ's comment); "any" is uninstall's."""
+def _wsl_read_raw(home, wsl_run, purpose="install"):
+    """(path, sha, bytes or None) of settings.json inside the distribution,
+    unparsed: what a snapshot keeps, so a file that does not parse is put
+    back as it was too. `sha` is "absent" with None for no file."""
     linux = _linux_path(home, home.join(home.config_dir, "settings.json"))
     rc, out, _ = wsl_run(["sh", "-c", _READ, "sh", linux, purpose])
     if rc == _ON_WINDOWS:
@@ -922,11 +923,19 @@ def _wsl_read_settings(home, wsl_run, purpose="install") -> _WslSettings:
         raise WslInstallError("Could not read Claude Code's settings inside"
                               " WSL.")
     if state == b"absent":
+        return path, "absent", None
+    return path, hashlib.sha256(body).hexdigest(), body
+
+
+def _wsl_read_settings(home, wsl_run, purpose="install") -> _WslSettings:
+    """settings.json inside the distribution. `purpose` "install" refuses
+    one on a Windows drive (_READ's comment); "any" is uninstall's."""
+    path, sha, body = _wsl_read_raw(home, wsl_run, purpose)
+    if body is None:
         return _WslSettings(path, "absent", {}, 2, True)
     doc = _parse_doc(body, "Claude Code's settings.json inside WSL")
     indent, trailing = _sniff_text(body.decode("utf-8", "replace"))
-    return _WslSettings(path, hashlib.sha256(body).hexdigest(), doc, indent,
-                        trailing)
+    return _WslSettings(path, sha, doc, indent, trailing)
 
 
 def _wsl_write(wsl_run, path: str, want: str, mode: str, data: bytes,
@@ -1113,45 +1122,53 @@ def uninstall_from(home, wsl_run) -> str:
 
 
 class WslSnapshot:
-    """What uninstall_from needs to take Blink out of one folder of a
-    distribution, read before another folder of the same distribution is
-    set up: the chain file in the folder's Linux home, and the markers in
-    the drop folder, which is named for the distribution and so shared.
+    """One folder of a distribution as it was before a move inside it
+    touched anything: its settings.json byte for byte, the chain file in its
+    Linux home, and the markers in the drop folder, which is named for the
+    distribution and so shared by every folder in it.
 
-    For a move inside a distribution (cli._setup_wsl), where the new folder
-    is written first and the old one taken out only once that worked: the
-    write overwrites both the markers and, when the Linux home is the same,
-    the chain file holding the old folder's own status line."""
+    For a move inside a distribution (cli._setup_wsl). The old folder is
+    taken out first and the new one installed after, and an install that
+    cannot finish puts both back from their snapshots. Until the
+    /code-review max of 277b81a..4003b0b the new folder was written first:
+    two folders of one Linux home share the chain file, and a new folder
+    with no status line of its own kept the old one's command there, which
+    an uninstall of it later put into the new folder (item 3)."""
 
-    def __init__(self, chain, sl_marker, hk_marker):
+    def __init__(self, chain, sl_marker, hk_marker, settings=None):
         self.chain = chain              # the chain file's text, or None
         self.sl_marker = sl_marker
         self.hk_marker = hk_marker
+        # (path, sha, bytes or None): settings.json as read, or None when
+        # it was not (a snapshot made for its chain and markers alone).
+        self.settings = settings
 
 
 def snapshot_wsl(home, wsl_run) -> WslSnapshot:
     """WslSnapshot for `home`, through `wsl_run` (its user). Raises
-    WslInstallError when the chain file cannot be read, as uninstall_from
-    does: read as empty, the old folder's status line would be lost."""
+    WslInstallError when the chain file or settings.json cannot be read, as
+    uninstall_from does: read as empty, the old folder's status line would
+    be lost. A settings.json that does not parse is kept as its bytes."""
     from pc import install_hooks
+    settings = _wsl_read_raw(home, wsl_run, "any")
     chain = wsl_shim_path(home, os.path.basename(CHAIN_PATH))
     rc, out, _ = wsl_run(["sh", "-c", _CAT_OR_NOTHING, "sh", chain])
     if rc != 0:
         raise WslInstallError("Could not read Blink's status line chain file"
                               " inside WSL.")
     return WslSnapshot(decode_chain(out) if out else None,
-                       _read_marker(home), install_hooks._read_marker(home))
+                       _read_marker(home), install_hooks._read_marker(home),
+                       settings)
 
 
-def take_out_of_folder(home, wsl_run, snap, files) -> str:
+def take_out_of_folder(home, wsl_run, snap) -> str:
     """uninstall_from for one folder of a distribution, from `snap` rather
-    than from what is on disk now: settings.json there loses Blink's status
-    line (the chain's command put back) and hooks. `files` also removes the
-    shims, the out file and the chain file in `home`'s Linux home; False
-    when those are shared with the folder now set up there. The markers
-    are never touched: they are the drop folder's, and the drop folder is
-    the distribution's. The text is for the screen only, as
-    uninstall_from's."""
+    than from what is on disk now, and without the shims: settings.json
+    there loses Blink's status line (the chain's command put back) and
+    hooks, the chain file goes or is rewritten as uninstall would, and the
+    markers are removed. The shims and the out file stay, for the folder
+    installed next or for a put-back (remove_wsl_files once the move has
+    worked). The text is for the screen only, as uninstall_from's."""
     from pc import install_hooks
     st = _wsl_read_settings(home, wsl_run, "any")
     sl_doc, _, action, msg = merge_uninstall(
@@ -1164,25 +1181,45 @@ def take_out_of_folder(home, wsl_run, snap, files) -> str:
                    _dump(st.doc, st.indent,
                          st.trailing_newline).encode("utf-8"),
                    "Claude Code's settings.json")
-    lines = [msg, install_hooks.uninstall_message(removed)]
-    if not files:
-        return " ".join(lines)
-    if sl_doc is not None:
-        _wsl_apply_chain(home, wsl_run, action)
-    if removed and HOOK_RECAPTURE_S > 0:
-        time.sleep(HOOK_RECAPTURE_S)    # as uninstall_from
-    if not _wsl_rm(wsl_run,
-                   *(wsl_shim_path(home, n) for n in WSL_SHIMS + ("out",))):
-        lines.append("Could not remove Blink's shims inside WSL; they do"
-                     " nothing without the settings above.")
-    return " ".join(lines)
+    _wsl_apply_chain(home, wsl_run,
+                     action if action is not None else ("delete",))
+    _remove_marker(home)
+    install_hooks._remove_marker(home)
+    return " ".join([msg, install_hooks.uninstall_message(removed)])
+
+
+def remove_wsl_files(home, wsl_run) -> str:
+    """The shims and the out file in `home`'s Linux home, after its folder
+    was taken out (take_out_of_folder) and Claude Code had time to drop the
+    hooks that ran them (HOOK_RECAPTURE_S, as uninstall_from). "" when
+    removed, else the line to say."""
+    if HOOK_RECAPTURE_S > 0:
+        time.sleep(HOOK_RECAPTURE_S)
+    if _wsl_rm(wsl_run,
+               *(wsl_shim_path(home, n) for n in WSL_SHIMS + ("out",))):
+        return ""
+    return ("Could not remove Blink's shims inside WSL; they do nothing"
+            " without the settings above.")
 
 
 def restore_snapshot(home, wsl_run, snap, chain=True) -> None:
-    """Put back what `snap` read: the markers, and with `chain` the chain
+    """Put back what `snap` read: settings.json byte for byte when it was
+    read and has changed since, the markers, and with `chain` the chain
     file in `home`'s Linux home. For a move inside a distribution that
-    could not finish, so the old folder is wired exactly as it was."""
+    could not finish, so a folder is wired exactly as it was. Raises what
+    the writes raise; the caller says it."""
     from pc import install_hooks
+    if snap.settings is not None:
+        path, sha, body = snap.settings
+        _, now_sha, _ = _wsl_read_raw(home, wsl_run, "any")
+        if now_sha != sha:
+            if body is None:
+                if not _wsl_rm(wsl_run, path):
+                    raise WslInstallError("Could not put Claude Code's"
+                                          " settings.json inside WSL back.")
+            else:
+                _wsl_write(wsl_run, path, now_sha, "keep", body,
+                           "Claude Code's settings.json")
     if chain:
         _wsl_apply_chain(home, wsl_run, ("write", snap.chain)
                          if snap.chain is not None else ("delete",))

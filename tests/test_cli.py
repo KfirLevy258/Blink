@@ -3242,9 +3242,13 @@ def _wsl_desk(monkeypatch, reg, probe=None, running=False):
         calls.append(("snapshot", home))
         return install_statusline.WslSnapshot("theirs\n", "m", {"h"})
 
-    def fake_take_out(home, wsl_run, snap, files):
-        calls.append(("take_out", home, files))
+    def fake_take_out(home, wsl_run, snap):
+        calls.append(("take_out", home))
         return "Statusline restored. Activity hooks removed."
+
+    def fake_rm_files(home, wsl_run):
+        calls.append(("rm_files", home))
+        return ""
 
     def fake_restore(home, wsl_run, snap, chain=True):
         calls.append(("restore", home, chain))
@@ -3257,6 +3261,7 @@ def _wsl_desk(monkeypatch, reg, probe=None, running=False):
     monkeypatch.setattr(install_statusline, "take_out_of_folder",
                         fake_take_out)
     monkeypatch.setattr(install_statusline, "restore_snapshot", fake_restore)
+    monkeypatch.setattr(install_statusline, "remove_wsl_files", fake_rm_files)
     monkeypatch.setattr(cli, "restart_service",
                         lambda: calls.append(("restart",)) or "restarted")
     monkeypatch.setattr(cli, "halt_service",
@@ -3280,7 +3285,7 @@ def _inside(calls):
     """The calls that reach into a distribution, in order."""
     return [c[0] for c in calls
             if c[0] in ("probe", "install_into", "uninstall_from",
-                        "snapshot", "take_out", "restore")]
+                        "snapshot", "take_out", "restore", "rm_files")]
 
 
 def _recorded_wsl(home, name="Ubuntu", guid=WSL_GUID, **kw):
@@ -3811,7 +3816,11 @@ def test_reinstall_into_a_moved_folder_takes_blink_out_of_the_old(
     under the old record. Since the review of the WSL work (2026-11-05,
     A5-1) the new one is written first and the old one taken out only once
     that worked and is recorded, from what was read of it before the write
-    (the chain file and the markers), leaving the shared shims alone."""
+    (the chain file and the markers), leaving the shared shims alone.
+    That order was wrong for two folders of one Linux home, which share the
+    chain file and the markers (the review of 277b81a..4003b0b, item 3):
+    both folders are read, the old one taken out, then the new one
+    installed, and the shared shims are left."""
     from pc import claude_home, wsl
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       probe=_probe(config_dir="/home/zoe/work-claude",
@@ -3819,10 +3828,10 @@ def test_reinstall_into_a_moved_folder_takes_blink_out_of_the_old(
     old = _recorded_wsl(tmp_path)
     os.makedirs(old.state_dir)
     assert cli.main(["install"]) == 0
-    assert _inside(calls) == ["probe", "snapshot", "install_into",
-                              "take_out"]
+    assert _inside(calls) == ["probe", "snapshot", "snapshot", "take_out",
+                              "install_into"]   # one Linux home: no rm_files
     took = next(c for c in calls if c[0] == "take_out")
-    assert took[1] == old and took[2] is False     # one Linux home: shared
+    assert took[1] == old
     new = claude_home.recorded()
     assert new.config_dir == wsl.unc("Ubuntu", "/home/zoe/work-claude")
     assert os.path.isdir(new.drop_dir)
@@ -3893,21 +3902,38 @@ def test_a_renamed_account_is_taken_out_as_the_one_there_now(
     up for. Renamed (usermod -l, same home), that account no longer
     exists, every wsl.exe -u for it fails, and install stopped for good
     with advice to act as a user nobody can be. The folder is taken out
-    as the account the distribution has now."""
+    as the account the distribution has now -- when the folder moved too.
+
+    With the same home and the same folder, a rename is not a move at all
+    (the review of 277b81a..4003b0b, item 4): taken for one, the folder
+    was written and then Blink taken out of it again. It is installed
+    again as the account there now, and the record's user updated."""
     from pc import claude_home
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       probe=_probe(user="zoey"))
     old = _recorded_wsl(tmp_path)
     _old_account_gone(monkeypatch, calls, undo_ok=("zoey",))
     assert cli.main(["install"]) == 0
+    assert _inside(calls) == ["probe", "install_into"]
+    assert next(c for c in calls if c[0] == "install_into")[1].linux_user \
+        == "zoey"
+    assert claude_home.recorded().linux_user == "zoey"
+    assert claude_home.recorded().config_dir == old.config_dir
+
+    # A rename whose folder moved as well is taken out as the account
+    # there now.
+    calls.clear()
+    claude_home.save(old)
+    monkeypatch.setattr(cli.wsl, "probe", lambda name, *a, **k: _probe(
+        user="zoey", config_dir="/home/zoe/work-claude"))
+    assert cli.main(["install"]) == 0
     out = " ".join(capsys.readouterr().out.split())
     read = [c[1] for c in calls if c[0] == "snapshot"]
-    assert [h.linux_user for h in read] == ["zoe", "zoey"]
+    assert [h.linux_user for h in read] == ["zoe", "zoey", "zoey"]
     assert read[1].config_dir == old.config_dir
-    assert _inside(calls)[-2:] == ["install_into", "take_out"]
     took = next(c for c in calls if c[0] == "take_out")
     assert took[1].linux_user == "zoey"
-    assert claude_home.recorded().linux_user == "zoey"
+    assert _inside(calls)[-2:] == ["take_out", "install_into"]
     assert "Linux account Blink was set up for inside Ubuntu (zoe)" in out
     assert "no longer there" in out
 
@@ -4177,7 +4203,11 @@ def test_a_moved_folder_save_that_fails_takes_the_new_one_back_out(
     shims its hooks run -- the exit 2 that blocks every prompt. It is taken
     back out. Until the review of the WSL work (A5-1) the old folder had
     been taken out first, and the message said Blink was in neither; now
-    the old folder is untouched and still recorded, and is said to be."""
+    the old folder is untouched and still recorded, and is said to be.
+    Since the review of 277b81a..4003b0b (item 3) the old folder is taken
+    out first, and both are put back from what was read of them before
+    anything was written: the new folder first, then the old one, whose
+    chain file and markers are the ones that stay."""
     from pc import claude_home, wsl
     calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
                       probe=_probe(config_dir="/home/zoe/work-claude",
@@ -4186,18 +4216,15 @@ def test_a_moved_folder_save_that_fails_takes_the_new_one_back_out(
     _save_fails(monkeypatch)
     assert cli.main(["install"]) == 1
     out = " ".join(capsys.readouterr().out.split())
-    # The old folder was never touched; the new one comes back out without
-    # its shared shims, and the chain file and markers are put back.
-    assert _inside(calls) == ["probe", "snapshot", "install_into",
-                              "snapshot", "take_out", "restore"]
-    took = next(c for c in calls if c[0] == "take_out")
-    assert took[1].config_dir == wsl.unc("Ubuntu", "/home/zoe/work-claude")
-    assert took[2] is False
-    assert next(c for c in calls if c[0] == "restore")[2] is True
+    assert _inside(calls) == ["probe", "snapshot", "snapshot", "take_out",
+                              "install_into", "restore", "restore"]
+    restored = [c[1] for c in calls if c[0] == "restore"]
+    assert restored[0].config_dir == wsl.unc("Ubuntu",
+                                             "/home/zoe/work-claude")
+    assert restored[1] == old
     assert claude_home.recorded() == old
     assert "being taken back out" in out
-    assert "was left as it was, and Blink's record still names it" in out
-    assert "already taken out" not in out
+    assert "was put back as it was, and Blink's record still names it" in out
     assert "Done." not in out
 
 
