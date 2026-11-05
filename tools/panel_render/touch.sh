@@ -63,6 +63,7 @@ $CC -O1 -w -DLV_CONF_INCLUDE_SIMPLE=1 -DCONFIG_BLINK_TOUCH_INJECT=1 \
 	"$ROOT/firmware/src/burn5h.c" \
 	"$ROOT/firmware/src/font_focus_40.c" \
 	"$ROOT/firmware/src/upd_prompt.c" \
+	"$ROOT/firmware/src/ask_prompt.c" \
 	"$ROOT/firmware/src/upd_row.c" \
 	"$ROOT/firmware/src/whatsnew.c" \
 	"$ROOT/firmware/src/ota_parse.c" \

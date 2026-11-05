@@ -82,6 +82,13 @@ void ui_settings_whatsnew_dismiss(void)
 {
 }
 
+/* The ask box and the update offer are not drawn here; nothing to take
+ * down. */
+void ui_settings_dozing(bool dozing)
+{
+	ARG_UNUSED(dozing);
+}
+
 bool ui_settings_busy(void)
 {
 	return false;

@@ -13,8 +13,8 @@
  * Someone updated automatically never sees `blink install`, where the
  * question is asked in the terminal, and the refresh never runs without a
  * yes. So the daemon sends {"t":"ask","v":2,"id":"refresh"} to a board that
- * lists the "ask" cap, at most once a day, and only while someone is at the
- * computer. It counts an ask toward its three only when an answer comes
+ * lists the "ask" cap, a day after the last answer (an hour after an ask
+ * that got none), and only while someone is at the computer. It counts an ask toward its three only when an answer comes
  * back -- "on" for Turn on, "no" for No thanks, and "later" when the box
  * closes itself after ASK_PROMPT_OPEN_MS with nobody having touched it --
  * because an answer is the one proof the box was seen. A box withdrawn, or
@@ -38,10 +38,11 @@
  *     ASK_PROMPT_PENDING_MS of arriving. The daemon sends it because
  *     someone is at the computer now; a box that surfaced hours later,
  *     once a doze ended, would be asking an empty room. The daemon asks
- *     again a day later, and the dropped ask has cost none of the three.
+ *     again an hour later, and the dropped ask has cost none of the three.
  *   - Never while the board dozes (ui_sleep.c), and withdrawn, with no
- *     answer, when a doze starts. The doze is half an hour without Claude
- *     activity -- exactly when the daemon is likeliest to ask -- and
+ *     answer, when a doze starts. The doze is four hours without Claude
+ *     activity (SLEEP_ABSENT_AFTER_S) -- a desk where the daemon may well
+ *     be asking -- and
  *     lv_timer_handler keeps running under the sleep clip, so a box drawn
  *     then sat over the clip and took the tap meant to wake the board,
  *     which could land on "No thanks" unseen; that answer is for good

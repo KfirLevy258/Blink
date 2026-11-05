@@ -96,10 +96,12 @@ void ui_settings_theme_edit_state(bool editing);
  * never on top of anything; see ask_prompt.h. */
 void ui_settings_ask(void);
 
-/* The board starts (true) or stops (false) dozing. While it dozes the ask
- * is never put up -- it would eat the tap that wakes the board -- and one
- * already up is taken down at once, with no answer. */
-void ui_settings_ask_dozing(bool dozing);
+/* The board starts (true) or stops (false) dozing. While it dozes neither
+ * the ask nor the update offer is put up -- either would eat the tap that
+ * wakes the board -- and one already up is taken down at once, unanswered:
+ * the ask comes back if the daemon sends it again, the offer once the board
+ * is awake. */
+void ui_settings_dozing(bool dozing);
 
 /* The host went away (HOST LOST) or said bye: the hold goes. */
 void ui_settings_theme_edit_host_gone(void);

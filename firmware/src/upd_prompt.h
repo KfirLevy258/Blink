@@ -42,6 +42,15 @@
  * `busy` is "something else is already asking this person something": the
  * settings panel, a confirm, a notice, or the download overlay. An offer must
  * never stack on top of one of those.
+ *
+ * `dozing` is the sleep clip (ui_sleep.c), a tap's peek included. The offer
+ * is a 300 px box on lv_layer_top and lv_timer_handler runs on under the
+ * clip, so an offer up when a doze started, or raised during one (a daemon
+ * restart's welcome check answered AVAILABLE), took the tap meant to wake
+ * the board -- and "Update now" under that tap starts an install nobody saw
+ * (/code-review max of feat/usage-refresh, V22; the ask box was fixed the
+ * same way first). So it comes down unanswered when the doze starts, which
+ * lifts the latch, and is not raised again until the board is awake.
  */
 enum upd_prompt_act {
 	UPD_PROMPT_NOTHING,	/* leave whatever is on the glass alone */
@@ -56,14 +65,15 @@ struct upd_prompt_turn {
 
 /*
  * `prompt_open` is whether the box is on screen right now, `latched` the
- * current once-per-boot flag, `busy` whether anything else owns the glass.
+ * current once-per-boot flag, `busy` whether anything else owns the glass,
+ * `dozing` whether the sleep clip is up.
  *
  * The caller applies the answer verbatim -- act, then `latched` -- rather
  * than deciding anything itself. That is the point: every rule above is in
  * one function that a host test can drive through all seven OTA states.
  */
 struct upd_prompt_turn upd_prompt_step(enum ota_ui_state st, bool prompt_open,
-				       bool latched, bool busy);
+				       bool latched, bool busy, bool dozing);
 
 /*
  * Whether the install confirm inside Settings ("Install version X?") must come

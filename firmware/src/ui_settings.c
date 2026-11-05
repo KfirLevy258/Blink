@@ -913,7 +913,7 @@ static void upd_prompt_draw(const struct ota_ui *snap)
  */
 static lv_obj_t *ask_box;
 static bool ask_pending;	/* an ask arrived and is not up yet */
-static bool ask_dozing;		/* ui_sleep_run is in charge of the panel */
+static bool board_dozing;	/* ui_sleep_run is in charge of the panel */
 static int64_t ask_shown_ms;	/* uptime it went up; 60 s from here */
 static int64_t ask_pending_ms;	/* uptime the ask arrived; 10 min to go up */
 
@@ -1365,16 +1365,23 @@ static void set_upd_row(lv_obj_t *lbl, enum upd_row row)
 /*
  * One turn of ask_prompt_step(), applied verbatim. `busy` is everything else
  * that asks this person something or owns the glass: the settings panel,
- * the install confirm, a notice, What's new, the update offer and the
- * download screen. The computer is gone when proto says no host has been
- * heard inside its timeout -- HOST LOST, or the silence after a bye.
+ * the install confirm, a notice, What's new, the update offer, the
+ * download screen -- and the eye clip (ui_anim_showing). ui_anim_run keeps
+ * lv_timer_handler and proto_service running under the clip, and
+ * ui_slide_top_hide hid only the top-layer boxes there when it began, so an
+ * ask arriving mid-clip was drawn over it, clickable, swallowing the swipe
+ * that ends the clip; a tap could land on an unseen "No thanks", which is
+ * for good (/code-review max of feat/usage-refresh, V9). The computer is
+ * gone when proto says no host has been heard inside its timeout -- HOST
+ * LOST, or the silence after a bye.
  */
 static void ask_tick(void)
 {
 	struct ask_prompt_turn at = ask_prompt_step(
 		ask_pending, ask_box != NULL,
-		panel || confirm || notice || wn || upd_prompt || dl_overlay,
-		!proto_host_seen(), ask_dozing, k_uptime_get(), ask_shown_ms,
+		panel || confirm || notice || wn || upd_prompt || dl_overlay ||
+			ui_anim_showing(),
+		!proto_host_seen(), board_dozing, k_uptime_get(), ask_shown_ms,
 		ask_pending_ms);
 
 	ask_pending = at.pending;
@@ -1389,7 +1396,7 @@ static void ask_tick(void)
 		/* Two literal printks, not one with a ?: -- the console
 		 * allowlist test finds a message only as printk's first
 		 * literal. */
-		if (ask_dozing) {
+		if (board_dozing) {
 			printk("[ask] withdrawn: the board is dozing\n");
 		} else {
 			printk("[ask] withdrawn: the computer went away\n");
@@ -1417,16 +1424,23 @@ void ui_settings_ask(void)
 	ask_pending_ms = k_uptime_get();
 }
 
-void ui_settings_ask_dozing(bool dozing)
+void ui_settings_dozing(bool dozing)
 {
-	ask_dozing = dozing;
+	board_dozing = dozing;
 	/* At once, not on the next 250 ms tick: the closing clip is drawn
-	 * straight to the panel the moment ui_sleep_run starts it, and the box
-	 * is clickable on lv_layer_top under it from then on. Withdrawn as on
-	 * host loss -- no answer, so the daemon counts none of its three. */
+	 * straight to the panel the moment ui_sleep_run starts it, and either
+	 * box is clickable on lv_layer_top under it from then on. Withdrawn as
+	 * on host loss -- the ask with no answer, so the daemon counts none of
+	 * its three; the offer with its latch lifted, so it is made again once
+	 * the board is awake (upd_prompt_step). */
 	if (dozing && ask_box) {
 		ask_close();
 		printk("[ask] withdrawn: the board is dozing\n");
+	}
+	if (dozing && upd_prompt) {
+		upd_prompt_close();
+		upd_prompt_done = false;
+		printk("[ota] offer withdrawn: the board is dozing\n");
 	}
 }
 
@@ -1498,9 +1512,14 @@ static void upd_timer_cb(lv_timer_t *t)
 	{
 		/* The ask box counts as busy here, as the offer does for it
 		 * below: neither is ever stacked on the other. */
+		/* And the eye clip, as for the ask (ask_tick): an offer raised
+		 * mid-clip would sit over it, clickable. The doze is its own
+		 * input, since it also takes an open offer down. */
 		struct upd_prompt_turn pt = upd_prompt_step(
 			snap.st, upd_prompt != NULL, upd_prompt_done,
-			panel || confirm || notice || dl_overlay || ask_box);
+			panel || confirm || notice || dl_overlay || ask_box ||
+				ui_anim_showing(),
+			board_dozing);
 
 		if (pt.act == UPD_PROMPT_WITHDRAW) {
 			upd_prompt_close();

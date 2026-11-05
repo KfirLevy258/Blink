@@ -32,7 +32,7 @@ struct ask_prompt_turn ask_prompt_step(bool pending, bool open, bool busy,
 	}
 	/* Too late to be the question the daemon meant: it asked because
 	 * someone was at the computer then. Nothing is sent; the daemon asks
-	 * again tomorrow. */
+	 * again an hour later. */
 	if (now_ms - pending_ms >= ASK_PROMPT_PENDING_MS) {
 		t.act = ASK_PROMPT_DROP;
 		t.pending = false;

@@ -2,9 +2,25 @@
 #include "upd_prompt.h"
 
 struct upd_prompt_turn upd_prompt_step(enum ota_ui_state st, bool prompt_open,
-				       bool latched, bool busy)
+				       bool latched, bool busy, bool dozing)
 {
 	struct upd_prompt_turn t = { UPD_PROMPT_NOTHING, latched };
+
+	/*
+	 * Never under the sleep clip: it would take the waking tap. Down
+	 * unanswered, like a withdrawal, so the latch lifts and the offer is
+	 * made again once the board is awake.
+	 */
+	if (dozing) {
+		if (prompt_open) {
+			t.act = UPD_PROMPT_WITHDRAW;
+			t.latched = false;
+		}
+		if (st == OTA_UI_FAILED) {
+			t.latched = false;
+		}
+		return t;
+	}
 
 	/*
 	 * The offer asserts something about the CURRENT state, so it goes away

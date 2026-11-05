@@ -329,6 +329,7 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[ota] offer shown",                              # ui_settings.c:830
     "[ota] offer withdrawn: a different version is on offer",  # :1311
     "[ota] offer withdrawn: state is no longer available",     # :1326
+    "[ota] offer withdrawn: the board is dozing",     # ui_settings.c:1443
     "[ota] install confirm withdrawn: the offer it named is no longer"
     " available",                                     # ui_settings.c:1346
     "[ota] test boot of",                                      # main.c:126
