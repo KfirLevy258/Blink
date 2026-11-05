@@ -3938,13 +3938,21 @@ def cmd_status(args) -> int:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
     codex = _source_lines(desk)
-    if getattr(args, "wire", False):
-        # The Session rows come out of the same poll as the wire line.
-        _wire_line()
-    else:
-        from pc import normalizer
-        _session_window_line(*_claude_page(desk))
-        _codex_session_line(normalizer.merge(codex) if codex else None)
+    # The Local Storage read in _claude_page and the bus poll behind --wire
+    # each resolve the Desktop folder on their own; pinning read_desk's answer
+    # around them keeps every line of this run on the one folder the Desktop
+    # row named (pc/desktop_paths: status holds one answer so its lines
+    # cannot contradict each other).
+    from pc import desktop_paths
+    held = desk.desktop_paths if desk is not None else None
+    with desktop_paths.one_answer(held):
+        if getattr(args, "wire", False):
+            # The Session rows come out of the same poll as the wire line.
+            _wire_line()
+        else:
+            from pc import normalizer
+            _session_window_line(*_claude_page(desk))
+            _codex_session_line(normalizer.merge(codex) if codex else None)
     return 0
 
 

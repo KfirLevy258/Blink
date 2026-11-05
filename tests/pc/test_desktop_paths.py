@@ -1592,7 +1592,6 @@ def test_a_held_answer_lists_the_same_places_after_the_tree_changes(
 
 
 
-
 # --- review of PR #3, 2026-11-05: the remaining findings -------------------
 
 def test_directory_mtimes_are_never_the_evidence(win, tmp_path):
@@ -1668,3 +1667,44 @@ def test_status_does_not_say_not_installed_for_an_indexeddb_package(
     assert row[0] == ("Desktop     no usage cache (Claude Desktop installed"
                       " but never signed in)")
     assert not any("not installed" in l for l in row)
+
+
+# --- review of PR 3, finding 13: one answer for the whole status run -------
+
+@pytest.mark.parametrize("wire", [False, True])
+def test_status_reads_its_session_row_from_the_desktop_rows_folder(
+        tmp_path, monkeypatch, wire):
+    """read_desk's answer used to be held only for read_desk and the Desktop
+    row; _claude_page's Local Storage read and the --wire bus poll each
+    resolved again, so a tree that changed in between put the Session row on
+    another folder than the Desktop row named. The tree is simulated by a
+    resolver that names a new folder on every call."""
+    import argparse
+    n = []
+
+    def resolver():
+        n.append(1)
+        return dp.Answer(str(tmp_path / ("folder%d" % len(n))),
+                         dp.SOURCE_DEFAULT)
+
+    monkeypatch.setattr(dp, "_resolve", resolver)
+    with dp.one_answer() as held:
+        pass
+    desk = cli.Desk(
+        claude_text=None, claude_ver=None, on_path=False, desktop=False,
+        desktop_installed=False, desktop_reading=None, codex=False,
+        hooks=cli.claude_hooks(), weekly=False, desktop_paths=held)
+    monkeypatch.setattr(cli, "read_desk", lambda *a, **k: desk)
+    seen = []
+
+    def page(*_a, **_k):
+        # What the Local Storage read and the bus poll both ask.
+        seen.append(dp.data_dir())
+        return (None, None)
+
+    monkeypatch.setattr(cli, "_claude_page", page)
+    monkeypatch.setattr(cli, "_wire_line", lambda: page())
+    monkeypatch.setattr(cli, "_session_window_line", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_codex_session_line", lambda *a, **k: None)
+    cli.cmd_status(argparse.Namespace(wire=wire))
+    assert seen == [held.path]
