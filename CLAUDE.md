@@ -86,13 +86,20 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**3986 passing, 1 skipped** (os.startfile, Windows only) as of 2026-11-05, on
-macOS, on the pr3-combined tree after the evidence-based folder
-ranking and the one-answer status run. Windows (ARM64 VM, a git-archive zip
-of the same tree expanded into a fresh folder) the same day: 3568 passed and
-408 skipped, with one failure, `test_theme_ended.py::test_a_refused_request_is_not_counted`
-(a loopback WinError 10053 reset); the file alone passed on re-run, 8 passed
-and 1 skipped. The VM full run took 510 s against 153 s on the Mac. Ubuntu
+**3989 passing, 1 skipped** (os.startfile, Windows only) as of 2026-11-05, on
+macOS, on the pr3-combined tree at 2cdf14d (3990 collected). Windows (ARM64
+VM) full run the same day, on a git-archive zip of a692b10, the tree before
+2cdf14d, which adds 3 tests: 3568 passed and 408 skipped, one failure,
+`test_theme_ended.py::test_a_refused_request_is_not_counted` (a loopback
+WinError 10053 reset); the file alone passed on re-run, 8 passed and 1
+skipped. The two totals are therefore of different trees (3987 collected on
+a692b10 on the Mac, 3977 on the VM) and the gap of 10 is by design: Windows
+collects 10 fewer tests, all in `tests/pc/test_desktop_paths.py`, because
+parametrize lists filter at collection on what that filesystem lets a
+fixture create (6 unsafe marker names, 4 glob-hostile profile names). On
+2cdf14d the VM collects 3980 against the Mac's 3990, the same gap, and
+`test_desktop_paths.py` plus `test_cli.py` ran there at 442 passed, 5
+skipped; the Windows full suite was not repeated on 2cdf14d. The VM full run took 510 s against 153 s on the Mac. Ubuntu
 (Docker, x86_64) was last run on 2026-11-01, on an earlier tree: 3661 passed
 and 198 skipped. Two one-off failures were seen on 2026-11-01 on earlier trees
 and passed on every re-run:
