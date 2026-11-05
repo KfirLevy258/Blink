@@ -1562,8 +1562,13 @@ class _Backend:
         half of a pair a test run must be able to undo on every platform, and
         it reports what happened. This is best effort, silent, and only where
         an open file handle would otherwise fail a rename.
+
+        True when it stopped something, which only Windows' does: the
+        caller restarts only then (the review of 277b81a..4003b0b, item
+        11, where a failed program swap ran `kickstart -k` on a daemon
+        nothing had stopped).
         """
-        return None
+        return False
 
     def stop(self, runner=None) -> str:
         """Stop the installed service, without uninstalling it.
@@ -2280,9 +2285,11 @@ class _SchtasksBackend(_Backend):
 
         The answer is discarded on purpose. There is nothing a caller in the
         middle of an update can do with "not installed", and update._replace()
-        waits for the handle regardless of whether this took.
+        waits for the handle regardless of whether this took. Only whether
+        anything was stopped is returned, for a caller that must start it
+        again.
         """
-        self.stop()
+        return self.stop().startswith("stopped")
 
     def _registered(self, runner=None) -> bool:
         r = (runner or subprocess.run)(["schtasks", "/query", "/tn", TASK_NAME],
@@ -2845,8 +2852,10 @@ def _refresh_shims() -> None:
             print(f"  could not refresh {os.path.basename(path)}: {e}")
 
 
-def halt_service() -> None:
-    """Stop the daemon before replacing the program underneath it.
+def halt_service() -> bool:
+    """Stop the daemon before replacing the program underneath it; True
+    when something was stopped (Windows only, _Backend.halt), which is
+    then the caller's to start again.
 
     Best effort and silent: on the platforms where it does nothing this is
     correct, and on the one where it matters the retry in update._replace()
@@ -2854,11 +2863,11 @@ def halt_service() -> None:
     output in the middle of an update.
     """
     if _skip_service():
-        return
+        return False
     try:
-        backend().halt()
+        return bool(backend().halt())
     except Exception:
-        pass
+        return False
 
 
 def _say_bye():
@@ -4066,8 +4075,7 @@ def cmd_install(args) -> int:
             # Re-running the installer over a live install hits the same
             # Windows rename refusal that `blink update` did; the service is
             # (re)installed and started further down either way.
-            halt_service()
-            halted = True
+            halted = halt_service()
             ok, message = update.swap_in(staged, installed_bin(),
                                          RELEASE_VERSION)
             if not ok:
@@ -4078,8 +4086,11 @@ def cmd_install(args) -> int:
                 # starts only at logon: returned here, the board sat on HOST
                 # LOST under "nothing else was changed" (since 1.4.1; review
                 # of the WSL work, 2026-11-05, A5-3). The old program is
-                # still in place, so it runs that.
-                if restart_left_it_down(restart_service()):
+                # still in place, so it runs that. Only a service the halt
+                # stopped: elsewhere it stops nothing, and this was a
+                # `kickstart -k` of a healthy daemon (item 11 of the review
+                # of 277b81a..4003b0b).
+                if halted and restart_left_it_down(restart_service()):
                     print("The background service did not start again;"
                           f" run `{_repair_command()} install` once the"
                           " download is fixed.")
@@ -4090,76 +4101,87 @@ def cmd_install(args) -> int:
         # interpreter instead. Customers never take this path.
         print("running from a checkout, nothing to copy")
 
-    step("Status line")
-    os.makedirs(blink_home(), exist_ok=True)
-    if kept_wsl is not None:
-        if not halted:
-            # Stopped before anything inside WSL is touched, not restarted
-            # after: the daemon's WslWatch repairs the recorded folder's
-            # status line every five minutes, and one that ran while this
-            # took Blink out of that folder put the status line back after
-            # the chain file was gone -- the customer's command lost from
-            # both, and statusLine left on a deleted shim (review of
-            # feat/enterprise-spend, W1). The service step below starts it.
-            halt_service()
-        print(f"Claude Code inside WSL ({kept_wsl.name})"
-              + ("" if named is not None else ", kept"))
-        got = _setup_wsl(kept_wsl)
-        if got is None or isinstance(got, _StoppedOnto):
-            # Stopped, rather than going on to the Codex hooks and the
-            # service and a "Done." after "Blink setup stopped" (U27). On
-            # None the record is the one from before, so the service reads
-            # what it read before; the one stop that leaves the new
-            # distribution recorded (a previous one whose record could not
-            # be put back, C4) says so by its result (D5).
-            if restart_service() == _RESTART_OK:
+    # Stopped for a record move (_stop_for_move) and started by the service
+    # step; on every other way out of here, a raise or a Ctrl-C included,
+    # by the finally. Until the review of 277b81a..4003b0b (item 11) only a
+    # failure inside the Claude Code step started it again, and one in the
+    # Codex hooks, driver or service step left the board on HOST LOST.
+    moved = {"stopped": False}
+    try:
+        step("Status line")
+        os.makedirs(blink_home(), exist_ok=True)
+        if kept_wsl is not None:
+            if not halted:
+                halted = True
+                # Stopped before anything inside WSL is touched, not restarted
+                # after: the daemon's WslWatch repairs the recorded folder's
+                # status line every five minutes, and one that ran while this
+                # took Blink out of that folder put the status line back after
+                # the chain file was gone -- the customer's command lost from
+                # both, and statusLine left on a deleted shim (review of
+                # feat/enterprise-spend, W1). The service step below starts it.
+                halt_service()
+            print(f"Claude Code inside WSL ({kept_wsl.name})"
+                  + ("" if named is not None else ", kept"))
+            got = _setup_wsl(kept_wsl)
+            if got is None or isinstance(got, _StoppedOnto):
+                # Stopped, rather than going on to the Codex hooks and the
+                # service and a "Done." after "Blink setup stopped" (U27). On
+                # None the record is the one from before, so the service reads
+                # what it read before; the one stop that leaves the new
+                # distribution recorded (a previous one whose record could not
+                # be put back, C4) says so by its result (D5).
+                if restart_service() == _RESTART_OK:
+                    print()
+                    if got is None:
+                        print("The background service is running again, reading"
+                              " what it read before.")
+                    else:
+                        print("The background service is running again, reading"
+                              f" Claude Code inside {got.home.distro_name}.")
+                return 1
+            step("Activity hooks")
+            print("inside WSL, with the status line")
+        else:
+            try:
+                _install_native_claude(home, step, moved)
+            except _RecordFailed as e:
                 print()
-                if got is None:
-                    print("The background service is running again, reading"
-                          " what it read before.")
-                else:
-                    print("The background service is running again, reading"
-                          f" Claude Code inside {got.home.distro_name}.")
-            return 1
-        step("Activity hooks")
-        print("inside WSL, with the status line")
-    else:
-        try:
-            _install_native_claude(home, step)
-        except _RecordFailed as e:
+                print("Blink setup stopped. It could not record which Claude Code")
+                print(f"folder this is for ({e}), and without that the")
+                print("background service would read another one. Claude Code's")
+                print("settings were not changed. Fix that, then run this again.")
+                # Stopped for the move, the finally below starts it; stopped
+                # by the program swap, it is restarted here. Either way it
+                # reads what it read before.
+                if not e.stopped and halted:
+                    restart_service()
+                return 1
+
+        # The disclosure for this step is here rather than up in _announce(),
+        # because it is the only step that is conditional on what is already on
+        # the machine: on a Codex-free machine there is nothing to disclose, and a
+        # paragraph about another vendor's config file would be noise at best and
+        # alarming at worst.
+        step("Codex hooks")
+        if codex_present():
             print()
-            print("Blink setup stopped. It could not record which Claude Code")
-            print(f"folder this is for ({e}), and without that the")
-            print("background service would read another one. Claude Code's")
-            print("settings were not changed. Fix that, then run this again.")
-            if e.stopped:
-                # Stopped for the move; it reads what it read before.
-                _start_after_move()
-            elif halted:
-                # The program swap stopped it; it reads what it read before.
-                restart_service()
-            return 1
+            _announce_codex_hooks()
+            print("      " + _install_codex_hooks())
+        else:
+            print(_install_codex_hooks())
 
-    # The disclosure for this step is here rather than up in _announce(),
-    # because it is the only step that is conditional on what is already on
-    # the machine: on a Codex-free machine there is nothing to disclose, and a
-    # paragraph about another vendor's config file would be noise at best and
-    # alarming at worst.
-    step("Codex hooks")
-    if codex_present():
-        print()
-        _announce_codex_hooks()
-        print("      " + _install_codex_hooks())
-    else:
-        print(_install_codex_hooks())
+        if sys.platform == "win32":
+            step("USB driver")
+            print(_install_driver_step())
 
-    if sys.platform == "win32":
-        step("USB driver")
-        print(_install_driver_step())
-
-    step("Background service")
-    service = _install_service()
-    print(service)
+        step("Background service")
+        service = _install_service()
+        moved["stopped"] = False        # the service step started it
+        print(service)
+    finally:
+        if moved["stopped"]:
+            _start_after_move()
 
     step("Usage refresh")
     if named is not None:
@@ -4251,11 +4273,17 @@ def _stop_for_move() -> bool:
     kickstart, after waiting out the stop grace (_LaunchdBackend.install)."""
     if _skip_service():
         return False
+    # The stop waits out a daemon still inside an OTA write's grace, which
+    # sat silent for minutes on the screen (item 11). ASCII dots: a Windows
+    # console in a legacy code page cannot print an ellipsis.
+    print("      Stopping the background service (up to 3 minutes)...",
+          flush=True)
     try:
         said = backend().stop()
     except Exception:
         return False
-    return said == "stopped"
+    # "stopped (started from the Run key)" is Windows' stop too.
+    return said.startswith("stopped")
 
 
 def _start_after_move() -> None:
@@ -4293,9 +4321,11 @@ def _record_unsaveable(home) -> bool:
     return False
 
 
-def _install_native_claude(home, step) -> None:
+def _install_native_claude(home, step, moved) -> None:
     """cmd_install's status line and activity hook steps for a native
-    `home`: record it, write the shims and edit its settings.json."""
+    `home`: record it, write the shims and edit its settings.json.
+    moved["stopped"] is set once the service is stopped for a record move;
+    cmd_install starts it again."""
     # Private to the user. The shims write the status line payload -- which
     # names the working directory and the session -- and the per-session
     # state files in here. Both shims create with umask 077, but a directory
@@ -4318,14 +4348,8 @@ def _install_native_claude(home, step) -> None:
     # Stopped before the record changes, and started by the service step
     # (or below, if this stops first): see _stop_for_move.
     stopped = matters and _stop_for_move()
-    try:
-        _install_native_files(home, step, olds, matters, stopped)
-    except _RecordFailed:
-        raise
-    except BaseException:
-        if stopped:
-            _start_after_move()
-        raise
+    moved["stopped"] = stopped
+    _install_native_files(home, step, olds, matters, stopped)
 
 
 def _install_native_files(home, step, olds, matters, stopped) -> None:

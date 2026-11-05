@@ -822,3 +822,60 @@ def test_settled_acts_on_a_change_only_when_two_reads_agree():
     reads = iter([(claude_home.NO_RECORD, None)] * 2)
     s = claude_home.Settled(lambda: next(reads))
     assert [s.read(), s.read()] == [claude_home.NO_RECORD] * 2
+
+
+@pytest.mark.parametrize("where", ["codex", "service", "interrupt"])
+def test_a_record_move_starts_the_service_whatever_stops_the_install(
+        tmp_path, monkeypatch, capsys, where):
+    """Item 11 (C12): stopped for the move, the service was started again
+    only by failures inside the Claude Code step. A raise in the Codex
+    hooks step or the service step, or a Ctrl-C, left it stopped and the
+    board on HOST LOST until the next login. It is started on every way
+    out, and the stop, which can take up to the 180 s grace, is said
+    first."""
+    x, y = _j(tmp_path, "x"), _j(tmp_path, "y")
+    os.makedirs(x)
+    os.makedirs(y)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", x)
+    calls = _with_service(monkeypatch)
+    assert cli.main(["install"]) == 0
+    calls.clear()
+    capsys.readouterr()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", y)
+    boom = KeyboardInterrupt if where == "interrupt" else RuntimeError
+
+    def fails(*a, **k):
+        raise boom("x")
+    monkeypatch.setattr(cli, "_install_service" if where == "service"
+                        else "_install_codex_hooks", fails)
+    with pytest.raises(boom):
+        cli.main(["install"])
+    names = [c[0] for c in calls]
+    assert names == ["stop", "start"]
+    assert "Stopping the background service (up to 3 minutes)" \
+        in capsys.readouterr().out
+
+
+def test_a_failed_program_swap_restarts_only_a_service_it_stopped(
+        tmp_path, monkeypatch, capsys):
+    """Item 11 (C13): after a download whose self-test failed, install
+    called restart_service() on every platform. On macOS and Linux,
+    where halt_service() stops nothing, that was `launchctl kickstart -k`
+    of a healthy daemon -- during a firmware write, the -k CLAUDE.md warns
+    against -- just after "Nothing else was changed"."""
+    calls = _with_service(monkeypatch)
+    monkeypatch.setattr(cli, "_frozen", lambda: True)
+    monkeypatch.setattr(cli, "_self_path",
+                        lambda: _j(tmp_path, "dl", "blink"))
+    os.makedirs(_j(tmp_path, "dl"))
+    from pc import update
+    monkeypatch.setattr(update, "swap_in", lambda *a: (False, "bad"))
+    assert cli.main(["install"]) == 1
+    assert [c[0] for c in calls] == ["halt"]
+
+    # Where halt does stop it (Windows), it is started again.
+    calls.clear()
+    monkeypatch.setattr(_Service, "halt", lambda self: (
+        self._note("halt"), True)[1], raising=False)
+    assert cli.main(["install"]) == 1
+    assert [c[0] for c in calls] == ["halt", "restart"]

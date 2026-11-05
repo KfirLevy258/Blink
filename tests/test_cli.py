@@ -3264,8 +3264,9 @@ def _wsl_desk(monkeypatch, reg, probe=None, running=False):
     monkeypatch.setattr(install_statusline, "remove_wsl_files", fake_rm_files)
     monkeypatch.setattr(cli, "restart_service",
                         lambda: calls.append(("restart",)) or "restarted")
+    # True, as a Windows halt that stopped the daemon answers.
     monkeypatch.setattr(cli, "halt_service",
-                        lambda: calls.append(("halt",)))
+                        lambda: calls.append(("halt",)) or True)
 
     def fake_run_in(home):
         # What status reads settings.json through inside a running

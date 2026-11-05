@@ -1362,7 +1362,7 @@ def test_halt_does_nothing_off_windows(home, monkeypatch, platform):
     killed = []
     monkeypatch.setattr(cli, "_kill_recorded_daemon", lambda: killed.append("pid"))
 
-    assert cli.backend().halt() is None
+    assert cli.backend().halt() is False
     assert r.calls == []
     assert killed == []
 
@@ -1382,5 +1382,5 @@ def test_halt_service_never_raises(home, monkeypatch):
             raise RuntimeError("schtasks is not on this machine")
 
     monkeypatch.setattr(cli, "backend", lambda: Boom())
-    assert cli.halt_service() is None
+    assert cli.halt_service() is False
     assert reached, "the swallow must be around a halt that actually ran"
