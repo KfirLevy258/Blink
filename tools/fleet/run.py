@@ -75,6 +75,7 @@ import ipaddress
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1007,6 +1008,25 @@ def _utm_worked(done):
     return "error" not in said and "cannot be found" not in said
 
 
+def _ignore_interrupt():
+    """Ignore SIGINT; the handler it replaced, or None where it cannot be
+    set (not the main thread). Children started meanwhile inherit the
+    ignore."""
+    try:
+        return signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (ValueError, OSError):
+        return None
+
+
+def _restore_interrupt(previous):
+    if previous is None:
+        return
+    try:
+        signal.signal(signal.SIGINT, previous)
+    except (ValueError, OSError):
+        pass
+
+
 class Bench:
     """This Mac's end of a VM run: its service, and the board's handoffs.
 
@@ -1084,6 +1104,12 @@ class Bench:
         out, and starting a service that is already running costs nothing,
         while not starting one that was stopped leaves this Mac dark.
         """
+        # Held BEFORE the stop is attempted: a Ctrl-C while launchctl runs
+        # can come after the bootout was done, and release() must then
+        # still start the service. Assigned after, as it was, the
+        # interrupt left held False, release() returned at once, and the
+        # board's daemon stayed unloaded on a desk someone works at.
+        self.held = True
         problems, skipped = self._service("stop")
         self.held = not skipped
         self.problems = [f"No VM was handed the board. {p}"
@@ -1100,7 +1126,18 @@ class Bench:
         if not self.held:
             return owed
         self.held = False
-        problems, _ = self._service("start")
+        # With Ctrl-C ignored while it runs, here and in the child it
+        # starts: a terminal sends the signal to the whole foreground
+        # group, so a second Ctrl-C (an operator watching a handback hang)
+        # killed `tests.fleet.service start` between its bootstrap and its
+        # kickstart, or this process before it began, and the service was
+        # left registered but idle or not registered at all. The start is
+        # a few seconds; it is not a place to stop.
+        previous = _ignore_interrupt()
+        try:
+            problems, _ = self._service("start")
+        finally:
+            _restore_interrupt(previous)
         return owed + [f"{p} The board on this Mac will stay dark until it"
                        f" is started (blink install puts it back)."
                        for p in problems]

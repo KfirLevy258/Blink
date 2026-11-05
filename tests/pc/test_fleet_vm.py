@@ -648,6 +648,44 @@ def test_the_service_comes_back_when_the_run_is_interrupted(tmp_path):
     assert "disconnect" in runner.kinds
 
 
+def test_a_ctrl_c_while_the_service_is_being_stopped_still_starts_it(
+        tmp_path):
+    """The bootout may have happened before the interrupt landed. hold()
+    used to record "held" only after the stop returned, so release() did
+    nothing and the board's daemon stayed unloaded."""
+    (tmp_path / "wd").mkdir()
+    runner = VmRunner(local_workdir=tmp_path / "wd",
+                      fail={"hold": KeyboardInterrupt()})
+    with pytest.raises(KeyboardInterrupt):
+        fleet_run.main(["--inventory", str(_vm_inventory(tmp_path)),
+                        "--state", str(tmp_path / "s.json")], runner=runner,
+                       ask=lambda p: None, interactive=False,
+                       leases=tmp_path / "none")
+    assert runner.kinds[-1] == "release"
+
+
+def test_the_service_is_started_with_ctrl_c_ignored_and_it_is_restored(
+        tmp_path):
+    """A second Ctrl-C reaches the whole foreground group, `start`'s child
+    included. Ignored while it runs; the handler is put back after."""
+    import signal
+    seen = []
+
+    class Watching(VmRunner):
+        def __call__(self, cmd, **kw):
+            if "tests.fleet.service" in " ".join(cmd) and cmd[-1] == "start":
+                seen.append(signal.getsignal(signal.SIGINT))
+            return super().__call__(cmd, **kw)
+
+    before = signal.getsignal(signal.SIGINT)
+    runner = Watching()
+    bench = _bench(runner)
+    assert bench.hold() == []
+    assert bench.release() == []
+    assert seen == [signal.SIG_IGN]
+    assert signal.getsignal(signal.SIGINT) == before
+
+
 def test_a_second_ctrl_c_ends_the_handback_but_not_the_service_start(
         tmp_path, capsys):
     """What docs/fleet-testing.md says a second Ctrl-C does, pinned. The
