@@ -86,18 +86,13 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**3984 passing, 1 skipped** (os.startfile, Windows only) as of 2026-11-05, on
-macOS, on the pr3-combined tree after the evidence-based folder ranking. The
-Windows figure below is from the tree at 8b27044, before the empty-target
-change and before the ranking rewrite, and has not been re-run on this one:
-Windows (ARM64 VM, a git-archive zip expanded into a
-fresh folder) the same day: 3544 passed and 408 skipped, with one failure in
-each of two full runs, a different loopback-reset test each time
-(`test_a_refused_request_is_not_counted`,
-`test_no_write_is_taken_without_the_token`). Neither failed in three re-runs
-of both theme files, where the known `test_an_oversize_body_is_refused` reset
-once instead. The VM was three times slower than the day before (510 s
-against 160 s). Ubuntu
+**3986 passing, 1 skipped** (os.startfile, Windows only) as of 2026-11-05, on
+macOS, on the pr3-combined tree after the evidence-based folder
+ranking and the one-answer status run. Windows (ARM64 VM, a git-archive zip
+of the same tree expanded into a fresh folder) the same day: 3568 passed and
+408 skipped, with one failure, `test_theme_ended.py::test_a_refused_request_is_not_counted`
+(a loopback WinError 10053 reset); the file alone passed on re-run, 8 passed
+and 1 skipped. The VM full run took 510 s against 153 s on the Mac. Ubuntu
 (Docker, x86_64) was last run on 2026-11-01, on an earlier tree: 3661 passed
 and 198 skipped. Two one-off failures were seen on 2026-11-01 on earlier trees
 and passed on every re-run:
