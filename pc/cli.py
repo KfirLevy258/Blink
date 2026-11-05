@@ -533,13 +533,19 @@ def desktop_app_installed() -> bool:
     machines that never ran Desktop, and it survives an uninstall -- on
     Linux, where there is no Desktop, it can only be such a leftover. Local
     Storage is written by the app's own browser engine and nothing else
-    (review, 2026-10-19).
+    (review, 2026-10-19). IndexedDB is written by that same engine and
+    nothing else, and the folder resolver admits a folder on either, so this
+    asks for either: a folder admitted on IndexedDB alone used to print "not
+    installed" beside "data found in the Store package folder" (review of
+    PR #3, 2026-11-05).
     """
-    from pc import desktop_local_storage
+    from pc import desktop_idb, desktop_local_storage
     try:
-        # The "Local Storage" folder, one above the leveldb store: the
-        # Windows measurement saw the folder, not what was inside it.
-        return os.path.isdir(os.path.dirname(desktop_local_storage.store_path()))
+        # The "Local Storage" and "IndexedDB" folders, one above each
+        # leveldb store: the Windows measurement saw the folders, not what
+        # was inside them.
+        return any(os.path.isdir(os.path.dirname(path)) for path in (
+            desktop_local_storage.store_path(), desktop_idb.store_path()))
     except Exception:
         return False
 
@@ -4332,28 +4338,14 @@ def _source_lines_desktop(desk, folder, now):
         # a report has to name the folder actually read.
         print(f"            data found in the Store package folder:"
               f" {folder.path}")
-    if folder.ignored:
-        # A marker and its folder are there, but Roaming was written more
-        # recently -- the exe build back in use. Without this line the
-        # report reads like a plain install, and "why is it reading Roaming
-        # when I have Claude-Data?" has no answer in it.
-        print("            Store build marker ignored, Roaming is newer")
-    if folder.package_ignored:
-        # The same for a package folder with no marker: it holds data, but
-        # Roaming is fresher, so Roaming is read.
-        print("            Store package folder ignored, Roaming is newer")
-    if folder.marker_passed_over:
-        # A package folder beat a marker's data folder that exists. Without
-        # this line the report names the package and never mentions that a
-        # Claude-Data target is there (review, 2026-11-04).
-        print("            Store build marker ignored, package folder is"
-              " newer")
-    if folder.package_skipped:
-        # The mirror: a package folder still holds data, but a marker in it
-        # points at data that exists, so the folder is the copy Desktop
-        # moved away from and is not read.
-        print("            Store package folder skipped, its marker says the"
-              " data moved")
+    for older in folder.not_read:
+        # A folder that holds a usage cache and lost to a newer one. Said by
+        # path, so a report never reads like the only copy was the one used.
+        # Folders with no cache are not here: they are only places looked
+        # at (_print_other_places_looked).
+        print(f"            older copy not read: {older}")
+    if folder.resolve_failed:
+        print("            folder lookup failed, Roaming used as a fallback")
 
 
 def _print_other_places_looked(folder):
@@ -4364,12 +4356,15 @@ def _print_other_places_looked(folder):
     that sent us looking at Roaming. Every data folder the resolver tried is
     listed, as the usage-cache path it wanted, and when no Store package
     folder exists at all that is said too, with where it looked. Off Windows
-    `folder.looked` is empty and nothing prints.
+    `folder.looked` is empty and nothing prints. A folder holding a cache is
+    not "looked at" with nothing found: it is `not_read`, and the status row
+    says so on its own line.
     """
     from pc import desktop_paths
     cache = desktop_paths.USAGE_CACHE_NAME
     first = os.path.normcase(os.path.normpath(folder.path))
-    seen = {first}
+    seen = {first} | {os.path.normcase(os.path.normpath(p))
+                      for p in folder.not_read}
     for where in folder.looked:
         key = os.path.normcase(os.path.normpath(where))
         if key in seen:
