@@ -21,6 +21,12 @@ def _no_system_claude(monkeypatch, tmp_path):
                         (str(tmp_path / "no-system-bin"),))
 
 
+# Where the stand-in find_claude says claude is. Absolute on this OS, since
+# remember_claude keeps abspath(exe): a bare "/x/claude" is kept on Windows
+# as C:\x\claude, and four tests compared it with "/x/claude" there.
+CLAUDE = os.path.abspath(os.path.join(os.sep, "x", "claude"))
+
+
 def _bh():
     return cli.blink_home()
 
@@ -43,7 +49,7 @@ def _native():
 
 @pytest.fixture
 def claude_found(monkeypatch):
-    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    monkeypatch.setattr(ur, "find_claude", lambda home: CLAUDE)
 
 
 def _work(monkeypatch, work):
@@ -235,7 +241,7 @@ def test_install_yes_records_where_claude_is(monkeypatch, claude_found):
     _tty(monkeypatch, [""])
     _work(monkeypatch, False)
     assert cli._install_refresh_step(_native()) == "on"
-    assert ur.recorded_claude(_bh()) == "/x/claude"
+    assert ur.recorded_claude(_bh()) == CLAUDE
 
 
 @pytest.mark.parametrize("answers,tty", [(["n"], True), ([], False)])
@@ -253,12 +259,12 @@ def test_reinstall_already_on_records_it_again(monkeypatch, claude_found):
     user_config.put(_bh(), ur.SETTING, True)
     _tty(monkeypatch, [])
     assert cli._install_refresh_step(_native()) == "on"
-    assert ur.recorded_claude(_bh()) == "/x/claude"
+    assert ur.recorded_claude(_bh()) == CLAUDE
 
 
 def test_config_on_records_where_claude_is(monkeypatch, claude_found):
     assert cli.main(["config", "usage-refresh", "on"]) == 0
-    assert ur.recorded_claude(_bh()) == "/x/claude"
+    assert ur.recorded_claude(_bh()) == CLAUDE
 
 
 def test_config_off_records_nothing(monkeypatch, claude_found):
@@ -271,7 +277,7 @@ def test_update_records_it_for_someone_already_on(monkeypatch, claude_found):
     user_config.put(_bh(), ur.SETTING, True)
     _tty(monkeypatch, [], tty=False)
     assert cli._update_refresh_question() == ""
-    assert ur.recorded_claude(_bh()) == "/x/claude"
+    assert ur.recorded_claude(_bh()) == CLAUDE
 
 
 def test_status_says_when_the_daemon_found_no_claude():

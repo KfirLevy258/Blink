@@ -25,16 +25,54 @@ ZERO = json.dumps({"type": "result", "subtype": "success", "is_error": False,
                    "result": "x"})
 
 
-def _fake_claude(tmp_path, stdout, exit_code=0, sleep=0):
+WIN = sys.platform == "win32"
+# The name find_claude looks for in a folder it searches: the native
+# installer's claude.exe on Windows, a plain `claude` everywhere else.
+CLAUDE = "claude.exe" if WIN else "claude"
+
+
+def _same(a, b):
+    # shutil.which on Windows names a hit with PATHEXT's spelling, so the
+    # fake written as claude.cmd comes back as claude.CMD.
+    return os.path.normcase(a) == os.path.normcase(b)
+
+
+def _fake_claude(tmp_path, stdout, exit_code=0, sleep=0, config=None):
+    """A stand-in claude: records its arguments, folder and BLINK_REFRESH
+    in rec.txt, writes `config` (path, text) when given, as a logged-in
+    /usage rewrites ~/.claude.json, then prints `stdout` and exits.
+
+    The work is a Python script, started by a `claude` shell script on
+    POSIX and by a claude.cmd on Windows, so run_once reaches the same
+    CreateProcess a customer's claude does (npm's shim is a claude.cmd).
+    It was a /bin/sh script alone until 2026-11-05, when the Windows VM's
+    suite failed nineteen tests here: Windows cannot start a shell script,
+    so every run was an OSError, FAILED, and no run path had been tested
+    on Windows at all."""
     d = tmp_path / "fakebin"
     d.mkdir(exist_ok=True)
     rec = tmp_path / "rec.txt"
-    p = d / "claude"
-    p.write_text("#!/bin/sh\n"
-                 f"printf '%s\\n' \"$*\" \"$PWD\" \"$BLINK_REFRESH\" > '{rec}'\n"
-                 + (f"sleep {sleep}\n" if sleep else "")
-                 + f"cat <<'EOF'\n{stdout}\nEOF\nexit {exit_code}\n")
-    p.chmod(0o755)
+    n = len(list(d.glob("fake*.py")))
+    script = d / f"fake{n}.py"
+    script.write_text(
+        "import os, sys, time\n"
+        f"with open({str(rec)!r}, 'w', encoding='utf-8') as f:\n"
+        "    f.write('\\n'.join([' '.join(sys.argv[1:]), os.getcwd(),\n"
+        "                       os.environ.get('BLINK_REFRESH', '')]) + '\\n')\n"
+        + (f"with open({config[0]!r}, 'w', encoding='utf-8') as f:\n"
+           f"    f.write({config[1]!r})\n" if config else "")
+        + (f"time.sleep({sleep})\n" if sleep else "")
+        + f"sys.stdout.write({stdout + chr(10)!r})\n"
+        f"sys.exit({exit_code})\n", encoding="utf-8")
+    if WIN:
+        # One wrapper per fake, as on POSIX; a later fake replaces it.
+        p = d / "claude.cmd"
+        p.write_text(f'@echo off\n"{sys.executable}" "{script}" %*\n'
+                     "exit /b %ERRORLEVEL%\n")
+    else:
+        p = d / "claude"
+        p.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{script}' \"$@\"\n")
+        p.chmod(0o755)
     return str(p), rec
 
 
@@ -134,12 +172,12 @@ def test_find_claude_on_path_then_local_bin(tmp_path, monkeypatch):
     (home / ".local" / "bin").mkdir(parents=True)
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     assert find_claude(str(home)) is None
-    local = home / ".local" / "bin" / "claude"
+    local = home / ".local" / "bin" / CLAUDE
     local.write_text("x")
     assert find_claude(str(home)) == str(local)
     exe, _ = _fake_claude(tmp_path, ZERO)
     monkeypatch.setenv("PATH", os.path.dirname(exe))
-    assert find_claude(str(home)) == exe
+    assert _same(find_claude(str(home)), exe)
 
 
 def test_find_claude_windows_exe(tmp_path, monkeypatch):
@@ -368,21 +406,17 @@ class _Watch:
 
 
 def _on_path(monkeypatch, exe):
-    # In front, not instead: the fake is a shell script and needs cat.
+    # In front, not instead, so the rest of PATH stays as it was.
     monkeypatch.setenv("PATH", os.path.dirname(exe) + os.pathsep
                        + os.environ.get("PATH", ""))
 
 
-def _moving_claude(tmp_path, stdout, fetched_at):
+def _moving_claude(tmp_path, stdout, fetched_at, doc=None):
     """A fake claude that answers `stdout` and rewrites ~/.claude.json with
     the cache fetched at `fetched_at`, as a logged-in /usage does."""
-    exe, rec = _fake_claude(tmp_path, stdout)
     cfg = pathlib.Path(os.environ["HOME"]) / ".claude.json"
-    body = json.dumps(_config_doc(fetched_at))
-    text = pathlib.Path(exe).read_text()
-    pathlib.Path(exe).write_text(text.replace(
-        "cat <<'EOF'", f"cat > '{cfg}' <<'CFG'\n{body}\nCFG\ncat <<'EOF'", 1))
-    return exe, rec
+    body = json.dumps((doc or _config_doc)(fetched_at))
+    return _fake_claude(tmp_path, stdout, config=(str(cfg), body))
 
 
 @pytest.mark.allow_claude_launch
@@ -1187,15 +1221,23 @@ def test_a_bad_new_field_is_a_fresh_state(tmp_path, run):
 
 # --- final review, Important 2: finding claude without the shell's PATH ----
 
-def _exe_at(d, name="claude"):
+def _exe_at(d, name=CLAUDE):
     d.mkdir(parents=True, exist_ok=True)
     p = d / name
     p.write_text("")
     return str(p)
 
 
+# Homebrew, a user npm prefix and nvm are POSIX installs: find_claude looks
+# in them off Windows only, where npm's claude.cmd lands in %APPDATA%\npm,
+# which the npm installer puts on the PATH that is searched first.
+POSIX_ONLY = pytest.mark.skipif(
+    WIN, reason="a POSIX installer's folder; not searched on Windows")
+
+
 @pytest.mark.parametrize("where", [
-    (".claude", "local"), (".npm-global", "bin")])
+    (".claude", "local"),
+    pytest.param((".npm-global", "bin"), marks=POSIX_ONLY)])
 def test_find_claude_in_the_other_installers_folders(tmp_path, monkeypatch,
                                                      where):
     home = tmp_path / "h"
@@ -1204,6 +1246,7 @@ def test_find_claude_in_the_other_installers_folders(tmp_path, monkeypatch,
     assert find_claude(str(home)) == exe
 
 
+@POSIX_ONLY
 def test_find_claude_in_homebrew(tmp_path, monkeypatch):
     home = tmp_path / "h"
     brew = tmp_path / "opt" / "homebrew" / "bin"
@@ -1216,6 +1259,7 @@ def test_find_claude_in_homebrew(tmp_path, monkeypatch):
     assert find_claude(str(home)) == local
 
 
+@POSIX_ONLY
 def test_find_claude_takes_the_newest_nvm_node(tmp_path, monkeypatch):
     home = tmp_path / "h"
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
@@ -1242,19 +1286,22 @@ def test_the_recorded_path_comes_first_and_a_gone_one_falls_back(
     assert ur.recorded_claude(str(blink)) == rec
     assert ur.locate_claude(str(blink), str(home)) == rec
     os.remove(rec)
-    assert ur.locate_claude(str(blink), str(home)) == exe
+    assert _same(ur.locate_claude(str(blink), str(home)), exe)
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     assert ur.locate_claude(str(blink), str(home)) == local
 
 
 def test_remember_claude_keeps_the_rest_of_the_file(tmp_path):
     home = str(tmp_path)
+    # Absolute on this OS: remember_claude keeps abspath(exe), and on
+    # Windows "/opt/homebrew/bin/claude" comes back as C:\opt\homebrew\...
+    exe = str(tmp_path / "bin" / CLAUDE)
     save_state(home, State(fails=2))
     ur.save_ask(home, ur.AskState(times=1))
-    ur.remember_claude(home, "/opt/homebrew/bin/claude")
+    ur.remember_claude(home, exe)
     assert load_state(home).fails == 2 and ur.load_ask(home).times == 1
     save_state(home, State(fails=3))        # and the other way round
-    assert ur.recorded_claude(home) == "/opt/homebrew/bin/claude"
+    assert ur.recorded_claude(home) == exe
 
 
 @pytest.mark.parametrize("junk", [3, "", "relative/claude", None])
@@ -1273,8 +1320,11 @@ def test_the_daemon_runs_the_recorded_claude_with_no_path(tmp_path,
     _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
     exe, rec = _moving_claude(tmp_path, ZERO, NOW + 2)
     t = _Watch(tmp_path, monkeypatch)
-    # launchd's own PATH: the shell tools the fake needs, and no claude.
-    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    # The service manager's own PATH, with no claude in it: launchd's, or
+    # on Windows the system folder alone (cmd.exe starts the fake there).
+    monkeypatch.setenv("PATH", os.path.join(os.environ["SystemRoot"],
+                                            "System32")
+                       if WIN else "/usr/bin:/bin:/usr/sbin:/sbin")
     assert ur.find_claude(os.environ["HOME"]) is None
     ur.remember_claude(str(t.blink), exe)
     t.w.tick_once()
@@ -1324,13 +1374,7 @@ def test_a_run_that_moves_an_all_null_cache_is_ok_and_spaced(tmp_path,
     home = pathlib.Path(os.environ["HOME"])
     (home / ".claude.json").write_text(
         json.dumps(_null_cache_doc(NOW - 3600)))
-    exe, rec = _fake_claude(tmp_path, ZERO)
-    body = json.dumps(_null_cache_doc(NOW + 2))
-    text = pathlib.Path(exe).read_text()
-    pathlib.Path(exe).write_text(text.replace(
-        "cat <<'EOF'",
-        f"cat > '{home / '.claude.json'}' <<'CFG'\n{body}\nCFG\ncat <<'EOF'",
-        1))
+    exe, rec = _moving_claude(tmp_path, ZERO, NOW + 2, doc=_null_cache_doc)
     _on_path(monkeypatch, exe)
     t = _Watch(tmp_path, monkeypatch)
     t.w.tick_once()
