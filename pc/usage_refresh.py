@@ -264,6 +264,15 @@ class State:
     # The daemon looked for claude and found it nowhere; `blink status`
     # says so (final review, Important 2).
     missing: bool = False
+    # The last good run made after a real idle reading: when it started,
+    # and the fetch time of the cache it made (None when the cache could
+    # not be read after it). Kept here, not only in the watch's memory, so
+    # a daemon restarted after the run still dates that cache as activity
+    # (RefreshWatch.activity_for; item 8 of the review of 277b81a..4003b0b,
+    # where a restart two minutes after a run let the board doze with the
+    # person at it).
+    proven_start: "float | None" = None
+    proven_fetched: "float | None" = None
 
 
 def _path(blink_home):
@@ -304,8 +313,8 @@ def load_state(blink_home):
                 or not isinstance(s.off_reason, str)
                 or not _finite(s.cleared_at)
                 or not isinstance(s.missing, bool)
-                or not (s.failing_since is None
-                        or _finite(s.failing_since))):
+                or not all(v is None or _finite(v) for v in (
+                    s.failing_since, s.proven_start, s.proven_fetched))):
             return State()
         return s
     except (TypeError, ValueError):
@@ -758,9 +767,12 @@ class RefreshWatch:
         # last_run_at, so Claude Code ran at every tick, and after a cost
         # verdict nothing held it off (review of Task 4, round 1).
         self._mem = None
-        # (start,) of the last good run made after a real idle reading,
-        # for activity_for.
-        self._proven = None
+        # (start, fetched) of the last good run made after a real idle
+        # reading, for activity_for: this process's, or the one the state
+        # file kept from before a restart.
+        st = load_state(blink_home)
+        self._proven = (None if st.proven_start is None
+                        else (st.proven_start, st.proven_fetched))
 
     def tick_once(self):
         """One decision and at most one run. Never raises: a refresh is
@@ -859,7 +871,10 @@ class RefreshWatch:
         p = self._proven
         if p is None:
             return None
-        started, = p
+        started, fetched = p
+        if fetched is not None:
+            # The cache that run made, by its own fetch time.
+            return started if fetched_at == fetched else None
         if started - MOVED_SLACK_S <= fetched_at <= started + RUN_TIMEOUT_S:
             return started
         return None
@@ -881,9 +896,12 @@ class RefreshWatch:
         if read.cleared_at > mem.cleared_at:
             return dataclasses.replace(read, last_run_at=last)
         base = mem if mem.last_run_at >= read.last_run_at else read
+        proven = max((mem, read), key=lambda x: x.proven_start or 0.0)
         return State(last, base.fails, base.failing_since,
                      mem.off_reason or read.off_reason,
-                     cleared_at=mem.cleared_at, missing=base.missing)
+                     cleared_at=mem.cleared_at, missing=base.missing,
+                     proven_start=proven.proven_start,
+                     proven_fetched=proven.proven_fetched)
 
     def _keep(self, state):
         """Hold `state` here, then write it. The type of a failed write is
@@ -919,6 +937,7 @@ class RefreshWatch:
             verdict = Verdict.FAILED
             raised.append(type(e).__name__)
         unread = False
+        moved = None
         if verdict is Verdict.OK:
             # A logged-out Claude Code answers -p /usage with a zero-cost
             # success too, and writes no cache (measured 2026-11-05). Only a
@@ -948,10 +967,12 @@ class RefreshWatch:
             state = dataclasses.replace(fresh, missing=False)
             if verdict is not Verdict.COST:
                 unread = True
-        if proven and verdict is Verdict.OK:
-            self._proven = (started,)
         new = (inconclusive(state, started) if unread
                else record(state, verdict, started))
+        if proven and verdict is Verdict.OK:
+            self._proven = (started, moved)
+            new = dataclasses.replace(new, proven_start=started,
+                                      proven_fetched=moved)
         self._mem = new
         if new.off_reason and not state.off_reason:
             # The setting first, each write in its own try: either one

@@ -1911,3 +1911,49 @@ def test_a_reading_dated_ahead_is_not_somebody_at_the_computer():
     assert ur.due(now, enabled=True, native=True, board_alive=True,
                   idle_s=0.0, cache_at=None, other_at=ahead,
                   state=ur.State()) is True
+
+
+def _spend_frame_at(fetched, active):
+    from pc.providers import base
+    return _frame(base.SPEND_SRC_ID, fetched, plan=base.PLAN_SPEND,
+                  spend_usd=12.34, spend_limit_usd=250.0, session_pct=4.9,
+                  active_at=active)
+
+
+@pytest.mark.parametrize("render", [None, 3 * 3600])
+def test_the_bus_credits_the_spend_page_of_a_proven_refresh(render):
+    """Item 8 of the /code-review max of 277b81a..4003b0b (verify/v9/c26):
+    the credit was for the windows frame only, so on a seat billed by
+    usage a proven run kept nothing awake, the feature's main audience
+    included. The spend page from the same run's /usage is credited too,
+    and never dated older than its own last render."""
+    from pc.providers import base
+    active = base.NO_CONTACT if render is None else NOW - render
+    bus = _usage_bus([_spend_frame_at(NOW - 90, active)])
+    bus.credit_refresh(lambda fetched: NOW - 100 if fetched == NOW - 90
+                       else None)
+    assert bus.poll()["active_age_s"] == 100
+    newer = _usage_bus([_spend_frame_at(NOW - 90, NOW - 10)])
+    newer.credit_refresh(lambda fetched: NOW - 100)
+    assert newer.poll()["active_age_s"] == 10
+
+
+@pytest.mark.allow_claude_launch
+def test_a_restart_keeps_the_credit_for_the_cache_its_run_made(
+        tmp_path, monkeypatch):
+    """Item 8 (verify/v11/s1_restart.py): the proven run lived in the
+    process's memory, so a daemon restarted two minutes after one (an
+    update, a nudged cable is not it, a login) took the cache that run made
+    for nobody there and the board dozed with the person at it. The last
+    proven run is kept in usage-refresh.json's "run" half."""
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    exe, rec = _moving_claude(tmp_path, ZERO, NOW + 2)
+    _on_path(monkeypatch, exe)
+    t = _Watch(tmp_path, monkeypatch, idle_s=60.0)
+    t.w.tick_once()
+    assert t.w.activity_for(NOW + 2) == NOW
+    again = _Watch(tmp_path, monkeypatch, clock=NOW + 120, idle_s=60.0)
+    assert again.w.activity_for(NOW + 2) == NOW
+    assert again.w.activity_for(NOW + 3) is None
+    # And the file's other halves still load.
+    assert again.state().last_run_at == NOW

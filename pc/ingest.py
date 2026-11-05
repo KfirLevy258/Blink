@@ -584,14 +584,20 @@ class IngestionBus:
             return frames
         out = []
         for f in frames:
+            # The spend page too, dated by the same /usage when that is the
+            # newest thing it rests on (its observed_at): on a seat billed
+            # by usage a proven run kept nothing awake (the /code-review
+            # max of 277b81a..4003b0b, item 8). Never older than the
+            # frame's own activity, a render's.
             if (f is not None and f.provider == claude_cli.PROVIDER_ID
-                    and f.src == base.USAGE_SRC_ID):
+                    and f.src in (base.USAGE_SRC_ID, base.SPEND_SRC_ID)):
                 try:
                     at = fn(f.observed_at)
                 except Exception:
                     at = None
                 if at is not None:
-                    f = dataclasses.replace(f, active_at=min(at, f.observed_at))
+                    f = dataclasses.replace(f, active_at=max(
+                        f.active_at, min(at, f.observed_at)))
             out.append(f)
         return out
 
