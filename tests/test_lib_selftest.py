@@ -245,3 +245,49 @@ def test_release_sh_refuses_trace_and_pilot_before_publishing():
         guard = first(rf"\s*{fn}\b")
         assert build < guard < publish, fn
         assert re.search(rf'{fn} "\$CFG" "\$BIN" \|\| exit 1', lines[guard])
+
+
+# --- the three WiFi-update test knobs (spec S9, Task 5.1) ---------------------
+
+KNOBS = [("NEVER_HEALTHY", b"[test] never healthy\n"),
+         ("CONFIRM_FAILS", b"[test] confirm fails\n"),
+         ("HANG_AFTER_BOOT", b"[test] hang after boot\n")]
+
+
+def _knobs(tmp_path, config, image):
+    cfg = tmp_path / ".config"
+    img = tmp_path / "zephyr.signed.bin"
+    if config is not None:
+        cfg.write_text(config, encoding="utf-8")
+    if image is not None:
+        img.write_bytes(image)
+    return subprocess.run(
+        ["sh", "-c", '. "$0"; blink_refuse_test_knobs "$1" "$2"',
+         str(LIB), str(cfg), str(img)],
+        capture_output=True, text=True, timeout=30)
+
+
+def test_a_build_without_knobs_passes(tmp_path):
+    r = _knobs(tmp_path, "# CONFIG_BLINK_TEST_NEVER_HEALTHY is not set\n",
+               _image(b"[ota] image confirmed\n"))
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("knob,line", KNOBS)
+def test_each_knob_refuses_by_config_and_by_image(tmp_path, knob, line):
+    r = _knobs(tmp_path, f"CONFIG_BLINK_TEST_{knob}=y\n", _image())
+    assert r.returncode == 1 and f"CONFIG_BLINK_TEST_" in r.stderr
+    r = _knobs(tmp_path, PLAIN_CONFIG, _image(line))
+    assert r.returncode == 1 and "[test] boot line" in r.stderr
+
+
+def test_a_missing_config_or_image_refuses(tmp_path):
+    assert _knobs(tmp_path, None, _image()).returncode == 1
+    (tmp_path / "other").mkdir()
+    assert _knobs(tmp_path / "other", PLAIN_CONFIG, None).returncode == 1
+
+
+def test_the_knob_lines_are_the_firmwares_own_words():
+    text = (ROOT / "firmware" / "src" / "main.c").read_text(encoding="utf-8")
+    for _knob, line in KNOBS:
+        assert line.decode().strip() in text

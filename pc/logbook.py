@@ -319,13 +319,16 @@ class Journal:
 # boot follows" on the next boot.
 CONSOLE_MESSAGES = tuple(sorted((
     # [ota] -- firmware/src/ota.c, ui_settings.c, main.c
-    "[ota] slot1 write failed",                                # ota.c:175
-    "[ota] bad redirect target",                               # ota.c:344
-    "[ota] too many redirects for",                            # ota.c:352
-    "[ota] downloading",                                       # ota.c:412
-    "[ota] transfer ended",                                    # ota.c:436
-    "[ota] truncated",                                         # ota.c:466
-    "[ota] sha256 mismatch",                                   # ota.c:480
+    "[ota] slot1 write failed",                                # ota_net.c
+    "[ota] stream aborted",                                    # ota_net.c
+    "[ota] confirm failed",                                    # main.c
+    "[ota] verified and marked pending",                       # ota_net.c
+    "[test] never healthy",                                    # main.c
+    "[test] confirm fails",                                    # main.c
+    "[test] hang after boot",                                  # main.c
+    "[ota] downloading",                                       # ota_net.c
+    "[ota] truncated",                                         # ota_net.c
+    "[ota] sha256 mismatch",                                   # ota_net.c
     "[ota] install not started: the offer changed under the prompt",
     "[ota] install not started: the offer changed under the confirm",
     "[ota] offer shown",                              # ui_settings.c:830
@@ -450,7 +453,7 @@ CONSOLE_EXTERNAL = (
 # its first word is the board's text too.
 CONSOLE_TAGS = frozenset({
     "bl", "boot", "cfg", "fatal", "focus", "mem", "ota", "proto", "sleep",
-    "slide", "swipe", "theme", "time", "touch", "usage", "wifi",
+    "slide", "swipe", "test", "theme", "time", "touch", "usage", "wifi",
 })
 
 BOARD_LINE = "(board line)"

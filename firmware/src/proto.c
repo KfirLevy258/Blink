@@ -32,6 +32,9 @@
 #include <errno.h>
 #include "wl_frame.h"
 #include "wl_server.h"
+#include "ota_net.h"
+#include <zephyr/sys/reboot.h>
+#include "ui_boot.h"
 #endif
 
 #define PROTO_VERSION BLINK_PROTO_VERSION
@@ -400,7 +403,8 @@ bool proto_ota_install(void)
 	 * announces a download that is not happening -- reported 2026-08-21,
 	 * where a USB flash was labelled "Over WiFi".
 	 */
-	ota_ui_set_source(OTA_SRC_USB);
+	ota_ui_set_source(link_active(k_uptime_get()) == LINK_WIFI ?
+			  OTA_SRC_WIFI : OTA_SRC_USB);
 
 	/*
 	 * The breadcrumb is NOT written here, at consent. It is written when
@@ -423,6 +427,162 @@ bool proto_ota_install(void)
 	emit(buf);
 	return true;
 }
+
+#if defined(CONFIG_BLINK_WIFI_LINK)
+/*
+ * --- OTA over the WiFi session (spec S9) ---
+ *
+ * The board writes its own slot 1 here. Everything below runs on the main
+ * thread: the network thread only moves the O frames into the ring, and
+ * drain_wifi() hands them to ota_o_sink() in order behind the ota_begin that
+ * precedes them (D34), so a chunk can never be handled before its begin nor
+ * ota_end overtake the last chunk. Nothing here logs a byte or an offset.
+ */
+static uint32_t ota_gen;	/* wl_server_session_gen() the stream began under */
+static uint32_t ota_prev;	/* bytes accepted before the current chunk */
+static uint8_t ota_pct = 255;
+
+static void ota_ack(uint32_t off, const char *err)
+{
+	char buf[96];
+
+	if (err) {
+		snprintf(buf, sizeof(buf),
+			 "{\"t\":\"ota_ack\",\"v\":%d,\"off\":%u,\"err\":\"%s\"}",
+			 PROTO_VERSION, (unsigned)off, err);
+	} else {
+		snprintf(buf, sizeof(buf),
+			 "{\"t\":\"ota_ack\",\"v\":%d,\"off\":%u}",
+			 PROTO_VERSION, (unsigned)off);
+	}
+	emit(buf);
+}
+
+/* The panel's own sentence says the current version keeps running (the
+ * DOWNLOADING -> FAILED notice in ui_settings.c); this is the reason under it. */
+static void ota_wifi_failed(const char *why)
+{
+	ota_ui_set(OTA_UI_FAILED, NULL, 0);
+	ota_ui_set_error(why);
+}
+
+static void ota_wifi_begin(const char *json)
+{
+	char v[16];
+	struct ota_ui snap;
+
+	ota_ui_get(&snap);
+	/* Only a stream the owner consented to, for the version on offer. Size
+	 * and sha256 are the ota_avail manifest's, never the daemon's here. */
+	if (!ota_staged || snap.st != OTA_UI_DOWNLOADING ||
+	    ota_ui_source() != OTA_SRC_WIFI ||
+	    !msg_get_str(json, "version", v, sizeof(v)) ||
+	    strcmp(v, ota_m.version) != 0) {
+		ota_ack(0, "refused");
+		return;
+	}
+	int rc = ota_net_begin(&ota_m);
+
+	if (rc != 0) {
+		ota_ack(0, rc == -EBUSY ? "unconfirmed" : "refused");
+		return;
+	}
+	ota_gen = wl_server_session_gen();
+	ota_prev = 0;
+	ota_pct = 255;
+	printk("[proto] ota: writing %s\n", v);
+	ota_ack(0, NULL);
+}
+
+/* Anything that ends a stream the board did not end itself. */
+static void ota_wifi_gone(void)
+{
+	ota_net_abort();
+	ota_wifi_failed("connection lost");
+}
+
+/* O frame: offset[4, big-endian] || image bytes. With no stream open (one
+ * just aborted, its window still in flight) it is dropped: the daemon was
+ * already told with an err ack, or its session is gone. */
+static void ota_o_sink(const uint8_t *body, size_t n)
+{
+	if (!ota_net_active()) {
+		return;
+	}
+	if (wl_server_session_gen() != ota_gen) {
+		ota_wifi_gone();
+		return;
+	}
+	if (n < 5) {
+		ota_wifi_failed("bad frame");
+		ota_net_abort();
+		ota_ack(0, "failed");
+		return;
+	}
+
+	uint32_t off = (uint32_t)body[0] << 24 | (uint32_t)body[1] << 16 |
+		       (uint32_t)body[2] << 8 | body[3];
+	int got = ota_net_chunk(off, body + 4, n - 4);
+
+	if (got < 0) {
+		/* ota_net_chunk has already dropped the stream. */
+		ota_wifi_failed("image refused");
+		ota_ack(0, "failed");
+		return;
+	}
+	if (ota_ui_source() == OTA_SRC_WIFI && ota_m.size != 0) {
+		uint8_t pct = (uint8_t)((uint64_t)got * 100 / ota_m.size);
+
+		if (pct != ota_pct) {
+			ota_pct = pct;
+			ota_ui_set(OTA_UI_DOWNLOADING, NULL, pct);
+		}
+	}
+	if (ota_net_should_ack(ota_prev, (uint32_t)got, ota_m.size)) {
+		ota_ack((uint32_t)got, NULL);
+	}
+	ota_prev = (uint32_t)got;
+}
+
+static void ota_wifi_end(void)
+{
+	if (!ota_net_active() || wl_server_session_gen() != ota_gen) {
+		ota_net_abort();
+		ota_wifi_failed("connection lost");
+		return;
+	}
+	if (ota_net_end(&ota_m) != OTA_OK) {
+		ota_wifi_failed("image check failed");
+		ota_ack(0, "failed");
+		return;
+	}
+
+	char trail[CFG_OTA_VER_MAX];
+
+	/* Here, not at ota_begin: a stream that is cut leaves no breadcrumb to
+	 * report a revert that never happened. */
+	whatsnew_trail(BLINK_FW_VERSION, ota_m.version, trail, sizeof(trail));
+	cfg_set_ota_state(1, trail);
+	ota_ui_set(OTA_UI_REBOOTING, &ota_m, 100);
+	k_sleep(K_SECONDS(1));	/* let the panel paint it */
+	ui_boot_mark_intentional_reboot();
+	sys_reboot(SYS_REBOOT_COLD);
+}
+
+/* Once per proto_service(), before the frames are drained, so a replaced
+ * session's stream dies before any frame of the new one is read. */
+static void ota_wifi_service(void)
+{
+	bool was = ota_net_active();
+
+	ota_net_service(link_wifi_must_close(k_uptime_get()),
+			wl_server_session_up(),
+			wl_server_session_gen() != ota_gen);
+	if (was && !ota_net_active()) {
+		ota_wifi_failed("connection lost");
+	}
+}
+#endif /* CONFIG_BLINK_WIFI_LINK */
 
 /* ---- WiFi pairing over the cable (spec S5.3, S6.1) ---------------------- */
 
@@ -1197,6 +1357,12 @@ static void dispatch(const char *json, enum proto_src src)
 		 * whichever way it goes. */
 		char v[16];
 
+#if defined(CONFIG_BLINK_WIFI_LINK)
+		if (src == PROTO_SRC_WIFI) {
+			/* The board writes slot 1 itself; no breadcrumb yet. */
+			ota_wifi_begin(json);
+		} else
+#endif
 		if (msg_get_str(json, "version", v, sizeof(v))) {
 			char trail[CFG_OTA_VER_MAX];
 
@@ -1211,6 +1377,10 @@ static void dispatch(const char *json, enum proto_src src)
 				       sizeof(trail));
 			cfg_set_ota_state(1, trail);
 		}
+#if defined(CONFIG_BLINK_WIFI_LINK)
+	} else if (strcmp(type, "ota_end") == 0 && src == PROTO_SRC_WIFI) {
+		ota_wifi_end();
+#endif
 	} else if (strcmp(type, "ota_resume") == 0) {
 		/*
 		 * The daemon replaced itself mid-update and is picking up an
@@ -1222,7 +1392,8 @@ static void dispatch(const char *json, enum proto_src src)
 				sizeof(ota_m.version))) {
 			printk("[proto] daemon resuming install of %s\n",
 			       ota_m.version);
-			ota_ui_set_source(OTA_SRC_USB);
+			ota_ui_set_source(src == PROTO_SRC_WIFI ? OTA_SRC_WIFI :
+					  OTA_SRC_USB);
 			ota_ui_set(OTA_UI_DOWNLOADING, &ota_m, 0);
 		}
 	} else if (strcmp(type, "ota_none") == 0) {
@@ -1245,6 +1416,10 @@ static void dispatch(const char *json, enum proto_src src)
 	} else if (strcmp(type, "ota_error") == 0) {
 		char why[48] = "";
 
+#if defined(CONFIG_BLINK_WIFI_LINK)
+		/* The daemon gave up on a WiFi stream: drop the flash context. */
+		ota_net_abort();
+#endif
 		ota_staged = false;
 		ota_ui_set(OTA_UI_FAILED, NULL, 0);
 		/* After the state, not before: ota_ui_set() clears the reason
@@ -1402,6 +1577,9 @@ void proto_init(void)
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 	touch_inject_init();
 #endif
+#if defined(CONFIG_BLINK_WIFI_LINK)
+	wl_server_set_sink(WL_T_OTA, ota_o_sink);
+#endif
 	send_hello();
 	last_ping_ms = k_uptime_get();
 }
@@ -1450,6 +1628,7 @@ void proto_service(void)
 	drain_rx();
 	wifi_poll();
 #if defined(CONFIG_BLINK_WIFI_LINK)
+	ota_wifi_service();
 	drain_wifi();
 #endif
 #ifdef CONFIG_BLINK_TOUCH_INJECT

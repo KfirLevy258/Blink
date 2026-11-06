@@ -187,3 +187,47 @@ int wl_crypto_selftest(void)
 {
 	return failing() ? -1 : 0;
 }
+
+/* The streaming hash: the same toy FNV, fed incrementally, so any chunking of
+ * one stream gives one digest. Not SHA-256; the ota_net tests compute their
+ * expected digest through these same three calls. */
+static struct fnv img_fnv;
+static size_t img_len;
+
+int wl_sha256_start(void)
+{
+	if (failing()) {
+		return -ENOMEM;
+	}
+	img_fnv.h = 0xcbf29ce484222325ULL;
+	img_len = 0;
+	return 0;
+}
+
+int wl_sha256_update(const uint8_t *p, size_t n)
+{
+	if (failing()) {
+		return -ENOMEM;
+	}
+	fnv_add(&img_fnv, p, n);
+	img_len += n;
+	return 0;
+}
+
+int wl_sha256_finish(uint8_t out[32])
+{
+	if (failing()) {
+		return -ENOMEM;
+	}
+	for (size_t blk = 0; blk < 4; blk++) {
+		struct fnv f = img_fnv;
+		uint8_t b = (uint8_t)blk;
+
+		fnv_add(&f, &b, 1);
+		fnv_len(&f, img_len);
+		for (int i = 0; i < 8; i++) {
+			out[blk * 8 + i] = (uint8_t)(f.h >> (8 * i));
+		}
+	}
+	return 0;
+}

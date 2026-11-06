@@ -109,6 +109,9 @@ run_one msg_parse    "msg_parse.c"     ""
 # The WiFi scan table: one entry a name, strongest first, at most 20.
 run_one net_link     ""                ""
 run_one ota_parse    "ota_parse.c"     ""
+# The image over the session: ota_net.c unchanged, on a RAM slot 1 and the toy
+# hash. Every abort is driven through ota_net_service, the production trigger.
+run_one ota_net      "ota_net.c ota_parse.c $ROOT/tests/support/flash_img_fake.c $ROOT/tests/support/wl_crypto_fake.c" ""
 run_one sleep_gate   "sleep_gate.c usage_freshness.c" ""
 run_one theme        "theme.c msg_parse.c" "-lm"
 # The one line a verify-only WiFi candidate may send.

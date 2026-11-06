@@ -121,9 +121,12 @@ def test_the_scan_reads_strings_the_way_c_does():
                                  b"one // two"]
 
 
-def test_the_url_board_touch_used_to_lose_is_scanned():
+def test_a_url_in_a_string_is_scanned():
+    # ota_split_url's "https://" literal was the real-file case; the HTTPS half
+    # is gone (Task 5.1), so the synthetic one above is the pin, and this
+    # keeps the scan from going blind on a real file.
     lits = literals((SRC / "ota_parse.c").read_text(encoding="utf-8"), _bt())
-    assert any(l.startswith(b"https://") for l in lits)
+    assert any(b"%u.%u.%u" in l for l in lits)
 
 
 # What C makes of each escape, checked against the compiler where one is

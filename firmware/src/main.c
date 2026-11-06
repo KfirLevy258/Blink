@@ -115,13 +115,41 @@ static void panel_fix_madctl(void)
 /* ---- OTA boot-side: test-boot self-confirm, else MCUboot reverts ---- */
 
 static bool ota_test_boot;
-static bool ota_health;		/* set once usage has arrived over USB */
+static bool ota_health;		/* set once usage has arrived, over either link */
+static int64_t ota_confirm_log_ms;
 static int64_t ota_confirm_deadline;
 static const struct device *wdt;
 static int wdt_chan = -1;
 
+/* The running image has not confirmed itself: slot 1 holds the only way back
+ * and a WiFi update would erase it (D38). ota_net_begin refuses on this. */
+bool ota_unconfirmed(void)
+{
+	return ota_test_boot;
+}
+
+/* usage_view_have_data() is link-agnostic, so usage over WiFi counts. */
+static void ota_mark_healthy(void)
+{
+	if (!IS_ENABLED(CONFIG_BLINK_TEST_NEVER_HEALTHY)) {
+		ota_health = true;
+	}
+}
+
 static void ota_boot_begin(void)
 {
+	/* Bench builds only (firmware/Kconfig). A fixed line each, so the
+	 * binary carries a marker tools/lib_selftest.sh can refuse a release
+	 * for, and the console says which failure window is being exercised. */
+	if (IS_ENABLED(CONFIG_BLINK_TEST_NEVER_HEALTHY)) {
+		printk("[test] never healthy\n");
+	}
+	if (IS_ENABLED(CONFIG_BLINK_TEST_CONFIRM_FAILS)) {
+		printk("[test] confirm fails\n");
+	}
+	if (IS_ENABLED(CONFIG_BLINK_TEST_HANG_AFTER_BOOT)) {
+		printk("[test] hang after boot\n");
+	}
 	if (boot_is_img_confirmed()) {
 		return;
 	}
@@ -155,14 +183,32 @@ static void ota_boot_pump(void)
 		wdt_feed(wdt, wdt_chan);	/* alive != healthy; deadline judges health */
 	}
 	if (ota_health) {
-		boot_write_img_confirmed();
-		ota_test_boot = false;
-		if (wdt_chan >= 0) {
-			wdt_disable(wdt);
-			wdt_chan = -1;
+		/* The return value was never looked at, so a confirm that did
+		 * not land still printed "image confirmed", disarmed the
+		 * watchdog and stopped trying -- and MCUboot reverted at the
+		 * next reset with nothing on the console saying why. On failure:
+		 * say so (once a second, not once a pass), keep the watchdog and
+		 * try again on the next pump. A confirm that never lands then
+		 * ends in the revert it would have ended in anyway. */
+		int rc = IS_ENABLED(CONFIG_BLINK_TEST_CONFIRM_FAILS) ?
+			 -EIO : boot_write_img_confirmed();
+
+		if (rc != 0) {
+			int64_t now = k_uptime_get();
+
+			if (now - ota_confirm_log_ms >= 1000) {
+				ota_confirm_log_ms = now;
+				printk("[ota] confirm failed\n");
+			}
+		} else {
+			ota_test_boot = false;
+			if (wdt_chan >= 0) {
+				wdt_disable(wdt);
+				wdt_chan = -1;
+			}
+			printk("[ota] image confirmed\n");
+			return;
 		}
-		printk("[ota] image confirmed\n");
-		return;
 	}
 	if (k_uptime_get() > ota_confirm_deadline) {
 		printk("[ota] not healthy within 90 s -- rebooting to revert\n");
@@ -264,7 +310,7 @@ static void usb_anim_pump(void)
 {
 	proto_service();
 	if (usage_view_have_data()) {
-		ota_health = true;	/* daemon delivered usage */
+		ota_mark_healthy();	/* daemon delivered usage */
 	}
 	ota_boot_pump();
 }
@@ -332,12 +378,21 @@ static void run_usb(void)
 	 * stale by now; ui_settings.h explains. Throw it away. */
 	ui_settings_drop_pending();
 
+	/* The first panel is up. Spin with interrupts off and the watchdog fed
+	 * by nobody: the unconfirmed image must be reverted by the watchdog, the
+	 * one failure the 90 s deadline cannot reach (bench builds only). */
+	if (IS_ENABLED(CONFIG_BLINK_TEST_HANG_AFTER_BOOT)) {
+		(void)irq_lock();
+		for (;;) {
+		}
+	}
+
 	while (1) {
 		proto_service();
 		heap_restart_if_due();
 
 		if (usage_view_have_data()) {
-			ota_health = true;	/* daemon delivered usage */
+			ota_mark_healthy();	/* daemon delivered usage */
 		}
 		ota_boot_pump();
 		fatal_pump();

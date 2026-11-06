@@ -9,6 +9,13 @@ static int failures;
 #define CK(cond, name) do{ if(cond){printf("PASS: %s\n",name);} \
 	else {printf("FAIL: %s\n",name); failures++;} }while(0)
 
+static void hdr_make(uint8_t *h, uint8_t ma, uint8_t mi, uint16_t rev)
+{
+	memset(h, 0, 64);
+	h[0] = 0x3d; h[1] = 0xb8; h[2] = 0xf3; h[3] = 0x96;	/* 0x96f3b83d LE */
+	h[20] = ma; h[21] = mi; h[22] = rev & 0xff; h[23] = rev >> 8;
+}
+
 int main(void)
 {
 	struct ota_manifest m;
@@ -33,14 +40,39 @@ int main(void)
 	CK(!ota_version_newer("0.2.9", "0.3.0"), "older is not newer");
 	CK(!ota_version_newer("garbage", "0.3.0"), "unparseable is not newer");
 
-	char host[64], path[768];
+	/* The MCUboot header on the first chunk, against running 1.4.0. */
+	uint8_t h[64];
 
-	CK(ota_split_url("https://objects.githubusercontent.com/foo/bar?tok=x",
-			 host, sizeof(host), path, sizeof(path)) == 0, "url splits");
-	CK(strcmp(host, "objects.githubusercontent.com") == 0, "host extracted");
-	CK(strcmp(path, "/foo/bar?tok=x") == 0, "path keeps query");
-	CK(ota_split_url("http://x/y", host, sizeof(host), path, sizeof(path)) < 0,
-	   "plain http rejected");
+	hdr_make(h, 1, 4, 1);
+	CK(ota_hdr_check(h, sizeof(h), "1.4.0", "1.4.1") == OTA_HDR_OK, "hdr_newer_ok");
+	hdr_make(h, 1, 4, 0);
+	CK(ota_hdr_check(h, sizeof(h), "1.4.0", "1.4.0") == OTA_HDR_NOT_NEWER, "hdr_same_refused");
+	hdr_make(h, 1, 3, 9);
+	CK(ota_hdr_check(h, sizeof(h), "1.4.0", "1.3.9") == OTA_HDR_NOT_NEWER, "hdr_older_refused");
+	hdr_make(h, 1, 4, 2);
+	CK(ota_hdr_check(h, sizeof(h), "1.4.0", "1.4.1") == OTA_HDR_NOT_OFFERED,
+	   "hdr_newer_but_not_offered_refused");
+	hdr_make(h, 1, 4, 1);
+	h[0] ^= 1;
+	CK(ota_hdr_check(h, sizeof(h), "1.4.0", "1.4.1") == OTA_HDR_BAD_MAGIC, "hdr_bad_magic_refused");
+	hdr_make(h, 1, 4, 1);
+	CK(ota_hdr_check(h, 27, "1.4.0", "1.4.1") == OTA_HDR_BAD_MAGIC, "hdr_short_refused");
+
+	/* Bounds: in order, inside the image. */
+	CK(ota_chunk_in_bounds(0, 0, 512), "chunk_first_in_bounds");
+	CK(!ota_chunk_in_bounds(1024, 1536, 512), "gap_refused");
+	CK(!ota_chunk_in_bounds(1024, 512, 512), "rewind_refused");
+	CK(ota_chunk_in_bounds(OTA_IMAGE_MAX - 512, OTA_IMAGE_MAX - 512, 512), "chunk_ending_at_image_max_ok");
+	CK(!ota_chunk_in_bounds(OTA_IMAGE_MAX - 512, OTA_IMAGE_MAX - 512, 513), "chunk_past_image_max_refused");
+	CK(!ota_chunk_in_bounds(OTA_IMAGE_MAX, OTA_IMAGE_MAX, 1), "chunk_after_image_max_refused");
+
+	const uint32_t size = 1000003;
+
+	CK(ota_net_should_ack(16383, 16385, size) && !ota_net_should_ack(100, 600, size) &&
+	   ota_net_should_ack(size - 7, size, size) && !ota_net_should_ack(5, 5, size),
+	   "ack_at_boundary_and_at_end");
+	CK(!ota_net_should_seal(size - 1, size) && ota_net_should_seal(size, size) &&
+	   !ota_net_should_seal(0, 0), "partial_stream_not_sealed");
 
 	printf(failures ? "\n%d FAILED\n" : "\nALL PASSED\n", failures);
 	return failures ? 1 : 0;

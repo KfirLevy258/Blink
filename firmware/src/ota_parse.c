@@ -104,24 +104,50 @@ bool ota_version_newer(const char *cand, const char *cur)
 	return false;
 }
 
-int ota_split_url(const char *url, char *host, size_t hlen,
-		  char *path, size_t plen)
+/* struct image_header: ih_magic u32 LE at 0, ih_ver at 20 (u8 major, u8
+ * minor, u16 revision LE, u32 build). */
+#define IH_MAGIC 0x96f3b83dU
+#define IH_VER_OFF 20
+#define IH_MIN_LEN 28
+
+enum ota_hdr_verdict ota_hdr_check(const uint8_t *hdr, size_t n,
+				   const char *running, const char *offered)
 {
-	static const char pfx[] = "https://";
-
-	if (strncmp(url, pfx, sizeof(pfx) - 1) != 0) {
-		return -1;
+	if (n < IH_MIN_LEN) {
+		return OTA_HDR_BAD_MAGIC;
 	}
-	url += sizeof(pfx) - 1;
+	uint32_t magic = (uint32_t)hdr[0] | (uint32_t)hdr[1] << 8 |
+			 (uint32_t)hdr[2] << 16 | (uint32_t)hdr[3] << 24;
 
-	const char *slash = strchr(url, '/');
-
-	if (!slash || (size_t)(slash - url) >= hlen ||
-	    strlen(slash) >= plen) {
-		return -1;
+	if (magic != IH_MAGIC) {
+		return OTA_HDR_BAD_MAGIC;
 	}
-	memcpy(host, url, slash - url);
-	host[slash - url] = '\0';
-	strcpy(path, slash);
-	return 0;
+
+	char ver[24];
+
+	snprintf(ver, sizeof(ver), "%u.%u.%u", hdr[IH_VER_OFF],
+		 hdr[IH_VER_OFF + 1],
+		 (unsigned)(hdr[IH_VER_OFF + 2] | hdr[IH_VER_OFF + 3] << 8));
+	if (!ota_version_newer(ver, running)) {
+		return OTA_HDR_NOT_NEWER;
+	}
+	return strcmp(ver, offered) == 0 ? OTA_HDR_OK : OTA_HDR_NOT_OFFERED;
+}
+
+bool ota_chunk_in_bounds(uint32_t got, uint32_t off, size_t n)
+{
+	return off == got && n <= OTA_IMAGE_MAX && off <= OTA_IMAGE_MAX - n;
+}
+
+bool ota_net_should_ack(uint32_t before, uint32_t after, uint32_t size)
+{
+	if (after == before) {
+		return false;
+	}
+	return before / OTA_ACK_EVERY != after / OTA_ACK_EVERY || after == size;
+}
+
+bool ota_net_should_seal(uint32_t got, uint32_t size)
+{
+	return size != 0 && got == size;
 }

@@ -26,6 +26,7 @@
 
 #include <zephyr/random/random.h>
 #include <mbedtls/md.h>
+#include <mbedtls/sha256.h>
 #include <mbedtls/hkdf.h>
 #include <mbedtls/chacha20.h>
 #include <mbedtls/chachapoly.h>
@@ -233,6 +234,27 @@ static int selftest_hkdf(void)
 		return -1;
 	}
 	return 0;
+}
+
+static mbedtls_sha256_context img_sha;
+
+int wl_sha256_start(void)
+{
+	mbedtls_sha256_init(&img_sha);
+	return mbedtls_sha256_starts(&img_sha, 0) == 0 ? 0 : -1;
+}
+
+int wl_sha256_update(const uint8_t *p, size_t n)
+{
+	return mbedtls_sha256_update(&img_sha, p, n) == 0 ? 0 : -1;
+}
+
+int wl_sha256_finish(uint8_t out[32])
+{
+	int rc = mbedtls_sha256_finish(&img_sha, out);
+
+	mbedtls_sha256_free(&img_sha);
+	return rc == 0 ? 0 : -1;
 }
 
 int wl_crypto_selftest(void)

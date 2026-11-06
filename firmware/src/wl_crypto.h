@@ -51,6 +51,15 @@ int wl_random(uint8_t *out, size_t n);
  * (mbedtls_ct_memcmp). */
 int wl_ct_equal(const uint8_t *a, const uint8_t *b, size_t n);
 
+/* One streaming SHA-256 at a time (the OTA image's, ota_net.c): start, update
+ * in any chunking, finish into out[32]. A single module-level context rather
+ * than a caller's, so this header needs no mbedTLS type and the host tests
+ * stay free of it. start discards a hash left unfinished by an aborted
+ * stream; software SHA-256 holds no allocation, so there is nothing to free. */
+int wl_sha256_start(void);
+int wl_sha256_update(const uint8_t *p, size_t n);
+int wl_sha256_finish(uint8_t out[32]);
+
 /* 0 when this build's cipher reproduces RFC 8439 section 2.8.2 (seal, open,
  * and a refused flipped tag) and RFC 5869 test case 1 (its PRK through
  * wl_hmac_sha256, its OKM through wl_hkdf_sha256); -1 otherwise. main.c runs
