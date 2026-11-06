@@ -488,7 +488,10 @@ def tap_console_line(line: str) -> str:
             obj = json.loads(text)
         except ValueError:
             obj = None
-        if isinstance(obj, dict) and obj.get("t") in protocol.WIRE_TYPES:
+        # isinstance first: a list or dict t is unhashable, and this runs in
+        # the daemon's read loop on whatever the board printed.
+        t = obj.get("t") if isinstance(obj, dict) else None
+        if isinstance(t, str) and t in protocol.WIRE_TYPES:
             return json.dumps(protocol.redact(obj), separators=(",", ":"))
     kept = console_line(line)
     if kept == "[usage] session":

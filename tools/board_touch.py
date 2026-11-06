@@ -1574,8 +1574,9 @@ class Bench:
         # unanswered; the board's own watchdogs are not what is under test.
         self.touch_only = touch_only
         # --skip-missing (bench only): a click, tap or expect-widget on a
-        # widget that is not on the panel logs a skip and goes on, so one
-        # script runs against a board with or without the spike's tile.
+        # widget that is not on the panel (for a tap: a target whose screen
+        # the board is not on) logs a skip and goes on. Only that step is
+        # skipped; a later expect that depended on it still fails.
         self.skip_missing = skip_missing
         if touch_only:
             edit_reply = None
@@ -2401,6 +2402,14 @@ class Bench:
         return not any(w.label and q in w.label for w in got[1])
 
     def run_step(self, s):
+        if self.skip_missing and s.cmd == "tap":
+            st = self.query_state()
+            if st is not None and any(
+                    str(st[k]) != str(v)
+                    for k, v in TARGETS[s.args[0]].needs.items()):
+                self.say(f"skip tap {s.args[0]}: the board is not on its "
+                         "screen (--skip-missing)")
+                return True
         if (self.skip_missing and s.cmd in ("click", "expect_widget",
                                             "wait_widget")
                 and self._widget_absent(s.args[0])):
@@ -2691,8 +2700,8 @@ def main(argv=None):
     ap.add_argument("--loop", type=int, default=1, metavar="N",
                     help="run the script N times")
     ap.add_argument("--skip-missing", action="store_true",
-                    help="bench only: a click or expect-widget on a widget "
-                         "that is not there is skipped, not failed")
+                    help="bench only: a click, tap or expect-widget on a "
+                         "widget that is not there is skipped, not failed")
     ap.add_argument("--edit-reply", choices=("ok", "no"), default="ok",
                     help="answer the board's theme_edit with ok 1 (as if a "
                          "browser opened) or ok 0")

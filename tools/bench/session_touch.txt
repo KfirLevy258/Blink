@@ -19,10 +19,10 @@ expect ui_state ov=connection
 widgets
 expect-widget "Link: WiFi"
 click "Forget WiFi"
-expect ui_state ov=connection modal=confirm
+expect ui_state ov=confirm
 mem
 click "Cancel"
-expect ui_state ov=connection modal=none
+expect ui_state ov=connection
 click "<"
 expect ui_state ov=none
 mem

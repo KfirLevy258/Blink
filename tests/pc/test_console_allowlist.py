@@ -196,6 +196,11 @@ TAP_LINES = [
     ('{"t":"wifi_state","st":"up","s":"6e6574"', logbook.BOARD_LINE),
     ('[usage] sess{"t":"wifi_state","s":"6e6574"}', "[usage]"),
     ('"s":"6e6574"', logbook.BOARD_LINE),
+    # an unhashable or non-string t is not a protocol object
+    ('{"t":[1]}', logbook.BOARD_LINE),
+    ('{"t":{}}', logbook.BOARD_LINE),
+    ('{"t":7,"s":"6e6574"}', logbook.BOARD_LINE),
+    ('[1,2]', logbook.BOARD_LINE),
     ("[cfg] mode=1 ssid=home-net-SECRET token=present", "[cfg]"),
     ("[proto] ota failed: anything", "[proto] ota failed"),
     ("[usage] session 3", logbook.APPLIED_LINE),
@@ -272,7 +277,7 @@ def test_every_output_is_in_the_allowlist_or_redacted_json():
     for _ in range(1000):
         obj = {k: rng.choice(values)
                for k in rng.sample(pool, rng.randrange(0, 8))}
-        obj["t"] = rng.choice(types)
+        obj["t"] = rng.choice(types + [[1], {}, 7, None, True, 2.5])
         out = logbook.tap_console_line(json.dumps(obj))
         assert _allowed(out), out
         assert "nested" not in out

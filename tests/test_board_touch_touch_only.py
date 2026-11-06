@@ -103,6 +103,19 @@ def test_skip_missing_skips_an_absent_widget_and_nothing_else():
     assert b.failures
 
 
+def test_skip_missing_skips_a_tap_whose_screen_is_not_showing():
+    # settings.back needs scr=settings; the fake board is on the gauges.
+    b, link = _bench(skip_missing=True)
+    b.run_script(bt.parse_script("tap settings.back\n"))
+    assert not b.failures, b.failures
+    assert "skip tap settings.back" in b.out.getvalue()
+    assert "touch" not in _types(link)
+
+    b, _ = _bench()
+    b.run_script(bt.parse_script("tap settings.back\n"))
+    assert b.failures
+
+
 # The labels the bench scripts may name. Today's Settings screen, from
 # firmware/src/ui_settings.c (mk_tile and the back button), plus the Connection
 # tile the spike adds (Task 0.2) and Settings > Connection proper (Task 1.5).
