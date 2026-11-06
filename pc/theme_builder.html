@@ -626,6 +626,11 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
             </fieldset>
             <p class="note">2.4 GHz networks only</p>
             <button type="button" class="link" id="c-scan">Scan again</button>
+            <button type="button" class="link" id="c-other">Network not listed?</button>
+            <div class="stack" id="c-other-box" hidden>
+              <label class="label" for="c-name">Network name</label>
+              <div class="pw"><input id="c-name" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" translate="no"></div>
+            </div>
             <div class="stack">
               <label class="label" for="c-pw" id="c-pwl">Password</label>
               <div class="pw" id="c-pwbox">
@@ -1822,7 +1827,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       var b = hex.match(/../g) || [], s;
       try { s = decodeURIComponent('%' + b.join('%')); }
       catch (e) { s = b.map(function (x) { var c = parseInt(x, 16); return c > 31 && c < 127 ? String.fromCharCode(c) : '\\x' + x; }).join(''); }
-      return s.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '?');
+      return s.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, '?');
     }
     function good(hex) { return typeof hex === 'string' && /^([0-9a-fA-F]{2}){1,32}$/.test(hex); }
 
@@ -1858,7 +1863,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
         : ['802.1X, not supported', false];
     }
     function select(n) {
-      pick = n; g('c-pwl').textContent = 'Password for ' + n.name; say(''); bad(false);
+      other(false); pick = n; g('c-pwl').textContent = 'Password for ' + n.name; say(''); bad(false);
     }
     function list(nets) {
       var ul = g('c-nets'), seen = {}, rows = [];
@@ -1895,7 +1900,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
     }
     function closePicker() {
       scanning++; show('c-picker', false); show('c-move', true); g('c-move').setAttribute('aria-expanded', 'false');
-      g('c-pw').value = ''; bad(false);
+      g('c-pw').value = ''; bad(false); unshow(); other(false); g('c-name').value = '';
     }
     // Synchronous on the PC for up to ~15 s, so the list says it is looking.
     function scan() {
@@ -1903,24 +1908,45 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       list([]); say('Looking for networks…'); g('c-go').disabled = true;
       post('/api/wifi/scan', null).then(function (j) {
         if (mine !== scanning) return;
-        g('c-go').disabled = false;
+        g('c-go').disabled = busy;
         if (j.status === 200) { say(''); list(j.nets); }
         else note(j.why || 'The board did not answer.');
-      }, function () { if (mine !== scanning) return; g('c-go').disabled = false; note('The app did not answer.'); });
+      }, function () { if (mine !== scanning) return; g('c-go').disabled = busy; note('The app did not answer.'); });
+    }
+    // A hand-typed name goes the way a scanned one does: its UTF-8 bytes as hex.
+    function typed() {
+      var v = g('c-name').value, b;
+      if (!v) return say('Enter the network name.', 'bad');
+      try { b = unescape(encodeURIComponent(v)); } catch (e) { return say('That network name is not valid text.', 'bad'); }
+      if (b.length > 32) return say('The network name can be at most 32 bytes.', 'bad');
+      if (b.indexOf('\u0000') >= 0) return say('The network name cannot contain a zero byte.', 'bad');
+      var h = '';
+      for (var i = 0; i < b.length; i++) h += ('0' + b.charCodeAt(i).toString(16)).slice(-2);
+      return { hex: h, name: name(h) };
+    }
+    function other(on) {
+      show('c-other-box', on); show('c-other', !on);
+      if (on) { pick = null; g('c-pwl').textContent = 'Password'; g('c-name').focus(); }
+    }
+
+    function unshow() {
+      var t = g('c-show'); t.setAttribute('aria-pressed', 'false'); t.textContent = 'Show'; t.setAttribute('aria-label', 'Show password'); g('c-pw').setAttribute('type', 'password');
     }
 
     function release() { busy = false; g('c-go').disabled = false; g('c-go').textContent = 'Connect'; }
     function later(f, ms) { clearTimeout(hold); hold = setTimeout(function () { hold = null; f(); }, ms); }
     function join() {
       if (busy) return;
-      if (!pick) { note('Pick a network first.'); return; }
-      var nm = pick.name, pw = g('c-pw').value;
+      var chosen = g('c-other-box').getAttribute('hidden') === null ? typed() : pick;
+      if (chosen === undefined) return;
+      if (!chosen) { note('Pick a network first.'); return; }
+      var nm = chosen.name, pw = g('c-pw').value;
       if (pw.length < 8) {
         say(pw ? 'A WiFi password has at least 8 characters.' : 'Enter the password for ' + nm + '.', 'bad');
         bad(true); g('c-pw').focus(); return;
       }
-      var body = { s: pick.hex, p: pw };
-      g('c-pw').value = ''; pw = null;
+      var body = { s: chosen.hex, p: pw };
+      g('c-pw').value = ''; pw = null; unshow();
       clearTimeout(hold); hold = null; bad(false); say('');
       busy = true; g('c-go').disabled = true; g('c-go').textContent = 'Connecting…';
       status.steps(0, 'active');
@@ -1956,7 +1982,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       else {
         var why = j.state && j.state.why;
         note('The board could not join ' + nm + '. ' + (why && why !== 'Wrong WiFi password' ? why + '.' : 'Check the password and try again.'));
-        bad(true);
+        if (!why || why === 'Wrong WiFi password') bad(true);
       }
     }
 
@@ -1973,6 +1999,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
     }
 
     g('c-move').addEventListener('click', openPicker);
+    g('c-other').addEventListener('click', function () { other(true); });
     g('c-scan').addEventListener('click', scan);
     g('c-cancel').addEventListener('click', function () { if (busy) return; closePicker(); say(''); g('c-move').focus(); });
     g('c-go').addEventListener('click', join);

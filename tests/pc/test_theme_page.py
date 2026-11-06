@@ -1905,3 +1905,78 @@ def test_board_shows_connection_screen_after_join():
     """, _wifi(nets=NETS, join=full), search="?panel=connect")
     assert "connection screen" in r[0] and "connection screen" in r[1]
     assert "connection screen" not in r[2] and "Claude, session" in r[2]
+
+
+# ---------------------------------------------------------------- Connect, review round
+def test_zero_width_and_bidi_marks_in_a_name_show_as_question_marks():
+    marks = "​‎‏؜﻿‮ "
+    r = builder_page.run(OPEN_PICKER + "return document.querySelectorAll('#c-nets b').map(b => b.textContent);",
+                         _wifi(nets=[{"s": _hex("A" + marks + "B"), "r": -40, "sec": "wpa2"}]),
+                         search="?panel=connect")
+    assert r == ["A" + "?" * len(marks) + "B"]
+
+
+def test_a_refused_join_for_another_reason_does_not_mark_the_password():
+    body = {"state": {"link": "usb", "why": "Network not found"}, "steps": ["sent"]}
+    r = builder_page.run(OPEN_PICKER + _enter("correct horse") + "return [$('c-pwbox').getAttribute('aria-invalid'), $('c-msg').textContent];",
+                         _wifi(nets=NETS, join={"status": 200, "body": body}), search="?panel=connect")
+    assert r == [None, "The board could not join Home-2G. Network not found."]
+
+
+def test_scanning_during_a_join_keeps_connect_disabled():
+    r = builder_page.run(OPEN_PICKER + """
+    const h = hold(); answer('/api/wifi/join', () => h.p);
+    $('c-pw').value = 'correct horse'; $('c-go').click(); await advance(10);
+    $('c-scan').click(); await advance(10);
+    const during = $('c-go').disabled;
+    h.release({ status: 200, body: { state: {}, steps: ['sent'] } }); await advance(10);
+    return [during, $('c-go').disabled];
+    """, _wifi(nets=NETS), search="?panel=connect")
+    assert r == [True, False]
+
+
+def test_show_toggle_returns_to_hidden_after_join_and_cancel():
+    r = builder_page.run(OPEN_PICKER + """
+    const st = () => [$('c-show').getAttribute('aria-pressed'), $('c-pw').getAttribute('type')];
+    $('c-show').click(); const shown = st();
+    $('c-pw').value = 'correct horse'; $('c-go').click(); await advance(10);
+    const afterJoin = st();
+    $('c-show').click(); $('c-cancel').click();
+    return [shown, afterJoin, st()];
+    """, _wifi(nets=NETS, join={"status": 200, "body": {"state": {}, "steps": ["sent"]}}),
+        search="?panel=connect")
+    assert r[0] == ["true", "text"]
+    assert r[1] == ["false", "password"] and r[2] == ["false", "password"]
+
+
+def _typed(name, pw="correct horse"):
+    return f"""
+    $('c-other').click(); const box = $('c-other-box').getAttribute('hidden');
+    $('c-name').value = {name!r}; $('c-pw').value = {pw!r}; $('c-go').click(); await advance(10);
+    return [box, requests.filter(q => q.path === '/api/wifi/join').map(q => q.body), $('c-msg').textContent];
+    """
+
+
+def test_a_hand_typed_name_is_sent_as_hex_like_a_scanned_one():
+    r = builder_page.run(OPEN_PICKER + _typed("Café <b>"), _wifi(nets=[]), search="?panel=connect")
+    assert r[0] is None
+    assert r[1] == [{"s": "Café <b>".encode().hex(), "p": "correct horse"}]
+    assert "Café <b>" in r[2] and "<b>" in r[2]       # said back as text, via textContent
+
+
+@pytest.mark.parametrize("name,want", [
+    ("x" * 33, "The network name can be at most 32 bytes."),
+    ("é" * 17, "The network name can be at most 32 bytes."),    # 34 bytes
+    ("", "Enter the network name.")])
+def test_a_bad_hand_typed_name_is_refused_before_sending(name, want):
+    r = builder_page.run(OPEN_PICKER + _typed(name), _wifi(nets=[]), search="?panel=connect")
+    assert r[1] == [] and r[2] == want
+
+
+def test_picking_a_listed_network_closes_the_name_field():
+    r = builder_page.run(OPEN_PICKER + """
+    $('c-other').click();
+    document.querySelectorAll('#c-nets input')[0].click();
+    return [$('c-other-box').getAttribute('hidden'), $('c-other').getAttribute('hidden')];
+    """, _wifi(nets=NETS), search="?panel=connect")
+    assert r == ["", None]
