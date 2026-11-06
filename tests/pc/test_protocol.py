@@ -1411,3 +1411,129 @@ def test_svc_keys_never_collide_with_its_values():
         short for page in status_page.PAGES.values()
         for _, short in page.components} | {"svc"}
     assert not keys & values
+
+
+# --- the transcript allowlist (S7.5, D54) -------------------------------------
+
+def test_redact_is_a_field_allowlist():
+    assert protocol.redact({"t": "ping", "k": "SECRET"}) == {"t": "ping"}
+    assert protocol.redact({"t": "wifi_set", "s": "6e6574", "p": "..",
+                            "k": ".."}) == {"t": "wifi_set"}
+    got = protocol.redact({"t": "wifi_state", "s": "6e6574",
+                           "ip": "192.168.1.2", "port": 49731, "r": -50,
+                           "st": "up", "link": "wifi", "kid": "0a1b2c3d",
+                           "why": ""})
+    assert got == {"st": "up", "link": "wifi", "kid": "0a1b2c3d", "why": "",
+                   "t": "wifi_state"}
+    assert "st" not in protocol.redact({"t": "wifi_state", "st": "6e6574"})
+    assert "kid" not in protocol.redact({"t": "wifi_state", "kid": "zz"})
+    assert "kid" not in protocol.redact({"t": "wifi_state", "kid": "0A1B2C3D"})
+    assert protocol.redact({"t": "wifi_state",
+                            "why": {"nested": "x"}}) == {"t": "wifi_state"}
+    assert protocol.redact({"t": "usage", "session_pct": 41,
+                            "extra": "SECRET"}) == {"t": "usage",
+                                                    "session_pct": 41}
+    assert protocol.redact({"t": "nope"}) == {"t": "(unknown)"}
+    assert protocol.redact({"no": "t"}) == {"t": "(unknown)"}
+    assert protocol.redact("not a dict") == {"t": "(unknown)"}
+    # a string past 64 characters is somebody's text
+    assert protocol.redact({"t": "usage", "src": "x" * 65}) == {"t": "usage"}
+    assert protocol.redact({"t": "usage", "src": "x" * 64})["src"] == "x" * 64
+
+
+def test_every_wire_type_has_tap_fields():
+    assert set(protocol.TAP_FIELDS) == set(protocol.WIRE_TYPES)
+    for t, fields in protocol.TAP_FIELDS.items():
+        assert "t" in fields and "v" not in fields, t
+
+
+def _builders():
+    return [
+        ("welcome", protocol.welcome("blink", "1.4.0", editing=True),
+         {"t", "app", "app_ver", "editing"}, {"v", "caps"}),
+        ("bye", protocol.bye(), {"t"}, {"v"}),
+        ("pong", protocol.pong(), {"t"}, {"v"}),
+        ("time_msg", protocol.time_msg(1700000000, 120),
+         {"t", "epoch", "utc_offset_min"}, {"v"}),
+        ("usage", protocol.usage(
+            41.0, 0, 62.0, 0, [{"name": "sonnet", "weekly_pct": 5.0}],
+            session_resets_in_s=100, weekly_resets_in_s=200, stale=True,
+            provider="claude", src="cli", state="running", n_sess=2, n_run=1,
+            n_wait=1, n_stuck=1, n_agents=3, p2="codex", p2_session_pct=10.0,
+            p2_weekly_pct=20.0, p2_session_resets_in_s=5,
+            p2_weekly_resets_in_s=6, p2_stale=True, burn_pph=1.5, age_s=3,
+            p2_age_s=4, active_age_s=2),
+         None, {"v"}),
+        ("edition", protocol.edition("codex"), {"t", "edition"}, {"v"}),
+        ("session", protocol.session("SECRET label", 3), {"t", "n"},
+         {"v", "label"}),
+        ("status", protocol.status("ok", "SECRET detail"), {"t", "state"},
+         {"v", "detail"}),
+        ("svc", protocol.svc("claude", "degraded", "SECRET what"),
+         {"t", "provider", "level"}, {"v", "what"}),
+        ("theme", protocol.theme("preview", {"id": 3, "bg": "#101010"}),
+         {"t", "op", "id"}, {"v", "bg"}),
+        ("theme_edit_reply", protocol.theme_edit_reply(True), {"t", "ok"},
+         {"v"}),
+        ("theme_edit_done", protocol.theme_edit_done(), {"t", "done"}, {"v"}),
+        ("ota_avail", protocol.ota_avail("1.4.0", 1000, "a" * 64, app="1.4.0"),
+         {"t", "version", "size"}, {"v", "sha256", "app"}),
+        ("ota_begin", protocol.ota_begin("1.4.0"), {"t", "version"}, {"v"}),
+        ("ota_resume", protocol.ota_resume("1.4.0"), {"t", "version"}, {"v"}),
+        ("ota_none", protocol.ota_none(app="1.4.0"), {"t"}, {"v", "app"}),
+        ("ota_error", protocol.ota_error("SECRET why"), {"t"}, {"v", "why"}),
+        ("edit_state", protocol.edit_state(True), {"t", "editing"}, {"v"}),
+    ]
+
+
+def test_each_builder_redacts_to_its_expected_projection():
+    for name, msg, kept, dropped in _builders():
+        got = protocol.redact(msg)
+        if kept is None:    # usage: every scalar it builds, nothing else
+            kept = set(msg) - dropped
+            assert {"session_pct", "weekly_pct", "stale", "p2_age_s"} <= kept
+        assert set(got) == kept, name
+        assert not set(got) & dropped, name
+        assert all(got[k] == msg[k] for k in got), name
+
+
+def test_the_table_names_every_host_to_board_builder():
+    """A new builder with no row here is a new message whose transcript
+    projection nobody looked at."""
+    tree = ast.parse(pathlib.Path(protocol.__file__).read_text("utf-8"))
+    found = set()
+    for fn in tree.body:
+        if isinstance(fn, ast.FunctionDef) and not fn.name.startswith("_"):
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Dict) and any(
+                        isinstance(k, ast.Constant) and k.value == "t"
+                        for k in node.keys):
+                    found.add(fn.name)
+    found.discard("redact")    # the allowlist itself, not a builder
+    assert found == {name for name, *_ in _builders()}
+
+
+def test_fleet_fields_survive():
+    """tests/fleet/agent.py:720-723 and tap_asserts.py:127-129 read these
+    from the transcript."""
+    got = protocol.redact({"t": "usage", "v": 2, "session_pct": 41,
+                           "weekly_pct": 12, "stale": True})
+    assert got == {"t": "usage", "session_pct": 41, "weekly_pct": 12,
+                   "stale": True}
+
+
+def test_redact_never_keeps_a_container():
+    import random
+    rng = random.Random(7)
+    junk = [{"a": 1}, [1, 2], ("x",), {"s": "6e6574"}, [], {}, object(),
+            b"bytes", "ok", 3, 2.5, None, True, "x" * 200]
+    for t, fields in protocol.TAP_FIELDS.items():
+        for _ in range(50):
+            msg = {k: rng.choice(junk) for k in fields | {"s", "p", "k", "ip"}}
+            msg["t"] = t
+            got = protocol.redact(msg)
+            assert got["t"] == t
+            assert set(got) <= fields
+            for v in got.values():
+                assert v is None or isinstance(v, (str, int, float, bool))
+                assert not isinstance(v, str) or len(v) <= 64

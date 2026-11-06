@@ -151,29 +151,39 @@ class Tap:
         without having decided the question. Later tasks count sent frames, so
         the key is on every tx record, not only the failures.
         """
-        self._append({"dir": "tx", "t": time.time(), "msg": msg,
-                      "sent": bool(sent)})
+        self._append({"dir": "tx", "t": time.time(),
+                      "msg": protocol.redact(msg), "sent": bool(sent)})
 
     def rx(self, msg):
-        self._append({"dir": "rx", "t": time.time(), "msg": msg})
+        self._append({"dir": "rx", "t": time.time(),
+                      "msg": protocol.redact(msg)})
 
     def console(self, data):
-        """Record raw board output, whole lines only.
+        """Record the board's output, whole lines only, each through
+        logbook.tap_console_line.
 
         Decoded with errors="replace": board output is not guaranteed clean
         UTF-8 -- a reset mid-line emits noise -- and this is called from the
         daemon's read loop, where raising would take the link down over a
         test facility.
 
-        The board's JSON arrives on this same wire, so protocol lines appear
-        here too. That is the point of a raw console tap; a test that wants
-        only messages reads the rx records instead.
+        This used to be a raw tap, and a raw tap is a leak once the board
+        speaks WiFi: the board's JSON arrives on this same wire, so a
+        wifi_state line (network name, address) and any printk that formats
+        a value would land in a file people attach to bug reports. Now it is
+        an allowlist: a protocol object is its redacted projection, the
+        applied-frame line is APPLIED_LINE (+ " STALE"), a known message is
+        its constant text, a known tag is bare, and everything else is
+        "(board line)". The rule is not "no braces, so it is a printk": the
+        deleted firmware printed an unquoted SSID, which is the fixture at
+        tests/pc/test_console_allowlist.py line 66 (D49).
         """
         self._pending += data
         *whole, self._pending = self._pending.split(b"\n")
         for line in whole:
             text = line.decode("utf-8", errors="replace").rstrip("\r")
-            self._append({"dir": "console", "t": time.time(), "line": text})
+            self._append({"dir": "console", "t": time.time(),
+                          "line": logbook.tap_console_line(text)})
 
     def wrap(self, write_msg, on_message):
         """(write_msg, on_message) that record, then delegate.

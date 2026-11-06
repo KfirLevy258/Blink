@@ -102,6 +102,15 @@ _FW_SRC = ROOT / "firmware" / "src"
 # Received by the bench injector from tools/board_touch.py, never from the
 # daemon, so the daemon's log never has it to name.
 _BENCH_ONLY = {"touch"}
+# Named in WIRE_TYPES ahead of the firmware that speaks them, so the transcript
+# allowlist (protocol.TAP_FIELDS) is complete from the first commit of the WiFi
+# transport. Each leaves this set in the task that teaches the firmware the
+# line (1.3 for wifi_*, 6.2 for logo_* and pref_set; ota_end and ota_ack with
+# the WiFi OTA); the set empty, the staleness check below is whole again.
+_NOT_IN_FIRMWARE_YET = {
+    "wifi_scan", "wifi_set", "wifi_forget", "ota_end", "logo_begin",
+    "logo_chunk", "logo_end", "logo_remove", "pref_set", "wifi_net",
+    "wifi_state", "ota_ack", "logo_ack", "logo_state"}
 _SENT = re.compile(r'\\"t\\":\\"([a-z_]+)')
 _READ = re.compile(r'strcmp\(type,\s*"([a-z_]+)"\)')
 
@@ -129,7 +138,8 @@ def test_every_type_the_firmware_sends_or_reads_is_one_the_log_can_name():
 
 def test_wire_types_names_nothing_the_firmware_does_not_use():
     sent, received = _firmware_types()
-    stale = protocol.WIRE_TYPES - sent - received
+    stale = (protocol.WIRE_TYPES - sent - received
+             - _NOT_IN_FIRMWARE_YET)
     assert not stale, sorted(stale)
 
 

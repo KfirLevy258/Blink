@@ -6,6 +6,7 @@ ignored by callers. v2.
 """
 import json
 import math
+import re
 
 from pc.version import PROTO_VERSION
 from pc.providers.base import STATE_UNKNOWN, worst_of
@@ -178,9 +179,120 @@ WIRE_TYPES = frozenset({
     "welcome", "bye", "pong", "time", "usage", "edition", "session",
     "status", "svc", "theme", "ota_avail", "ota_begin", "ota_resume",
     "ota_none", "ota_error", "edit_state",
+    # The WiFi transport (docs/superpowers/specs/2026-11-05-wifi-transport-
+    # design.md S6.1, S7.5). Builders arrive in Tasks 1.3 and 6.2; the names
+    # are here now so the transcript allowlist below can be complete.
+    # host -> board
+    "wifi_scan", "wifi_set", "wifi_forget", "ota_end", "logo_begin",
+    "logo_chunk", "logo_end", "logo_remove", "pref_set",
+    # board -> host
+    "wifi_net", "wifi_state", "ota_ack", "logo_ack", "logo_state",
 })
 
 UNKNOWN_TYPE = "(unknown type)"
+
+# --- the transcript allowlist (S7.5, D54) ------------------------------------
+#
+# BLINK_TAP records whole messages, and with WiFi on the wire a message can
+# carry the network's name, its password, the pairing key and the board's
+# address. A deny-list ("drop s, p, k") fails the day someone adds a field, so
+# this is the other shape: per type, the only fields a transcript may hold.
+# A field nobody listed is dropped, and so is anything that is not a scalar.
+#
+# `v` is in none of them: it is the same number on every line, and what the
+# fleet reads (session_pct, weekly_pct, stale: tests/fleet/agent.py:720-723,
+# tap_asserts.py:127-129) does not include it. Free text a person typed or a
+# program chose (a session label, a status detail, an svc `what`, an ota error
+# reason, a widget label) is left out for the same reason the log leaves it
+# out: it is somebody's content.
+_T = frozenset({"t"})
+_USAGE_FIELDS = frozenset({
+    "t", "session_pct", "session_resets_in_s", "weekly_pct",
+    "weekly_resets_in_s", "stale", "fable_pct", "sonnet_pct", "opus_pct",
+    "provider", "src", "state", "n_sess", "n_run", "n_wait", "n_stuck",
+    "n_agents", "p2", "p2_session_pct", "p2_weekly_pct", "p2_s_in_s",
+    "p2_w_in_s", "p2_stale", "burn_pph", "age_s", "p2_age_s",
+    "active_age_s",
+})
+TAP_FIELDS = {
+    # board -> host
+    "hello": _T, "ping": _T, "pref": _T, "ota_query": _T, "ota_flash": _T,
+    "theme_now": _T, "widgets": _T,
+    "theme_edit": frozenset({"t", "ok", "done"}),
+    "touch_done": frozenset({"t", "op", "ok"}),
+    "touch_refused": _T,
+    "ui_state": frozenset({"t", "scr", "ov", "modal", "busy", "theme",
+                           "stored", "tp", "focus", "bl", "edit", "slp",
+                           "nt", "gf"}),
+    "wifi_net": frozenset({"t", "i", "n", "sec"}),
+    "wifi_state": frozenset({"t", "st", "link", "kid", "why"}),
+    "ota_ack": frozenset({"t", "off", "err"}),
+    "logo_ack": _T, "logo_state": _T,
+    # host -> board
+    "welcome": frozenset({"t", "app", "app_ver", "editing"}),
+    "bye": _T, "pong": _T,
+    "time": frozenset({"t", "epoch", "utc_offset_min"}),
+    "usage": _USAGE_FIELDS,
+    "edition": frozenset({"t", "edition"}),
+    "session": frozenset({"t", "n"}),
+    "status": frozenset({"t", "state"}),
+    "svc": frozenset({"t", "provider", "level"}),
+    "theme": frozenset({"t", "op", "id"}),
+    "ota_avail": frozenset({"t", "version", "size"}),
+    "ota_begin": frozenset({"t", "version"}),
+    "ota_resume": frozenset({"t", "version"}),
+    "ota_none": _T, "ota_error": _T,
+    "edit_state": frozenset({"t", "editing"}),
+    "wifi_scan": _T, "wifi_set": _T, "wifi_forget": _T, "ota_end": _T,
+    "logo_begin": _T, "logo_chunk": _T, "logo_end": _T, "logo_remove": _T,
+    "pref_set": _T,
+}
+
+# The fixed words of the WiFi lines (spec S5.7, S6.1). A string in one of
+# these fields that is not on its list is dropped, not recorded: the field
+# name is a promise that the value is one of ours, and a board that sent
+# something else is exactly the board whose text we do not want in a file.
+TAP_ENUMS = {
+    "st": frozenset({"off", "joining", "up", "fail"}),
+    "link": frozenset({"usb", "wifi"}),
+    "sec": frozenset({"wpa2", "wpa3", "mixed", "open"}),
+    "why": frozenset({
+        "", "Wrong WiFi password", "Network not found",
+        "No address from the router", "WPA3-only networks are not supported",
+        "WiFi self-test failed", "Could not forget WiFi. Try again."}),
+    "err": frozenset({"", "unconfirmed"}),
+}
+_KID = re.compile(r"[0-9a-f]{8}\Z")
+TAP_STR_MAX = 64
+TAP_UNKNOWN = "(unknown)"
+
+
+def redact(msg) -> dict:
+    """`msg` as a transcript may hold it: only the fields TAP_FIELDS lists
+    for its type, only scalars, only enum words from TAP_ENUMS, `kid` as 8
+    lowercase hex, any other string at most TAP_STR_MAX long. A type outside
+    WIRE_TYPES is {"t": "(unknown)"}. Never raises on a hostile message:
+    this runs on every line the board prints."""
+    t = msg.get("t") if isinstance(msg, dict) else None
+    allowed = TAP_FIELDS.get(t) if isinstance(t, str) else None
+    if allowed is None:
+        return {"t": TAP_UNKNOWN}
+    out = {}
+    for k, v in msg.items():
+        if k not in allowed:
+            continue
+        if v is not None and not isinstance(v, (str, int, float, bool)):
+            continue
+        if k in TAP_ENUMS:
+            if not isinstance(v, str) or v not in TAP_ENUMS[k]:
+                continue
+        elif k == "kid":
+            if not isinstance(v, str) or not _KID.match(v):
+                continue
+        elif isinstance(v, str) and len(v) > TAP_STR_MAX:
+            continue
+        out[k] = v
+    return out
 
 
 def log_name(msg) -> str:

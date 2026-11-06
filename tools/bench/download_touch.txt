@@ -1,0 +1,9 @@
+expect ui_state modal=download
+widgets
+mem
+wait 10
+expect ui_state modal=download
+mem
+wait 10
+expect ui_state modal=download
+mem

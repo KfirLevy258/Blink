@@ -1,0 +1,31 @@
+expect ui_state scr=gauges modal=none
+tap settings.open
+expect ui_state scr=settings ov=none
+widgets
+mem
+click "Brightness"
+expect ui_state ov=brightness
+click "<"
+expect ui_state ov=none
+mem
+click "Theme"
+expect ui_state ov=theme
+widgets
+click "<"
+expect ui_state ov=none
+mem
+click "Connection"
+expect ui_state ov=connection
+widgets
+expect-widget "Link: WiFi"
+click "Forget WiFi"
+expect ui_state ov=connection modal=confirm
+mem
+click "Cancel"
+expect ui_state ov=connection modal=none
+click "<"
+expect ui_state ov=none
+mem
+click "<"
+expect ui_state scr=gauges
+mem

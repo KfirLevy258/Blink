@@ -34,7 +34,9 @@ counts bytes and looks at no payload. ConsoleEcho does look at what it
 forwards, on purpose and only to cut it down: see console_line.
 """
 import contextlib
+import json
 import os
+import re
 import threading
 import time
 
@@ -405,6 +407,23 @@ CONSOLE_MESSAGES = tuple(sorted((
 # value.
 CONSOLE_RENDERED = ("[ota] update landed", "[ota] update REVERTED")
 
+# Lines the board prints that are not ours: the ESP32 ROM's reset reason and
+# Zephyr's banner. They are the one thing on the console that says WHY a board
+# restarted (a brownout is not a watchdog), and a customer's "it keeps
+# rebooting" is unanswerable without them. Kept apart from CONSOLE_MESSAGES
+# because the provenance test over that list proves each stem is a printk in
+# firmware/src, and these live in the ROM and in Zephyr, not here (the same
+# reason LVGL's and Zephyr's other lines are left out, above). That is also
+# why the list is short and exact: every entry is a whole fixed token, and the
+# ROM appends ",boot:0x13 (SPI_FAST_FLASH_BOOT)" or a clock figure that is cut
+# like any other value. Matched after CONSOLE_MESSAGES. The WiFi plan's D49.
+CONSOLE_EXTERNAL = (
+    "rst:0x1 (POWERON_RESET)", "rst:0xc (SW_CPU_RESET)",
+    "rst:0xf (BROWNOUT_RESET)", "rst:0x10 (RTCWDT_RTC_RESET)",
+    "rst:0x7 (TG0WDT_SYS_RESET)", "rst:0x8 (TG1WDT_SYS_RESET)",
+    "*** Booting Zephyr OS",
+)
+
 # Every tag a printk in firmware/src opens with. A line opening with any
 # other bracketed word -- or with none: the bootloader's and Zephyr's own
 # banners, the touch tracer's #TT rows -- is a fixed placeholder, because
@@ -425,7 +444,7 @@ def console_line(line: str) -> str:
     formatted into the line survives.
     """
     text = line.strip()
-    for known in CONSOLE_RENDERED + CONSOLE_MESSAGES:
+    for known in CONSOLE_RENDERED + CONSOLE_MESSAGES + CONSOLE_EXTERNAL:
         if text.startswith(known):
             return known
     if text.startswith("[") and "]" in text:
@@ -433,6 +452,48 @@ def console_line(line: str) -> str:
         if tag in CONSOLE_TAGS:
             return f"[{tag}]"
     return BOARD_LINE
+
+
+# What the transcript says for the board's "[usage] session 50% (12s) ..."
+# line: that a frame was applied, and whether it was marked STALE. The figures
+# on the line are the owner's usage, so they are cut like any other value; the
+# fleet suite (tests/fleet/tap_asserts.py) needs only these two facts.
+APPLIED_LINE = "[usage] session applied"
+_STALE_WORD = re.compile(r"(?:^|\s)STALE(?:\s|$)")
+
+
+def tap_console_line(line: str) -> str:
+    """One console line as a BLINK_TAP transcript or tools/console_tail.py
+    may hold it (D49). An allowlist, so nothing passes for what it lacks.
+
+    A line that is a whole JSON object whose `t` is in protocol.WIRE_TYPES is
+    the compact encoding of protocol.redact(obj). A "[usage] session" line is
+    APPLIED_LINE, plus " STALE" when the board marked the frame so. Anything
+    else is console_line(line): a known message as its constant, a known tag
+    bare, the rest BOARD_LINE.
+
+    "No braces and no quotes, so it is a printk" was the first rule and it was
+    wrong: the deleted firmware printed an unquoted SSID ("[cfg] mode=1
+    ssid=home-net-SECRET token=present", the fixture in
+    tests/pc/test_console_allowlist.py), proto.c echoes the daemon's error
+    text after "[proto] ota failed: ", and a reset prints arbitrary bytes. A
+    line cut in half, or one with a protocol object glued behind a tag, is
+    not an object and therefore falls to console_line, which keeps at most
+    its tag.
+    """
+    from pc import protocol
+    text = line.strip()
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict) and obj.get("t") in protocol.WIRE_TYPES:
+            return json.dumps(protocol.redact(obj), separators=(",", ":"))
+    kept = console_line(line)
+    if kept == "[usage] session":
+        return APPLIED_LINE + (" STALE" if _STALE_WORD.search(text) else "")
+    return kept
 
 
 class ConsoleEcho:

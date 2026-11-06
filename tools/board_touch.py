@@ -1551,10 +1551,34 @@ def _utc_offset_min(now):
     return int((lt.tm_gmtoff or 0) // 60)
 
 
+# What firmware/src/touch_inject.c answers: the whole of what --touch-only may
+# put on the wire. The touch ops (tap, swipe, press, release, click, wake,
+# dismiss) are all t="touch"; mem is only a request to the host harness.
+INJECT_TYPES = frozenset({"touch", "ui_state", "widgets"})
+
+TOUCH_ONLY_REFUSAL = ("--touch-only: this script has a fake or edit-reply "
+                      "step, which writes a line the injector does not "
+                      "handle; take it out or drop --touch-only")
+
+
 class Bench:
     def __init__(self, link, out=None, settle_scale=1.0, verbose=False,
-                 edit_reply=True):
+                 edit_reply=True, touch_only=False, skip_missing=False):
         self.link = link
+        # --touch-only: this bench speaks only INJECT_TYPES. It exists for the
+        # WiFi bench, where a session is live and a welcome, time, usage,
+        # svc, pong or theme line from here would be a second host talking
+        # over the board's real one (and could end the session it measures).
+        # send() refuses everything else, greet() and send_frames() do
+        # nothing, and the board's ping, ota_query and theme_edit go
+        # unanswered; the board's own watchdogs are not what is under test.
+        self.touch_only = touch_only
+        # --skip-missing (bench only): a click, tap or expect-widget on a
+        # widget that is not on the panel logs a skip and goes on, so one
+        # script runs against a board with or without the spike's tile.
+        self.skip_missing = skip_missing
+        if touch_only:
+            edit_reply = None
         self.out = out or sys.stdout
         self.scale = settle_scale
         self.verbose = verbose
@@ -1598,6 +1622,10 @@ class Bench:
 
     # -- writing --
     def send(self, msg):
+        if self.touch_only and msg.get("t") not in INJECT_TYPES:
+            # The type only: a message may carry anything.
+            raise ValueError("--touch-only: a line the injector does not "
+                             "handle was about to be sent")
         raw, why = protocol.encode_checked(msg)
         if raw is None:
             self.say(f"not sent: {why}")
@@ -1607,6 +1635,8 @@ class Bench:
         return True
 
     def greet(self):
+        if self.touch_only:
+            return
         from pc.version import RELEASE_VERSION
         # editing=False: no builder is open here, and a bench run must not
         # start on an "Edit on computer" held by whatever ran before it.
@@ -1614,6 +1644,8 @@ class Bench:
                                    editing=False))
 
     def send_frames(self):
+        if self.touch_only:
+            return
         now = time.time()
         claude, codex = _fake_frames(now, self._frames_sent)
         self._frames_sent += 1
@@ -1712,13 +1744,17 @@ class Bench:
             return False
         t = obj["t"]
         if t == "ping":
-            self.send(protocol.pong())
+            if not self.touch_only:
+                self.send(protocol.pong())
             return True
         if t == "ota_query":
             # As a daemon with nothing newer answers. Unanswered, the
             # board's own 30 s watchdog (main.c, OTA_UI_CHECKING) fails the
             # check and upd_timer_cb puts "Couldn't check for updates" over
             # the gauges -- the notice that stopped the first board run.
+            if self.touch_only:
+                self.say("ota_query (not answered: --touch-only)")
+                return True
             self.say("ota_query (answered ota_none)")
             self.send(protocol.ota_none())
             return True
@@ -1878,8 +1914,11 @@ class Bench:
         st = None
         while True:
             st = self.query_state()
+            # "a|b" accepts either: a screen that is one of two things by
+            # the time the bench looks (the spike's modal comes and goes).
             if st is not None and st["busy"] == 0 and all(
-                    str(st.get(k)) == str(v) for k, v in want.items()):
+                    str(st.get(k)) in str(v).split("|")
+                    for k, v in want.items()):
                 return True, st
             if time.monotonic() >= deadline:
                 return False, st
@@ -2351,7 +2390,23 @@ class Bench:
                      f"({100.0 * m['peak'] / pool:.1f}%), "
                      f"largest free {m['largest']}")
 
+    def _widget_absent(self, text):
+        """True when no widget on the panel says `text` (any tier of
+        reachable_matches), False when one does or the listing failed (the
+        step then fails as it always did)."""
+        got, _ = self._list()
+        if got is None:
+            return False
+        q = text[:LABEL_MAX]
+        return not any(w.label and q in w.label for w in got[1])
+
     def run_step(self, s):
+        if (self.skip_missing and s.cmd in ("click", "expect_widget",
+                                            "wait_widget")
+                and self._widget_absent(s.args[0])):
+            self.say(f"skip {s.cmd.replace('_', '-')} {s.args[0]!r}: "
+                     "no such widget (--skip-missing)")
+            return True
         if s.cmd == "tap":
             return self.run_target(s.args[0])
         if s.cmd == "raw_tap":
@@ -2629,6 +2684,15 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true",
                     help="click a widget even when it is disabled (LVGL "
                          "drops the press; refused without this)")
+    ap.add_argument("--touch-only", action="store_true",
+                    help="write only touch, ui_state and widgets lines: no "
+                         "welcome, time, usage or answers (for a board with "
+                         "a live WiFi session)")
+    ap.add_argument("--loop", type=int, default=1, metavar="N",
+                    help="run the script N times")
+    ap.add_argument("--skip-missing", action="store_true",
+                    help="bench only: a click or expect-widget on a widget "
+                         "that is not there is skipped, not failed")
     ap.add_argument("--edit-reply", choices=("ok", "no"), default="ok",
                     help="answer the board's theme_edit with ok 1 (as if a "
                          "browser opened) or ok 0")
@@ -2679,6 +2743,12 @@ def main(argv=None):
         print(f"{args.cmd}: {e}", file=sys.stderr)
         return 2
 
+    if args.touch_only and (args.harness or any(
+            st.cmd in ("fake", "edit_reply") for st in steps)):
+        # Before the port opens: nothing may have been written by now.
+        print(TOUCH_ONLY_REFUSAL, file=sys.stderr)
+        return 2
+
     if args.harness:
         port, ser, lock = "the host harness", None, None
         link = HarnessLink(args.harness, args.renders)
@@ -2689,7 +2759,8 @@ def main(argv=None):
         port, ser, lock = conn
         link = Link(ser)
     bench = Bench(link, verbose=args.verbose,
-                  edit_reply=args.edit_reply == "ok")
+                  edit_reply=args.edit_reply == "ok",
+                  touch_only=args.touch_only, skip_missing=args.skip_missing)
     bench.force = args.force
     if ser is not None:
         bench.port_check = lambda: port_holders(port)
@@ -2701,17 +2772,26 @@ def main(argv=None):
         print(f"bench on {port}")
         bench.greet()
         # The board answers welcome with pref (its caps) and theme_now.
-        bench.mark()
-        bench._wait(lambda evs: next((e for e in evs if e["t"] == "pref"),
-                                     None), 3.0)
-        bench.send_frames()
+        if not args.touch_only:
+            bench.mark()
+            bench._wait(lambda evs: next((e for e in evs if e["t"] == "pref"),
+                                         None), 3.0)
+            bench.send_frames()
         bench.sleep(1.0)
         if bench.query_state() is None:
             bench.fail("the board does not answer ui_state -- is this a "
                        "CONFIG_BLINK_TOUCH_INJECT image?")
         else:
-            bench.run_with_restore(steps, keep_going=args.keep_going,
-                                   restore=not args.no_restore)
+            for n in range(max(1, args.loop)):
+                if args.loop > 1:
+                    bench.say(f"loop {n + 1} of {args.loop}")
+                # Restoring would send a theme line, which --touch-only may
+                # not; its scripts only look and open, and change nothing.
+                bench.run_with_restore(
+                    steps, keep_going=args.keep_going,
+                    restore=not (args.no_restore or args.touch_only))
+                if bench.failures and not args.keep_going:
+                    break
         bench.summary()
     finally:
         link.stop()
