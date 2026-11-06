@@ -103,7 +103,7 @@ bool link_replace_session(bool newcomer_authenticated)
 #ifdef __ZEPHYR__
 /*
  * The only path from proto.c's emit() to a link. Diagnostics
- * (printk("[tag] ...")) never come through here, so nothing but protocol
+ * (tagged console lines) never come through here, so nothing but protocol
  * lines can reach the network. USB stays a printk: the long prj.conf comment
  * on the deferred log still applies.
  *
