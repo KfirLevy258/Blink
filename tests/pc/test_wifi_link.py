@@ -87,7 +87,7 @@ def _fake_air(key, answer_port, stranger=False, log=None):
 
 
 def test_read_write_through_the_fake_board(tmp_path, board):
-    b = board()
+    b = board(hello_at_start=True)
     _pair(tmp_path, b.address[1])
     link, out = wifi_link.connect(str(tmp_path), discover=_nodisc)
     assert out == "connected" and link.kind == "wifi"
@@ -278,7 +278,7 @@ def test_a_frame_split_across_two_recvs():
 
 
 def test_a_failed_address_refresh_keeps_the_link(tmp_path, board, monkeypatch):
-    b = board()
+    b = board(hello_at_start=True)
     _pair(tmp_path, _free_port())
 
     def boom(*a):
