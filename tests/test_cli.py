@@ -3528,6 +3528,27 @@ def test_a_wsl_usage_seat_is_told_what_is_kept_once(
     assert said.count(path) == 1
 
 
+@pytest.mark.parametrize("where", ["codex", "driver"])
+def test_a_ctrl_c_after_the_wsl_halt_starts_the_service_again(
+        tmp_path, monkeypatch, where):
+    """The scoped review of feat/spend-wsl-refresh, item 2: the WSL
+    branch halts the daemon before it touches the distribution, and only
+    the service step or a stop inside _setup_wsl started it again. A
+    Ctrl-C in the Codex hooks or the USB driver step left it stopped."""
+    calls = _wsl_desk(monkeypatch, _FakeReg([(WSL_GUID, "Ubuntu")]),
+                      probe=_probe())
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+
+    def fails(*a, **k):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(cli, "_install_codex_hooks" if where == "codex"
+                        else "_install_driver_step", fails)
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["install", "--wsl", "Ubuntu"])
+    names = [c[0] for c in calls if c[0] in ("halt", "restart", "service")]
+    assert names == ["halt", "restart"]
+
+
 def test_a_wsl_desk_on_another_seat_gets_the_short_paragraph_once(
         tmp_path, monkeypatch, capsys):
     """D1, the other seat: the short paragraph, said once and after the

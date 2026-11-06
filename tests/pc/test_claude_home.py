@@ -879,3 +879,81 @@ def test_a_failed_program_swap_restarts_only_a_service_it_stopped(
         self._note("halt"), True)[1], raising=False)
     assert cli.main(["install"]) == 1
     assert [c[0] for c in calls] == ["halt", "restart"]
+
+
+# ------------------- scoped review of feat/spend-wsl-refresh, item 2
+
+def _halting(monkeypatch, calls):
+    """Windows' halt, which stops the daemon and says so."""
+    monkeypatch.setattr(_Service, "halt", lambda self: (
+        self._note("halt"), True)[1], raising=False)
+
+
+def _frozen_swap(tmp_path, monkeypatch, ok=True):
+    from pc import update
+    monkeypatch.setattr(cli, "_frozen", lambda: True)
+    monkeypatch.setattr(cli, "_self_path",
+                        lambda: _j(tmp_path, "dl", "blink"))
+    os.makedirs(_j(tmp_path, "dl"), exist_ok=True)
+    # The frozen shims come out of the bundle: the tree's copies stand in.
+    tools = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "tools")
+    for name in ("blink-statusline.sh", "blink-hook.sh"):
+        with open(os.path.join(tools, name), encoding="utf-8") as f, \
+                open(_j(tmp_path, "dl", name), "w", encoding="utf-8") as g:
+            g.write(f.read())
+    monkeypatch.setattr(update, "swap_in", lambda *a: (ok, "bad"))
+
+
+@pytest.mark.parametrize("boom", [KeyboardInterrupt, RuntimeError])
+def test_a_ctrl_c_in_the_driver_step_starts_the_halted_service(
+        tmp_path, monkeypatch, boom):
+    """The scoped review of feat/spend-wsl-refresh, item 2: the finally
+    started only a stop made for a record move. On Windows the program
+    swap halts the daemon, and a Ctrl-C (or a raise) in the USB driver
+    step then left it stopped, the board on HOST LOST until the next
+    logon. Every stop this install made is started again on every way
+    out."""
+    calls = _with_service(monkeypatch)
+    _halting(monkeypatch, calls)
+    _frozen_swap(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+
+    def driver():
+        raise boom("x")
+    monkeypatch.setattr(cli, "_install_driver_step", driver)
+    with pytest.raises(boom):
+        cli.main(["install"])
+    names = [c[0] for c in calls]
+    assert names[0] == "halt" and names[-1] == "restart"
+    assert names.count("restart") == 1 and "install" not in names
+
+
+def test_a_ctrl_c_during_the_swap_starts_the_halted_service(
+        tmp_path, monkeypatch):
+    calls = _with_service(monkeypatch)
+    _halting(monkeypatch, calls)
+    _frozen_swap(tmp_path, monkeypatch)
+    from pc import update
+
+    def swap(*a):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(update, "swap_in", swap)
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["install"])
+    assert [c[0] for c in calls] == ["halt", "restart"]
+
+
+def test_an_install_that_stopped_nothing_starts_nothing(tmp_path,
+                                                        monkeypatch):
+    """Only services this install stopped: off Windows the halt stops
+    nothing, and a raise afterwards must not kickstart a healthy daemon."""
+    calls = _with_service(monkeypatch)
+    _frozen_swap(tmp_path, monkeypatch)
+
+    def fails(*a, **k):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(cli, "_install_codex_hooks", fails)
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["install"])
+    assert [c[0] for c in calls] == ["halt"]
