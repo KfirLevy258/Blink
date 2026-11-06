@@ -250,6 +250,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The mbedTLS that Zephyr 4.3.1 pins (west.yml:318, version 3.6.6), so
+      # wl_crypto_real compiles the board's cipher wrapper against the exact
+      # library the firmware links. This job checks out only this
+      # repository, so it fetches that one module, pinned by commit and by
+      # the tarball's sha256 (measured 2026-11-06, two downloads alike).
+      # BLINK_REQUIRE_MBEDTLS=1 turns a missing source into a failure here;
+      # on a developer machine without one the suite skips with a line.
+      - name: fetch the pinned mbedTLS
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/mbedtls.tar.gz" \
+            https://github.com/zephyrproject-rtos/mbedtls/archive/11c0f18ab888fed4363eeeb43fd734246dc3c93b.tar.gz
+          echo "1d271dd84ec2e309e6e0152a953cb373dfb9c1eb24a39e792b909d88d3a36b33  $RUNNER_TEMP/mbedtls.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/mbedtls"
+          tar -xzf "$RUNNER_TEMP/mbedtls.tar.gz" -C "$RUNNER_TEMP/mbedtls" --strip-components=1
+          echo "BLINK_MBEDTLS_SRC=$RUNNER_TEMP/mbedtls" >> "$GITHUB_ENV"
+          echo "BLINK_REQUIRE_MBEDTLS=1" >> "$GITHUB_ENV"
       - run: sh tests/ci/check_host_tests.sh
 
   # The factory scripts -- tools/burn.sh and tools/flash_encrypted.sh -- run

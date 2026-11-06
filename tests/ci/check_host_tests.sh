@@ -40,7 +40,11 @@ run_one() {
 
 	objs=""
 	for e in $extra; do
-		objs="$objs $SRC/$e"
+		# An absolute path is a source outside firmware/src (mbedTLS's).
+		case $e in
+		/*) objs="$objs $e" ;;
+		*) objs="$objs $SRC/$e" ;;
+		esac
 	done
 
 	# -Wall -Werror: these compile in seconds and a warning in firmware
@@ -125,6 +129,46 @@ run_one usage_freshness "usage_freshness.c" ""
 run_one usage_layout ""                ""
 run_one usage_state  "usage_state.c"   ""
 run_one svc_state    "svc_state.c fmt.c" ""
+
+# The board's cipher (wl_crypto_mbedtls.c, unchanged) against the PC's
+# (pc/wifi_crypto.py, through tests/wl_crypto_real/vectors.h) at every
+# plaintext length, on mbedTLS's own sources: the library files the wrapper
+# reaches, built with tests/wl_crypto_real/mbedtls_config.h. The sources are
+# the module Zephyr 4.3.1 pins (west.yml:318, 3.6.6): BLINK_MBEDTLS_SRC when
+# set (CI fetches the pinned tarball, .github/workflows/installer.yml), else
+# the workspace's modules/crypto/mbedtls, else its mbedtls-3.6 copy. A
+# machine with none skips this one suite and every other runs as before;
+# BLINK_REQUIRE_MBEDTLS=1 makes that a failure, so CI cannot skip it quietly.
+mbedtls_src() {
+	if [ -n "${BLINK_MBEDTLS_SRC:-}" ]; then
+		printf '%s\n' "$BLINK_MBEDTLS_SRC"
+		return 0
+	fi
+	# shellcheck source=tools/lib_zephyr.sh
+	. "$ROOT/tools/lib_zephyr.sh"
+	ws=$(blink_zephyr_ws) || return 1
+	for d in "$ws/modules/crypto/mbedtls" "$ws/modules/crypto/mbedtls-3.6"; do
+		if [ -f "$d/library/chachapoly.c" ]; then
+			printf '%s\n' "$d"
+			return 0
+		fi
+	done
+	return 1
+}
+if MBEDTLS=$(mbedtls_src); then
+	mbed_objs="wl_crypto_mbedtls.c"
+	for f in chachapoly.c chacha20.c poly1305.c hkdf.c md.c sha256.c \
+		platform_util.c constant_time.c; do
+		mbed_objs="$mbed_objs $MBEDTLS/library/$f"
+	done
+	run_one wl_crypto_real "$mbed_objs" \
+		"-I$MBEDTLS/include -I$ROOT -I$ROOT/tests/wl_crypto_real/stub -DMBEDTLS_CONFIG_FILE=\"tests/wl_crypto_real/mbedtls_config.h\""
+elif [ "${BLINK_REQUIRE_MBEDTLS:-}" = 1 ]; then
+	printf '  %-14s NO MBEDTLS SOURCE (BLINK_REQUIRE_MBEDTLS=1)\n' wl_crypto_real
+	failures=$((failures + 1))
+else
+	echo "  SKIP wl_crypto_real (no mbedTLS source; set BLINK_MBEDTLS_SRC)"
+fi
 
 if [ "$failures" -ne 0 ]; then
 	printf '\n%d host test(s) failed\n' "$failures" >&2

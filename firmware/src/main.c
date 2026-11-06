@@ -30,6 +30,7 @@
 #include "ui_touchfx.h"
 #include "version.h"
 #include "mem_stats.h"
+#include "wl_crypto.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
@@ -583,6 +584,18 @@ int main(void)
 	if (mbedtls_platform_set_calloc_free(k_calloc, k_free) != 0) {
 		printk("[usage] FATAL: mbedTLS allocator hookup failed\n");
 		return -1;
+	}
+
+	/* The WiFi link's cipher against RFC 8439 2.8.2 and RFC 5869 case 1,
+	 * once, before the network thread exists and after the allocator above
+	 * (HMAC and HKDF allocate). A build whose mbedTLS port or configuration
+	 * got the cipher wrong would otherwise look like a pairing that never
+	 * works, the same symptom as a wrong key; this names it on the console
+	 * instead, and the network thread (Task 2.5) starts only when it passed,
+	 * so a board that fails never brings the radio up (spec S5.4, D47). The
+	 * USB panel is unaffected either way. */
+	if (IS_ENABLED(CONFIG_BLINK_WIFI_LINK) && wl_crypto_selftest() != 0) {
+		printk("[wifi] selftest failed\n");
 	}
 
 	if (!device_is_ready(display_dev)) {

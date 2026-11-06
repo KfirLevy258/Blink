@@ -54,6 +54,11 @@ target_sources_ifdef(CONFIG_BLINK_TOUCH_INJECT app PRIVATE src/touch_inject.c
 		     src/touch_widgets.c)
 
 
+# The WiFi link's cipher (mbedTLS behind wl_crypto.h) and its boot
+# self-test; CONFIG_BLINK_WIFI_LINK and the mbedTLS modules it needs come
+# from firmware/Kconfig and prj.conf (spec S5.1).
+target_sources_ifdef(CONFIG_BLINK_WIFI_LINK app PRIVATE src/wl_crypto_mbedtls.c)
+
 # The [mem] lines (src/mem_stats.c), on whenever prj.conf keeps the heap
 # counters on. It reads the LVGL pool's free lists through Zephyr's private
 # lib/heap/heap.h, so ZEPHYR_BASE is on the path for this one file only and
