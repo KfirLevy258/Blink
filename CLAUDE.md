@@ -101,20 +101,21 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**5047 passing, 2 skipped** (os.startfile and one other platform test) as
-of 2026-11-06, on macOS, on PR #8's tree after develop (PR #3) was merged
-into it (5049 collected). The same tree the same day, each its own count:
-Ubuntu (Docker, x86_64) 4847 passed and 202 skipped; Windows (ARM64 VM, a
-git-archive zip) 4561 passed and 475 skipped, with three failures. One was
-the merge itself: PR #3's once-per-change `[ingest] Desktop data folder`
-line, Windows only, landed in a spend test that required an empty stderr;
-fixed, `test_spend_page.py` then passed there. The other two were
-`test_theme_server.py`, a loopback WinError 10053 reset, as on 2026-11-01 below;
-four re-runs of that file failed once, each time on a different case. Windows
-collects 10 fewer tests (5039), all in `tests/pc/test_desktop_paths.py`, by
+**5074 passing, 2 skipped** (os.startfile and one other platform test) as
+of 2026-11-06, on macOS, on PR #8's tree at fbdcd8d (the /usage version
+floor; 5076 collected; 344d3a0 after it adds one test, 5075 there). The
+same tree the same day, each its own count: Ubuntu (Docker, x86_64) 4874
+passed and 202 skipped; Windows (ARM64 VM, a git-archive zip) 4590 passed
+and 475 skipped, with one failure, `test_theme_server.py`'s loopback
+WinError 10053 reset, as on 2026-11-01 below; across five Windows runs that
+day it failed on a different case each time, and this branch does not
+touch it. Earlier that day the Windows run also caught the merge of PR #3:
+its once-per-change `[ingest] Desktop data folder` line, Windows only,
+landed in a spend test that required an empty stderr (fixed). Windows
+collects 10 fewer tests (5066), all in `tests/pc/test_desktop_paths.py`, by
 design: parametrize lists filter at collection on what that filesystem lets
 a fixture create (6 unsafe marker names, 4 glob-hostile profile names). The
-VM full run took 720 s against 202 s on the Mac and 488 s on Ubuntu.
+VM full run took 631 s against 162 s on the Mac and 486 s on Ubuntu.
 Two one-off failures were seen on 2026-11-01 on earlier trees
 and passed on every re-run:
 `test_sandbox.py::test_ordinary_commands_are_untouched` on Ubuntu (the child
