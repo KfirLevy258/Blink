@@ -5,7 +5,7 @@ import queue
 import threading
 import time
 
-from pc import protocol, settings_ops, wifi_pair
+from pc import private_file, protocol, settings_ops, wifi_pair
 from pc.bridge import Bridge
 
 _NO_FEED = dict(fetch_manifest=lambda: None, fetch_signed_manifest=lambda: None)
@@ -32,6 +32,7 @@ def make(tmp_path, caps=("wifi",), verify=None, run_async=None):
                run_async=run_async or spawn, **_NO_FEED)
     b.on_message({"t": "hello", "v": 1, "fw": "1.4.1", "board_id": "abcd",
                   "caps": list(caps)})
+    b.on_message({"t": "wifi_state", "v": 1, "st": "off", "link": "usb"})
     sent.clear()
     return b, ops, sent, home, verified, threads
 
@@ -89,6 +90,7 @@ def test_join_sends_one_wifi_set_and_saves_on_up(tmp_path):
 def test_join_fail_saves_nothing(tmp_path):
     b, ops, sent, home, verified, th = make(tmp_path)
     t, box = start_join(b, sent, ops)
+    b.on_message({"t": "wifi_state", "v": 1, "st": "joining", "link": "usb"})
     b.on_message({"t": "wifi_state", "v": 1, "st": "fail", "link": "usb",
                   "why": "bad password"})
     t.join(3)
@@ -158,14 +160,115 @@ def test_the_password_is_not_kept(tmp_path):
     pump_until(b, lambda: any(m["t"] == "wifi_set" for m in sent))
     b.on_message(up(kid_of(sent)))
     t.join(3)
-    t.join()
-    holders = [r for r in gc.get_referrers(pw)
-               if not isinstance(r, type(gc.get_referrers.__self__))
-               and type(r).__name__ not in ("frame", "function")]
-    assert holders == [] or all(type(r).__name__ == "cell" for r in holders)
-    assert pw not in repr([m for m in sent if m["t"] != "wifi_set"])
+    for x in th:
+        x.join()
+    holders = [r for r in gc.get_referrers(pw) if type(r).__name__ != "frame"]
+    assert holders == []
+    hexpw = pw.encode().hex()
+    hits = [m for m in sent if pw in repr(m) or hexpw in repr(m)]
+    assert [m["t"] for m in hits] == ["wifi_set"]
+    assert pw not in repr(box) and pw not in repr(verified)
 
 
+def test_ops_refused_until_the_board_says_usb(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    b._wifi_link = None
+    t, box = call(ops.forget, 2.0)
+    pump_until(b, lambda: box)
+    assert isinstance(box["e"], settings_ops.BoardOpError) and not sent
+
+
+def test_forget_keeps_the_file_until_the_board_answers(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    wifi_pair.save(home, "abcd", b"k" * 32, "10.0.0.5", 49731)
+    t, box = call(ops.forget, 5.0)
+    pump_until(b, lambda: sent)
+    assert wifi_pair.load(home) is not None
+    b.on_message(up("whatever"))                  # stale, not the answer
+    assert wifi_pair.load(home) is not None and t.is_alive()
+    b.on_message({"t": "wifi_state", "v": 1, "st": "off", "link": "usb"})
+    t.join(3)
+    assert wifi_pair.load(home) is None
+
+
+def test_a_not_private_pairing_dir_finishes_the_op_not_the_daemon(
+        tmp_path, monkeypatch):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    t, box = start_join(b, sent, ops)
+
+    def boom(*a):
+        raise private_file.NotPrivate("x")
+    monkeypatch.setattr(wifi_pair, "save", boom)
+    b.on_message(up(kid_of(sent)))
+    t.join(3)
+    assert isinstance(box["e"], settings_ops.BoardOpError) and not verified
+
+
+def test_a_late_up_still_saves_the_key(tmp_path, capsys):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    t, box = call(ops.join, b"Net", PW, 0.2)
+    pump_until(b, lambda: any(m["t"] == "wifi_set" for m in sent))
+    t.join(3)
+    assert "e" in box                              # the page gave up
+    b.pump()
+    b.on_message(up(kid_of(sent)))
+    assert wifi_pair.load(home)["kid"] == kid_of(sent)
+    assert "another computer" not in capsys.readouterr().err
+
+
+def test_a_late_up_after_the_window_is_not_saved(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    t, box = call(ops.join, b"Net", PW, 0.1)
+    pump_until(b, lambda: any(m["t"] == "wifi_set" for m in sent))
+    t.join(3)
+    b._join["until"] = 0
+    b.on_message(up(kid_of(sent)))
+    assert wifi_pair.load(home) is None
+
+
+def test_the_mismatch_sentence_needs_usb_evidence(tmp_path, capsys):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    wifi_pair.save(home, "abcd", b"k" * 32, "10.0.0.5", 49731)
+    b.on_message(up("deadbeef", link="wifi"))
+    assert wifi_pair.load(home) is not None
+    assert "another computer" not in capsys.readouterr().err
+
+
+def test_another_board_on_the_cable_does_not_delete_this_pairing(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    wifi_pair.save(home, "other-board", b"k" * 32, "10.0.0.5", 49731)
+    b.on_message({"t": "wifi_state", "v": 1, "st": "off", "link": "usb"})
+    assert wifi_pair.load(home) is not None
+
+
+def test_join_is_refused_without_a_wire_board_id(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    b._board_id = None
+    t, box = call(ops.join, b"Net", PW, 2.0)
+    pump_until(b, lambda: box)
+    assert isinstance(box["e"], settings_ops.BoardOpError) and not sent
+
+
+def test_a_stale_fail_before_joining_does_not_end_the_join(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    t, box = start_join(b, sent, ops)
+    b.on_message({"t": "wifi_state", "v": 1, "st": "fail", "link": "usb"})
+    t.join(0.3)
+    assert t.is_alive()
+    b.on_message({"t": "wifi_state", "v": 1, "st": "joining", "link": "usb"})
+    b.on_message({"t": "wifi_state", "v": 1, "st": "fail", "link": "usb"})
+    t.join(3)
+    assert box["r"]["steps"] == ["sent"]
+
+
+def test_an_up_with_a_bad_address_saves_nothing(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    t, box = start_join(b, sent, ops)
+    m = up(kid_of(sent))
+    m["port"] = 0
+    b.on_message(m)
+    t.join(3)
+    assert "e" in box and wifi_pair.load(home) is None and not verified
 def test_scan_collects_nets_until_the_last(tmp_path):
     b, ops, sent, home, verified, th = make(tmp_path)
     t, box = call(ops.scan, 5.0)
@@ -182,9 +285,10 @@ def test_forget_removes_the_file_and_returns_the_state(tmp_path):
     wifi_pair.save(home, "abcd", b"k" * 32, "10.0.0.5", 49731)
     t, box = call(ops.forget, 5.0)
     pump_until(b, lambda: sent)
-    assert wifi_pair.load(home) is None and sent[0]["t"] == "wifi_forget"
+    assert sent[0]["t"] == "wifi_forget"
     b.on_message({"t": "wifi_state", "v": 1, "st": "off", "link": "usb"})
     t.join(3)
+    assert wifi_pair.load(home) is None
     assert box["r"]["st"] == "off" and box["r"]["usb"] is True
 
 

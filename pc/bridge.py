@@ -8,6 +8,7 @@ import threading
 import time
 
 from pc import ota as ota_mod
+from pc import private_file
 from pc import protocol
 from pc import settings_ops
 from pc import wifi_pair
@@ -85,6 +86,10 @@ def _proto_for_log(proto) -> str:
     if isinstance(proto, int) and 0 <= proto <= 9999:
         return f"protocol {proto}"
     return "a newer protocol"
+
+
+# How long a join's key is kept for a late `up` (the board's verify window).
+JOIN_LATE_S = 60.0
 
 
 class Bridge:
@@ -808,9 +813,8 @@ class Bridge:
     def _drain_ops(self):
         if self._ops is None:
             return
-        op = self._op
-        if op is not None and op.abandoned:
-            self._op = self._join = None
+        if self._op is not None and self._op.abandoned:
+            self._op = None             # a late `up` can still be saved
         while self._op is None:
             try:
                 op = self._ops.queue.get_nowait()
@@ -824,14 +828,19 @@ class Bridge:
         op.result, op.error = result, error
         op.done.set()
         if self._op is op:
-            self._op = self._join = None
+            self._op = None
 
     def _start_op(self, op):
         if not self._board_can(protocol.BOARD_CAP_WIFI):
             return self._finish(op, error="This board cannot join WiFi.")
-        if self._wifi_link == "wifi":
+        # Pairing is for the cable (S5.3). Fail closed: until the board has
+        # said which link it is on, it is not known to be USB.
+        if self._wifi_link != "usb":
             return self._finish(op, error=(
                 "Plug the board in with the cable to change its WiFi."))
+        if op.kind == "join" and self._board_id is None:
+            return self._finish(op, error=(
+                "The board has not said which one it is yet. Try again."))
         self._op = op
         if op.kind == "scan":
             self._scan = []
@@ -839,12 +848,15 @@ class Bridge:
         elif op.kind == "join":
             ssid, password = op.args
             key = wifi_pair.new_key()
+            # Outlives the op by the verify window (D65): an `up` after the
+            # page stopped waiting must still save the key the board holds.
             self._join = {"op": op, "key": key, "kid": wifi_pair.kid(key),
-                          "steps": []}
+                          "steps": [], "joining": False,
+                          "board_id": self._board_id,
+                          "until": self._now() + JOIN_LATE_S}
             self._write(protocol.wifi_set(ssid, password, key))
             op.args = ssid = password = None
         else:
-            wifi_pair.remove(self._home)
             self._write(protocol.wifi_forget())
 
     def _on_wifi_net(self, msg):
@@ -864,22 +876,38 @@ class Bridge:
         if self._ops is not None:
             self._ops.note_state(msg)
         op, st = self._op, msg.get("st")
+        usb = msg.get("link") == "usb"
         if op is not None and op.kind == "forget":
-            return self._finish(op, result=dict(self._ops.state()))
-        j = self._join
-        if j is not None:
-            if "sent" not in j["steps"]:
-                j["steps"].append("sent")
-            if st == "fail":
-                self._finish(op, result={"state": self._ops.state(),
-                                         "steps": j["steps"]})
-            elif st == "up" and msg.get("kid") == j["kid"]:
-                self._joined(j, msg)
+            # Only the board's "off" answers a forget: an earlier state still
+            # in flight is not the answer, and the pairing goes with it.
+            if st == "off":
+                wifi_pair.remove(self._home)
+                self._finish(op, result=dict(self._ops.state()))
             return
-        if self._home is None or "kid" not in msg and st != "off":
+        j = self._join
+        if j is not None and self._now() >= j["until"]:
+            j = self._join = None
+        if j is not None:
+            jop = j["op"] if j["op"] is op else None
+            if st == "joining":
+                j["joining"] = True
+                if "sent" not in j["steps"]:
+                    j["steps"].append("sent")
+            elif st == "fail" and j["joining"] and jop is not None:
+                self._join = None
+                self._finish(jop, result={"state": self._ops.state(),
+                                          "steps": j["steps"]})
+            elif st == "up" and usb and msg.get("kid") == j["kid"]:
+                self._joined(j, jop, msg)
+            return
+        if not usb or self._home is None or self._board_id is None:
+            return
+        if "kid" not in msg and st != "off":
             return
         pair = wifi_pair.load(self._home)
-        if pair is not None and msg.get("kid") != pair["kid"]:
+        # Another board on the cable is not this one forgetting us.
+        if (pair is not None and pair["board_id"] == self._board_id
+                and msg.get("kid") != pair["kid"]):
             wifi_pair.remove(self._home)
             if not self._said_kid:
                 self._said_kid = True
@@ -887,15 +915,34 @@ class Bridge:
                       " forgot this one; plug it in and open blink settings",
                       file=sys.stderr)
 
-    def _joined(self, j, msg):
-        op, key = j["op"], j["key"]
+    def _joined(self, j, op, msg):
+        key = j["key"]
         ip, port = msg.get("ip"), msg.get("port")
+        self._join = None
+        if op is not None:
+            self._op = None             # the verify below answers the op
+        if "sent" not in j["steps"]:
+            j["steps"].append("sent")
         j["steps"].append("joined")
-        try:
-            wifi_pair.save(self._home, self._board_id or "board", key, ip, port)
-        except (OSError, ValueError, TypeError):
-            return self._finish(op, error="Could not save the pairing.")
-        self._join = self._op = None    # the verify below answers the op
+        err = None
+        if not (isinstance(ip, str) and ip and type(port) is int
+                and 0 < port < 65536):
+            err = "The board gave an address this computer cannot use."
+        else:
+            try:
+                wifi_pair.save(self._home, j["board_id"], key, ip, port)
+            except private_file.NotPrivate:
+                err = "Could not save the pairing safely."
+            except (OSError, ValueError, TypeError):
+                err = "Could not save the pairing."
+        if err:
+            if op is not None:
+                op.args = None
+                op.result, op.error = None, err
+                op.done.set()
+            return
+        if op is None:
+            return                      # saved late; the page gave up
         state = self._ops.state()
 
         def work():
