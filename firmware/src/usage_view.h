@@ -108,6 +108,11 @@ void usage_view_set_status(enum usage_status status);
 
 void usage_view_set_activity(enum usage_activity a);
 
+/* The link mark beside the health dot (S5.7): 0 none, 1 USB, 2 WiFi. Drawn
+ * only for 1 and 2; the caller passes 0 for an unpaired board on USB, which
+ * leaves the header exactly as it was. Main thread. */
+void usage_view_set_link(uint8_t kind);
+
 /*
  * The board has closed its eyes, or opened them again.
  *

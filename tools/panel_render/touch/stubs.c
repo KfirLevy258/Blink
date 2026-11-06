@@ -13,6 +13,7 @@
 #include "backlight.h"
 #include "ota.h"
 #include "proto.h"
+#include "net_link.h"
 #include "ui_boot.h"
 #include "ui_theme.h"
 #include "theme.h"
@@ -219,6 +220,51 @@ void harness_ota_error(const char *why)
 }
 
 /* --- the protocol ---------------------------------------------------------- */
+
+/* --- the WiFi link: a paired board with a live session, the deepest the
+ * Connection screen gets. Forget clears the pairing in RAM, as the store does.
+ * Fixed made-up names and addresses (CLAUDE.md: nothing captured). */
+static bool wifi_paired = true;
+
+bool cfg_get_wifi(char *ssid, size_t ssid_len, char *psk, size_t psk_len)
+{
+	if (!wifi_paired) {
+		return false;
+	}
+	snprintf(ssid, ssid_len, "bench-net");
+	snprintf(psk, psk_len, "%s", "");
+	return true;
+}
+
+bool cfg_paired(void)
+{
+	return wifi_paired;
+}
+
+int cfg_clear_pairing(void)
+{
+	wifi_paired = false;
+	return 0;
+}
+
+uint8_t proto_link_kind(void)
+{
+	return wifi_paired ? 2 : 1;
+}
+
+void net_link_request_down(void) {}
+enum net_link_state net_link_state(void) { return NL_UP; }
+enum net_link_why net_link_why(void) { return NL_WHY_NONE; }
+bool net_link_ip(char *buf, size_t len)
+{
+	snprintf(buf, len, "192.0.2.7");
+	return true;
+}
+int8_t net_link_rssi(void) { return -55; }
+const char *net_link_why_text(enum net_link_why w)
+{
+	return w == NL_WHY_FORGET ? "Could not forget WiFi. Try again." : "";
+}
 
 const char *proto_host_version(void)
 {

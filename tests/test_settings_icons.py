@@ -63,6 +63,6 @@ def test_every_icon_array_is_aligned_for_lvgl():
     c = (SRC / "settings_icons.c").read_text(encoding="utf-8")
     arrays = re.findall(r"^static const uint8_t (icon_\w+_map)\[\](.*?)=",
                         c, re.M)
-    assert len(arrays) == 4
+    assert len(arrays) == 5
     for name, attrs in arrays:
         assert "aligned(LV_DRAW_BUF_ALIGN)" in attrs, name

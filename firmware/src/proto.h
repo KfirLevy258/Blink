@@ -4,6 +4,7 @@
 #include "ota_parse.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 
 /* Initialize protocol I/O, send hello. Call once at startup. */
 void proto_init(void);
@@ -73,6 +74,10 @@ void proto_send_theme_now(const char *why);
 
 /* {"t":"theme_edit","v":2}: Settings > Theme > "Edit on computer". */
 void proto_send_theme_edit(void);
+
+/* Which link protocol lines go over right now: 0 none, 1 USB, 2 WiFi. The
+ * answer link_active() gives (link.h), for the panel. */
+uint8_t proto_link_kind(void);
 
 /* Did the last welcome advertise the theme builder ("caps":["theme"])? */
 bool proto_host_can_theme(void);

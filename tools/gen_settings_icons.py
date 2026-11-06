@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draw the four Settings tile icons and write them out as LVGL A8 images.
+"""Draw the five Settings tile icons and write them out as LVGL A8 images.
 
     PYTHONDONTWRITEBYTECODE=1 python3 tools/gen_settings_icons.py
 
@@ -104,8 +104,22 @@ def update(x, y):
     return d
 
 
+def link(x, y):
+    """Connection: a dot and three arcs opening upward -- the WiFi mark,
+    which also reads as "signal" for the USB cable the same tile reports.
+    The 0.3 in the cone keeps every sample off the cone's edge (the apex
+    sits on a grid line of 0.25 steps), which the edge test insists on."""
+    ax, ay = C, 22.1
+    d = math.hypot(x - ax, y - ay) - 2.2
+    r = math.hypot(x - ax, y - ay)
+    cone = abs(x - ax) + (y - ay) + 0.3
+    for rad in (7.0, 12.0, 17.0):
+        d = min(d, max(abs(r - rad) - STROKE, cone))
+    return d
+
+
 ICONS = (("bright", sun), ("theme", contrast), ("focus", focus),
-         ("update", update))
+         ("update", update), ("link", link))
 
 
 def render(fn):

@@ -1449,3 +1449,8 @@ bool proto_host_lost(void)
 {
 	return host_lost;
 }
+
+uint8_t proto_link_kind(void)
+{
+	return (uint8_t)link_active(k_uptime_get());
+}

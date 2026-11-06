@@ -94,6 +94,9 @@ void ui_settings_theme_edit_state(bool editing);
 /* The host went away (HOST LOST) or said bye: the hold goes. */
 void ui_settings_theme_edit_host_gone(void);
 
+/* Is the Connection screen up? Main thread only. */
+bool ui_settings_connection_open(void);
+
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 /*
  * What Settings is showing, for the bench injector's ui_state reply
@@ -103,7 +106,7 @@ void ui_settings_theme_edit_host_gone(void);
  */
 struct ui_settings_bench {
 	bool open;		/* the panel is up (or is the ground under one) */
-	const char *sub;	/* none|brightness|theme|focus|confirm */
+	const char *sub;	/* none|brightness|theme|focus|connection|confirm */
 	const char *modal;	/* none|notice|whatsnew|prompt|download */
 	bool busy;		/* a transition is latched or a close queued */
 	int theme_page;		/* the theme screen's page, from 0 */

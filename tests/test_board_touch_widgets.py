@@ -1321,3 +1321,25 @@ def test_edit_reply_parses_and_hold_answers_nothing():
     n = len(link.writes)
     b.on_line(b'{"t":"theme_edit","v":2}')
     assert len(link.writes) == n                 # nothing sent back
+
+
+def test_the_connection_screen_says_what_the_spec_says():
+    """S5.7's copy, verbatim, in the firmware: the bench scripts click these
+    words, and the board keeps 47 characters of any failure line."""
+    src = (SRC / "ui_settings.c").read_text(encoding="utf-8")
+    for words in ("Connection", "Link: WiFi", "Link: USB cable",
+                  "Network: %s", "Address: %s", "Signal: good",
+                  "Signal: fair", "Signal: weak", "Forget WiFi", "Forget",
+                  "Cancel",
+                  "Set up WiFi on the computer: blink settings",
+                  "Forget this network?\\nThe board goes back to USB."):
+        assert f'"{words}"' in src, words
+    # Source-level only: this greps the firmware, it does not walk the
+    # Forget/Cancel confirm (tools/bench/session_touch.txt does that).
+    assert "Keep the cable connected" in src.split("static void show_install_confirm")[1]
+    # The settings grid names the fifth tile and the screen reports itself.
+    assert '"Connection",' in src and '"connection"' in src
+    assert "connection" in bt._STATE_WORDS["ov"]
+    net = (SRC / "net_link.c").read_text(encoding="utf-8")
+    assert "Could not forget WiFi. Try again." in net
+    assert len("Could not forget WiFi. Try again.") <= 47

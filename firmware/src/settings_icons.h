@@ -7,5 +7,6 @@ extern const lv_image_dsc_t settings_icon_bright;
 extern const lv_image_dsc_t settings_icon_theme;
 extern const lv_image_dsc_t settings_icon_focus;
 extern const lv_image_dsc_t settings_icon_update;
+extern const lv_image_dsc_t settings_icon_link;
 
 #endif

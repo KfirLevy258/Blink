@@ -172,6 +172,11 @@ static int pip_n_sess, pip_n_run, pip_n_wait, pip_n_stuck;
 static enum usage_status data_health = USAGE_STATUS_DISCONNECTED;
 static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
+/* The link mark left of the age (S5.7). Kept across a rebuild of the screen
+ * in link_kind, as the counts are: it is the last thing said, not a widget. */
+static lv_obj_t *link_lbl;
+static uint8_t link_kind;
+#define LINK_MARK_W 20		/* what the age gives up while the mark shows */
 static lv_obj_t *clock_lbl;
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
 /*
@@ -727,6 +732,7 @@ void usage_view_deinit(void)
 	 * set_status, the same way the health dot does.
 	 */
 	dot = NULL;
+	link_lbl = NULL;
 	title_lbl = chev_r = chev_l = NULL;
 	for (int i = 0; i < PIP_MAX; i++) {
 		pip[i] = NULL;
@@ -747,6 +753,32 @@ void usage_view_deinit(void)
 	if (gauge_scr) {
 		lv_obj_del(gauge_scr);
 		gauge_scr = NULL;
+	}
+}
+
+static void link_paint(void)
+{
+	if (link_lbl == NULL) {
+		return;
+	}
+	if (link_kind == 0) {
+		lv_obj_add_flag(link_lbl, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -30, HDR_ROW_Y);
+		return;
+	}
+	lv_label_set_text(link_lbl, link_kind == 2 ? LV_SYMBOL_WIFI : LV_SYMBOL_USB);
+	lv_obj_clear_flag(link_lbl, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -30 - LINK_MARK_W, HDR_ROW_Y);
+}
+
+void usage_view_set_link(uint8_t kind)
+{
+	if (kind == link_kind) {
+		return;
+	}
+	link_kind = kind;
+	if (built) {
+		link_paint();
 	}
 }
 
@@ -879,6 +911,15 @@ void usage_view_init(void)
 	lv_label_set_text(age_lbl, "");
 	lv_obj_set_style_text_color(age_lbl, COL_DIM, 0);
 	lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -30, HDR_ROW_Y);
+
+	/* Beside the health dot, left of the age; nothing at all for an
+	 * unpaired board on USB, so that panel is pixel for pixel what it was. */
+	link_lbl = lv_label_create(scr);
+	lv_obj_set_style_text_color(link_lbl, COL_DIM, 0);
+	lv_obj_align(link_lbl, LV_ALIGN_TOP_RIGHT, -30, HDR_ROW_Y);
+	lv_obj_add_flag(link_lbl, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_clear_flag(link_lbl, LV_OBJ_FLAG_CLICKABLE);
+	link_paint();
 
 	/* Wall clock. Blank until a time source and timezone are known -- an
 	 * empty label beats a confidently wrong one. */
@@ -2842,6 +2883,7 @@ void usage_view_apply_theme(void)
 	lv_obj_set_style_bg_color(gauge_scr, COL_BG, 0);
 	lv_obj_set_style_text_color(title_lbl, COL_DIM, 0);
 	lv_obj_set_style_text_color(age_lbl, COL_DIM, 0);
+	lv_obj_set_style_text_color(link_lbl, COL_DIM, 0);
 	lv_obj_set_style_text_color(clock_lbl, COL_DIM, 0);
 	lv_obj_set_style_text_color(chev_r, COL_GREY, 0);
 	lv_obj_set_style_text_color(chev_l, COL_GREY, 0);

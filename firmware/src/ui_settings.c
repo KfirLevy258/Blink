@@ -32,6 +32,7 @@
 #include "backlight.h"
 #include "ota.h"
 #include "proto.h"
+#include "net_link.h"
 #include "upd_prompt.h"
 #include "upd_row.h"
 #include "usage_view.h"
@@ -75,6 +76,10 @@
 static lv_obj_t *panel;		/* NULL when closed */
 /* The software-update install dialog. */
 static lv_obj_t *confirm;	/* NULL when no dialog is up */
+/* The Connection screen and its Forget WiFi confirm (S5.7). The confirm is
+ * its own pointer, not `confirm`: upd_timer_cb() withdraws that one when the
+ * update offer changes, and must never delete a question about WiFi. */
+static lv_obj_t *conn_ov, *conn_confirm, *conn_err;
 
 /* Software-update widgets (all NULL when their owner is closed/absent). */
 static lv_obj_t *notice;	/* outcome popup on the top layer */
@@ -953,7 +958,13 @@ static void show_install_confirm(const struct ota_ui *snap)
 
 	lv_obj_t *q = lv_label_create(confirm);
 
-	lv_label_set_text_fmt(q, "Install version %s?\nThe screen restarts when done.",
+	/* The cable line used to be the Settings footer; the customer taps
+	 * here to start a USB update, so this is where it still protects them.
+	 * Two whole literals, not a %s, so the bench's label table can name
+	 * both (board_touch.py VERSION_HOLES). */
+	lv_label_set_text_fmt(q, ota_ui_source() == OTA_SRC_USB ?
+			      "Install version %s?\nThe screen restarts when done.\nKeep the cable connected" :
+			      "Install version %s?\nThe screen restarts when done.",
 			      snap->version);
 	lv_obj_set_style_text_color(q, COL_TEXT, 0);
 	lv_obj_set_style_text_align(q, LV_TEXT_ALIGN_CENTER, 0);
@@ -1819,6 +1830,11 @@ static void sub_closed_cb(void *unused)
 	} else if (focus_ov != NULL) {
 		mem_stats_report("focus-close");
 		focus_forget();
+	} else if (conn_ov != NULL) {
+		mem_stats_report("connection-close");
+		conn_ov = NULL;
+		conn_confirm = NULL;
+		conn_err = NULL;
 	} else {
 		return;
 	}
@@ -1833,7 +1849,8 @@ static void sub_closed_cb(void *unused)
  * button, a swipe after it -- find sub_closing set and do nothing more. */
 static void sub_close(void)
 {
-	if ((bright_ov == NULL && focus_ov == NULL) || sub_closing) {
+	if ((bright_ov == NULL && focus_ov == NULL && conn_ov == NULL) ||
+	    sub_closing) {
 		return;
 	}
 	sub_closing = true;
@@ -1888,7 +1905,8 @@ static void bright_stop_cb(lv_event_t *e)
 static void show_bright(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (bright_ov || focus_ov || theme_ov || confirm || panel == NULL) {
+	if (bright_ov || focus_ov || theme_ov || confirm || conn_ov ||
+	    panel == NULL) {
 		return;
 	}
 	panel_empty();		/* see sub_closed_cb() */
@@ -2591,7 +2609,8 @@ static void show_theme(bool fresh)
 	int n = theme_list(ids);
 	int pages = theme_pages();
 
-	if (theme_ov || bright_ov || focus_ov || confirm || panel == NULL) {
+	if (theme_ov || bright_ov || focus_ov || confirm || conn_ov ||
+	    panel == NULL) {
 		return;
 	}
 	if (fresh) {
@@ -2715,7 +2734,7 @@ static void theme_row_cb(lv_event_t *e)
 		return;
 	}
 	if (theme_ov == NULL && bright_ov == NULL && focus_ov == NULL &&
-	    confirm == NULL && !closing) {
+	    conn_ov == NULL && confirm == NULL && !closing) {
 		lv_async_call(theme_open_cb, NULL);
 	}
 }
@@ -2898,7 +2917,8 @@ static void focus_pick_cb(lv_event_t *e)
 static void show_focus(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (focus_ov || bright_ov || theme_ov || confirm || panel == NULL) {
+	if (focus_ov || bright_ov || theme_ov || confirm || conn_ov ||
+	    panel == NULL) {
 		return;
 	}
 	/* The panel's contents go first, as for Brightness (sub_closed_cb).
@@ -2990,7 +3010,240 @@ static bool sub_can_open(void)
 	 * swipe is the common case, and an open queued in the one loop pass
 	 * before do_close would run against a panel being torn down. */
 	return theme_ov == NULL && bright_ov == NULL && focus_ov == NULL &&
-	       confirm == NULL && !sub_closing && !closing;
+	       conn_ov == NULL && confirm == NULL && !sub_closing && !closing;
+}
+
+/*
+ * Settings > Connection (spec S5.7): which link the board is on, read-only,
+ * and the one control on it, Forget WiFi.
+ *
+ * Built like Brightness: the panel emptied under it and rebuilt when it
+ * closes, so the screen costs the pool one overlay and its labels while it is
+ * open. A snapshot taken when it opens; it does not tick. The tile that opens
+ * it is the fifth, laid across the bottom (build_panel says where the footer
+ * went).
+ */
+static void conn_close_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	sub_close();
+}
+
+static void conn_gesture_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
+		sub_close();
+	}
+}
+
+/* Pays a theme rebuild a change left owed while the question was up, as
+ * confirm_gone() does for the install confirm. */
+static void conn_forget_gone(void)
+{
+	lv_obj_del(conn_confirm);
+	conn_confirm = NULL;
+	if (rebuild_owed && lv_async_call(rebuild_cb, NULL) == LV_RESULT_OK) {
+		rebuild_owed = false;
+	}
+}
+
+static void conn_no_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	mem_stats_report("forget-close");
+	conn_forget_gone();
+}
+
+static void conn_yes_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	mem_stats_report("forget-close");
+	/*
+	 * Cleared first, then the radio: on a failed write the pairing is
+	 * already gone from RAM (cfg_clear_pairing), so the board stops using
+	 * the network either way, and the radio goes down whatever the flash
+	 * said. Only the words differ: the screen stays and says the sector
+	 * may still hold the password. TODO(Task 2.5): close the live session
+	 * here as well, once the network thread exists on feat.
+	 */
+	int rc = cfg_clear_pairing();
+
+	net_link_request_down();
+	conn_forget_gone();
+	if (rc == 0) {
+		printk("[wifi] forgotten\n");
+		sub_close();
+		return;
+	}
+	printk("[wifi] forget failed\n");
+	/* One label, reused: a retry that fails again must not stack another. */
+	if (conn_err == NULL) {
+		conn_err = lv_label_create(conn_ov);
+		lv_label_set_text(conn_err, net_link_why_text(NL_WHY_FORGET));
+		lv_obj_set_style_text_color(conn_err, COL_RED, 0);
+		lv_obj_align(conn_err, LV_ALIGN_TOP_LEFT, 12, 148);
+	}
+}
+
+static void conn_forget_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (!tile_was_a_tap() || conn_confirm != NULL || sub_closing) {
+		return;
+	}
+	conn_confirm = lv_obj_create(panel);
+	lv_obj_set_size(conn_confirm, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_style_bg_color(conn_confirm, COL_BG, 0);
+	lv_obj_set_style_bg_opa(conn_confirm, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(conn_confirm, 0, 0);
+	lv_obj_set_style_pad_all(conn_confirm, 0, 0);
+	lv_obj_clear_flag(conn_confirm, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_center(conn_confirm);
+
+	lv_obj_t *q = lv_label_create(conn_confirm);
+
+	lv_label_set_text(q, "Forget this network?\nThe board goes back to USB.");
+	lv_obj_set_style_text_color(q, COL_TEXT, 0);
+	lv_obj_set_style_text_align(q, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_align(q, LV_ALIGN_TOP_MID, 0, 40);
+
+	lv_obj_t *yes = mk_btn(conn_confirm, "Forget", COL_RED, conn_yes_cb, NULL);
+
+	lv_obj_align(yes, LV_ALIGN_BOTTOM_MID, 0, -70);
+
+	lv_obj_t *no = mk_btn(conn_confirm, "Cancel", COL_TRACK, conn_no_cb, NULL);
+
+	lv_obj_align(no, LV_ALIGN_BOTTOM_MID, 0, -18);
+}
+
+/* A row of text: a transparent clickable object holding the label, because
+ * the bench's widget listing names an object by its first label child
+ * (the widget lister's label_of) and would show a bare label as ''. Inert, and
+ * the swipe still passes through it. */
+static void conn_row(const char *txt, int y, lv_color_t col, bool wrap)
+{
+	lv_obj_t *r = lv_obj_create(conn_ov);
+
+	lv_obj_set_size(r, 296, wrap ? 2 * FONT_LINE_H : FONT_LINE_H);
+	lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_border_width(r, 0, 0);
+	lv_obj_set_style_pad_all(r, 0, 0);
+	lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
+	lv_obj_add_flag(r, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_align(r, LV_ALIGN_TOP_LEFT, 12, y);
+
+	lv_obj_t *l = lv_label_create(r);
+
+	lv_label_set_text(l, txt);
+	lv_obj_set_width(l, 296);
+	lv_label_set_long_mode(l, wrap ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_DOT);
+	lv_obj_set_style_text_color(l, col, 0);
+}
+
+static void show_conn(void)
+{
+	char ssid[33], psk[1], raw[48], row[64];
+	int y = 72;
+
+	if (bright_ov || focus_ov || theme_ov || confirm || conn_ov ||
+	    panel == NULL) {
+		return;
+	}
+	panel_empty();		/* see sub_closed_cb() */
+	conn_ov = lv_obj_create(panel);
+	lv_obj_set_size(conn_ov, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_style_bg_color(conn_ov, COL_BG, 0);
+	lv_obj_set_style_bg_opa(conn_ov, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(conn_ov, 0, 0);
+	lv_obj_set_style_radius(conn_ov, 0, 0);
+	lv_obj_set_style_pad_all(conn_ov, 0, 0);
+	lv_obj_clear_flag(conn_ov, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(conn_ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(conn_ov, conn_gesture_cb, LV_EVENT_GESTURE, NULL);
+	lv_obj_center(conn_ov);
+
+	mk_back(conn_ov, conn_close_cb);
+
+	lv_obj_t *title = lv_label_create(conn_ov);
+
+	lv_label_set_text(title, "Connection");
+	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+	lv_obj_set_style_text_color(title, COL_TEXT, 0);
+	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 11);
+
+	mk_line(conn_ov, 40);
+
+	uint8_t lk = proto_link_kind();
+
+	conn_row(lk == 2 ? "Link: WiFi" : lk == 1 ? "Link: USB cable" :
+		 "Link: none", 50, COL_TEXT, false);
+
+	/* D28: credentials alone decide whether Forget is offered, so a 1.3.4
+	 * unit's leftover WiFi can still be wiped. The password is not wanted
+	 * here: a 1-byte buffer takes none of it. */
+	bool have = cfg_get_wifi(raw, sizeof(raw), psk, sizeof(psk));
+
+	if (!have) {
+		conn_row("Set up WiFi on the computer: blink settings", y,
+			 COL_DIM, true);
+	} else {
+		fmt_ascii(raw, ssid, sizeof(ssid));
+		snprintf(row, sizeof(row), "Network: %s", ssid);
+		conn_row(row, y, COL_TEXT, false);
+		y += 22;
+		if (net_link_ip(raw, sizeof(raw))) {
+			snprintf(row, sizeof(row), "Address: %s", raw);
+			conn_row(row, y, COL_TEXT, false);
+			y += 22;
+			int rssi = net_link_rssi();
+
+			conn_row(rssi > -60 ? "Signal: good" :
+				 rssi > -75 ? "Signal: fair" : "Signal: weak",
+				 y, COL_TEXT, false);
+		}
+		if (net_link_state() == NL_FAILED) {
+			conn_row(net_link_why_text(net_link_why()), 132,
+				 COL_RED, false);
+		}
+		lv_obj_t *fb = mk_btn(conn_ov, "Forget WiFi", COL_TRACK,
+				      conn_forget_cb, NULL);
+
+		lv_obj_align(fb, LV_ALIGN_BOTTOM_MID, 0, -18);
+	}
+
+	/* The version pair, which used to be the Settings footer. */
+	if (proto_host_version()[0]) {
+		snprintf(row, sizeof(row), "Blink %s  |  App %s",
+			 BLINK_FW_VERSION, proto_host_version());
+	} else {
+		snprintf(row, sizeof(row), "Blink %s", BLINK_FW_VERSION);
+	}
+	lv_obj_t *ver = lv_label_create(conn_ov);
+
+	lv_label_set_text(ver, row);
+	lv_obj_set_style_text_color(ver, COL_DIM, 0);
+	lv_obj_align(ver, LV_ALIGN_TOP_MID, 0, 166);
+}
+
+static void conn_open_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	show_conn();
+}
+
+static void conn_row_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (tile_was_a_tap() && sub_can_open()) {
+		lv_async_call(conn_open_cb, NULL);
+	}
+}
+
+bool ui_settings_connection_open(void)
+{
+	return conn_ov != NULL;
 }
 
 static void bright_row_cb(lv_event_t *e)
@@ -3150,6 +3403,9 @@ static void do_close(void (*pump)(void))
 	lv_obj_del(panel);	/* deletes confirm and any overlay with it */
 	panel = NULL;
 	confirm = NULL;
+	conn_ov = NULL;
+	conn_confirm = NULL;
+	conn_err = NULL;
 	rebuild_owed = false;	/* the next open is built in the theme */
 	bright_ov = NULL;
 	lv_obj_update_layout(lv_screen_active());
@@ -3263,7 +3519,7 @@ static void back_cb(lv_event_t *e)
 	 * reaches past the overlay's edge, and a press landing there must not
 	 * close the panel out from under it. */
 	if (confirm == NULL && bright_ov == NULL && theme_ov == NULL &&
-	    focus_ov == NULL) {
+	    focus_ov == NULL && conn_ov == NULL) {
 		close_panel();
 	}
 }
@@ -3272,7 +3528,7 @@ static void panel_gesture_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
 	if (confirm == NULL && bright_ov == NULL && theme_ov == NULL &&
-	    focus_ov == NULL &&
+	    focus_ov == NULL && conn_ov == NULL &&
 	    lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
 		close_panel();
 	}
@@ -3294,8 +3550,9 @@ static void panel_gesture_cb(lv_event_t *e)
 static void rebuild_cb(void *unused)
 {
 	ARG_UNUSED(unused);
-	if (confirm != NULL && panel != NULL && !closing) {
-		rebuild_owed = true;	/* paid by confirm_gone() */
+	if ((confirm != NULL || conn_confirm != NULL) && panel != NULL &&
+	    !closing) {
+		rebuild_owed = true;	/* paid by confirm_gone(), conn_forget_gone() */
 		return;
 	}
 	if (panel == NULL || closing) {
@@ -3305,6 +3562,7 @@ static void rebuild_cb(void *unused)
 	bool theme_was_open = theme_ov != NULL;
 	bool bright_was_open = bright_ov != NULL;
 	bool focus_was_open = focus_ov != NULL;
+	bool conn_was_open = conn_ov != NULL;
 	lv_obj_t *scr = lv_obj_get_parent(panel);
 
 	upd_btn = NULL;
@@ -3318,6 +3576,8 @@ static void rebuild_cb(void *unused)
 	theme_grid = NULL;
 	theme_edit_lbl = NULL;
 	bright_ov = NULL;
+	conn_ov = NULL;
+	conn_err = NULL;
 	focus_forget();
 	lv_obj_del(panel);
 	panel = NULL;
@@ -3328,6 +3588,8 @@ static void rebuild_cb(void *unused)
 		show_bright(NULL);
 	} else if (focus_was_open) {
 		show_focus(NULL);
+	} else if (conn_was_open) {
+		show_conn();
 	}
 }
 
@@ -3397,25 +3659,20 @@ static void build_panel(lv_obj_t *parent_scr)
 	lv_obj_set_pos(panel, 0, 0);
 
 /*
- * The footer: two centred lines under the tiles, on the panel itself.
- *
- * The version pair used to be the update row's subtitle, which put a fact
- * inside a control -- so reading the version meant looking at a button, and
- * the button's own state ("Install 1.4.0") had to be squeezed in beside it.
- * Separating them gives the button one job and the footer room for the
- * second line, which is the thing an update actually needs someone to know.
+ * The fifth tile, "Connection": full width, 36 px, under the two rows of
+ * tiles. There is no grid room for a third row of 71 px, and the footer that
+ * used to sit here (the version pair and "Keep the cable connected") is gone
+ * from this screen to make the room: the version pair moved onto the
+ * Connection screen, and the cable line is said by the update itself ("Keep
+ * the cable connected." on the download screen, dl_sub), at the moment it
+ * applies. Task 0.2 measured this very layout at 3400 B of LVGL pool left,
+ * over the 2320 B floor.
  */
-#define FOOT_Y1 (TILE_TOP + 2 * TILE_H + TILE_GAP + 5)
-#define FOOT_Y2 (FOOT_Y1 + 18)
+#define CONN_Y (TILE_TOP + 2 * TILE_H + TILE_GAP + 4)
+#define CONN_H 36
 
-/*
- * Four tiles and a two-line footer, inside 240. Checked here rather than
- * eyeballed, because a row once went off the bottom of a 240 px screen and
- * nobody noticed until it was flashed. FONT_LINE_H is 16 for the default
- * montserrat_14, so the second line ends at 235.
- */
-BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
-	     "the settings footer no longer fits on the panel");
+BUILD_ASSERT(CONN_Y + CONN_H <= 240,
+	     "the Connection tile no longer fits on the panel");
 	/* No green edge seam here. It existed as a left-edge cue back when the
 	 * back control was a bare chevron that was easy to miss; the control is
 	 * now a bordered 60 x 36 button that announces itself, so the seam was
@@ -3435,10 +3692,8 @@ BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 	char sub[56];
 
 	/*
-	 * Four tiles, two by two (see mk_tile). There is no room for a third
-	 * pair: the tiles and the two-line footer use the 240 px between them
-	 * (the BUILD_ASSERT above), and a fifth control would have to take
-	 * height from all four.
+	 * Four tiles, two by two (see mk_tile), and the Connection tile under
+	 * them (see CONN_Y). There is no room for a third pair.
 	 *
 	 * The update tile's state is set by upd_timer_cb() at the end of this,
 	 * so it starts empty -- and laid out bare -- like the row before it.
@@ -3454,38 +3709,25 @@ BUILD_ASSERT(FOOT_Y2 + 16 <= 240,
 			  upd_cb, &upd_lbl);
 
 	/*
-	 * Both versions, on the panel rather than in the button.
-	 *
-	 * This is the only place on the device that can say which HALF of the
-	 * pair is behind -- the app's version is otherwise invisible from the
-	 * panel -- so it says both, or says the board's alone when no host has
-	 * introduced itself.
+	 * The Connection tile, across the bottom. mk_tile() lays out a 144 x
+	 * 71 tile; this one is re-fitted by hand: icon left, name centred, the
+	 * link on the right. The state is "WiFi" only while a session is live.
 	 */
-	lv_obj_t *ver = lv_label_create(panel);
+	lv_obj_t *ct = mk_tile(panel, 4, &settings_icon_link, "Connection",
+			       proto_link_kind() == 2 ? "WiFi" :
+			       proto_link_kind() == 1 ? "USB" : "None",
+			       conn_row_cb, NULL);
+	lv_obj_t *c_icon = lv_obj_get_child(ct, 0);
+	lv_obj_t *c_name = lv_obj_get_child(ct, 1);
+	lv_obj_t *c_state = lv_obj_get_child(ct, 2);
 
-	if (proto_host_version()[0]) {
-		snprintf(sub, sizeof(sub), "Blink %s  |  App %s",
-			 BLINK_FW_VERSION, proto_host_version());
-	} else {
-		snprintf(sub, sizeof(sub), "Blink %s", BLINK_FW_VERSION);
-	}
-	lv_label_set_text(ver, sub);
-	lv_obj_set_style_text_color(ver, COL_DIM, 0);
-	lv_obj_align(ver, LV_ALIGN_TOP_MID, 0, FOOT_Y1);
-
-	/*
-	 * The one instruction this device gives, and it is here because this
-	 * is the screen where it matters: an update writes a new image over
-	 * USB and a board that loses power halfway is a board that has to be
-	 * recovered with a cable anyway. Stated as a standing condition rather
-	 * than fired as a warning mid-download -- by the time a progress bar
-	 * could say it, unplugging has already happened.
-	 */
-	lv_obj_t *keep = lv_label_create(panel);
-
-	lv_label_set_text(keep, "Keep the cable connected");
-	lv_obj_set_style_text_color(keep, COL_DIM, 0);
-	lv_obj_align(keep, LV_ALIGN_TOP_MID, 0, FOOT_Y2);
+	lv_obj_set_size(ct, 2 * TILE_W + TILE_GAP, CONN_H);
+	lv_obj_align(ct, LV_ALIGN_TOP_LEFT, 12, CONN_Y);
+	lv_obj_align(c_icon, LV_ALIGN_LEFT_MID, 6, 0);
+	lv_obj_align(c_name, LV_ALIGN_CENTER, 0, 0);
+	lv_obj_set_width(c_state, 60);
+	lv_obj_align(c_state, LV_ALIGN_RIGHT_MID, -4, 0);
+	lv_obj_clear_flag(c_state, LV_OBJ_FLAG_HIDDEN);
 
 	upd_timer_cb(NULL);	/* correct the row before the first tick */
 }
@@ -3913,8 +4155,9 @@ void ui_settings_bench_state(struct ui_settings_bench *out)
 {
 	out->nt = notice == NULL ? "none" : bench_nt ? bench_nt : "other";
 	out->open = panel != NULL;
-	out->sub = confirm ? "confirm" : bright_ov ? "brightness" :
-		   theme_ov ? "theme" : focus_ov ? "focus" : "none";
+	out->sub = confirm || conn_confirm ? "confirm" :
+		   bright_ov ? "brightness" : theme_ov ? "theme" :
+		   focus_ov ? "focus" : conn_ov ? "connection" : "none";
 	out->modal = wn ? "whatsnew" : dl_overlay ? "download" :
 		     upd_prompt ? "prompt" : notice ? "notice" : "none";
 	out->busy = want_open || want_close || want_page != 0 || closing ||

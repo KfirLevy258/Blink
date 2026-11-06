@@ -508,6 +508,8 @@ VERSION_HOLES = {
     "Version %s is available.\nThis also updates the app on your computer.":
         ("ver",),
     "Install version %s?\nThe screen restarts when done.": ("ver",),
+    "Install version %s?\nThe screen restarts when done.\nKeep the cable connected":
+        ("ver",),
     "Updating to %s...": ("ver",),
     "Downloading version %s...": ("ver",),
     "Install %s": ("ver",),
