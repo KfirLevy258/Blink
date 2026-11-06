@@ -13,10 +13,15 @@
  * partition IS the flag: a unit built for an individual has never had it
  * written, so it reads as erased flash (or, on a fused chip, as the garbage an
  * erased sector decrypts to), the magic does not match, and the boot carries
- * on exactly as before. Nothing over USB can write it -- it takes esptool with
- * the board held in bootloader mode, which is the same boundary the edition
- * stamp has, and unlike the edition it can be undone the same way (erase the
- * region and the unit is an individual one again).
+ * on exactly as before.
+ *
+ * Who may write it (spec S15.2): anyone who can talk to the board's protocol,
+ * the paired PC over WiFi or whoever holds the cable (logo_write.c, behind
+ * logo_begin / logo_chunk / G frames / logo_end, and logo_remove). That is the
+ * OTA image's boundary, and it is weaker than the factory's "esptool with the
+ * board in bootloader mode" that this comment used to promise. It is why
+ * logo_parse below checks the whole blob and not only its header: what the
+ * protocol can write, the boot must be able to refuse.
  *
  * Layout (all little-endian):
  *
@@ -37,6 +42,22 @@
 #define LOGO_HDR_LEN 32
 #define LOGO_VERSION 1
 
+/*
+ * Playback caps (D60), one definition that pc/logo_encode.py mirrors so the
+ * daemon refuses before it sends, and tools/encode_logo.py and burn.sh
+ * enforce so the factory cannot burn what the board would refuse. Set at
+ * Task 6.3 from every factory logo that exists (2026-11-07): the largest
+ * needs 52 frames at 15 fps, hold 1800 ms, 5266 ms in all, 5 rects in a
+ * frame. LOGO_MAX_TOTAL_MS is the whole time the boot may spend on a logo,
+ * nframes * 1000 / fps + hold_ms. 120 rects is every frame the encoder can
+ * produce: it cuts bands of changed rows, and 240 rows give at most 120.
+ */
+#define LOGO_MAX_FRAMES 180
+#define LOGO_FPS_MIN 1
+#define LOGO_FPS_MAX 60
+#define LOGO_MAX_TOTAL_MS 15000
+#define LOGO_MAX_RECTS 120
+
 struct logo_info {
 	const uint8_t *blob;
 	size_t blob_len;
@@ -52,6 +73,13 @@ struct logo_info {
  * panel's size: a logo authored for another screen would be blitted off the
  * edge, so it is refused here instead. Returns false for anything that is
  * not a complete, intact logo -- the caller then boots as an individual unit.
+ *
+ * Checked: the CRC, the header, the caps above, then a strict PackBits16 walk
+ * of every frame: every rect inside the canvas with non-zero size, its runs
+ * producing exactly w*h pixels with none crossing that count, the last run
+ * ending exactly at the rect's declared payload length, and the walk ending
+ * exactly at blob_len. Called at logo_end and at every boot (logo.c), so a
+ * bad blob already on the flash is absent too.
  */
 bool logo_parse(const uint8_t *part, size_t part_len,
 		uint16_t want_w, uint16_t want_h, struct logo_info *out);

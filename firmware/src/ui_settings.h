@@ -65,6 +65,17 @@ void ui_settings_service(void (*pump)(void));
  */
 bool ui_settings_busy(void);
 
+/* What the Focus and Brightness tiles do after their write, for pref_set
+ * (spec S15.3) and for the tiles themselves, so the page and a tap cannot
+ * drift apart.
+ *
+ * apply_focus: the gauge screen takes the stored Focus layout in place, then
+ * the tile's subtitle and the Focus screen follow, whenever they exist.
+ * apply_bright: backlight_set (which persists, and is a no-op at the same
+ * level), so the PWM changes now, then the tile's "60%" follows. */
+void ui_settings_apply_focus(void);
+void ui_settings_apply_bright(uint8_t pct);
+
 /* Repaint the settings panel, if it is open, in the active theme. */
 void ui_settings_apply_theme(void);
 

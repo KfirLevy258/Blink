@@ -23,6 +23,7 @@ target_sources(app PRIVATE
 	src/whatsnew.c
 	src/logo_parse.c
 	src/logo.c
+	src/logo_write.c
 	src/ui_settings.c
 	src/edit_hold.c
 	src/settings_icons.c

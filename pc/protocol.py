@@ -944,6 +944,10 @@ BOARD_CAP_EDIT_DONE = "edit_done"
 # Takes wifi_scan / wifi_set / wifi_forget over the cable (spec S6.1). The
 # Connect panel offers its WiFi controls only to a board that lists it.
 BOARD_CAP_WIFI = "wifi"
+# Takes logo_begin / logo_chunk / G frames / logo_end / logo_remove and
+# answers logo_state (spec S15.2); takes pref_set (S15.3).
+BOARD_CAP_LOGO = "logo"
+BOARD_CAP_PREF = "pref"
 
 
 def board_caps(msg) -> frozenset:

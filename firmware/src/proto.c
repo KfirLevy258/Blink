@@ -4,6 +4,7 @@
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/ring_buffer.h>
+#include <zephyr/sys/base64.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -14,6 +15,8 @@
 #include <mbedtls/sha256.h>
 #include "msg_parse.h"
 #include "ota.h"
+#include "ota_parse.h"
+#include "logo_write.h"
 #include "version.h"
 #include "cfg_store.h"
 #include "whatsnew.h"
@@ -186,7 +189,11 @@ static void emit(const char *json)
 /* edit_done: this firmware handles theme_edit done:1 (theme contract
  * Addendum 6). A cap of its own because the 1.4.0 builds before the handler
  * already said "theme", and the daemon must not send them the line. */
-#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"wifi\"]"
+/* logo: takes logo_begin/logo_chunk/G frames/logo_end/logo_remove and answers
+ * logo_state; pref: takes pref_set (spec S15.2, S15.3). The daemon sends
+ * neither to a board that does not list them. */
+/* One line: tests/pc/test_board_caps.py reads the macro as one literal. */
+#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"wifi\",\"logo\",\"pref\"]"
 
 /*
  * The board's id, as hello and pref both say it: hwinfo's device id in hex,
@@ -224,25 +231,31 @@ void proto_send_pref(void)
 	 * had nothing but board.json's memory to say which board it was --
 	 * and a remembered id must never decide whose theme wins.
 	 *
-	 * 119 bytes at its widest ("claude", a 32-digit id and the three
-	 * caps; 99 with this board's 12 digits), measured by
-	 * tests/pc/test_board_caps.py, which fails if it outgrows this. It was
-	 * 96 B for the 61 B line before the id, and 107 before edit_done.
-	 * With the NUL that leaves 8 B of the 128. A cap costs its name's
-	 * length plus 3 B (the comma and two quotes), so a name of five
-	 * characters or fewer still fits and a longer one needs this buffer
-	 * made bigger first. Both stay far under the daemon's 512.
+	 * 176 bytes at its widest ("claude", a 32-digit id, bright 100 and
+	 * the six caps), measured by tests/pc/test_board_caps.py, which fails
+	 * if it outgrows this. It was 119 in 128 before Task 6.3 added focus,
+	 * bright, view and the logo and pref caps. A cap costs its name's
+	 * length plus 3 B (the comma and two quotes). Far under the daemon's
+	 * 512.
+	 *
+	 * focus, bright and view are what pref_set sets (spec S15.3), so the
+	 * page renders what the board holds and sees a pref_set land. view is
+	 * 0, the gauges: the only view until feat/ultra-burn merges.
 	 */
-	char buf[128];
+	char buf[192];
 
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"pref\",\"v\":%d,\"provider\":\"%s\","
-		 "\"board_id\":\"%s\"," BOARD_CAPS "}",
+		 "\"board_id\":\"%s\",\"focus\":%d,\"bright\":%d,\"view\":0,"
+		 BOARD_CAPS "}",
 		 PROTO_VERSION,
 		 cfg_get_main_src() == CFG_MAIN_SRC_CODEX ? "codex" : "claude",
-		 board_id_hex());
+		 board_id_hex(), cfg_get_focus_on() ? 1 : 0,
+		 (int)cfg_get_bright_pct());
 	emit(buf);
 }
+
+static void send_logo_state(void);
 
 static void send_hello(void)
 {
@@ -251,13 +264,12 @@ static void send_hello(void)
 	uint32_t cause = 0;
 	(void)hwinfo_get_reset_cause(&cause);
 
-	/* 148 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
-	 * "1.4.0", the three caps), measured by tests/pc/test_board_caps.py,
-	 * which fails if it outgrows this; a truncated hello is not JSON. With
-	 * the NUL, 11 B of the 160 are spare. A cap costs its name's length
-	 * plus 3 B and a two-digit minor in fw 1 B, and whatever is added has
-	 * to sum to 11 or less. */
-	char buf[160];
+	/* 171 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
+	 * "1.4.0", the six caps), measured by tests/pc/test_board_caps.py,
+	 * which fails if it outgrows this; a truncated hello is not JSON. It
+	 * was 148 in 160 before the logo and pref caps. A cap costs its name's
+	 * length plus 3 B and a two-digit minor in fw 1 B. */
+	char buf[192];
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
 		 "\"board_id\":\"%s\",\"fw\":\"" BLINK_FW_VERSION "\","
@@ -268,6 +280,7 @@ static void send_hello(void)
 	 * no other way to learn a preference the user set while it was gone. */
 	proto_send_pref();
 	proto_send_theme_now("boot");
+	send_logo_state();
 }
 
 /*
@@ -604,12 +617,271 @@ static void ota_wifi_service(void)
 #define OTA_STREAM_DROP() do { } while (0)
 #endif /* CONFIG_BLINK_WIFI_LINK */
 
-/* ---- WiFi pairing over the cable (spec S5.3, S6.1) ---------------------- */
-
 /* Where a protocol line came from. wifi_scan/wifi_set/wifi_forget act only
  * from the cable: pairing is a physical act, and a stranger on the network
  * must not be able to repoint the board (S5.3). */
 enum proto_src { PROTO_SRC_USB, PROTO_SRC_WIFI };
+
+/* ---- The company logo and the preferences (spec S15.2, S15.3) ---------- */
+
+/*
+ * The logo partition is written here from either link: logo_begin, then the
+ * bytes (logo_chunk lines over USB, G frames over WiFi), then logo_end. All
+ * on the main thread (D34): G frames reach logo_g_sink from drain_wifi() in
+ * order behind the logo_begin line that precedes them. logo_write.c keeps
+ * "present" trustworthy; this half only routes, acks and says what happened.
+ * Nothing here logs a byte, an offset or a length.
+ *
+ * Acks: off:0 once the erase is done, on both links. Over USB after EVERY
+ * chunk: each byte lands in the 2 KB UART RX ring (RX_RING_SIZE), so the
+ * daemon keeps four 256-byte chunks in flight and needs every ack to move;
+ * a 32 KiB window would overflow the ring and lines would be dropped
+ * silently (2026-11-07). Over WiFi at 16 KiB boundaries and at got == size,
+ * as the OTA stream does: TCP carries the window.
+ */
+static bool logo_via_wifi;	/* the open stream's link; its bytes come only from there */
+static uint32_t logo_size, logo_prev;
+#if defined(CONFIG_BLINK_WIFI_LINK)
+static uint32_t logo_gen;	/* wl_server_session_gen() the stream began under */
+#endif
+
+static void logo_ack(uint32_t off, const char *err)
+{
+	char buf[96];
+
+	if (err) {
+		snprintf(buf, sizeof(buf),
+			 "{\"t\":\"logo_ack\",\"v\":%d,\"off\":%u,\"err\":\"%s\"}",
+			 PROTO_VERSION, (unsigned)off, err);
+	} else {
+		snprintf(buf, sizeof(buf),
+			 "{\"t\":\"logo_ack\",\"v\":%d,\"off\":%u}",
+			 PROTO_VERSION, (unsigned)off);
+	}
+	emit(buf);
+}
+
+/* After hello and welcome, and after every change: the page shows "Logo:
+ * company, 48 KB, 12 frames" or "none" from it, and the daemon's stream is
+ * done only when this follows its logo_end. */
+static void send_logo_state(void)
+{
+	char buf[96];
+	uint32_t bytes = 0;
+	uint16_t frames = 0;
+	bool present = logo_write_state(&bytes, &frames);
+
+	snprintf(buf, sizeof(buf),
+		 "{\"t\":\"logo_state\",\"v\":%d,\"present\":%d,"
+		 "\"bytes\":%u,\"frames\":%u}",
+		 PROTO_VERSION, present ? 1 : 0, (unsigned)bytes,
+		 (unsigned)frames);
+	emit(buf);
+}
+
+/* A whole number in [0, 2^32) off the wire, or false. */
+static bool get_u32(const char *json, const char *key, uint32_t *out)
+{
+	double v;
+
+	if (!msg_get_double(json, key, &v) || v != v || v < 0 ||
+	    v > 4294967295.0 || v != (double)(uint32_t)v) {
+		return false;
+	}
+	*out = (uint32_t)v;
+	return true;
+}
+
+/* What a chunk's result means on the wire. A refused chunk has already
+ * dropped the stream and erased the partition (logo_write.h). */
+static void logo_took(int got)
+{
+	if (got < 0) {
+		logo_ack(0, "failed");
+		send_logo_state();
+		return;
+	}
+	if (!logo_via_wifi ||
+	    ota_net_should_ack(logo_prev, (uint32_t)got, logo_size)) {
+		logo_ack((uint32_t)got, NULL);
+	}
+	logo_prev = (uint32_t)got;
+}
+
+static void logo_begin_line(const char *json, enum proto_src src)
+{
+	uint32_t size, crc;
+
+	if (!get_u32(json, "size", &size) || !get_u32(json, "crc", &crc) ||
+	    logo_write_begin(size, crc) != 0) {
+		/* Whatever was open is not continued by a begin that failed. */
+		logo_write_abort();
+		logo_ack(0, "refused");
+		return;
+	}
+	logo_via_wifi = src == PROTO_SRC_WIFI;
+	logo_size = size;
+	logo_prev = 0;
+#if defined(CONFIG_BLINK_WIFI_LINK)
+	logo_gen = wl_server_session_gen();
+#endif
+	logo_ack(0, NULL);	/* erased: the window opens */
+}
+
+/* USB only: over WiFi the bytes are G frames. A chunk with no stream open
+ * (one just refused, its window still in flight) is dropped: the daemon was
+ * already told. */
+static void logo_chunk_line(const char *json, enum proto_src src)
+{
+	/* Static: the main thread is the only caller, and these would be most
+	 * of a kilobyte of its stack. A line is under LINE_MAX, so neither can
+	 * be cut short. */
+	static char d[LINE_MAX];
+	static uint8_t bin[LINE_MAX * 3 / 4];
+	size_t n = 0;
+	uint32_t off;
+
+	if (!logo_write_active()) {
+		return;
+	}
+	if (src != PROTO_SRC_USB || logo_via_wifi ||
+	    !get_u32(json, "off", &off) ||
+	    !msg_get_str(json, "d", d, sizeof(d)) ||
+	    base64_decode(bin, sizeof(bin), &n, (const uint8_t *)d,
+			  strlen(d)) != 0 || n == 0) {
+		logo_write_abort();
+		logo_took(-1);
+		return;
+	}
+	logo_took(logo_write_chunk(off, bin, n));
+}
+
+static void logo_end_line(enum proto_src src)
+{
+	if (!logo_write_active() || logo_via_wifi != (src == PROTO_SRC_WIFI)) {
+		logo_ack(0, "refused");
+		return;
+	}
+	if (logo_write_end() == 0) {
+		printk("[logo] written\n");
+	} else {
+		printk("[logo] rejected\n");
+		logo_ack(0, "rejected");
+	}
+	send_logo_state();
+}
+
+static void logo_line(const char *type, const char *json, enum proto_src src)
+{
+	if (strcmp(type, "logo_begin") == 0) {
+		logo_begin_line(json, src);
+	} else if (strcmp(type, "logo_chunk") == 0) {
+		logo_chunk_line(json, src);
+	} else if (strcmp(type, "logo_end") == 0) {
+		logo_end_line(src);
+	} else if (strcmp(type, "logo_remove") == 0) {
+		if (logo_write_remove() == 0) {
+			printk("[logo] removed\n");
+		}
+		send_logo_state();
+	}
+}
+
+#if defined(CONFIG_BLINK_WIFI_LINK)
+/* G frame: offset[4, big-endian] || logo bytes (spec S15.2). */
+static void logo_g_sink(const uint8_t *body, size_t n)
+{
+	if (!logo_write_active() || !logo_via_wifi) {
+		return;
+	}
+	if (wl_server_session_gen() != logo_gen || n < 5) {
+		logo_write_abort();
+		logo_took(-1);
+		return;
+	}
+
+	uint32_t off = (uint32_t)body[0] << 24 | (uint32_t)body[1] << 16 |
+		       (uint32_t)body[2] << 8 | body[3];
+
+	logo_took(logo_write_chunk(off, body + 4, n - 4));
+}
+
+/* Once per proto_service(), beside ota_wifi_service: a WiFi stream dies with
+ * its session, on a USB takeover or a replacement, and never half-writes. */
+static void logo_wifi_service(void)
+{
+	if (logo_write_active() && logo_via_wifi &&
+	    (link_wifi_must_close(k_uptime_get()) || !wl_server_session_up() ||
+	     wl_server_session_gen() != logo_gen)) {
+		logo_write_abort();
+		send_logo_state();
+	}
+}
+#endif
+
+/*
+ * pref_set (spec S15.3): what the tiles set, from the page. Every present
+ * field is checked against its enum before any store call -- the setters
+ * accept any byte (cfg_store.c), and a protocol client is not the page -- so
+ * one bad field drops the whole line. Each applied field then does what its
+ * tile does after the write, and the pref line answers with what the board
+ * now holds. There is no weekly field (D61).
+ */
+static void pref_set_line(const char *json)
+{
+	char ms[12];
+	double v;
+	int src = -1, focus = -1, bright = -1;
+
+	if (msg_find_value(json, "main_src")) {
+		if (!msg_get_str(json, "main_src", ms, sizeof(ms))) {
+			goto bad;
+		}
+		if (strcmp(ms, "claude") == 0) {
+			src = CFG_MAIN_SRC_CLAUDE;
+		} else if (strcmp(ms, "codex") == 0) {
+			src = CFG_MAIN_SRC_CODEX;
+		} else {
+			goto bad;
+		}
+	}
+	if (msg_find_value(json, "focus")) {
+		if (!msg_get_double(json, "focus", &v) || (v != 0 && v != 1)) {
+			goto bad;
+		}
+		focus = (int)v;
+	}
+	if (msg_find_value(json, "bright")) {
+		if (!msg_get_double(json, "bright", &v) ||
+		    (v != 20 && v != 40 && v != 60 && v != 80 && v != 100)) {
+			goto bad;
+		}
+		bright = (int)v;
+	}
+	/* view: accepted and ignored until feat/ultra-burn, which adds the
+	 * view enum, merges here (S15.3). */
+
+	if (src >= 0 && src != cfg_get_main_src()) {
+		(void)cfg_set_main_src((uint8_t)src);
+	}
+	if (focus >= 0 && focus != cfg_get_focus_on()) {
+		/* Off keeps whichever window was last chosen, as the tile does. */
+		if (cfg_set_focus((uint8_t)focus, cfg_get_focus_win()) != 0) {
+			printk("[focus] could not store the choice\n");
+		}
+		ui_settings_apply_focus();
+	}
+	if (bright >= 0) {
+		/* backlight_set persists and is a no-op at the same level. */
+		ui_settings_apply_bright((uint8_t)bright);
+	}
+	proto_send_pref();
+	return;
+bad:
+	printk("[proto] pref_set refused\n");
+}
+
+/* ---- WiFi pairing over the cable (spec S5.3, S6.1) ---------------------- */
 
 #define WIFI_PORT 49731			/* D18 */
 #define WIFI_JOIN_DEADLINE_MS 60000
@@ -1295,6 +1567,9 @@ static void dispatch(const char *json, enum proto_src src)
 		 * daemon that restarted without resetting the board heard
 		 * the hello that carried it in a previous life. */
 		proto_send_theme_now("boot");
+		/* And the logo, so a page opened under a restarted daemon can
+		 * say what the partition holds. */
+		send_logo_state();
 		wifi_send_state(NULL, NULL, false);
 	} else if (strncmp(type, "wifi_", 5) == 0) {
 		if (src == PROTO_SRC_USB) {	/* dropped without a reply otherwise */
@@ -1507,6 +1782,10 @@ static void dispatch(const char *json, enum proto_src src)
 			svc_note(prov, lvl, what, k_uptime_get());
 			usage_view_svc_changed();
 		}
+	} else if (strncmp(type, "logo_", 5) == 0) {
+		logo_line(type, json, src);
+	} else if (strcmp(type, "pref_set") == 0) {
+		pref_set_line(json);
 	}
 	/* unknown types ignored */
 }
@@ -1612,6 +1891,7 @@ void proto_init(void)
 #endif
 #if defined(CONFIG_BLINK_WIFI_LINK)
 	wl_server_set_sink(WL_T_OTA, ota_o_sink);
+	wl_server_set_sink(WL_T_LOGO, logo_g_sink);
 #endif
 	send_hello();
 	last_ping_ms = k_uptime_get();
@@ -1662,6 +1942,7 @@ void proto_service(void)
 	wifi_poll();
 #if defined(CONFIG_BLINK_WIFI_LINK)
 	ota_wifi_service();
+	logo_wifi_service();
 	drain_wifi();
 #endif
 #ifdef CONFIG_BLINK_TOUCH_INJECT

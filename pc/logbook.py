@@ -350,6 +350,7 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[proto] host status",                                     # :867
     "[proto] rx ring overflow, dropped",                       # :947
     "[proto] host went away",                                  # :1025
+    "[proto] pref_set refused",                                # pref_set_line
     # [fatal] -- firmware/src/fatal.c. The three "reason" lines differ only
     # after their numbers, so they share one stem.
     "[fatal] reason",                                          # :68 :78 :82
@@ -386,6 +387,11 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[theme] preview cancelled",                               # :214
     "[theme] saved",                                           # :248
     "[theme] line refused",                                    # proto.c:753
+    # [logo] -- firmware/src/proto.c (spec S15.2): the partition written or
+    # removed over the protocol, or a written image logo_parse refused.
+    "[logo] written",
+    "[logo] removed",
+    "[logo] rejected",
     # [boot] -- firmware/src/ui_boot.c, logo.c, bootclip.c
     "[boot] logo: frame failed to decode",                     # ui_boot.c:203
     "[boot] logo: cannot map partition",                       # logo.c:38
@@ -452,8 +458,9 @@ CONSOLE_EXTERNAL = (
 # banners, the touch tracer's #TT rows -- is a fixed placeholder, because
 # its first word is the board's text too.
 CONSOLE_TAGS = frozenset({
-    "bl", "boot", "cfg", "fatal", "focus", "mem", "ota", "proto", "sleep",
-    "slide", "swipe", "test", "theme", "time", "touch", "usage", "wifi",
+    "bl", "boot", "cfg", "fatal", "focus", "logo", "mem", "ota", "proto",
+    "sleep", "slide", "swipe", "test", "theme", "time", "touch", "usage",
+    "wifi",
 })
 
 BOARD_LINE = "(board line)"

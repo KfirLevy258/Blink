@@ -311,3 +311,75 @@ def test_ops_never_block_the_serial_loop(tmp_path):
     b.pump()
     assert time.monotonic() - t0 < 0.05
     t.join(3)
+
+
+# --- the logo and the preferences, from the page (spec S15.2, S15.3) ---
+
+
+def test_pref_set_is_one_line_under_512():
+    msg = protocol.pref_set(main_src="claude", focus=1, view="burn",
+                            bright=100)
+    raw, _ = protocol.encode_checked(msg)
+    assert raw.endswith(b"\n") and raw.count(b"\n") == 1
+    assert len(raw) <= protocol.MAX_LINE_BYTES
+
+
+def test_logo_ops_refused_without_the_cap(tmp_path):
+    b, ops, sent, *_ = make(tmp_path, caps=("wifi",))
+    for fn, args in ((ops.logo, (b"x" * 64,)), (ops.logo_remove, ()),
+                     (ops.pref_set, ())):
+        t, box = call(fn, *args)
+        pump_until(b, lambda: not t.is_alive())
+        assert isinstance(box.get("e"), settings_ops.BoardOpError), fn
+    assert sent == []
+
+
+def test_pref_set_answers_with_the_boards_pref(tmp_path):
+    b, ops, sent, *_ = make(tmp_path, caps=("pref",))
+    t, box = call(lambda: ops.pref_set(focus=1, bright=20))
+    pump_until(b, lambda: any(m["t"] == "pref_set" for m in sent))
+    assert [m for m in sent if m["t"] == "pref_set"] == [
+        protocol.pref_set(focus=1, bright=20)]
+    b.on_message({"t": "pref", "v": 1, "provider": "claude", "focus": 1,
+                  "bright": 20, "view": 0, "caps": ["pref"]})
+    t.join(3)
+    assert box["r"] == {"provider": "claude", "focus": 1, "bright": 20,
+                        "view": 0}
+
+
+def test_logo_op_streams_over_usb_and_ends_on_logo_state(tmp_path):
+    b, ops, sent, *_ = make(tmp_path, caps=("logo",))
+    blob = bytes(range(256)) * 3
+    t, box = call(ops.logo, blob)
+    pump_until(b, lambda: any(m["t"] == "logo_begin" for m in sent))
+    b.on_message({"t": "logo_ack", "v": 1, "off": 0})
+    for _ in range(10):
+        b.pump()
+        for m in [m for m in sent if m["t"] == "logo_chunk"]:
+            b.on_message({"t": "logo_ack", "v": 1,
+                          "off": m["off"] + 256})
+        sent[:] = [m for m in sent if m["t"] != "logo_chunk"]
+    pump_until(b, lambda: any(m["t"] == "logo_end" for m in sent))
+    b.on_message({"t": "logo_state", "v": 1, "present": 1, "bytes": 768,
+                  "frames": 1})
+    pump_until(b, lambda: not t.is_alive())
+    assert box["r"] == {"present": 1, "bytes": 768, "frames": 1}
+
+
+def test_logo_remove_ends_on_logo_state(tmp_path):
+    b, ops, sent, *_ = make(tmp_path, caps=("logo",))
+    t, box = call(ops.logo_remove)
+    pump_until(b, lambda: any(m["t"] == "logo_remove" for m in sent))
+    b.on_message({"t": "logo_state", "v": 1, "present": 0, "bytes": 0,
+                  "frames": 0})
+    t.join(3)
+    assert box["r"]["present"] == 0
+
+
+def test_a_refused_logo_is_a_sentence(tmp_path):
+    b, ops, sent, *_ = make(tmp_path, caps=("logo",))
+    t, box = call(ops.logo, b"x" * 64)
+    pump_until(b, lambda: any(m["t"] == "logo_begin" for m in sent))
+    b.on_message({"t": "logo_ack", "v": 1, "off": 0, "err": "refused"})
+    pump_until(b, lambda: not t.is_alive())
+    assert str(box["e"]) == "The board refused the logo"

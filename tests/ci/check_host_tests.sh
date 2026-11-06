@@ -105,6 +105,10 @@ run_one fmt          "fmt.c"           ""
 # Which link protocol lines go to: USB wins, backoff, the verify window.
 run_one link         "link.c"          ""
 run_one logo         "logo_parse.c bootanim_dec.c" ""
+# The strict walk and the caps (spec S15.2): every limit broken alone.
+run_one logo_parse   "logo_parse.c bootanim_dec.c" ""
+# The partition written from a stream, on a RAM partition.
+run_one logo_write   "logo_write.c logo_parse.c bootanim_dec.c $ROOT/tests/support/flash_area_fake.c" ""
 run_one msg_parse    "msg_parse.c"     ""
 # The WiFi scan table: one entry a name, strongest first, at most 20.
 run_one net_link     ""                ""

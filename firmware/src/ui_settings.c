@@ -1902,7 +1902,12 @@ static void bright_stop_cb(lv_event_t *e)
 	if (!tile_was_a_tap()) {
 		return;
 	}
-	backlight_set((uint8_t)(intptr_t)lv_event_get_user_data(e));
+	ui_settings_apply_bright((uint8_t)(intptr_t)lv_event_get_user_data(e));
+}
+
+void ui_settings_apply_bright(uint8_t pct)
+{
+	backlight_set(pct);
 	bright_refresh();
 }
 
@@ -2926,10 +2931,15 @@ static void focus_pick_cb(lv_event_t *e)
 	if (cfg_set_focus(on, win) != 0) {
 		printk("[focus] could not store the choice\n");
 	}
-	/* The gauge screen is underneath this one and changes in place, so
-	 * the panel opens onto the new layout when it closes. Drawn from
-	 * what was stored, so the screen never shows a choice the next boot
-	 * would not. */
+	ui_settings_apply_focus();
+}
+
+void ui_settings_apply_focus(void)
+{
+	/* The gauge screen is underneath the Focus screen and changes in
+	 * place, so the panel opens onto the new layout when it closes. Drawn
+	 * from what was stored, so the screen never shows a choice the next
+	 * boot would not. */
 	usage_view_set_focus(cfg_get_focus_on(), cfg_get_focus_win());
 	focus_refresh();
 }

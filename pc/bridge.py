@@ -2,6 +2,7 @@
 liveness. I/O (serial) is injected so this is unit-testable without hardware."""
 import datetime
 import hashlib
+import json
 import queue
 import sys
 import threading
@@ -94,6 +95,18 @@ def _proto_for_log(proto) -> str:
 JOIN_LATE_S = 60.0
 
 
+class _UsbLogoLink:
+    """LogoStream's link over the cable: its encode_checked lines go out
+    through the Bridge's own writer, which owns the serial port."""
+    kind = "usb"
+
+    def __init__(self, write_msg):
+        self._write = write_msg
+
+    def write(self, raw):
+        self._write(json.loads(raw))
+
+
 class Bridge:
     def __init__(self, write_msg, fetch_usage, now=time.monotonic,
                  set_preferred=None,
@@ -109,6 +122,7 @@ class Bridge:
         self._write = write_msg          # callable(dict)
         self._logo = None                # (LogoStream, link) while one runs
         self.logo_result = None          # (ok, why) of the last stream
+        self._logo_state = None          # the board's last logo_state
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
         # None on a daemon wired without a bus (the tests do this).
@@ -339,6 +353,10 @@ class Bridge:
             if self._set_preferred and isinstance(want, str):
                 if self._set_preferred(want):
                     print(f"[bridge] main source: {want}", file=sys.stderr)
+            if self._op is not None and self._op.kind == "pref":
+                self._finish(self._op, result={
+                    k: msg.get(k) for k in ("provider", "focus", "bright",
+                                            "view")})
             return
         if t == "hello":
             self._note_board(msg)
@@ -373,6 +391,12 @@ class Bridge:
         elif t == "logo_state":
             if self._logo is not None:
                 self._logo[0].state(msg.get("present"))
+            state = {k: msg.get(k) for k in ("present", "bytes", "frames")}
+            self._logo_state = state
+            if self._ops is not None:
+                self._ops.note_device(logo=state)
+            if self._op is not None and self._op.kind == "logo_remove":
+                self._finish(self._op, result=state)
         elif t == "theme_now":
             # Recorded, never answered here: whatever it makes owed goes out
             # on the next tick (see THEME_QUIET_S).
@@ -897,6 +921,8 @@ class Bridge:
             self._op = None
 
     def _start_op(self, op):
+        if op.kind in ("logo", "logo_remove", "pref"):
+            return self._start_board_op(op)
         if not self._board_can(protocol.BOARD_CAP_WIFI):
             return self._finish(op, error="This board cannot join WiFi.")
         # Pairing is for the cable (S5.3). Fail closed: until the board has
@@ -924,6 +950,37 @@ class Bridge:
             op.args = ssid = password = None
         else:
             self._write(protocol.wifi_forget())
+
+    def _start_board_op(self, op):
+        """The logo and the preferences: either link, the board's caps
+        decide (S15.2, S15.3). Each holds the op slot until the board's
+        answer: logo_state for the logo ops, pref for pref_set."""
+        if op.kind == "pref":
+            if not self._board_can(protocol.BOARD_CAP_PREF):
+                return self._finish(op, error=(
+                    "This board's firmware cannot take preferences from"
+                    " here. Update it first."))
+            self._op = op
+            self._write(op.args)
+            return
+        if not self._board_can(protocol.BOARD_CAP_LOGO):
+            return self._finish(op, error=(
+                "This board's firmware cannot change its logo. Update it"
+                " first."))
+        if self._logo is not None:
+            return self._finish(op, error="A logo is already being sent.")
+        if op.kind == "logo_remove":
+            self._op = op
+            self._write(protocol.logo_remove())
+            return
+        link = self._link if self._link is not None else _UsbLogoLink(
+            self._write)
+        try:
+            self.start_logo(op.args, link)
+        except ValueError as e:
+            return self._finish(op, error=str(e))
+        op.args = None
+        self._op = op
 
     def _on_wifi_net(self, msg):
         op = self._op
@@ -1051,6 +1108,12 @@ class Bridge:
             self._logo, self.logo_result = None, res
             print("[bridge] logo: " + ("sent" if res[0] else "FAILED: " + res[1]),
                   file=sys.stderr)
+            op = self._op
+            if op is not None and op.kind == "logo":
+                if res[0]:
+                    self._finish(op, result=self._logo_state)
+                else:
+                    self._finish(op, error=res[1])
 
     def pump(self):
         """Write any theme_edit answers that are ready. Called by the daemon

@@ -12,7 +12,7 @@ import socket
 import threading
 import time
 
-from pc import wifi_pair, wifi_session
+from pc import protocol, wifi_pair, wifi_session
 
 
 class BoardOpError(Exception):
@@ -73,6 +73,21 @@ class BoardOps:
 
     def forget(self, timeout_s: float = 10.0) -> dict:
         return self._run(_Op("forget"), timeout_s)
+
+    def logo(self, blob: bytes, timeout_s: float = 300.0) -> dict:
+        """Stream a logo image (pc/logo_encode.build's bytes); the board's
+        logo_state once its logo_parse has accepted it. A 512 KB image over
+        the cable is about a minute; a fused board's encrypted writes are
+        slower."""
+        return self._run(_Op("logo", bytes(blob)), timeout_s)
+
+    def logo_remove(self, timeout_s: float = 30.0) -> dict:
+        return self._run(_Op("logo_remove"), timeout_s)
+
+    def pref_set(self, timeout_s: float = 10.0, **fields) -> dict:
+        """The board's pref after it applied `fields`. A field the board
+        refuses gets no answer, and the page hears that it did not answer."""
+        return self._run(_Op("pref", protocol.pref_set(**fields)), timeout_s)
 
     def state(self) -> dict:
         with self._lock:

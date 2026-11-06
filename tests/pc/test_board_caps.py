@@ -266,7 +266,10 @@ def _fw_line(name, buf_name="buf"):
             fmt += macros[tok.group(2)]
         pos = tok.end()
     assert call[pos:].lstrip().startswith(","), call
-    widest = {"d": str(protocol.VERSION), "x": "f" * 8, "s": "f" * 32}
+    # %d at three digits: pref's bright reaches 100, and the protocol
+    # version is shorter, so this over-measures it and never under.
+    widest = {"d": max(str(protocol.VERSION), "100", key=len), "x": "f" * 8,
+              "s": "f" * 32}
     line = re.sub(r"%([dxs])", lambda m: widest[m.group(1)], fmt)
     # Any other conversion (%u, %02x, %lu...) would stay in the line as
     # literal text, under-measure it, and still parse inside a JSON string,
@@ -281,7 +284,8 @@ def test_the_boards_hello_carries_both_caps_and_fits_its_buffer():
     line, size = _fw_line("send_hello")
     msg = json.loads(line)
     assert msg["t"] == "hello"
-    assert protocol.board_caps(msg) == {"svc", "theme", "edit_done", "wifi"}
+    assert protocol.board_caps(msg) == {"svc", "theme", "edit_done", "wifi",
+                                        "logo", "pref"}
     # snprintf truncates silently, and a truncated hello is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
 
@@ -293,15 +297,17 @@ def test_the_boards_pref_carries_both_caps_and_fits_its_buffer():
     line = line.replace("f" * 32, "claude", 1)
     msg = json.loads(line)
     assert msg["t"] == "pref"
-    assert protocol.board_caps(msg) == {"svc", "theme", "edit_done", "wifi"}
+    assert protocol.board_caps(msg) == {"svc", "theme", "edit_done", "wifi",
+                                        "logo", "pref"}
     # snprintf truncates silently, and a truncated pref is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
-    # Measured 119 B in the 128 B buffer (hello: 148 in 160). A cap costs
-    # its name's length plus 3 B, so one named in more than five characters
-    # needs proto_send_pref's buffer made bigger first. The daemon reads
-    # 512 and the board itself drops a longer inbound line whole; a pref
-    # anywhere near that is a mistake.
-    assert len(line) <= 160, len(line)
+    # focus, bright and view are what pref_set sets (spec S15.3).
+    assert {"focus", "bright", "view"} <= set(msg)
+    # Measured 176 B in the 192 B buffer (hello: 171 in 192), after the
+    # logo and pref caps and the three preferences. A cap costs its name's
+    # length plus 3 B. The daemon reads 512 and the board itself drops a
+    # longer inbound line whole; a pref anywhere near that is a mistake.
+    assert len(line) <= 200, len(line)
 
 
 def test_the_boards_pref_names_the_board_as_hello_does():
