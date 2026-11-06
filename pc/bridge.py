@@ -370,6 +370,9 @@ class Bridge:
         elif t == "logo_ack":
             if self._logo is not None:
                 self._logo[0].ack(msg.get("off"), msg.get("err"))
+        elif t == "logo_state":
+            if self._logo is not None:
+                self._logo[0].state(msg.get("present"))
         elif t == "theme_now":
             # Recorded, never answered here: whatever it makes owed goes out
             # on the next tick (see THEME_QUIET_S).

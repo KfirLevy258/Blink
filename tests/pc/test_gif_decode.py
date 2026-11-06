@@ -179,3 +179,42 @@ def test_180_frames_of_320x240_stay_under_64_mb():
         tracemalloc.stop()
     assert len(got) == 180
     assert peak < 64 * 1024 * 1024
+
+
+def test_a_transparent_2048_frame_composites_at_c_speed():
+    """5.8 KB for a 2048x2048 frame with a transparent index: the per-pixel
+    loop took 7-10 s a frame. Now it must decode in well under a second."""
+    import time
+    f = gg.frame(2048, 2048, bytes([0, 1]) * (2048 * 2048 // 2),
+                 transparent=0, delay_cs=2)
+    data = gg.build(2048, 2048, PAL, [f])
+    assert len(data) < 10_000
+    t = time.perf_counter()
+    got = _got(data)
+    assert time.perf_counter() - t < 1.0
+    assert len(got) == 1
+
+
+def test_a_transparent_row_keeps_what_is_under_it_and_paints_the_rest():
+    f1 = gg.frame(5, 1, bytes([1, 1, 1, 1, 1]), disposal=1)
+    f2 = gg.frame(5, 1, bytes([0, 2, 0, 3, 0]), transparent=0)
+    got = _got(gg.build(5, 1, PAL, [f1, f2]))
+    assert [r for _, r in got] == _want(5, 1, PAL, [f1, f2])
+
+
+def test_the_pixel_budget_refuses_a_swarm_of_big_frames_fast():
+    """180 frames of 2048x2048 fit the 2 MiB body cap (~1 MB). The budget is
+    checked before each frame's data, so the bomb is refused after four."""
+    import time
+    f = gg.frame(2048, 2048, bytes([0, 1]) * (2048 * 2048 // 2),
+                 transparent=0, delay_cs=2)
+    one = gg.build(2048, 2048, PAL, [f])
+    start = one.index(b"\x21\xf9")
+    data = one[:start] + one[start:-1] * 180 + b"\x3b"
+    assert len(data) < 2 * 1024 * 1024
+    t = time.perf_counter()
+    with pytest.raises(gd.GifError, match="too large"):
+        _got(data, max_frames=180)
+    assert time.perf_counter() - t < 1.0
+    # the panel-sized worst case still fits the budget
+    assert 180 * 320 * 240 <= gd.GIF_MAX_PIXELS

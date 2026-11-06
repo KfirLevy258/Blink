@@ -106,19 +106,20 @@ def is_gif(path):
 
 
 def load_gif(path, bg, scale):
-    """Decode with pc.gif_decode, honouring the delays: returns (canvases,
-    fps) with each source frame repeated for its ticks, so the gate and the
-    zero-rect hold records come out as pc.logo_encode.from_gif's do."""
+    """Decode with pc.gif_decode (the frame cap in the board's own sentence);
+    returns the (delay_ms, rows) list."""
     with open(path, "rb") as f:
         data = f.read()
     try:
-        got = list(gif_decode.decode(data, logo_encode.LOGO_MAX_FRAMES, bg,
-                                     scale))
-        fps, ticks = logo_encode.gif_timing([d for d, _ in got])
-        if sum(ticks) > logo_encode.LOGO_MAX_FRAMES:
-            raise ValueError(logo_encode.E_FRAMES)
+        return logo_encode.decode_gif(data, bg, scale)
     except ValueError as e:
         sys.exit(f"{path}: {e}")
+
+
+def gif_canvases(got, hold_ms):
+    """(canvases, fps): each source frame repeated for its ticks, so the gate
+    and the zero-rect hold records come out as pc.logo_encode.from_gif's do."""
+    fps, ticks = logo_encode.gif_timing([d for d, _ in got], hold_ms)
     canvases = []
     for (_d, rows), n in zip(got, ticks):
         a = np.frombuffer(b"".join(rows), dtype=np.uint8).reshape(
@@ -273,15 +274,17 @@ def main():
     gif = bool(args.image) and is_gif(args.image)
     if gif:
         bg = parse_bg(args.bg) if args.bg != "auto" else (0, 0, 0)
-        canvases, fps = load_gif(args.image, bg, args.scale)
-    still = (bool(args.image) and not gif) or (gif and len(canvases) == 1)
+        got = load_gif(args.image, bg, args.scale)
+    # A still is one SOURCE frame: a GIF of one frame with a long delay is
+    # still a still, however many ticks its delay spans.
+    still = (bool(args.image) and not gif) or (gif and len(got) == 1)
     hold = args.hold if args.hold is not None else (3.0 if still else 0.5)
     if not 0 <= hold <= 60:
         sys.exit("--hold must be 0..60 seconds")
     hold_ms = int(round(hold * 1000))
 
     if gif:
-        pass
+        canvases, fps = gif_canvases(got, hold_ms)
     elif args.image:
         im = Image.open(args.image)
         bg = parse_bg(args.bg, im)

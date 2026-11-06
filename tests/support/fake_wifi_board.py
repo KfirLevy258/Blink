@@ -231,6 +231,9 @@ class FakeWifiBoard:
                         return          # sealed: the board reboots, the session drops
                 elif t == "ota_begin" and self.avail_size < 0:
                     self._line(c, {"t": "ota_ack", "err": "refused"})
+                elif t == "logo_end":
+                    self._line(c, {"t": "logo_state", "present": 1,
+                                   "bytes": len(self.logo_sink), "frames": 1})
                 elif t in ("ota_begin", "logo_begin"):
                     kind = b"O" if t == "ota_begin" else b"G"
                     size = self.avail_size if kind == b"O" else msg.get("size", -1)

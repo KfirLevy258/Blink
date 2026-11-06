@@ -118,14 +118,18 @@ def test_gif_timing_uses_the_players_integer_tick():
     for _ in range(200):
         ds = [rng.choice([0, 10, 20, 30, 40, 50, 70, 100, 130, 250, 1000])
               + rng.randrange(0, 15) for _ in range(rng.randrange(1, 9))]
-        assert le.gif_timing(ds) == _oracle(ds), ds
+        want = _oracle(ds)
+        if sum(want[1]) <= le.LOGO_MAX_FRAMES:      # else the caps pick another
+            assert le.gif_timing(ds) == want, ds
+        else:
+            assert sum(le.gif_timing(ds)[1]) <= le.LOGO_MAX_FRAMES, ds
     fps, _ = le.gif_timing([30, 100, 1000])
     struct.pack("B", fps)
     err = sum(abs(d - n * (1000 // fps)) for d, n in zip([30, 100, 1000], [1, 4, 40]))
     assert err == 5
 
 
-def test_each_board_limit_is_refused_before_send(monkeypatch):
+def test_each_board_limit_is_refused_before_send():
     frame = [0] * (320 * 240)
     with pytest.raises(ValueError, match=le.E_FRAMES):
         le.build([frame] * (le.LOGO_MAX_FRAMES + 1), 60, 1000, (0, 0, 0))
@@ -135,13 +139,17 @@ def test_each_board_limit_is_refused_before_send(monkeypatch):
     with pytest.raises(ValueError, match=le.E_TOTAL):
         le.build([frame] * 180, 12, 1000, (0, 0, 0))
     le.build([frame] * 180, 12, 0, (0, 0, 0))               # 15000 exactly fits
-    # a frame with two changed bands, with the cap lowered to one
-    a, b = list(frame), list(frame)
-    b[10 * 320 + 5] = b[200 * 320 + 9] = 1
-    monkeypatch.setattr(le, "LOGO_MAX_RECTS", 1)
+    # 120 is every frame the encoder can write: alternate rows changed
+    base = [0] * (320 * 240)
+    bands = list(base)
+    for y in range(0, 240, 2):
+        bands[y * 320] = 1
+    info = le.parse(le.build([base, bands], 10, 1000, (0, 0, 0)))
+    assert info["rects"] == [1, 120] and le.LOGO_MAX_RECTS == 120
+    tiny = (0, 0, 1, 1, bytes((0, 0, 0)), 3)
+    assert le.parse(_wrap(_ban([[tiny] * 120])))["max_rects"] == 120
     with pytest.raises(ValueError, match=le.E_RECTS):
-        le.build([a, b], 10, 1000, (0, 0, 0))
-    monkeypatch.undo()
+        le.parse(_wrap(_ban([[tiny] * 121])))
     # hand-built blobs the encoder would never write
     run2 = bytes((128,)) + b"\x00\x01"
     ok = _wrap(_ban([[(0, 0, 320, 240, b"", 0)]]))
@@ -197,3 +205,51 @@ def test_a_repeated_frame_is_a_zero_rect_record():
     info = le.parse(le.build(fr, 10, 500, (10, 20, 30)))
     assert info["rects"][3] == 0 and info["rects"][0] == 1
     assert info["max_rects"] == 2
+
+
+def test_gif_timing_fits_a_long_last_frame():
+    """30 frames of 30 ms then a 5 s last frame: fps 33 would need 197
+    ticks. The fps is chosen among those that fit (29: tick 34, 177 ticks), or
+    the last frame is cut (the hold keeps it up); the clip is not refused."""
+    ds = [30] * 30 + [5000]
+    fps, ticks = le.gif_timing(ds, 3000)
+    assert ticks[:30] == [1] * 30 and 25 <= fps <= 40
+    assert sum(ticks) <= le.LOGO_MAX_FRAMES
+    assert sum(ticks) * 1000 <= (le.LOGO_MAX_TOTAL_MS - 3000) * fps
+    data = gg.build(8, 6, PAL, [gg.frame(8, 6, bytes([i % 4] * 48), delay_cs=cs)
+                                for i, cs in enumerate([3] * 30 + [500])])
+    info = le.parse(le.from_gif(data, (0, 0, 0), 3000, "fill"))
+    assert 25 <= info["fps"] <= 40
+
+
+def test_too_many_gif_frames_use_the_boards_sentence():
+    fs = [gg.frame(2, 2, bytes(4)) for _ in range(le.LOGO_MAX_FRAMES + 1)]
+    with pytest.raises(ValueError, match=le.E_FRAMES):
+        le.from_gif(gg.build(2, 2, PAL, fs), (0, 0, 0), 3000, "fill")
+
+
+def test_a_too_long_clip_is_refused_before_the_gate_runs(monkeypatch):
+    fs = [gg.frame(8, 6, bytes(48), delay_cs=300) for _ in range(6)]   # 18 s
+    data = gg.build(8, 6, PAL, fs)
+    monkeypatch.setattr(le, "quantise", lambda *a: pytest.fail("gated"))
+    with pytest.raises(ValueError, match=le.E_TOTAL):
+        le.from_gif(data, (0, 0, 0), 3000, "fill")
+
+
+def test_a_noisy_gif_stays_within_a_memory_bound():
+    """30 noisy 320x240 frames (a list-of-ints RGB565 was 65 MB
+    here, ~500 MB at 180 frames before E_SIZE refused it). Bound: 45 MB."""
+    import tracemalloc
+    rng = random.Random(4)
+    variants = [bytes(rng.getrandbits(1) for _ in range(320 * 240))
+                for _ in range(4)]
+    fs = [gg.frame(320, 240, variants[i % 4], delay_cs=10) for i in range(30)]
+    data = gg.build(320, 240, [(0, 0, 0), (250, 250, 250)], fs)
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match=le.E_SIZE):
+            le.from_gif(data, (0, 0, 0), 3000, "fill")
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 45 * 1024 * 1024, peak

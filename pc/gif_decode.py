@@ -29,6 +29,13 @@ import operator
 import struct
 
 GIF_MAX_SIDE = 2048
+# Sum of w*h over every frame's image descriptor. The side cap bounds one
+# frame (4 M pixels), not the file: a 2 MiB GIF holds ~360 frames of that (a
+# 2048x2048 two-colour frame is 5.8 KB), minutes of CPU for a logo. 16 Mi pixels
+# is 1.2 times what the frame cap allows at the panel's own size (180 frames of
+# 320x240 = 13.8 M) and four frames of the largest size the side cap lets in,
+# which decode in well under a second.
+GIF_MAX_PIXELS = 16 * 1024 * 1024
 CANVAS_W, CANVAS_H = 320, 240
 
 _NOT_GIF, _BIG, _MANY = "not a GIF", "too large", "too many frames"
@@ -171,6 +178,7 @@ def _lzw(data, min_size, limit):
     return bytes(out[:limit])
 
 
+_MASKS = [bytes(255 if i == t else 0 for i in range(256)) for t in range(256)]
 _PASSES = ((0, 8), (4, 8), (2, 4), (1, 2))
 
 
@@ -197,7 +205,7 @@ def decode(data, max_frames, bg, scale=1.0):
     gpal = _palette(r.take(3 * (2 << (flags & 7)))) if flags & 0x80 else None
     pad = bytes(bg)
     canvas = None
-    count = 0
+    count = pixels = 0
     delay = disposal = 0
     transp = None
     pending = None              # (disposal, rect, saved canvas) of the last frame
@@ -231,6 +239,9 @@ def decode(data, max_frames, bg, scale=1.0):
             raise GifError(_BIG)
         if count >= max_frames:
             raise GifError(_MANY)
+        pixels += w * h
+        if pixels > GIF_MAX_PIXELS:
+            raise GifError(_BIG)
         count += 1
         pal = _palette(r.take(3 * (2 << (iflags & 7)))) if iflags & 0x80 else gpal
         if pal is None:
@@ -257,11 +268,22 @@ def decode(data, max_frames, bg, scale=1.0):
             o = y + top
             a, z = o * stride + 3 * left, o * stride + 3 * (left + w)
             if transp is not None and transp in row:
-                cur = canvas[a:z]
-                for x, v in enumerate(row):
-                    if v != transp:
-                        cur[3 * x:3 * x + 3] = bytes((rt[v], gt[v], bt[v]))
-                canvas[a:z] = cur
+                # At C speed: a transparent index marks pixels to keep. The
+                # mask is 0xFF where the frame is transparent, widened to 3
+                # bytes a pixel, and the two rows combined as big integers
+                # (a per-pixel loop took 7-10 s for one 2048x2048 frame).
+                m = row.translate(_MASKS[transp])
+                m3 = bytearray(3 * w)
+                m3[0::3] = m3[1::3] = m3[2::3] = m
+                new = bytearray(3 * w)
+                new[0::3] = row.translate(rt)
+                new[1::3] = row.translate(gt)
+                new[2::3] = row.translate(bt)
+                mi = int.from_bytes(m3, "big")
+                full = (1 << (24 * w)) - 1
+                keep = (int.from_bytes(canvas[a:z], "big") & mi) | (
+                    int.from_bytes(new, "big") & (mi ^ full))
+                canvas[a:z] = keep.to_bytes(3 * w, "big")
             else:
                 new = bytearray(3 * w)
                 new[0::3] = row.translate(rt)

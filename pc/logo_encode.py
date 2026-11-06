@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import struct
 import zlib
+from array import array
 
 from pc import gif_decode
 
@@ -33,7 +34,11 @@ LOGO_MAX = 0x80000
 LOGO_MAX_FRAMES = 180
 LOGO_FPS_MIN, LOGO_FPS_MAX = 1, 60
 LOGO_MAX_TOTAL_MS = 15000
-LOGO_MAX_RECTS = 256
+# A frame record's rect count is one byte and the encoder cuts rects as bands
+# of changed rows, so 240 rows give at most 120 bands (a band needs an
+# unchanged row after it): 120 is every frame the encoder can write, and a
+# count above it can only be a hand-built blob.
+LOGO_MAX_RECTS = 120
 HDR_LEN = 32
 ALIGN = 32
 MAGIC = b"BLGO"
@@ -86,15 +91,16 @@ def quantise(frames888, threshold):
 
 
 def to_rgb565(rows):
-    """240 rows of 960 RGB888 bytes -> a flat list of 76800 RGB565 ints."""
-    out, seen = [], {}
+    """240 rows of 960 RGB888 bytes -> a flat array('H') of 76800 RGB565
+    values (2 bytes each: a list of ints was ~500 MB over 180 frames)."""
+    out, seen = array("H"), {}
     for row in rows:
         px = seen.get(row)
         if px is None:
-            px = [((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
-                  for r, g, b in zip(row[0::3], row[1::3], row[2::3])]
+            px = array("H", [((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+                             for r, g, b in zip(row[0::3], row[1::3], row[2::3])])
             seen[row] = px
-        out += px
+        out.extend(px)
     return out
 
 
@@ -130,9 +136,9 @@ def _packbits16(px, start, stop):
 
 
 def _rect_payload(frame, x, y, w, h):
-    px = []
+    px = array("H")
     for yy in range(y, y + h):
-        px += frame[yy * W + x:yy * W + x + w]
+        px.extend(frame[yy * W + x:yy * W + x + w])
     return _packbits16(px, 0, len(px))
 
 
@@ -294,21 +300,36 @@ def parse(img, check=True, frames=False):
     return info
 
 
-def gif_timing(delays_ms):
+def gif_timing(delays_ms, hold_ms=0):
     """(fps, ticks): BAN1 has one integer fps and the player ticks every
     1000 // fps ms, so pick the fps in range whose tick best fits the delays
     (least sum |d - n*tick|, n = max(1, round(d/tick)); ties to the lower
-    fps). A delay of 0 or under 20 ms is 100 ms, as browsers treat it."""
+    fps). A delay of 0 or under 20 ms is 100 ms, as browsers treat it.
+    Only fps values whose ticks fit LOGO_MAX_FRAMES and the total cap (with
+    `hold_ms`) are candidates, and the LAST frame's ticks are cut to fit
+    first, because the hold keeps that frame up anyway: 30 frames of 30 ms
+    then a 5 s last frame is fps 33 with a shortened last frame, not an
+    error. With no candidate the unconstrained best is returned and
+    check_limits says why."""
     ds = [100 if d < 20 else d for d in delays_ms]
-    best = None
+    best = fallback = None
     for fps in range(LOGO_FPS_MIN, LOGO_FPS_MAX + 1):
         tick = 1000 // fps
-        err = sum(abs(d - max(1, round(d / tick)) * tick) for d in ds)
+        ticks = [max(1, round(d / tick)) for d in ds]
+        err0 = sum(abs(d - n * tick) for d, n in zip(ds, ticks))
+        if fallback is None or err0 < fallback[0]:
+            fallback = (err0, fps, ticks)
+        cap = min(LOGO_MAX_FRAMES, (LOGO_MAX_TOTAL_MS - hold_ms) * fps // 1000)
+        over = sum(ticks) - cap
+        if over > 0:
+            ticks = ticks[:-1] + [ticks[-1] - min(over, ticks[-1] - 1)]
+            if sum(ticks) > cap:
+                continue
+        err = sum(abs(d - n * tick) for d, n in zip(ds, ticks))
         if best is None or err < best[0]:
-            best = (err, fps)
-    fps = best[1]
-    tick = 1000 // fps
-    return fps, [max(1, round(d / tick)) for d in ds]
+            best = (err, fps, ticks)
+    best = best or fallback
+    return best[1], best[2]
 
 
 def from_rgba(rgba, bg, hold_ms):
@@ -336,18 +357,30 @@ def from_rgba(rgba, bg, hold_ms):
     return build([to_rgb565(rows)], 1, hold_ms, _bg565(bg))
 
 
-def gif_frames565(data, bg, scale=1.0, threshold=10):
+def decode_gif(data, bg, scale=1.0):
+    """gif_decode.decode as a list, with the frame cap in the board's own
+    sentence (one sentence for one limit)."""
+    try:
+        return list(gif_decode.decode(data, LOGO_MAX_FRAMES, bg, scale))
+    except gif_decode.GifError as e:
+        if str(e) == "too many frames":
+            raise ValueError(E_FRAMES) from None
+        raise
+
+
+def gif_frames565(data, bg, scale=1.0, threshold=10, hold_ms=0):
     """Decode, gate and convert a GIF: (frames565 with each source frame
-    repeated for its ticks, fps). A repeated frame costs a zero-rect record."""
-    got = list(gif_decode.decode(data, LOGO_MAX_FRAMES, bg, scale))
-    fps, ticks = gif_timing([d for d, _ in got])
-    if sum(ticks) > LOGO_MAX_FRAMES:
-        raise ValueError(E_FRAMES)
+    repeated for its ticks, fps). A repeated frame costs a zero-rect record.
+    The caps are checked before the gate runs, so a clip that is too long is
+    refused having cost only the decode."""
+    got = decode_gif(data, bg, scale)
+    fps, ticks = gif_timing([d for d, _ in got], hold_ms)
+    check_limits(sum(ticks), fps, hold_ms)
     shown = quantise([rows for _, rows in got], threshold)
+    del got
     out = []
     for rows, n in zip(shown, ticks):
-        f = to_rgb565(rows)
-        out += [f] * n
+        out += [to_rgb565(rows)] * n
     return out, fps
 
 
@@ -357,5 +390,5 @@ def from_gif(data, bg, hold_ms, fit):
     if fit not in FIT_SCALE:
         raise ValueError(E_FIT)
     bg = tuple(bg)
-    frames, fps = gif_frames565(data, bg, FIT_SCALE[fit])
+    frames, fps = gif_frames565(data, bg, FIT_SCALE[fit], hold_ms=hold_ms)
     return build(frames, fps, hold_ms, _bg565(bg))

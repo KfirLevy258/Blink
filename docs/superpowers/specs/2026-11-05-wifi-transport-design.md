@@ -1647,7 +1647,7 @@ same boundary the OTA image has.
   width and height; every rect's declared payload length inside the blob
   and its PackBits16 decoding to exactly `w * h` pixels; the walk ends
   exactly at `blob_len`. Provisional values: 180 frames, 1 to 60 fps (the
-  tool's own range, `encode_logo.py:245`), 15000 ms total, 256 rects. They
+  tool's own range, `encode_logo.py:245`), 15000 ms total, 120 rects (2026-11-07: was 256, which a one-byte rect count cannot even write; the encoder cuts bands of changed rows, so 240 rows give at most 120 bands, and 120 is every frame it can produce). They
   are provisional because factory logos already exist (local `.bin` files
   up to about 150 KB, uncommitted, never described here beyond their
   headers): plan Task 6.3 runs `tools/encode_logo.py --info`, extended to

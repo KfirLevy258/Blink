@@ -8,9 +8,11 @@ GIF rules written independently of pc/gif_decode, as the screen's RGB rows.
 """
 from __future__ import annotations
 
+import functools
 import struct
 
 
+@functools.lru_cache(maxsize=32)
 def lzw_encode(indices, min_size, clear_every=None, extra=b""):
     """GIF LZW. `clear_every`: emit a clear code after that many codes, to
     exercise a clear mid-stream. `extra` indices are encoded after the real

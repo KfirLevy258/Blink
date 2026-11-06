@@ -71,34 +71,46 @@ def test_logo_stream_over_fake_board_wifi(rig, size):
 
 
 class FakeUsb:
-    """A serial port with the board behind it: acks like the firmware (at
-    16 KiB boundaries and at the size), answers into Bridge.on_message."""
+    """A serial port with the board behind it: a bounded UART RX ring that
+    DROPS a line that does not fit (the firmware's 2 KB ring, proto.c), and a
+    board that drains the ring once per bridge pass, acks EVERY chunk, and
+    answers logo_end with logo_state."""
     kind = "usb"
+    RING = 2048
 
-    def __init__(self):
+    def __init__(self, present=1):
         self.bridge, self.lines, self.got, self.size = None, [], bytearray(), -1
+        self.ring, self.used, self.dropped, self.present = [], 0, 0, present
 
     def write(self, raw):
         assert len(raw) <= protocol.MAX_LINE_BYTES
-        m = json.loads(raw)
-        self.lines.append(m)
-        t = m["t"]
-        if t == "logo_begin":
-            self.size = m["size"]
-            self.bridge.on_message({"t": "logo_ack", "off": 0})
-        elif t == "logo_chunk":
-            assert m["off"] == len(self.got)
-            before = len(self.got)
-            self.got += base64.b64decode(m["d"])
-            n = len(self.got)
-            if n // 16384 > before // 16384 or n == self.size:
-                self.bridge.on_message({"t": "logo_ack", "off": n})
+        if self.used + len(raw) > self.RING:
+            self.dropped += 1
+            return
+        self.ring.append(raw)
+        self.used += len(raw)
+
+    def service(self):
+        lines, self.ring, self.used = self.ring, [], 0
+        for raw in lines:
+            m = json.loads(raw)
+            self.lines.append(m)
+            t = m["t"]
+            if t == "logo_begin":
+                self.size = m["size"]
+                self.bridge.on_message({"t": "logo_ack", "off": 0})
+            elif t == "logo_chunk":
+                if m["off"] != len(self.got):
+                    continue
+                self.got += base64.b64decode(m["d"])
+                self.bridge.on_message({"t": "logo_ack", "off": len(self.got)})
+            elif t == "logo_end":
+                self.bridge.on_message({"t": "logo_state",
+                                        "present": self.present})
 
 
-@pytest.mark.parametrize("size", [400003, 513])
-def test_logo_stream_over_fake_board_usb(size):
-    blob = _blob(size)
-    usb = FakeUsb()
+def _run_usb(blob, present=1):
+    usb = FakeUsb(present)
     b = _bridge(lambda m: usb.write(protocol.encode(m)))
     usb.bridge = b
     b.start_logo(blob, usb)
@@ -106,10 +118,47 @@ def test_logo_stream_over_fake_board_usb(size):
         if b.logo_result is not None:
             break
         b.pump()
+        usb.service()
+    return b, usb
+
+
+@pytest.mark.parametrize("size", [400003, 513])
+def test_logo_stream_over_fake_board_usb(size):
+    blob = _blob(size)
+    b, usb = _run_usb(blob)
     assert b.logo_result == (True, "")
-    assert bytes(usb.got) == blob
+    assert usb.dropped == 0 and bytes(usb.got) == blob
     assert [m["t"] for m in usb.lines].count("logo_end") == 1
     assert max(len(m["d"]) for m in usb.lines if m["t"] == "logo_chunk") == 344
+
+
+def test_a_32k_window_over_usb_overflows_the_ring(monkeypatch):
+    """The fake ring is real: with the WiFi window the stream floods it, lines
+    are dropped and the image never arrives."""
+    monkeypatch.setattr(logo_stream, "WINDOW_USB", 32 * 1024)
+    b, usb = _run_usb(_blob(20000))
+    assert usb.dropped > 0 and bytes(usb.got) != _blob(20000)
+
+
+def test_the_stream_is_not_done_until_the_board_says_present():
+    b, usb = _run_usb(_blob(1000), present=0)
+    assert b.logo_result == (False, logo_stream.REFUSED)
+    assert logo_stream.REFUSED == "The board refused the logo"
+    # logo_end sent, no logo_state yet: still running
+    usb = FakeUsb()
+    b = _bridge(lambda m: usb.write(protocol.encode(m)))
+    usb.bridge = b
+    usb.size = 0
+    b.start_logo(_blob(300), usb)
+    usb.service = lambda: None
+    for _ in range(5):
+        b.pump()
+        for m in [{"t": "logo_ack", "off": 0}]:
+            b.on_message(m)
+    b.on_message({"t": "logo_ack", "off": 256})
+    b.on_message({"t": "logo_ack", "off": 300})
+    b.pump()
+    assert b.logo_streaming() and b.logo_result is None
 
 
 def test_oversize_blob_is_refused_before_transmission(rig):
