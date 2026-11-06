@@ -137,4 +137,64 @@ ok "claude still starts with our settings.json in place"
 claude --version >/dev/null 2>&1 || fail "claude --version fails after uninstall"
 ok "uninstall clean, claude still starts"
 
+# ------------------------------------------------------- the /usage contract
+#
+# The opt-in refresh runs `claude -p /usage` with the flags in
+# pc/usage_refresh.command(), and judges the JSON with judge(). Neither has a
+# stability commitment from Claude Code, the same risk as the status line
+# field above. Logged out (this HOME has no login, and the runner has no
+# keychain), every flag must still be accepted and the answer must still be
+# the zero-cost JSON result that was measured logged out on 2026-11-05.
+#
+# A COST verdict fails: it means the command reached the model, or judge()
+# would now read a free answer as spending, and either way the refresh would
+# turn itself off on every desk. So does an answer that is not the expected
+# JSON. On the `old` floor (BLINK_CLAUDE_LABEL) both are printed and pass:
+# 2.1.100 predates /usage and answers "Unknown skill: usage" with one turn
+# and no cost, which judge() reads as COST (measured 2026-11-06, logged out,
+# in a throwaway VM). That is open for a decision -- see
+# docs/open-bugs/usage-refresh-old-claude.md -- not a merge blocker.
+#
+# Run from the source tree, not the binary: the binary has no way to run one
+# refresh on demand, and the command and judge are the same code.
+unset CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY
+mkdir -p "$WORK/refresh"
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT" py - "$WORK/refresh" \
+	"${BLINK_CLAUDE_LABEL:-}" <<'EOF' || exit 1
+import json, shutil, subprocess, sys
+from pc import usage_refresh as ur
+
+cwd, label = sys.argv[1], sys.argv[2]
+exe = shutil.which("claude")
+try:
+    r = subprocess.run(ur.command(exe), cwd=cwd, stdin=subprocess.DEVNULL,
+                       capture_output=True, timeout=ur.RUN_TIMEOUT_S)
+except subprocess.TimeoutExpired:
+    sys.exit(f"FAIL: claude -p /usage did not finish in {ur.RUN_TIMEOUT_S} s")
+verdict = ur.judge(r.returncode, r.stdout)
+
+
+def bad(msg):
+    if label == "old":
+        print("  note " + msg)
+        sys.exit(0)
+    sys.exit("FAIL: " + msg)
+
+
+if verdict is ur.Verdict.COST:
+    bad("logged out, claude -p /usage reads as COST: the refresh would turn"
+        " itself off on every desk. Measure the command again (CLAUDE.md)"
+        " before shipping.")
+try:
+    doc = json.loads(r.stdout)
+    shape = isinstance(doc, dict) and doc.get("type") == "result"
+except ValueError:
+    shape = False
+if not shape:
+    # The CLI's own error text, from a runner with no account in it.
+    bad(f"claude -p /usage gave no JSON result (exit {r.returncode}):\n"
+        + r.stderr.decode(errors="replace")[-600:])
+print(f"  ok   /usage answers a JSON result, judged {verdict.name}")
+EOF
+
 printf 'PASS [%s]\n' "$VERSION"
