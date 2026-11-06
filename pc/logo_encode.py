@@ -313,8 +313,8 @@ def gif_timing(delays_ms, hold_ms=0):
     `hold_ms`) are candidates, and the LAST frame's ticks are cut to fit
     first, because the hold keeps that frame up anyway: 30 frames of 30 ms
     then a 5 s last frame is fps 29 (tick 34, 177 ticks, fits whole; fps 33
-    would need 197 and a cut last frame), not an error. With no candidate the unconstrained best is returned and
-    check_limits says why."""
+    would need 197 and a cut last frame), not an error. With no candidate
+    the unconstrained best is returned and check_limits says why."""
     ds = [100 if d < 20 else d for d in delays_ms]
     best = fallback = None
     for fps in range(LOGO_FPS_MIN, LOGO_FPS_MAX + 1):

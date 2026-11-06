@@ -1681,9 +1681,8 @@ same boundary the OTA image has.
   the daemon keeps four chunks (about 1.5 KB) in flight; a 32 KiB window
   would overflow the ring and the board would drop lines silently
   (2026-11-07). The stream is done only when the board's `logo_state`
-  arrives after `logo_end` (`present` 1), and
-  which is the one place the OTA path has no USB equivalent (OTA over USB
-  is esptool). The control lines are shared by both links: `logo_begin`
+  arrives after `logo_end` (`present` 1). `logo_chunk` is the one place
+  the OTA path has no USB equivalent (OTA over USB is esptool). The control lines are shared by both links: `logo_begin`
   (`size`, `crc`), the chunks, `logo_end`; `logo_remove`; and the board's
   `logo_state` (`present`, `bytes`, `frames`) sent after `hello` and after
   every change, so the page can show "Logo: company, 48 KB, 12 frames" or
