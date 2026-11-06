@@ -544,8 +544,9 @@ def test_ok_whose_cache_did_not_move_is_failed(tmp_path, monkeypatch, capsys):
     assert rec.exists()
     s = t.state()
     assert s.fails == 1 and s.failing_since == NOW and s.last_run_at == NOW
+    # Named apart from output that changed shape (review of PR #8).
     assert capsys.readouterr().err.splitlines() == [
-        "usage refresh failed (exit 0)"]
+        "usage refresh failed (no cache written)"]
 
 
 @pytest.mark.allow_claude_launch
@@ -1957,3 +1958,77 @@ def test_a_restart_keeps_the_credit_for_the_cache_its_run_made(
     assert again.w.activity_for(NOW + 3) is None
     # And the file's other halves still load.
     assert again.state().last_run_at == NOW
+
+
+# --- review of PR #8, 2026-11-06 --------------------------------------------
+
+@pytest.mark.parametrize("content, want", [
+    (None, False),                         # no config.json at all
+    ({}, False),                           # the key absent: never answered
+    ({ur.SETTING: "true"}, False),
+    ({ur.SETTING: 1}, False),
+    ({ur.SETTING: "on"}, False),
+    ({ur.SETTING: None}, False),
+    ({ur.SETTING: False}, False),
+    ({ur.SETTING: True}, True),
+])
+def test_only_a_literal_true_turns_the_refresh_on(tmp_path, content, want):
+    """The one line between a desk that never answered and a `claude -p`
+    on the owner's quota. Every watch test stubbed it, so `is not False`
+    or a truthy check would have passed the whole suite."""
+    blink = tmp_path / ".blink"
+    blink.mkdir()
+    if content is not None:
+        (blink / "config.json").write_text(json.dumps(content))
+    assert ur.enabled(str(blink)) is want
+
+
+def test_a_desk_that_never_answered_runs_nothing(tmp_path, monkeypatch):
+    # The real enabled() over a config.json without the key, and every
+    # other condition saying yes: the runner must never be reached.
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    ran = []
+    t = _Watch(tmp_path, monkeypatch,
+               runner=lambda *a, **k: ran.append(a) or 1 / 0)
+    (t.blink / "config.json").write_text("{}")
+    t.w._enabled = lambda: ur.enabled(str(t.blink))
+    t.w.tick_once()
+    assert ran == [] and t.state() == State()
+    t.enabled[0] = True                    # the stub alone does run it
+    t.w._enabled = lambda: t.enabled[0]
+    t.w.tick_once()
+    assert ran
+
+
+def test_a_board_ask_that_raises_is_said_once_by_type(tmp_path, monkeypatch,
+                                                      capsys):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+
+    def broken(caps):
+        raise RuntimeError("someone@example.com 42%")
+    monkeypatch.setattr(k.a, "_due", broken)
+    assert k.a.due(CAPS) is False
+    assert k.a.due(CAPS) is False
+    err = capsys.readouterr().err
+    assert err.splitlines() == ["usage refresh ask failed (RuntimeError)"]
+    assert "example" not in err and "42" not in err
+
+
+@pytest.mark.parametrize("answer", ["on", "no"])
+def test_an_answer_that_cannot_be_saved_is_said_by_type(tmp_path, monkeypatch,
+                                                        capsys, answer):
+    from pc import user_config
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+
+    def refuse(*a, **kw):
+        raise PermissionError(13, "refused")
+    monkeypatch.setattr(user_config, "put", refuse)
+    k.a.answer(answer)
+    err = capsys.readouterr().err
+    # The type, never which way the person answered.
+    assert err.splitlines() == [
+        "usage refresh answer not saved (PermissionError)"]
+    assert k.ask().times == 1

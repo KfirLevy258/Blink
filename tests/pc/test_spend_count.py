@@ -374,7 +374,8 @@ def test_save_does_not_use_mkstemp(tmp_path, monkeypatch):
     assert os.listdir(tmp_path) == ["spend-count.json"]
 
 
-def test_a_refused_save_tries_once_and_backs_off(tmp_path, monkeypatch):
+def test_a_refused_save_tries_once_and_backs_off(tmp_path, monkeypatch,
+                                                  capsys):
     """A folder that refuses the write costs one attempt, not a retry on
     every two-second poll; the count stays in memory and is written once
     the back-off has passed."""
@@ -397,6 +398,9 @@ def test_a_refused_save_tries_once_and_backs_off(tmp_path, monkeypatch):
         c.observe("b", 1.00, 200 + i)    # a new session is urgent
         c.save()
     assert len(calls) == 1
+    # Said once for the streak, by type alone (review of PR #8).
+    assert capsys.readouterr().err.splitlines() == [
+        "[spend] count not saved (PermissionError)"]
     monkeypatch.setattr(install_statusline, "_open_temp", real)
     tick.t += 30
     c.save()

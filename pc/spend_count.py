@@ -130,6 +130,7 @@ import atexit
 import json
 import math
 import os
+import sys
 import time
 
 # As a package import, like every other module under pc/. A bare
@@ -644,8 +645,14 @@ class SpendCounter:
             # install_statusline.temp_siblings finds them, so a killed
             # write is swept by the next one.
             theme._write_json(target, doc, tries=1)
-        except OSError:
-            # Kept in memory and tried again after the back-off (save).
+        except OSError as e:
+            # Kept in memory and tried again after the back-off (save). Said
+            # once per streak, by type: a ~/.blink that refuses writes lost
+            # the count at every restart with nothing in the log (review of
+            # PR #8, 2026-11-06).
+            if self._failed_at is None:
+                print(f"[spend] count not saved ({type(e).__name__})",
+                      file=sys.stderr)
             self._failed_at = tick
             return
         self._dirty = self._urgent = False

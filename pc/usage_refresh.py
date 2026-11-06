@@ -58,8 +58,8 @@ GIVE_UP_S = 24 * 3600
 # was two failures -- one on Friday evening, none over a weekend with nobody
 # at the desk, one on Monday morning before the network was up -- and the
 # refresh turned itself off with "/login" advice that fitted neither
-# (/code-review max of feat/usage-refresh, V12). Six is at least five hours
-# of attempts at the hourly backoff.
+# (/code-review max of feat/usage-refresh, V12). Six runs span at least
+# 3 h 50 m: three at the REFRESH_AFTER_S spacing, then the hourly backoff.
 GIVE_UP_AFTER = 6
 TICK_S = 60
 
@@ -518,8 +518,10 @@ class BoardAsk:
     the next heartbeat.
 
     `home()` is the claude_home record, `view(now)` the config
-    (config_view). Nothing here logs: the answer is the person's, and the
-    daemon's log names the message type alone."""
+    (config_view). Nothing here logs the answer, which is the person's; a
+    failure is said by its type alone, once per streak (_say). Swallowed
+    silently until the review of PR #8, a fault here left the box never
+    shown, or a "Turn on" never saved, with nothing in the log."""
 
     def __init__(self, blink_home, home, view, now=time.time, idle=None,
                  other_at=None):
@@ -531,6 +533,13 @@ class BoardAsk:
         self._other_at = other_at if other_at is not None else (lambda: None)
         self._lock = threading.Lock()
         self._mem = None
+        self._said = None
+
+    def _say(self, what, e):
+        name = type(e).__name__
+        if self._said != (what, name):
+            self._said = (what, name)
+            print(f"usage refresh {what} ({name})", file=sys.stderr)
 
     def _state(self):
         read = load_ask(self._blink_home)
@@ -553,7 +562,8 @@ class BoardAsk:
         """Never raises: a question is never worth the thread."""
         try:
             return self._due(frozenset(board_caps))
-        except Exception:
+        except Exception as e:
+            self._say("ask failed", e)
             return False
 
     def _due(self, caps):
@@ -622,12 +632,12 @@ class BoardAsk:
                     return
                 try:
                     user_config.put(self._blink_home, SETTING, a == "on")
-                except Exception:
+                except Exception as e:
                     # Not saved: an "on" is asked again tomorrow, a "no" is
                     # held by `declined` above.
-                    pass
-        except Exception:
-            pass
+                    self._say("answer not saved", e)
+        except Exception as e:
+            self._say("answer not saved", e)
 
 
 def is_work_login(view):
@@ -948,6 +958,10 @@ class RefreshWatch:
             raised.append(type(e).__name__)
         unread = False
         moved = None
+        # Why an exit-0 run failed, in fixed words: both used to read
+        # "failed (exit 0)", and a logged-out Claude Code (no cache) could
+        # not be told from output that changed shape (review of PR #8).
+        why = None if verdict is Verdict.OK else "unexpected output"
         if verdict is Verdict.OK:
             # A logged-out Claude Code answers -p /usage with a zero-cost
             # success too, and writes no cache (measured 2026-11-05). Only a
@@ -965,6 +979,7 @@ class RefreshWatch:
                 moved = _cache_at(view)
                 if moved is None or moved < started - MOVED_SLACK_S:
                     verdict = Verdict.FAILED
+                    why = "no cache written"
         # `blink config usage-refresh on` may have landed while claude ran
         # (up to RUN_TIMEOUT_S): its fresh start wins over the streak this
         # run began with, and only the run's time is added to it. Recorded
@@ -989,15 +1004,19 @@ class RefreshWatch:
             # holds it off, and this watch's copy holds it until the
             # setting is seen off. So `blink status` and `blink config`
             # say off as well.
+            put_failed = None
             try:
                 user_config.put(self._blink_home, SETTING, False)
-            except Exception:
-                pass
+            except Exception as e:
+                # The state file still holds it off; said, so a config.json
+                # that still reads "on" has a reason in the log.
+                put_failed = type(e).__name__
             unsaved = self._keep(new)
             print(f"usage refresh off ({new.off_reason})", file=sys.stderr)
             self._said = None
-            if unsaved:
-                self._say_failure(unsaved)
+            for name in (put_failed, unsaved):
+                if name:
+                    self._say_failure(name)
             return
         # A failed write is said after the run's own line, by type.
         unsaved = self._keep(new)
@@ -1011,6 +1030,8 @@ class RefreshWatch:
             print("usage refresh ran", file=sys.stderr)
         elif verdict is Verdict.TIMEOUT:
             print("usage refresh failed (timeout)", file=sys.stderr)
+        elif codes[-1] == 0 and why:
+            print(f"usage refresh failed ({why})", file=sys.stderr)
         else:
             print(f"usage refresh failed (exit {codes[-1]})",
                   file=sys.stderr)
