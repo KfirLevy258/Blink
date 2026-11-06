@@ -608,3 +608,19 @@ def test_a_run_started_inside_tests_pc_still_loads_the_sandbox():
         cwd=ROOT / "tests" / "pc", env=env, capture_output=True, text=True,
         timeout=120)
     assert out.returncode == 0, out.stdout + out.stderr
+
+
+def test_udp_sendto_off_loopback_is_refused():
+    # Discovery is a broadcast and never calls connect(), so connect-only
+    # guarding let it straight onto a developer's LAN.
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        with pytest.raises(conftest.RealNetworkRefused):
+            s.sendto(b"x", ("255.255.255.255", 49731))
+        if hasattr(s, "sendmsg"):
+            with pytest.raises(conftest.RealNetworkRefused):
+                s.sendmsg([b"x"], [], 0, ("255.255.255.255", 49731))
+        s.sendto(b"x", ("127.0.0.1", 1))      # loopback stays open
+    finally:
+        s.close()

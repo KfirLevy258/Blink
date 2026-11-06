@@ -159,6 +159,9 @@ def _no_real_network(request, monkeypatch):
     address instead of timing out. Loopback stays open: the theme builder
     will serve on 127.0.0.1.
 
+    UDP too (sendto, sendmsg): the WiFi discovery query is a broadcast and
+    never passes through connect().
+
     Raised as a BaseException, not an AssertionError. The watch's reader
     catches Exception on purpose -- a status light must never take the daemon
     down -- and would have turned the refusal into an ordinary "unreadable
@@ -177,6 +180,8 @@ def _no_real_network(request, monkeypatch):
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
     real_getaddrinfo = socket.getaddrinfo
+    real_sendto = socket.socket.sendto
+    real_sendmsg = getattr(socket.socket, "sendmsg", None)
 
     def refuse(what):
         raise RealNetworkRefused(
@@ -190,6 +195,24 @@ def _no_real_network(request, monkeypatch):
             return real(self, address)
         return connect
 
+    def guarded_to(real):
+        # UDP never calls connect(): the address rides on every datagram.
+        # sendto(data, addr) or sendto(data, flags, addr); sendmsg's is the
+        # third after ancdata and flags, or None for a connected socket (which connect()
+        # already vetted). 255.255.255.255 is the WiFi discovery broadcast
+        # and must be refused here, not reach a developer's LAN.
+        def sendto(self, data, *rest):
+            if rest and not _loopback(rest[-1]):
+                refuse(rest[-1])
+            return real(self, data, *rest)
+        return sendto
+
+    def sendmsg(self, buffers, *rest):
+        addr = rest[2] if len(rest) > 2 else None
+        if addr is not None and not _loopback(addr):
+            refuse(addr)
+        return real_sendmsg(self, buffers, *rest)
+
     def getaddrinfo(host, *a, **k):
         if host is not None and not _loopback((host,)):
             refuse(host)
@@ -199,6 +222,9 @@ def _no_real_network(request, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex",
                         guarded(real_connect_ex))
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket.socket, "sendto", guarded_to(real_sendto))
+    if real_sendmsg is not None:       # not on Windows
+        monkeypatch.setattr(socket.socket, "sendmsg", sendmsg)
 
 
 class RealNetworkRefused(BaseException):
