@@ -398,6 +398,12 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[touch] INJECT BUILD: the PC can drive this panel -- bench only, never"
     " ship this",                                         # touch_inject.c:490
     "[time] manual time",                                      # net_time.c:67
+    # [wifi] -- firmware/src/net_link.c (spec S5.8). The join's reason is one
+    # of net_link_why_text's fixed sentences, and is cut like any value.
+    "[wifi] radio up",                                         # :160
+    "[wifi] joined",                                           # :351
+    "[wifi] join failed",                                      # :270
+    "[wifi] lost the network",                                 # :136
 ), key=len, reverse=True))
 
 # "[ota] update %s: wanted %s, running %s (from %s)" (main.c:233) is the line
@@ -430,7 +436,7 @@ CONSOLE_EXTERNAL = (
 # its first word is the board's text too.
 CONSOLE_TAGS = frozenset({
     "bl", "boot", "cfg", "fatal", "focus", "mem", "ota", "proto", "sleep",
-    "slide", "swipe", "theme", "time", "touch", "usage",
+    "slide", "swipe", "theme", "time", "touch", "usage", "wifi",
 })
 
 BOARD_LINE = "(board line)"

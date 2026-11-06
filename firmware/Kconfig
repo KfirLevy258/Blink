@@ -123,6 +123,23 @@ config BLINK_TOUCH_INJECT
 	  burn). burn.sh refuses this build without --bench, and release.sh and
 	  flash_encrypted.sh refuse it outright (tools/lib_selftest.sh).
 
+config BLINK_WIFI_LINK
+	bool "The WiFi link: the station half of the radio"
+	depends on WIFI_ESP32 && NET_DHCPV4 && NET_MGMT_EVENT
+	default y
+	help
+	  Scan, join and take the radio down again (src/net_link.c, spec
+	  S5.1), for the encrypted WiFi link to the daemon. In every image:
+	  the Phase 0 RAM gate passed with one image for all boards
+	  (docs/research/2026-11-wifi-ram-spike.md, Verdict). The driver
+	  initialises at boot either way; an unpaired board never brings the
+	  interface up (D42).
+
+	  Deliberately NOT the deleted BLINK_WIFI_MODE, the standalone mode
+	  that fetched usage over the air. tools/release.sh still refuses a
+	  build with that symbol set, and a new name keeps that guard meaning
+	  what it says.
+
 endmenu
 
 # The deferred log carries every protocol line this board sends. It used to

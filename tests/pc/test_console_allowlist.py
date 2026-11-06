@@ -78,6 +78,13 @@ LINES = [
     ("[bl] 73%", "[bl]", ["73"]),
     # ui_sleep.c:183
     ("[sleep] dozing (night)", "[sleep] dozing", ["night"]),
+    # net_link.c -- the radio's four fixed lines (spec S5.8). The board never
+    # prints a network name, but a line that carried one must still lose it.
+    ("[wifi] radio up", "[wifi] radio up", []),
+    ("[wifi] joined MyNet", "[wifi] joined", ["MyNet"]),
+    ("[wifi] join failed: Wrong WiFi password", "[wifi] join failed",
+     ["Wrong", "password"]),
+    ("[wifi] lost the network", "[wifi] lost the network", []),
     # a known stem with something riding on the end of it
     ("[theme] saved SECRET-TAIL", "[theme] saved", ["SECRET-TAIL"]),
     # no tag the firmware uses: the bootloader, Zephyr, the touch tracer,

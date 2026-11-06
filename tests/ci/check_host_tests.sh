@@ -99,6 +99,8 @@ run_one fmt          "fmt.c"           ""
 run_one link         "link.c"          ""
 run_one logo         "logo_parse.c bootanim_dec.c" ""
 run_one msg_parse    "msg_parse.c"     ""
+# The WiFi scan table: one entry a name, strongest first, at most 20.
+run_one net_link     ""                ""
 run_one ota_parse    "ota_parse.c"     ""
 run_one sleep_gate   "sleep_gate.c usage_freshness.c" ""
 run_one theme        "theme.c msg_parse.c" "-lm"

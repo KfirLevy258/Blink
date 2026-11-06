@@ -101,7 +101,7 @@ def test_lines_go_through_tap_console_line():
     rc, lines, _ = _run([
         (secret + "\n").encode(),
         b'{"t":"wifi_state","st":"up","s":"6e6574","ip":"10.0.0.2"}\r\n',
-        # at this task the [wifi] tag is not on the list; Task 1.2 flips it
+        # a fixed net_link.c line comes out as its constant
         b"[wifi] joined\n",
         b"garbage \x00\xff 6e6574\n",
         b"[usage] firm",   # cut in half, then completed by the next read
@@ -109,7 +109,7 @@ def test_lines_go_through_tap_console_line():
     ])
     assert lines == [logbook.BOARD_LINE,
                      '{"t":"wifi_state","st":"up"}',
-                     logbook.BOARD_LINE,
+                     "[wifi] joined",
                      logbook.BOARD_LINE,
                      "[usage] firmware boot OK"]
 
