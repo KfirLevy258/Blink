@@ -933,6 +933,9 @@ BOARD_CAP_THEME = "theme"    # takes theme lines; answers theme_edit
 # while their ask is in flight as an ok 0, put up "run blink theme", and
 # then ignore the real ok 1 (review of fp/audit-nice r2, SHOULD-1).
 BOARD_CAP_EDIT_DONE = "edit_done"
+# Takes wifi_scan / wifi_set / wifi_forget over the cable (spec S6.1). The
+# Connect panel offers its WiFi controls only to a board that lists it.
+BOARD_CAP_WIFI = "wifi"
 
 
 def board_caps(msg) -> frozenset:
@@ -1110,6 +1113,31 @@ def ota_none(app=None):
 
 def ota_error(why=""):
     return {"t": "ota_error", "v": VERSION, "why": why}
+
+
+def ota_end(size):
+    """The last WiFi OTA chunk was acked; the board flushes and seals."""
+    return {"t": "ota_end", "v": VERSION, "size": int(size)}
+
+
+# --- WiFi pairing over the cable (spec S6.1) ---
+# SSIDs are arbitrary bytes and passwords any printable ASCII, so both travel
+# as lowercase hex: no JSON escaping on the board, a fixed worst-case width.
+
+
+def wifi_scan():
+    return {"t": "wifi_scan", "v": VERSION}
+
+
+def wifi_set(ssid, password, key):
+    """The one line that carries the password. log_name and redact keep only
+    its type; nothing on the host prints it."""
+    return {"t": "wifi_set", "v": VERSION, "s": bytes(ssid).hex(),
+            "p": password.encode("ascii").hex(), "k": bytes(key).hex()}
+
+
+def wifi_forget():
+    return {"t": "wifi_forget", "v": VERSION}
 
 # --------------------------------------------------------------- overage cap
 

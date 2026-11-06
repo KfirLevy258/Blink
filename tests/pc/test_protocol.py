@@ -1496,6 +1496,11 @@ def _builders():
         ("ota_none", protocol.ota_none(app="1.4.0"), {"t"}, {"v", "app"}),
         ("ota_error", protocol.ota_error("SECRET why"), {"t"}, {"v", "why"}),
         ("edit_state", protocol.edit_state(True), {"t", "editing"}, {"v"}),
+        ("ota_end", protocol.ota_end(1000), {"t"}, {"v", "size"}),
+        ("wifi_scan", protocol.wifi_scan(), {"t"}, {"v"}),
+        ("wifi_set", protocol.wifi_set(b"net", "SECRETpw", bytes(32)),
+         {"t"}, {"v", "s", "p", "k"}),
+        ("wifi_forget", protocol.wifi_forget(), {"t"}, {"v"}),
     ]
 
 
@@ -1550,3 +1555,40 @@ def test_redact_never_keeps_a_container():
             for v in got.values():
                 assert v is None or isinstance(v, (str, int, float, bool))
                 assert not isinstance(v, str) or len(v) <= 64
+
+
+def test_the_widest_wifi_set_fits():
+    """The widest wifi_set measures 298 bytes of MAX_LINE_BYTES=512
+    (2026-11-06): a 32-byte SSID and a 63-character password. A 64-character
+    password, which password_problem refuses, still fits, so the budget is
+    not what stops it."""
+    raw, why = protocol.encode_checked(
+        protocol.wifi_set(b"\xff" * 32, "~" * 63, bytes(32)))
+    assert why is None and len(raw) == 298
+    raw, why = protocol.encode_checked(
+        protocol.wifi_set(b"\xff" * 32, "a" * 64, bytes(32)))
+    assert why is None
+
+
+def test_the_widest_board_lines_fit():
+    """The board's own widest lines, built by hand because only firmware
+    sends them: wifi_net 131 bytes, wifi_state 215 (2026-11-06)."""
+    net = {"t": "wifi_net", "v": 1, "i": 19, "n": 20, "s": "ff" * 32,
+           "r": -100, "sec": "mixed"}
+    state = {"t": "wifi_state", "v": 1, "st": "joining", "link": "wifi",
+             "s": "ff" * 32, "ip": "255.255.255.255", "port": 65535,
+             "r": -100, "kid": "ffffffff", "why": "Wrong WiFi password"}
+    raw_net, why = protocol.encode_checked(net)
+    assert why is None and len(raw_net) == 131
+    raw_state, why = protocol.encode_checked(state)
+    assert why is None and len(raw_state) == 215
+
+
+def test_wifi_types_log_by_name_only():
+    assert protocol.log_name(
+        protocol.wifi_set(b"x", "secretpw", bytes(32))) == "wifi_set"
+
+
+def test_the_builders_output_is_redacted_by_the_task_0_1_redactor():
+    assert protocol.redact(
+        protocol.wifi_set(b"net", "secretpw", bytes(32))) == {"t": "wifi_set"}
