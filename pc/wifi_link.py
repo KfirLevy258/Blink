@@ -140,16 +140,33 @@ def _say(msg: str) -> None:
     print("[wifi] " + msg, file=sys.stderr)
 
 
+# The last failure sentence said. The daemon retries a missing board every
+# 5..60 s for as long as it runs (spec 7.2), so without this a charger board
+# that is off wrote three lines a minute into bridge.log. A failure is said
+# once and again only after something else happened (a connect, or the other
+# failure); "connecting" is not repeated while a failure is standing.
+_standing = None
+
+
+def _fail_say(outcome: str, msg: str) -> None:
+    global _standing
+    if _standing != outcome:
+        _standing = outcome
+        _say(msg)
+
+
 def connect(home: str, create_connection=socket.create_connection,
             discover=discover, timeout_s: float = 3.0):
     """(WifiLink | None, outcome). Outcomes: "connected", "not paired",
     "not found" (nothing answered), "failed" (a peer answered and the
     handshake did not complete: unauthenticated by design, D36)."""
+    global _standing
     pair = wifi_pair.load(home)
     if pair is None:
         return None, "not paired"
     key = pair["key"]
-    _say("connecting to the board")
+    if _standing is None:
+        _say("connecting to the board")
     reached = False
 
     def attempt(ip, port):
@@ -177,10 +194,11 @@ def connect(home: str, create_connection=socket.create_connection,
                 except (OSError, private_file.NotPrivate):
                     pass        # a failed address refresh must not drop a good link
     if link is not None:
+        _standing = None
         _say("connected")
         return link, "connected"
     if reached:
-        _say("handshake refused")
+        _fail_say("failed", "handshake refused")
         return None, "failed"
-    _say("board not found")
+    _fail_say("not found", "board not found")
     return None, "not found"
