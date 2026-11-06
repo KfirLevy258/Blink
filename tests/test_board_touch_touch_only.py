@@ -130,7 +130,7 @@ def test_skip_missing_skips_a_tap_whose_screen_is_not_showing():
 # tile the spike adds (Task 0.2) and Settings > Connection proper (Task 1.5).
 # A literal list on purpose: a script that names a widget nobody has is a
 # script that skips or fails on the bench without saying why.
-WIDGETS = {"Brightness", "Theme", "Focus", "Update", "<",
+WIDGETS = {"Brightness", "Open settings", "Focus", "Update", "<",
            "Connection", "Forget WiFi", "Link: WiFi", "Cancel"}
 
 

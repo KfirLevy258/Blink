@@ -2077,7 +2077,7 @@ BUILD_ASSERT(THEME_GRID_Y + 3 * THEME_TILE_H + 2 * THEME_TILE_GAP <= 240,
 #define EDIT_HOLD_MS (150 * 1000)
 #endif
 /*
- * The fallback is an instruction, "On your computer, run: blink theme", over
+ * The fallback is an instruction, "On your computer, run: blink settings", over
  * three lines, and it is only useful if it can be read and typed from: 3 s
  * is too short for that, and a fallback that never left would hide the
  * button under it. 8 s, then the name; and a tap before then asks again
@@ -2099,7 +2099,7 @@ static const char *const edit_holding = "Editing on your computer";
  * Markdown on a screen that has none. tests/test_panel_strings.py now
  * refuses a backtick, or any character the built-in fonts lack, in any
  * firmware string. */
-static const char *const edit_run = "On your computer, run: blink theme";
+static const char *const edit_run = "On your computer, run: blink settings";
 
 static int theme_page;		/* survives a repaint, so the page stays put */
 static const char *edit_note;	/* what the slot says; NULL is its name */
@@ -2163,14 +2163,53 @@ static bool tile_was_a_tap(void)
 	       lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_NONE;
 }
 
+/*
+ * The Open settings tile says what is happening in its own name label,
+ * where the icon and the name were, rather than in the tile's one-line
+ * state label. Two reasons, both measured on 2026-11-07: the state label is
+ * 128 px wide and dotted, so "On your computer, run: blink settings" lost
+ * the one word the owner has to type; and the bench's widget list names a
+ * control by its FIRST label child, so a note
+ * in the state label could not be waited for. The tile's state label is
+ * never shown; it is only the handle mk_tile gives back.
+ */
+static void edit_tile_paint(void)
+{
+	lv_obj_t *name = lv_obj_get_user_data(theme_edit_lbl);
+	lv_obj_t *icon = lv_obj_get_user_data(name);
+
+	if (edit_note != NULL) {
+		lv_label_set_text(name, edit_note);
+		lv_label_set_long_mode(name, LV_LABEL_LONG_WRAP);
+		lv_obj_set_width(name, TILE_W - 16);
+		lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
+		lv_obj_set_style_text_color(name, edit_h.held ? COL_DIM :
+					    COL_TEXT, 0);
+		lv_obj_align(name, LV_ALIGN_CENTER, 0, 0);
+		lv_obj_add_flag(icon, LV_OBJ_FLAG_HIDDEN);
+		return;
+	}
+	lv_label_set_text(name, "Open settings");
+	lv_obj_set_width(name, LV_SIZE_CONTENT);
+	lv_obj_remove_local_style_prop(name, LV_STYLE_TEXT_COLOR, 0);
+	lv_obj_remove_local_style_prop(name, LV_STYLE_TEXT_ALIGN, 0);
+	lv_obj_align(name, LV_ALIGN_TOP_MID, 0, TILE_NAME_Y + TILE_BARE_DY);
+	lv_obj_clear_flag(icon, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void edit_paint(void)
 {
-	if (theme_edit_lbl) {
-		lv_label_set_text(theme_edit_lbl,
-				  edit_note ? edit_note : edit_name);
-		lv_obj_set_style_text_color(theme_edit_lbl, edit_h.held ?
-					    COL_DIM : COL_TEXT, 0);
+	if (theme_edit_lbl == NULL) {
+		return;
 	}
+	if (theme_ov == NULL) {
+		edit_tile_paint();
+		return;
+	}
+	/* The Theme screen's old Edit slot, kept for the tests. */
+	lv_label_set_text(theme_edit_lbl, edit_note ? edit_note : edit_name);
+	lv_obj_set_style_text_color(theme_edit_lbl, edit_h.held ? COL_DIM :
+				    COL_TEXT, 0);
 }
 
 static void edit_timer_cb(lv_timer_t *t);
@@ -2713,30 +2752,6 @@ static void show_theme(bool fresh)
 	lv_obj_clear_flag(theme_grid, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_clear_flag(theme_grid, LV_OBJ_FLAG_CLICKABLE);
 	theme_fill();
-}
-
-/*
- * The Theme row's tap. Deferred, because opening the theme screen deletes the
- * settings panel's contents -- the row this tap is still being delivered to
- * among them.
- */
-static void theme_open_cb(void *unused)
-{
-	ARG_UNUSED(unused);
-	show_theme(true);
-}
-
-static void theme_row_cb(lv_event_t *e)
-{
-	ARG_UNUSED(e);
-	/* The row sits where a swipe to close Settings often begins. */
-	if (!tile_was_a_tap()) {
-		return;
-	}
-	if (theme_ov == NULL && bright_ov == NULL && focus_ov == NULL &&
-	    conn_ov == NULL && confirm == NULL && !closing) {
-		lv_async_call(theme_open_cb, NULL);
-	}
 }
 
 /* --- The Focus screen ------------------------------------------------- */
@@ -3703,8 +3718,9 @@ BUILD_ASSERT(CONN_Y + CONN_H <= 240,
 	snprintf(sub, sizeof(sub), "%d%%", backlight_get());
 	mk_tile(panel, 0, &settings_icon_bright, "Brightness", sub,
 		bright_row_cb, &pct_lbl);
-	mk_tile(panel, 1, &settings_icon_theme, "Theme",
-		theme_name(theme_active_id()), theme_row_cb, NULL);
+	mk_tile(panel, 1, &settings_icon_theme, "Open settings", "",
+		theme_edit_cb, &theme_edit_lbl);
+	edit_paint();	/* a note outlives the panel it was drawn on */
 	mk_tile(panel, 2, &settings_icon_focus, "Focus", focus_name(),
 		focus_row_cb, &focus_sub);
 	upd_btn = mk_tile(panel, 3, &settings_icon_update, "Update", "",

@@ -217,9 +217,11 @@ def test_the_default_script_has_a_click_by_label_pass():
     steps = bt.parse_script((ROOT / "tools" / "bench" / "full_touch.txt")
                             .read_text(encoding="utf-8"))
     clicked = [s.args[0] for s in steps if s.cmd == "click"]
-    for label in ("Focus", "Session", "Off", "Theme", "Edit on computer",
-                  "Dark", "Brightness", "<"):
+    for label in ("Focus", "Session", "Off", "Open settings", "Brightness",
+                  "<"):
         assert label in clicked, label
+    # Task 6.1: no Theme tile and no theme screen to click through.
+    assert "Theme" not in clicked and "Edit on computer" not in clicked
     assert any(s.cmd == "wait_widget"
                and s.args[0] == "Editing on your computer" for s in steps)
     # The full eye swipe is still last.
@@ -644,8 +646,9 @@ def test_every_label_the_shipped_scripts_click_is_printable():
         for s in steps:
             if s.cmd == "click":
                 assert allow.allowed(s.args[0]), (name, s.args[0])
-    for label in ("BLINK", "Settings", "Update", "Theme", "Focus",
-                  "Brightness", "Edit on computer", "Opened on your computer",
+    for label in ("BLINK", "Settings", "Update", "Open settings", "Focus",
+                  "Brightness", "Opening on your computer",
+                  "Opened on your computer",
                   "On your computer, run: blink", "What's new", "Back",
                   "Yes, do it", "Cancel", "Later", "Update now", "OK", "*",
                   "Updated to 1.3.4", "Couldn't check for updates."):
@@ -1343,3 +1346,40 @@ def test_the_connection_screen_says_what_the_spec_says():
     net = (SRC / "net_link.c").read_text(encoding="utf-8")
     assert "Could not forget WiFi. Try again." in net
     assert len("Could not forget WiFi. Try again.") <= 47
+
+
+# --- Task 6.1: the tile that opens the settings page ------------------------
+
+def test_the_settings_tile_is_open_settings_and_nothing_is_called_theme():
+    c = (SRC / "ui_settings.c").read_text()
+    assert re.search(r'mk_tile\(panel, 1, &settings_icon_theme, "Open settings"'
+                     r',[^;]*theme_edit_cb, &theme_edit_lbl\);', c)
+    assert not re.search(r'mk_tile\([^;]*"Theme"', c)
+    # The Theme screen stays compiled for the tests, and nothing opens it.
+    assert "theme_row_cb" not in c and "theme_open_cb" not in c
+
+
+def test_the_run_fallback_names_blink_settings():
+    c = (SRC / "ui_settings.c").read_text()
+    assert '"On your computer, run: blink settings"' in c
+    assert "run: blink theme" not in c
+
+
+def test_no_theme_target_is_in_the_bench_vocabulary():
+    assert not [n for n in bt.TARGETS if n.startswith("theme.")]
+    for name in ("full_touch.txt", "popups_touch.txt", "session_touch.txt"):
+        text = (ROOT / "tools" / "bench" / name).read_text(encoding="utf-8")
+        assert "theme.open" not in text, name
+        assert 'click "Theme"' not in text, name
+
+
+def test_the_session_script_clicks_the_tile_and_expects_the_hold_copy():
+    steps = bt.parse_script((ROOT / "tools" / "bench" / "session_touch.txt")
+                            .read_text(encoding="utf-8"))
+    cmds = [(s.cmd, s.args) for s in steps]
+    i = cmds.index(("click", ("Open settings",)))
+    assert cmds[i + 1][0] == "expect" and cmds[i + 1][1][0] == "ui_state"
+    assert cmds[i + 1][1][1]["scr"] == "settings"
+    assert cmds[i + 1][1][1]["edit"] in ("waiting|held", ("waiting", "held"))
+    assert ("wait_widget", ("Opening on your computer", 3.0)) in cmds
+

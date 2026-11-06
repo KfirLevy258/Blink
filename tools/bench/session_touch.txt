@@ -8,11 +8,10 @@ expect ui_state ov=brightness
 click "<"
 expect ui_state ov=none
 mem
-click "Theme"
-expect ui_state ov=theme
+click "Open settings"
+expect ui_state scr=settings edit=waiting|held
+wait-widget "Opening on your computer" 3
 widgets
-click "<"
-expect ui_state ov=none
 mem
 click "Connection"
 expect ui_state ov=connection

@@ -8,7 +8,7 @@
 # at the end has each screen's peak against the 32680 B pool.
 #
 # It changes three settings and puts two of them back: it ends on Focus off
-# and Theme Dark. Brightness is left at 60% (level 3).
+# and Theme Dark (the board no longer changes the theme itself). Brightness is left at 60% (level 3).
 #
 # Before every target the tool wakes a dozing board and takes down any
 # notice, saying "notice dismissed (KIND)"; `expect notice none` checks
@@ -80,30 +80,15 @@ wait 2
 expect ui_state scr=settings ov=none bl=60
 mem
 
-tap theme.open
-# A swipe begun on the page button ("1/3 >"). Left must not turn the page:
-# LVGL sends the button its CLICKED after a gesture too, and only
-# tile_was_a_tap() stops that (it already did before the button let
-# gestures through, so this half guards against a regression only).
-swipe 300 20 180 20
-wait 1
-expect ui_state ov=theme tp=0
-# Right, the back gesture, must close Theme. This half is the change: the
-# button used to keep gestures, so a back swipe begun on it did nothing.
-# 56 px, past LVGL's 50 px gesture limit.
-swipe 262 20 318 20
-wait 2
-expect ui_state scr=settings ov=none
-tap theme.open
-tap theme.light
-expect theme_now why=user id=9
-tap theme.edit_on_computer
+# Task 6.1: the Theme screen is gone from the board; this tile asks the
+# computer to open the settings page, and held it reads the way it did on
+# the Theme screen.
+click "Open settings"
 expect theme_edit
 # Held now, as with a real builder open; the builder "ends", so the rest of
-# the run, and the desk after it, find the button as it was.
+# the run, and the desk after it, find the tile as it was.
 fake edit_done
-wait-widget "Edit on computer" 3
-tap settings.back
+expect ui_state edit=name
 mem
 
 # Each Focus choice is checked on the gauges themselves, not just in the
@@ -125,12 +110,6 @@ tap focus.open
 tap focus.off
 tap back.swipe
 expect ui_state focus=off gf=off
-mem
-
-tap theme.open
-tap theme.dark
-expect theme_now why=user id=0
-tap settings.back
 mem
 
 tap settings.back
@@ -155,19 +134,11 @@ click "Off"
 expect ui_state focus=off
 click "<"
 expect ui_state ov=none
-click "Theme"
-expect ui_state ov=theme tp=0
-click "Ocean"
-expect theme_now why=user id=4
-click "Edit on computer"
+click "Open settings"
 expect theme_edit
 wait-widget "Editing on your computer" 3
 fake edit_done
-wait-widget "Edit on computer" 3
-click "Dark"
-expect theme_now why=user id=0
-click "<"
-expect ui_state ov=none
+expect ui_state edit=name
 click "Brightness"
 expect ui_state ov=brightness
 click "<"

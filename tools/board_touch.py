@@ -190,16 +190,14 @@ P_EYE_ZONE = rect_center(0, (SCREEN_H - 150) // 2, 44, 150)
 # mk_back: 60 x 36 at (6, 2), the same on Settings and every screen in it.
 P_BACK = rect_center(6, 2, 60, 36)
 # mk_tile: tile k of four, two by two from (12, TILE_TOP) -- Brightness,
-# Theme, then Focus and Update.
+# Open settings, then Focus and Update.
 def _tile(k):
     x = 12 + (k % 2) * (_L["TILE_W"] + _L["TILE_GAP"])
     y = _L["TILE_TOP"] + (k // 2) * (_L["TILE_H"] + _L["TILE_GAP"])
     return rect_center(x, y, _L["TILE_W"], _L["TILE_H"])
 
 
-P_BRIGHT_ROW, P_THEME_ROW, P_FOCUS_ROW = _tile(0), _tile(1), _tile(2)
-# show_theme: the page button, 60 x 36 in the top right corner (-6, 2).
-P_THEME_PAGE = rect_center(SCREEN_W - 6 - 60, 2, 60, 36)
+P_BRIGHT_ROW, P_FOCUS_ROW = _tile(0), _tile(2)
 
 
 def bright_stop(i):
@@ -208,28 +206,11 @@ def bright_stop(i):
     return rect_center(12 + i * 60, 86, 56, 116)
 
 
-def slot_center(k):
-    """mk_slot: theme slot k of six, two across, inside the grid at
-    THEME_GRID_Y. Slot 5 is "Edit on computer" when the app can open the
-    builder, which this tool always says it can."""
-    x = 12 + (k % 2) * (_L["THEME_TILE_W"] + 8)
-    y = _L["THEME_GRID_Y"] + (k // 2) * (_L["THEME_TILE_H"] +
-                                         _L["THEME_TILE_GAP"])
-    return rect_center(x, y, _L["THEME_TILE_W"], _L["THEME_TILE_H"])
-
-
 def focus_btn(i):
     """show_focus: Off, Session, Weekly, side by side."""
     return rect_center(12 + i * (_L["FOCUS_BTN_W"] + _L["FOCUS_BTN_GAP"]),
                        _L["FOCUS_BTN_Y"],
                        _L["FOCUS_BTN_W"], _L["FOCUS_BTN_H"])
-
-
-def theme_slot(theme_id):
-    """(page, slot) of a theme on the theme screen: ids in order, five a
-    page because the sixth slot is Edit (theme_per_page with caps theme)."""
-    per = _L["THEME_SLOTS"] - 1
-    return (theme_id // per, theme_id % per)
 
 
 # Swipes. Each starts on the ground of the screen it is meant for, not on a
@@ -257,7 +238,7 @@ class Target:
                  ms=None):
         self.name = name
         self.ms = ms                # stroke length; None is the default
-        self.kind = kind            # "tap" | "swipe" | "theme"
+        self.kind = kind            # "tap" | "swipe"
         self.pts = pts
         self.needs = needs          # ui_state fields required beforehand
         self.expect = expect        # f(before) -> fields required after
@@ -304,19 +285,6 @@ def _targets():
         add(f"brightness.level{i + 1}", "tap", [bright_stop(i)],
             {"ov": "brightness"}, {"ov": "brightness", "bl": 20 + 20 * i},
             0.3, f"brightness stop {i + 1} ({20 + 20 * i}%)")
-    add("theme.open", "tap", [P_THEME_ROW], on_settings, {"ov": "theme"},
-        0.6, "the Theme tile")
-    add("theme.next_page", "tap", [P_THEME_PAGE], {"ov": "theme"},
-        {"ov": "theme"}, 0.3, "the theme screen's page button")
-    for name, tid in THEME_IDS.items():
-        _, slot = theme_slot(tid)
-        add(f"theme.{name}", "theme", [slot_center(slot)], {"ov": "theme"},
-            {"ov": "theme", "theme": tid, "stored": tid}, 0.6,
-            f"theme tile {name} (id {tid}), paging to it first")
-    add("theme.edit_on_computer", "tap", [slot_center(5)], {"ov": "theme"},
-        {"ov": "theme", "edit": "held"}, 0.6,
-        "the Edit on computer slot (answered ok 1, as a daemon would; held"
-        " until a done, since this tool greets with the edit_done cap)")
     add("focus.open", "tap", [P_FOCUS_ROW], on_settings, {"ov": "focus"},
         0.6, "the Focus tile")
     for i, name in enumerate(FOCUS_NAMES):
@@ -1983,20 +1951,6 @@ class Bench:
         if note is not None:
             note(name)
 
-    def _goto_theme_page(self, page):
-        for _ in range(4):
-            st = self.query_state()
-            if st is None:
-                return False
-            if st["tp"] == page:
-                return True
-            x, y = P_THEME_PAGE
-            self._note("theme.next_page")
-            if not self.stroke(touch_tap(x, y)):
-                return False
-            self.sleep(0.3)
-        return False
-
     def clear_the_way(self, st):
         """Wake a dozing board and take down a notice, saying so, before an
         action. Neither is a target's business: both are things a person at
@@ -2038,12 +1992,6 @@ class Bench:
                       " ".join(f"{k}={before[k]}" for k in t.needs))
             return False
         self.say(f"> {name}")
-        if t.kind == "theme":
-            tid = THEME_IDS[name.split(".", 1)[1]]
-            page, _ = theme_slot(tid)
-            if not self._goto_theme_page(page):
-                self.fail(f"{name}: could not page to theme page {page + 1}")
-                return False
         self._note(name)
         if not self._play(t, t.points()):
             return False
@@ -2643,10 +2591,11 @@ def restore_plan(start, now, start_h=None):
             plan.append(("line", pc_theme.message("save", {"id": tid})))
         else:
             t = _saved_custom_matching(start_h)
+            # No tile to press it back with: the Theme screen is not
+            # reachable from the board any more (Task 6.1), so a custom
+            # theme whose colours are not on this desk stays as it is.
             if t is not None:
                 plan.append(("line", pc_theme.message("save", t)))
-            else:
-                ui += ["theme.open", "theme.custom", "settings.back"]
     if now["bl"] != start["bl"]:
         k = min(5, max(1, round(start["bl"] / 20)))
         ui += ["brightness.open", f"brightness.level{k}", "settings.back"]
