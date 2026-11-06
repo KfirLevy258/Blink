@@ -92,7 +92,7 @@ enum ota_result ota_net_end(void)
 	if (!open_) {
 		return OTA_ERR_SIZE;
 	}
-	if (!ota_net_should_seal(got, man.size) || man.size != total) {
+	if (!ota_net_should_seal(got, man.size)) {
 		printk("[ota] truncated\n");
 		ota_net_abort();
 		return OTA_ERR_SIZE;
