@@ -281,7 +281,7 @@ def test_the_boards_hello_carries_both_caps_and_fits_its_buffer():
     line, size = _fw_line("send_hello")
     msg = json.loads(line)
     assert msg["t"] == "hello"
-    assert protocol.board_caps(msg) == {"svc", "theme", "edit_done"}
+    assert protocol.board_caps(msg) == {"svc", "theme", "edit_done", "wifi"}
     # snprintf truncates silently, and a truncated hello is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
 
@@ -293,7 +293,7 @@ def test_the_boards_pref_carries_both_caps_and_fits_its_buffer():
     line = line.replace("f" * 32, "claude", 1)
     msg = json.loads(line)
     assert msg["t"] == "pref"
-    assert protocol.board_caps(msg) == {"svc", "theme", "edit_done"}
+    assert protocol.board_caps(msg) == {"svc", "theme", "edit_done", "wifi"}
     # snprintf truncates silently, and a truncated pref is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
     # Measured 119 B in the 128 B buffer (hello: 148 in 160). A cap costs

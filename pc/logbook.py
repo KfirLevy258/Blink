@@ -405,6 +405,10 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[wifi] join failed",                                      # :281
     "[wifi] lost the network",                                 # :142
     "[wifi] selftest failed",                                  # main.c:601
+    # proto.c: the pairing, over the cable (spec S5.8)
+    "[wifi] paired",
+    "[wifi] forgotten",
+    "[wifi] forget failed",
 ), key=len, reverse=True))
 
 # "[ota] update %s: wanted %s, running %s (from %s)" (main.c:233) is the line

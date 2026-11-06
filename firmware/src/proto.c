@@ -9,6 +9,9 @@
 
 #include "proto.h"
 #include "link.h"
+#include "net_link.h"
+#include "wifi_msg.h"
+#include <mbedtls/sha256.h>
 #include "msg_parse.h"
 #include "ota.h"
 #include "version.h"
@@ -175,7 +178,7 @@ static void emit(const char *json)
 /* edit_done: this firmware handles theme_edit done:1 (theme contract
  * Addendum 6). A cap of its own because the 1.4.0 builds before the handler
  * already said "theme", and the daemon must not send them the line. */
-#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\"]"
+#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"wifi\"]"
 
 /*
  * The board's id, as hello and pref both say it: hwinfo's device id in hex,
@@ -416,7 +419,301 @@ bool proto_ota_install(void)
 	return true;
 }
 
-static void dispatch(const char *json)
+/* ---- WiFi pairing over the cable (spec S5.3, S6.1) ---------------------- */
+
+/* Where a protocol line came from. wifi_scan/wifi_set/wifi_forget act only
+ * from the cable: pairing is a physical act, and a stranger on the network
+ * must not be able to repoint the board (S5.3). */
+enum proto_src { PROTO_SRC_USB, PROTO_SRC_WIFI };
+
+#define WIFI_PORT 49731			/* D18 */
+#define WIFI_JOIN_DEADLINE_MS 60000	/* scan 10 s + join 30 s, with room */
+#define WIFI_WHY_BAD_INPUT "Invalid WiFi settings"
+#define WIFI_WHY_SAVE "Could not save the pairing"
+
+/* The candidate of a wifi_set in flight. Persisted only when the join comes
+ * up (D21), so a wrong password leaves the old pairing exactly as it was. */
+static struct {
+	bool active;
+	bool seen_joining;	/* net_link may still show the PREVIOUS result */
+	int64_t deadline;
+	uint8_t ssid[32];
+	size_t ssid_len;
+	char psk[CFG_PSK_MAX];
+	uint8_t key[CFG_PAIR_KEY_LEN];
+} cand;
+
+static int scan_sent = -1;	/* -1 none pending, else next line index */
+static int scan_n;
+static struct net_link_ap scan_tab[NET_LINK_SCAN_MAX];
+
+/* What the last wifi_state said, so a change is noticed once. */
+static int last_st = -1, last_why = -1, last_link = -1;
+
+/* A plain memset of a buffer that is never read again can be optimised
+ * away; these held a password and the pairing key. */
+static void wipe(void *p, size_t n)
+{
+	volatile uint8_t *v = p;
+
+	while (n--) {
+		*v++ = 0;
+	}
+}
+
+static void wifi_cand_drop(void)
+{
+	wipe(&cand, sizeof(cand));
+}
+
+static void wifi_kid(const uint8_t key[CFG_PAIR_KEY_LEN], char out[9])
+{
+	mbedtls_sha256_context c;
+	uint8_t d[32];
+
+	mbedtls_sha256_init(&c);
+	mbedtls_sha256_starts(&c, 0);
+	mbedtls_sha256_update(&c, key, CFG_PAIR_KEY_LEN);
+	mbedtls_sha256_finish(&c, d);
+	mbedtls_sha256_free(&c);
+	snprintf(out, 9, "%02x%02x%02x%02x", d[0], d[1], d[2], d[3]);
+}
+
+/* The state the panel and the daemon should believe, from three facts: a
+ * set in flight, whether anything is paired, and what the radio says. An
+ * unpaired board is "off" even while a join that Forget cut off winds down. */
+static const char *wifi_st_name(int *code)
+{
+	enum net_link_state s = net_link_state();
+	int c = 0;
+
+	if (cand.active && !cand.seen_joining) {
+		c = 1;
+	} else if (cand.active || cfg_paired()) {
+		c = s == NL_JOINING ? 1 : s == NL_UP ? 2 : s == NL_FAILED ? 3 : 0;
+	}
+	*code = c;
+	return c == 1 ? "joining" : c == 2 ? "up" : c == 3 ? "fail" : "off";
+}
+
+/* One wifi_state line. `why` overrides the radio's own reason (a request
+ * refused before it reached the radio). */
+static void wifi_send_state(const char *st_override, const char *why_override)
+{
+	static char buf[384];
+	uint8_t ssid[32];
+	size_t ssid_len = 0;
+	char psk[CFG_PSK_MAX];
+	uint8_t key[CFG_PAIR_KEY_LEN];
+	char kid[9] = "";
+	char ip[20] = "";
+	int code;
+	struct wifi_view v = { 0 };
+
+	v.st = wifi_st_name(&code);
+	v.rssi = -127;
+	if (cand.active) {
+		memcpy(ssid, cand.ssid, cand.ssid_len);
+		ssid_len = cand.ssid_len;
+		wifi_kid(cand.key, kid);
+	} else if (cfg_get_pairing(ssid, &ssid_len, psk, sizeof(psk), key)) {
+		wifi_kid(key, kid);
+	}
+	wipe(psk, sizeof(psk));
+	wipe(key, sizeof(key));
+	if (code == 2 && net_link_ip(ip, sizeof(ip))) {
+		v.ip = ip;
+		v.port = WIFI_PORT;
+		v.rssi = net_link_rssi();
+	}
+	v.link = link_active(k_uptime_get()) == LINK_WIFI ? "wifi" : "usb";
+	v.ssid = ssid_len ? ssid : NULL;
+	v.ssid_len = ssid_len;
+	v.kid = kid;
+	v.why = code == 3 ? net_link_why_text(net_link_why()) : "";
+	if (st_override) {
+		v.st = st_override;
+	}
+	if (why_override) {
+		v.why = why_override;
+	}
+	if (wifi_fmt_state(buf, sizeof(buf), &v) > 0) {
+		emit(buf);
+	}
+	last_st = code;
+	last_why = (int)net_link_why();
+	last_link = v.link[0];
+}
+
+static void wifi_do_set(const char *json)
+{
+	char s[65], p[129], k[65];
+	uint8_t pw[64];
+	int sl, pl, kl;
+	bool ok = false;
+
+	/* The first reply to every set is `joining`, even one refused below:
+	 * the PC counts a `fail` only after it (pc/bridge.py). */
+	wifi_cand_drop();
+	wifi_send_state("joining", "");
+	if (msg_get_str(json, "s", s, sizeof(s)) &&
+	    msg_get_str(json, "p", p, sizeof(p)) &&
+	    msg_get_str(json, "k", k, sizeof(k))) {
+		sl = wifi_hex_decode(s, cand.ssid, sizeof(cand.ssid));
+		pl = wifi_hex_decode(p, pw, sizeof(pw));
+		kl = wifi_hex_decode(k, cand.key, sizeof(cand.key));
+		if (pl > 0) {
+			memcpy(cand.psk, pw, (size_t)pl);
+		}
+		/* cfg_set_pairing refuses a 0x00 in the name, and by then the
+		 * join has run: refuse it now. */
+		ok = sl > 0 && kl == CFG_PAIR_KEY_LEN && pl > 0 &&
+		     memchr(cand.ssid, 0, (size_t)sl) == NULL &&
+		     wifi_psk_valid(cand.psk, (size_t)pl);
+		cand.ssid_len = sl > 0 ? (size_t)sl : 0;
+	}
+	wipe(s, sizeof(s));
+	wipe(p, sizeof(p));
+	wipe(k, sizeof(k));
+	wipe(pw, sizeof(pw));
+	if (!ok) {
+		wifi_cand_drop();
+		wifi_send_state("fail", WIFI_WHY_BAD_INPUT);
+		return;
+	}
+	cand.active = true;
+	cand.deadline = k_uptime_get() + WIFI_JOIN_DEADLINE_MS;
+	last_st = 1;	/* the `joining` above already said it */
+	net_link_request_join(cand.ssid, cand.ssid_len, cand.psk);
+}
+
+static void wifi_do_forget(void)
+{
+	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
+	/* D28: a leftover SSID from a 1.3.4 build counts, paired or not. */
+	bool any = cfg_paired() || cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk));
+
+	wipe(ssid, sizeof(ssid));
+	wipe(psk, sizeof(psk));
+	wifi_cand_drop();	/* a join still running must not persist later */
+	if (!any) {
+		wifi_send_state(NULL, NULL);
+		return;
+	}
+	/* Flash first: the secrets are the urgent part. The radio's down is
+	 * queued behind a running join (up to 30 s) and reports on its own. */
+	if (cfg_clear_pairing() == 0) {
+		net_link_request_down();
+		printk("[wifi] forgotten\n");
+		wifi_send_state("off", "");
+	} else {
+		net_link_request_down();
+		printk("[wifi] forget failed\n");
+		wifi_send_state("fail", net_link_why_text(NL_WHY_FORGET));
+	}
+}
+
+static void wifi_handle(const char *type, const char *json)
+{
+	if (strcmp(type, "wifi_scan") == 0) {
+		scan_sent = -2;		/* waiting for the radio */
+		net_link_request_scan();
+	} else if (strcmp(type, "wifi_set") == 0) {
+		wifi_do_set(json);
+	} else if (strcmp(type, "wifi_forget") == 0) {
+		wifi_do_forget();
+	}
+}
+
+/* Once per proto_service(): stream scan results one line per call (twenty
+ * lines at once would flood the deferred log), settle a set in flight, and
+ * report any change of state. */
+static void wifi_poll(void)
+{
+	char buf[160];
+
+	if (scan_sent == -2) {
+		scan_n = net_link_scan_results(scan_tab, NET_LINK_SCAN_MAX);
+		if (scan_n != -EAGAIN) {
+			scan_n = scan_n < 0 ? 0 : scan_n;
+			scan_sent = 0;
+		}
+	} else if (scan_sent >= 0) {
+		/* An empty scan still ends visibly: i=0, n=0, no network. */
+		bool empty = scan_n == 0;
+
+		if (wifi_fmt_net(buf, sizeof(buf), scan_sent, scan_n,
+				 empty ? NULL : &scan_tab[scan_sent]) > 0) {
+			emit(buf);
+		}
+		scan_sent++;
+		if (empty || scan_sent >= scan_n) {
+			scan_sent = -1;
+		}
+	}
+
+	if (cand.active) {
+		enum net_link_state s = net_link_state();
+
+		if (s == NL_JOINING) {
+			cand.seen_joining = true;
+		} else if (cand.seen_joining && s == NL_UP) {
+			int rc = cfg_set_pairing(cand.ssid, cand.ssid_len,
+						 cand.psk, cand.key);
+
+			if (rc == 0) {
+				printk("[wifi] paired\n");
+				link_verify_window(k_uptime_get());	/* D65 */
+				wifi_cand_drop();
+				wifi_send_state(NULL, NULL);
+			} else {
+				wifi_cand_drop();
+				net_link_request_down();
+				wifi_send_state("fail", WIFI_WHY_SAVE);
+			}
+		} else if (cand.seen_joining && s == NL_FAILED) {
+			wifi_cand_drop();
+			wifi_send_state(NULL, NULL);
+		} else if (k_uptime_get() > cand.deadline) {
+			wifi_cand_drop();
+			wifi_send_state("fail", net_link_why_text(NL_WHY_NOT_FOUND));
+		}
+	}
+
+	{
+		int code;
+		char l;
+
+		(void)wifi_st_name(&code);
+		l = link_active(k_uptime_get()) == LINK_WIFI ? 'w' : 'u';
+		if (last_st >= 0 && (code != last_st ||
+				     (int)net_link_why() != last_why ||
+				     l != last_link)) {
+			wifi_send_state(NULL, NULL);
+		}
+	}
+}
+
+/* A paired board joins at boot (the pairing is the opt-in; an unpaired one
+ * never brings the radio up, D42). */
+static void wifi_boot_join(void)
+{
+	uint8_t ssid[32];
+	size_t ssid_len = 0;
+	char psk[CFG_PSK_MAX];
+	uint8_t key[CFG_PAIR_KEY_LEN];
+
+	if (cfg_get_pairing(ssid, &ssid_len, psk, sizeof(psk), key)) {
+		net_link_request_join(ssid, ssid_len, psk);
+	}
+	wipe(psk, sizeof(psk));
+	wipe(key, sizeof(key));
+	last_st = 0;
+	last_why = 0;
+	last_link = 'u';
+}
+
+static void dispatch(const char *json, enum proto_src src)
 {
 	char type[16];
 	if (!msg_get_str(json, "t", type, sizeof(type))) {
@@ -434,7 +731,9 @@ static void dispatch(const char *json)
 	}
 #endif
 	last_host_ms = k_uptime_get();
-	link_usb_heard(last_host_ms);
+	if (src == PROTO_SRC_USB) {
+		link_usb_heard(last_host_ms);
+	}
 	host_seen = true;
 	host_lost = false;
 	if (strcmp(type, "bye") == 0) {
@@ -755,6 +1054,11 @@ static void dispatch(const char *json)
 		 * daemon that restarted without resetting the board heard
 		 * the hello that carried it in a previous life. */
 		proto_send_theme_now("boot");
+		wifi_send_state(NULL, NULL);
+	} else if (strncmp(type, "wifi_", 5) == 0) {
+		if (src == PROTO_SRC_USB) {	/* dropped without a reply otherwise */
+			wifi_handle(type, json);
+		}
 	} else if (strcmp(type, "theme") == 0) {
 		/*
 		 * Validated whole before anything is applied: a line with one
@@ -958,7 +1262,9 @@ static void drain_rx(void)
 				discarding = false;
 			} else if (line_len > 0) {
 				line[line_len] = '\0';
-				dispatch(line);
+				dispatch(line, PROTO_SRC_USB);
+				/* A wifi_set line carried a password and a key. */
+				wipe(line, sizeof(line));
 			}
 			line_len = 0;
 		} else if (discarding) {
@@ -989,6 +1295,7 @@ void proto_init(void)
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 	touch_inject_init();
 #endif
+	wifi_boot_join();
 	send_hello();
 	last_ping_ms = k_uptime_get();
 }
@@ -1035,6 +1342,7 @@ bool proto_host_seen(void)
 void proto_service(void)
 {
 	drain_rx();
+	wifi_poll();
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 	touch_inject_service();
 #endif

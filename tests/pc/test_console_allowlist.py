@@ -85,6 +85,9 @@ LINES = [
     ("[wifi] join failed: Wrong WiFi password", "[wifi] join failed",
      ["Wrong", "password"]),
     ("[wifi] lost the network", "[wifi] lost the network", []),
+    ("[wifi] paired", "[wifi] paired", []),
+    ("[wifi] forgotten MyNet", "[wifi] forgotten", ["MyNet"]),
+    ("[wifi] forget failed", "[wifi] forget failed", []),
     # a known stem with something riding on the end of it
     ("[theme] saved SECRET-TAIL", "[theme] saved", ["SECRET-TAIL"]),
     # no tag the firmware uses: the bootloader, Zephyr, the touch tracer,

@@ -6,6 +6,7 @@ target_sources(app PRIVATE
 	src/main.c
 	src/proto.c
 	src/link.c
+	src/wifi_msg.c
 	src/msg_parse.c
 	src/usage_view.c
 	src/fmt.c

@@ -132,6 +132,7 @@ run_one usage_freshness "usage_freshness.c" ""
 run_one usage_layout ""                ""
 run_one usage_state  "usage_state.c"   ""
 run_one svc_state    "svc_state.c fmt.c" ""
+run_one wifi_msg     "wifi_msg.c msg_parse.c" ""
 
 # The handshake and the frame, on the toy cipher in tests/support (an
 # absolute path is a source outside firmware/src, as run_one allows).
