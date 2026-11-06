@@ -1131,7 +1131,10 @@ def wifi_scan():
 
 def wifi_set(ssid, password, key):
     """The one line that carries the password. log_name and redact keep only
-    its type; nothing on the host prints it."""
+    its type; nothing on the host prints it. A non-ASCII password raises a
+    fixed message: UnicodeEncodeError's own text quotes the character."""
+    if not password.isascii():
+        raise ValueError("the WiFi password must be ASCII") from None
     return {"t": "wifi_set", "v": VERSION, "s": bytes(ssid).hex(),
             "p": password.encode("ascii").hex(), "k": bytes(key).hex()}
 

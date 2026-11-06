@@ -1560,13 +1560,17 @@ def test_redact_never_keeps_a_container():
 def test_the_widest_wifi_set_fits():
     """The widest wifi_set measures 298 bytes of MAX_LINE_BYTES=512
     (2026-11-06): a 32-byte SSID and a 63-character password. A 64-character
-    password, which password_problem refuses, still fits, so the budget is
-    not what stops it."""
+    password also fits (it is accepted only as hex, a raw PSK), and so does a
+    64-character non-hex one that password_problem refuses: the budget is not
+    what stops it."""
     raw, why = protocol.encode_checked(
         protocol.wifi_set(b"\xff" * 32, "~" * 63, bytes(32)))
     assert why is None and len(raw) == 298
     raw, why = protocol.encode_checked(
         protocol.wifi_set(b"\xff" * 32, "a" * 64, bytes(32)))
+    assert why is None
+    raw, why = protocol.encode_checked(
+        protocol.wifi_set(b"\xff" * 32, "x" * 64, bytes(32)))
     assert why is None
 
 
@@ -1592,3 +1596,12 @@ def test_wifi_types_log_by_name_only():
 def test_the_builders_output_is_redacted_by_the_task_0_1_redactor():
     assert protocol.redact(
         protocol.wifi_set(b"net", "secretpw", bytes(32))) == {"t": "wifi_set"}
+
+
+def test_wifi_set_refuses_a_non_ascii_password_without_quoting_it():
+    import pytest
+    with pytest.raises(ValueError) as e:
+        protocol.wifi_set(b"net", "p\u00e4ss\u00f6word", bytes(32))
+    assert e.value.__cause__ is None and e.value.__context__ is None
+    assert str(e.value) == "the WiFi password must be ASCII"
+    assert "\u00e4" not in repr(e.value) and "\u00f6" not in repr(e.value)
