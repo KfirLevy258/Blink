@@ -80,6 +80,7 @@ static atomic_t scanning;
 static atomic_t run_ticket;
 static uint32_t req_seq;	/* under lock */
 static uint32_t req_ticket;	/* under lock */
+static bool req_pending;	/* under lock: a request not yet taken by do_join */
 static volatile enum net_link_state state = NL_OFF;
 static volatile enum net_link_why why = NL_WHY_NONE;
 /* Set once at boot by net_link_refuse_selftest(), never cleared: a board
@@ -399,6 +400,14 @@ static void do_join(void)
 	char psk[sizeof(req_psk)];
 	k_spinlock_key_t key = k_spin_lock(&lock);
 
+	/* The OP_JOIN bit is cleared before this lock is taken, so a request
+	 * landing in that gap leaves the bit set for a second run with the
+	 * password already wiped. Only a request nobody has taken runs. */
+	if (!req_pending) {
+		k_spin_unlock(&lock, key);
+		return;
+	}
+	req_pending = false;
 	len = req_ssid_len;
 	ticket = req_ticket;
 	memcpy(ssid, req_ssid, len);
@@ -566,6 +575,7 @@ uint32_t net_link_request_join(const uint8_t *ssid, size_t ssid_len, const char 
 		req_seq = 1;
 	}
 	ticket = req_ticket = req_seq;
+	req_pending = true;
 	k_spin_unlock(&lock, key);
 	atomic_or(&ops, OP_JOIN);
 	kick();
@@ -579,7 +589,17 @@ void net_link_request_down(void)
 	if (iface == NULL || refused) {
 		return;
 	}
-	/* A join still waiting would bring the radio straight back. */
+	/* A join still waiting would bring the radio straight back, and its
+	 * password must not outlive it. */
+	{
+		k_spinlock_key_t key = k_spin_lock(&lock);
+
+		req_pending = false;
+		mbedtls_platform_zeroize(req_psk, sizeof(req_psk));
+		mbedtls_platform_zeroize(req_ssid, sizeof(req_ssid));
+		req_ssid_len = 0;
+		k_spin_unlock(&lock, key);
+	}
 	atomic_and(&ops, ~OP_JOIN);
 	atomic_or(&ops, OP_DOWN);
 	kick();
