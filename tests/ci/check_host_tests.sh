@@ -176,10 +176,11 @@ if MBEDTLS=$(mbedtls_src); then
 	run_one wl_wire_real "wl_hs.c wl_frame.c $mbed_objs" \
 		"-I$MBEDTLS/include -I$ROOT -I$ROOT/tests/wl_crypto_real/stub -DMBEDTLS_CONFIG_FILE=\"tests/wl_crypto_real/mbedtls_config.h\""
 elif [ "${BLINK_REQUIRE_MBEDTLS:-}" = 1 ]; then
-	printf '  %-14s NO MBEDTLS SOURCE (BLINK_REQUIRE_MBEDTLS=1)\n' wl_crypto_real
+	printf '  %-14s NO MBEDTLS SOURCE (BLINK_REQUIRE_MBEDTLS=1)\n' \
+		"wl_crypto_real, wl_wire_real"
 	failures=$((failures + 1))
 else
-	echo "  SKIP wl_crypto_real (no mbedTLS source; set BLINK_MBEDTLS_SRC)"
+	echo "  SKIP wl_crypto_real, wl_wire_real (no mbedTLS source; set BLINK_MBEDTLS_SRC)"
 fi
 
 if [ "$failures" -ne 0 ]; then

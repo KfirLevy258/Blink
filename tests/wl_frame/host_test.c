@@ -143,6 +143,23 @@ static void test_refusals(void)
 		      rx.dead,
 	      "shorter_than_header_refused");
 
+	/* Exactly the frame's length, not one byte more. */
+	pair(&tx, &rx);
+	fl = wl_frame_seal(&tx, 'L', (const uint8_t *)"hello", 5, frame,
+			   sizeof(frame));
+	frame[fl] = 0;
+	check(wl_frame_open(&rx, frame, (size_t)fl + 1, &type, body,
+			    sizeof(body)) == -1 && rx.dead,
+	      "long_frame_refused");
+
+	/* A body buffer of exactly the body's size is enough. */
+	pair(&tx, &rx);
+	fl = wl_frame_seal(&tx, 'L', (const uint8_t *)"hello", 5, frame,
+			   sizeof(frame));
+	check(wl_frame_open(&rx, frame, (size_t)fl, &type, body, 5) == 5 &&
+		      !rx.dead,
+	      "body_buffer_exact_accepted");
+
 	/* A caller buffer that cannot hold the body. */
 	pair(&tx, &rx);
 	fl = wl_frame_seal(&tx, 'L', (const uint8_t *)"hello", 5, frame,
@@ -235,15 +252,22 @@ static void test_dead(void)
 		      tx.ctr == UINT64_MAX,
 	      "last_counter_still_usable");
 
+	pair(&tx, &rx);
 	wl_dir_wipe(&tx);
 	{
-		int z = 1;
+		int z = tx.ctr == 0;
 
-		for (size_t i = 0; i < sizeof(tx); i++) {
-			z &= ((uint8_t *)&tx)[i] == 0;
+		for (size_t i = 0; i < sizeof(tx.key); i++) {
+			z &= tx.key[i] == 0;
 		}
 		check(z, "dir_wipe_zeroes");
 	}
+	check(tx.dead && wl_frame_seal(&tx, 'L', (const uint8_t *)"a", 1,
+				       frame, sizeof(frame)) == -1,
+	      "wiped_direction_stays_dead");
+	check(wl_frame_seal(&rx, 'L', body, (size_t)-1, frame,
+			    sizeof(frame)) == -1 && rx.dead,
+	      "seal_length_wrap_refused");
 }
 
 int main(void)

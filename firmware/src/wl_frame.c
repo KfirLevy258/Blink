@@ -31,6 +31,8 @@ static int die(struct wl_dir *d)
 	return -1;
 }
 
+/* Any type byte is sealed, by design: the callers pass L, O or G and the
+ * reader (wl_frame_open) is where an unknown one is refused. */
 int wl_frame_seal(struct wl_dir *d, uint8_t type, const uint8_t *body,
 		  size_t n, uint8_t *out, size_t out_max)
 {
@@ -39,7 +41,8 @@ int wl_frame_seal(struct wl_dir *d, uint8_t type, const uint8_t *body,
 
 	/* At 2^64 - 1 the next nonce would repeat; at one frame a millisecond
 	 * that is 584 million years away, and the check costs nothing. */
-	if (d->dead || len > WL_PT_MAX || out_max < 2 + len + WL_TAG_LEN ||
+	/* n is checked alone and first: 1 + n wraps at SIZE_MAX. */
+	if (d->dead || n > WL_PT_MAX - 1 || len > WL_PT_MAX || out_max < 2 + len + WL_TAG_LEN ||
 	    d->ctr == UINT64_MAX) {
 		return die(d);
 	}
@@ -101,4 +104,6 @@ int wl_frame_open(struct wl_dir *d, const uint8_t *frame, size_t n,
 void wl_dir_wipe(struct wl_dir *d)
 {
 	wipe(d, sizeof(*d));
+	/* An all-zero key must never be live: a wiped direction stays dead. */
+	d->dead = true;
 }

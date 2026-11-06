@@ -76,7 +76,7 @@ static void test_hs(void)
 	wl_fake_fail_next = 1;
 	memset(m1b, 0x77, sizeof(m1b));
 	check(wl_hs_m1(&hs2, m1b) == -1 && all_zero(hs2.nb, 16) &&
-		      all_zero(m1b, 0) && m1b[0] == 0x77,
+		      m1b[0] == 0x77,
 	      "m1_fails_without_entropy");
 
 	wl_hs_m1(&hs, m1);
@@ -85,6 +85,11 @@ static void test_hs(void)
 		      hs.np[15] == 0x42,
 	      "m2_good_accepted");
 
+	memset(hs.np, 0, 16);
+	m2[47] ^= 1;	/* the LAST tag byte: the whole 32 are compared */
+	check(wl_hs_check_m2(&hs, K, m2, WL_M2_LEN) == -1 && all_zero(hs.np, 16),
+	      "m2_last_tag_byte_checked");
+	m2[47] ^= 1;
 	memset(hs.np, 0, 16);
 	check(wl_hs_check_m2(&hs, K, m2, 47) == -1 && all_zero(hs.np, 16),
 	      "m2_short_refused");
@@ -197,6 +202,14 @@ static void test_disc(void)
 	q[2] = 'X';
 	check(wl_disc_answer(K, q, WL_Q_LEN, 49731, a) == -1 && a[0] == 0x77,
 	      "disc_wrong_magic_silent");
+	make_q(K, q);
+	q[3] = 2;
+	check(wl_disc_answer(K, q, WL_Q_LEN, 49731, a) == -1 && a[0] == 0x77,
+	      "disc_wrong_version_silent");
+	make_q(K, q);
+	q[35] ^= 1;
+	check(wl_disc_answer(K, q, WL_Q_LEN, 49731, a) == -1 && a[0] == 0x77,
+	      "disc_last_tag_byte_checked");
 	make_q(K2, q);
 	check(wl_disc_answer(K, q, WL_Q_LEN, 49731, a) == -1,
 	      "disc_wrong_key_silent");

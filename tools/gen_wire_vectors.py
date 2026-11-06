@@ -18,6 +18,8 @@ the output.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import struct
 import sys
@@ -52,14 +54,48 @@ def source() -> str:
     from pc import wifi_crypto as wc
     from pc import wifi_session as ws
 
+    # M2 and the keys come out of the PC's own client_handshake, driven by a
+    # scripted socket; M3 is computed here with hmac directly, so the client
+    # accepting it proves the PC's argument order, not this script's copy.
     m1 = ws.M1_MAGIC + NB
-    m2 = NP + ws._mac(KEY, b"blink-wifi-1 pc", NB, NP)
-    m3 = ws._mac(KEY, b"blink-wifi-1 board", NB, NP)
-    keys = wc.hkdf_sha256(NB + NP, KEY, b"blink-wifi-1 session", 64)
-    k_pb, k_bp = keys[:32], keys[32:]
-    q = ws.Q_MAGIC + NQ + ws._mac(KEY, b"blink-disc-1 q", NQ)[:16]
+    m3 = hmac.new(KEY, b"blink-wifi-1 board" + NB + NP,
+                  hashlib.sha256).digest()
+
+    class Script:
+        def __init__(self):
+            self.rx, self.sent = m1 + m3, b""
+
+        def settimeout(self, _):
+            pass
+
+        def recv(self, n):
+            out, self.rx = self.rx[:n], self.rx[n:]
+            return out
+
+        def sendall(self, data):
+            self.sent += data
+
+    def fixed(n, value):
+        return lambda _n: value
+
+    real = os.urandom
+    sock = Script()
+    try:
+        os.urandom = fixed(16, NP)
+        sess = ws.client_handshake(sock, KEY)
+        os.urandom = fixed(16, NQ)
+        nq, q = ws.disc_query(KEY)
+    finally:
+        os.urandom = real
+    assert nq == NQ
+    m2, k_pb, k_bp = sock.sent, sess._ktx, sess._krx
+    assert len(m2) == 48 and m2[:16] == NP
+    assert k_pb == wc.hkdf_sha256(NB + NP, KEY, b"blink-wifi-1 session",
+                                  64)[:32]
     pb = struct.pack(">H", PORT)
-    a = ws.A_MAGIC + ws._mac(KEY, b"blink-disc-1 a", NQ, pb)[:16] + pb
+    a = ws.A_MAGIC + hmac.new(KEY, b"blink-disc-1 a" + NQ + pb,
+                              hashlib.sha256).digest()[:16] + pb
+    assert ws.disc_answer_port(KEY, NQ, a) == PORT
 
     pc_tx = ws.Session(k_pb, k_bp)      # PC -> board
     pc_rx = ws.Session(k_bp, k_pb)      # the same keys, to seal board -> PC
