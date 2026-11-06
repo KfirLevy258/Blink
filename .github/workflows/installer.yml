@@ -299,6 +299,9 @@ jobs:
   claude-versions:
     name: claude ${{ matrix.label }} (${{ matrix.version }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A stalled npm install or claude run fails here, not at GitHub's six
+    # hours. The cell takes about three minutes.
+    timeout-minutes: 20
     # The Linux binary is already built and uploaded by `build`. Compiling it
     # again in all four cells cost four PyInstaller runs to produce four
     # identical artifacts.

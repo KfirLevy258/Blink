@@ -162,13 +162,17 @@ mkdir -p "$WORK/refresh"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT" py - "$WORK/refresh" \
 	"${BLINK_CLAUDE_LABEL:-}" <<'EOF' || exit 1
 import json, shutil, subprocess, sys
-from pc import usage_refresh as ur
+from pc import usage_refresh as ur, wsl
 
 cwd, label = sys.argv[1], sys.argv[2]
 exe = shutil.which("claude")
 try:
-    r = subprocess.run(ur.command(exe), cwd=cwd, stdin=subprocess.DEVNULL,
-                       capture_output=True, timeout=ur.RUN_TIMEOUT_S)
+    # The daemon's own runner: on Windows, plain run() kills only the
+    # claude.cmd shell at the timeout and then waits on node's pipes with no
+    # limit, so a stalled run hung the cell instead of failing it.
+    r = wsl._bounded_run(ur.command(exe), cwd=cwd, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         timeout=ur.RUN_TIMEOUT_S)
 except subprocess.TimeoutExpired:
     sys.exit(f"FAIL: claude -p /usage did not finish in {ur.RUN_TIMEOUT_S} s")
 verdict = ur.judge(r.returncode, r.stdout)
@@ -193,8 +197,16 @@ except ValueError:
 if not shape:
     # The CLI's own error text, from a runner with no account in it.
     bad(f"claude -p /usage gave no JSON result (exit {r.returncode}):\n"
-        + r.stderr.decode(errors="replace")[-600:])
-print(f"  ok   /usage answers a JSON result, judged {verdict.name}")
+        + (r.stderr or b"").decode(errors="replace")[-600:])
+if verdict is not ur.Verdict.OK:
+    # JSON, but not the zero-turn, zero-cost success judge() needs: a field
+    # renamed or an is_error flipped. Every desk would judge every run
+    # FAILED and turn the refresh off a day later with advice that fits
+    # nothing. Only the field names go in the message, never values.
+    bad(f"claude -p /usage is judged {verdict.name}, not OK (exit"
+        f" {r.returncode}; keys: {sorted(doc)}). Check judge() against"
+        " the new answer before shipping.")
+print("  ok   /usage answers the zero-cost JSON result, judged OK")
 EOF
 
 printf 'PASS [%s]\n' "$VERSION"
