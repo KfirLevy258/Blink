@@ -438,3 +438,16 @@ marks a capability the board or app does not have yet.
   - the doze switch;
   - usage refresh, until feat/usage-refresh ships.
 - **Google Fonts:** the mock loads them. The shipped page must not.
+
+## 8. Notes on the build (Task 4.2)
+
+- **Browser floor:** Chrome 111, Safari 16.2, Firefox 121. `color-mix()`
+  (Chrome 111, Safari 16.2, Firefox 113) and `:has()` (Chrome 105, Safari
+  15.4, Firefox 121) set it. Under it `@supports` fallbacks keep the cable
+  lines, the light pool and the swatch focus ring working.
+- **Type:** the page uses `system-ui` where the mock prefers IBM Plex Sans
+  and Mono, which are not bundled (only the two Montserrat files the board's
+  screen is drawn in are). This is the fallback stack this spec names.
+- **Scroll width at 400px:** `scrollbar-gutter: stable` holds 15 px back on a
+  classic-scrollbar desktop, so the document is narrower than the viewport,
+  never wider.

@@ -1198,6 +1198,7 @@ class Launcher:
         # healthy daemon.
         server = self._server
         if server is not None and not server.done:
+            server.persistent = True    # the settings page; see BuilderServer
             server.add_token(token)
             server.touch()
             theme.write_builder(self._home, server.port, ack=request_id)
@@ -1205,13 +1206,14 @@ class Launcher:
         with self._lock:
             server = self._server
             if server is not None and not server.done:
+                server.persistent = True
                 server.add_token(token)
                 server.touch()
             else:
                 kw = {} if self.board_ops is None \
                     else {"board_ops": self.board_ops}
                 server = self._make(self._home, panel=panel, token=token,
-                                    **kw)
+                                    persistent=True, **kw)
                 server.say = _say_ending
                 server.start()
                 self._server = server
@@ -1246,7 +1248,7 @@ class Launcher:
             server.touch()
         # Held across the opener on purpose, so two taps cannot open two
         # tabs; close() and ended() do not wait for it (see there).
-        ok = bool(self._opener(server.new_link() + "&panel=look"))
+        ok = bool(self._opener(server.new_link(panel="look")))
         if not ok and fresh:
             # Nothing was ever shown, so there is nothing to cancel; the
             # board puts up its own "Run blink theme" fallback.

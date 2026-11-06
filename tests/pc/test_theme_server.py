@@ -581,9 +581,10 @@ class FakeServer:
     def start(self):
         pass
 
-    def new_link(self):
+    def new_link(self, panel=None):
         self.links += 1
-        return f"http://127.0.0.1:1/open?k={self.links}"
+        extra = f"&panel={panel}" if panel else ""
+        return f"http://127.0.0.1:1/open?k={self.links}{extra}"
 
     def page_alive(self):
         return self.alive
@@ -1294,3 +1295,42 @@ def test_any_request_but_the_heartbeat_touches_a_settings_sessions_idle_clock(
     s.clock.t += s.idle_s + 1
     s.tick()
     assert s.wait(5) == "idle"
+
+
+def test_edit_on_computer_opens_the_page_on_look(home):
+    """The board's Edit on computer is Launcher.launch(): its link, followed
+    for real, redirects to the page with Look open (it opened on no control)."""
+    opened = []
+    lau = theme_server.Launcher(home, opener=lambda u: opened.append(u) or True)
+    try:
+        assert lau.launch()
+        link = urllib.parse.urlsplit(opened[0])
+        assert "panel=look" in link.query
+        s = lau._server
+        status, headers, _ = request(s, "GET", link.path + "?" + link.query)
+        assert status == 303 and headers["Location"] == "/?panel=look"
+    finally:
+        lau.close()
+
+
+def test_serve_headless_makes_a_persistent_settings_server(home):
+    lau = theme_server.Launcher(home, opener=lambda u: True)
+    try:
+        lau.serve_headless("connect", "k" * 40, "r1")
+        assert lau._server.persistent is True
+        status, headers, _ = request(lau._server, "GET",
+                                     "/open?k=" + "k" * 40 + "&panel=connect")
+        assert status == 303 and headers["Location"] == "/?panel=connect"
+    finally:
+        lau.close()
+
+
+def test_done_refuses_no_origin_and_no_cookie(settings_server):
+    s = settings_server
+    cookie = login(s)
+    assert request(s, "POST", "/api/done", origin="absent",
+                   cookie=cookie)[0] == 403
+    assert request(s, "POST", "/api/done",
+                   origin="http://evil.example")[0] == 403
+    assert request(s, "POST", "/api/done")[0] == 403      # no cookie
+    assert not s.done

@@ -19,7 +19,7 @@ request that is not loopback or file: is aborted, so a page that reached for
 the network shows it as a failure here, and the mock's Google Fonts fall back
 to the system stack. It writes the PNGs, measurements.json (the board's box in
 each state, each panel's top and width, the 400px width and the hub's
-position) and diff.json (per pair, the share of pixels that differ by more
+position) and mock-measurements.json (the same for the mock) and diff.json (per pair, the share of pixels that differ by more
 than a few levels), prints the directory, and returns 0.
 
 The page-url is a one-time link, spent once: the colour scheme is switched in
@@ -54,7 +54,7 @@ def main(argv=None):
     from playwright.sync_api import sync_playwright
     from PIL import Image, ImageChops
     os.makedirs(a.out, exist_ok=True)
-    measures, diffs = {}, {}
+    measures, mock_measures, diffs = {}, {}, {}
     mock_url = "file://" + os.path.abspath(a.mock)
 
     def only_local(route):
@@ -90,6 +90,7 @@ def main(argv=None):
                     for pg, who in ((page, "page"), (mock, "mock")):
                         pg.screenshot(path=os.path.join(a.out, f"{key}-{who}.png"))
                     measures[key] = page.evaluate(_MEASURE)
+                    mock_measures[key] = mock.evaluate(_MEASURE)
                     one = Image.open(os.path.join(a.out, key + "-page.png")).convert("RGB")
                     two = Image.open(os.path.join(a.out, key + "-mock.png")).convert("RGB")
                     d = ImageChops.difference(one, two).convert("L").point(
@@ -108,6 +109,8 @@ def main(argv=None):
             browser.close()
     with open(os.path.join(a.out, "measurements.json"), "w") as f:
         json.dump(measures, f, indent=1)
+    with open(os.path.join(a.out, "mock-measurements.json"), "w") as f:
+        json.dump(mock_measures, f, indent=1)
     with open(os.path.join(a.out, "diff.json"), "w") as f:
         json.dump(diffs, f, indent=1)
     print(a.out)

@@ -309,6 +309,19 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
 @media (max-width: 640px) { .notice-card { padding: 22px 18px; } .notice-card .btn { justify-self: stretch; } }
 
 /* ---------- narrow: the board, name, status and controls stick; the desk goes ---------- */
+/* Browser floor: Chrome 111, Safari 16.2, Firefox 121 (color-mix and :has).
+   Under it the three uses degrade rather than vanish: the cable lines and the
+   light pool take plain colours, and a swatch's focus ring follows
+   :focus-within. See docs/design/settings-page.md, "Notes on the build". */
+@supports not (color: color-mix(in srgb, red, blue)) {
+  .track { stroke: var(--muted); stroke-opacity: .55; }
+  .stage::before { background: radial-gradient(50% 50% at 50% 46%, var(--stage) 0%, transparent 100%); }
+  .chips, .confirm { background: var(--field); }
+}
+@supports not selector(:has(a)) {
+  .crow .pick:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
+
 @media (max-width: 1199px) {
   /* The stuck board covers the top of the viewport; a focused field must stay clear of it. */
   html { scroll-padding-top: calc(min(34vh, 300px) + 150px); }

@@ -173,7 +173,8 @@ def test_theme_edit_opens_look():
     opened = []
     lau = theme_server.Launcher(home(), opener=lambda u: opened.append(u) or True,
                                 make_server=Fake)
-    Fake.new_link = lambda self: "http://127.0.0.1:6000/open?k=1"
+    Fake.new_link = lambda self, panel=None: (
+        "http://127.0.0.1:6000/open?k=1" + (f"&panel={panel}" if panel else ""))
     try:
         assert lau.launch()
     finally:
@@ -190,7 +191,8 @@ def test_settings_succeeds_while_launch_is_stuck_in_the_opener():
         gate.wait(20)
         return True
     lau = theme_server.Launcher(home(), opener=stuck, make_server=Fake)
-    Fake.new_link = lambda self: "http://127.0.0.1:6000/open?k=1"
+    Fake.new_link = lambda self, panel=None: (
+        "http://127.0.0.1:6000/open?k=1" + (f"&panel={panel}" if panel else ""))
     t = threading.Thread(target=lau.launch, daemon=True)
     try:
         t.start()
