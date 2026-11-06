@@ -41,6 +41,9 @@ run_one() {
 	objs=""
 	for e in $extra; do
 		# An absolute path is a source outside firmware/src (mbedTLS's).
+		# shortcut: $extra and $cflags are word-split, so a path with a
+		# space in it (an mbedTLS checkout under "My Projects") breaks the
+		# build line; quote through arrays if a machine ever needs one.
 		case $e in
 		/*) objs="$objs $e" ;;
 		*) objs="$objs $SRC/$e" ;;

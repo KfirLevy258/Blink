@@ -11,7 +11,8 @@
  * wl_fake_fail_next: set it, and the next call (any function but
  * wl_ct_equal, which cannot fail) fails and clears it. That is the path
  * mbedtls_md_setup's allocation failure takes on the board (hkdf.c:107).
- * It returns -ENOMEM, except wl_aead_open, whose contract is 0 or -1.
+ * It returns -ENOMEM, except wl_aead_open and wl_crypto_selftest, whose
+ * contracts are 0 or -1.
  */
 #include <errno.h>
 #include <string.h>
@@ -184,5 +185,5 @@ int wl_ct_equal(const uint8_t *a, const uint8_t *b, size_t n)
 
 int wl_crypto_selftest(void)
 {
-	return failing() ? -ENOMEM : 0;
+	return failing() ? -1 : 0;
 }

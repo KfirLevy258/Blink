@@ -9,8 +9,9 @@
  * generated from the Python by tools/gen_aead_vectors.py), and the board
  * checks itself against the RFCs at every boot (wl_crypto_selftest).
  *
- * Every function returns 0 on success and a negative number on failure;
- * nothing is void, because mbedtls_md_setup can fail its allocation
+ * Every function returns 0 on success and a negative number on failure,
+ * except wl_ct_equal, which answers a question: 1 for equal, 0 for
+ * different. Nothing is void, because mbedtls_md_setup can fail its allocation
  * (hkdf.c:107, md.c) and a caller must never use an output whose call
  * failed. Nothing here prints: a key, nonce or tag never reaches a log.
  */

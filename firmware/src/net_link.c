@@ -79,6 +79,10 @@ static void kick(void);
 static atomic_t scanning;
 static volatile enum net_link_state state = NL_OFF;
 static volatile enum net_link_why why = NL_WHY_NONE;
+/* Set once at boot by net_link_refuse_selftest(), never cleared: a board
+ * whose cipher failed its known-answer test keeps the radio off until it
+ * reboots (spec S5.4, D47). */
+static volatile bool refused;
 static volatile int conn_status;
 static volatile bool joining;
 static volatile bool dropped;
@@ -498,7 +502,7 @@ SYS_INIT(net_link_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 void net_link_request_scan(void)
 {
-	if (iface == NULL) {
+	if (iface == NULL || refused) {
 		return;
 	}
 	/* Set here, not in the work, so a caller polling straight after the
@@ -530,7 +534,7 @@ void net_link_request_join(const uint8_t *ssid, size_t ssid_len, const char *psk
 	size_t plen = strnlen(psk, sizeof(req_psk));
 	k_spinlock_key_t key;
 
-	if (iface == NULL) {
+	if (iface == NULL || refused) {
 		return;
 	}
 	/* The PC validated both (S6.1); this is the board validating again.
@@ -556,13 +560,22 @@ void net_link_request_join(const uint8_t *ssid, size_t ssid_len, const char *psk
 
 void net_link_request_down(void)
 {
-	if (iface == NULL) {
+	/* Refused too: the radio never came up, and a down would turn the
+	 * NL_FAILED the Connection screen reads into NL_OFF. */
+	if (iface == NULL || refused) {
 		return;
 	}
 	/* A join still waiting would bring the radio straight back. */
 	atomic_and(&ops, ~OP_JOIN);
 	atomic_or(&ops, OP_DOWN);
 	kick();
+}
+
+void net_link_refuse_selftest(void)
+{
+	refused = true;
+	why = NL_WHY_SELFTEST;
+	state = NL_FAILED;
 }
 
 enum net_link_state net_link_state(void)

@@ -48,6 +48,11 @@ void net_link_request_join(const uint8_t *ssid, size_t ssid_len, const char *psk
 /* Sockets closed, NET_REQUEST_WIFI_DISCONNECT (wait <= 2 s), net_if_down(),
  * esp_wifi_stop(): D46. */
 void net_link_request_down(void);
+/* main.c, when wl_crypto_selftest() failed at boot: every later scan,
+ * join and down is refused, so the radio never comes up, and the state reads
+ * NL_FAILED with NL_WHY_SELFTEST ("WiFi self-test failed") for the
+ * Connection screen. Until reboot. */
+void net_link_refuse_selftest(void);
 void net_link_work(void);
 enum net_link_state net_link_state(void);
 enum net_link_why net_link_why(void);

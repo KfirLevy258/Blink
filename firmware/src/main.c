@@ -31,6 +31,7 @@
 #include "version.h"
 #include "mem_stats.h"
 #include "wl_crypto.h"
+#include "net_link.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
@@ -591,11 +592,14 @@ int main(void)
 	 * (HMAC and HKDF allocate). A build whose mbedTLS port or configuration
 	 * got the cipher wrong would otherwise look like a pairing that never
 	 * works, the same symptom as a wrong key; this names it on the console
-	 * instead, and the network thread (Task 2.5) starts only when it passed,
-	 * so a board that fails never brings the radio up (spec S5.4, D47). The
-	 * USB panel is unaffected either way. */
+	 * instead, and net_link refuses every scan and join from then on, so a
+	 * board that fails never brings the radio up and its Connection screen
+	 * says why (spec S5.4, D47). Nothing can ask for the radio before this:
+	 * every request comes from proto, which starts below. The USB panel is
+	 * unaffected either way. */
 	if (IS_ENABLED(CONFIG_BLINK_WIFI_LINK) && wl_crypto_selftest() != 0) {
 		printk("[wifi] selftest failed\n");
+		net_link_refuse_selftest();
 	}
 
 	if (!device_is_ready(display_dev)) {

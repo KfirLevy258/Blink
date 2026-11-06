@@ -354,15 +354,15 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[fatal] this boot follows",                               # :117
     "[fatal] SELFTEST BUILD: will fault at",                   # :122
     # [usage] -- firmware/src/main.c, proto.c
-    "[usage] panel: DBI bus not ready, MADCTL uncorrected",    # main.c:98
-    "[usage] panel: MADCTL write failed",                      # main.c:104
-    "[usage] no app after 60 s; dozing until one speaks",      # main.c:543
-    "[usage] firmware boot OK",                                # main.c:569
-    "[usage] FATAL: mbedTLS allocator hookup failed",          # main.c:585
-    "[usage] display not ready",                               # main.c:602
+    "[usage] panel: DBI bus not ready, MADCTL uncorrected",    # main.c:99
+    "[usage] panel: MADCTL write failed",                      # main.c:105
+    "[usage] no app after 60 s; dozing until one speaks",      # main.c:544
+    "[usage] firmware boot OK",                                # main.c:570
+    "[usage] FATAL: mbedTLS allocator hookup failed",          # main.c:586
+    "[usage] display not ready",                               # main.c:606
     "[usage] cleared a stored refresh token: no WiFi in this build",
-    "[usage] mode: USB bridge (no host yet)",                  # main.c:676
-    "[usage] mode: USB bridge",                                # main.c:652
+    "[usage] mode: USB bridge (no host yet)",                  # main.c:680
+    "[usage] mode: USB bridge",                                # main.c:656
     "[usage] session",                                         # proto.c:620
     # [cfg] -- firmware/src/cfg_store.c, proto.c
     "[cfg] migrated 1.3.4 record",                             # :218
@@ -404,7 +404,7 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[wifi] joined",                                           # :368
     "[wifi] join failed",                                      # :281
     "[wifi] lost the network",                                 # :142
-    "[wifi] selftest failed",                                  # main.c:598
+    "[wifi] selftest failed",                                  # main.c:601
 ), key=len, reverse=True))
 
 # "[ota] update %s: wanted %s, running %s (from %s)" (main.c:233) is the line

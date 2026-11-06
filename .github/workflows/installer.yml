@@ -255,6 +255,10 @@ jobs:
       # library the firmware links. This job checks out only this
       # repository, so it fetches that one module, pinned by commit and by
       # the tarball's sha256 (measured 2026-11-06, two downloads alike).
+      # A checksum mismatch most likely means GitHub regenerated the archive
+      # (it has changed its tar/gzip output before), not tampering: download
+      # it again, check the extracted tree is commit 11c0f18a's, and record
+      # the new sum. Never drop the check to make the job pass.
       # BLINK_REQUIRE_MBEDTLS=1 turns a missing source into a failure here;
       # on a developer machine without one the suite skips with a line.
       - name: fetch the pinned mbedTLS
