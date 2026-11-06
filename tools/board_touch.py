@@ -1184,7 +1184,7 @@ def _on_panel(pts, lineno):
 _QUOTED_CMDS = ("click", "expect-widget", "wait-widget", "widgets", "fake")
 FAKE_KINDS = ("ota_avail", "ota_none", "ota_error", "boot_notice",
               "reverted_notice", "edit_done", "welcome", "edit_state",
-              "edit_answer", "preview", "host_gone")
+              "edit_answer", "preview", "host_gone", "ask")
 WELCOME_KINDS = ("open", "shut", "old")
 
 
@@ -1228,7 +1228,7 @@ def _parse_quoted(cmd, rest, lineno):
                           + "|".join(FAKE_KINDS) + " [ARG]")
     if kind == "ota_avail" and len(rest) in (2, 3):
         return Step(lineno, "fake", tuple(rest))
-    if kind in ("ota_none", "reverted_notice", "edit_done") and \
+    if kind in ("ota_none", "reverted_notice", "edit_done", "ask") and \
             len(rest) == 1:
         return Step(lineno, "fake", tuple(rest))
     if kind == "welcome":
@@ -2277,6 +2277,11 @@ class Bench:
                 msg.pop("editing")
                 msg["caps"] = [protocol.BOARD_CAP_THEME]
             return self.send(msg)
+        if kind == "ask":
+            # "Keep figures fresh?" (ask_prompt.h), the real protocol line a
+            # daemon sends; the board's answer comes back to this tool, which
+            # saves nothing, so a tap here turns nothing on anywhere.
+            return self.send(protocol.ask("refresh"))
         if kind == "edit_state":
             # The daemon's restatement of whether its builder is open.
             return self.send(protocol.edit_state(args[0] == "open"))
