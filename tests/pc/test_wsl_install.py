@@ -1096,6 +1096,38 @@ def test_a_renamed_account_with_the_same_folder_is_not_a_move(
 
 
 @posix_only
+def test_another_account_with_another_home_but_the_same_folder_is_a_move(
+        tmp_path, monkeypatch):
+    """The scoped review of feat/spend-wsl-refresh, item 1: the default
+    Linux user changed to one whose home is elsewhere, with the same
+    absolute CLAUDE_CONFIG_DIR. Comparing the folder alone called that no
+    move, and the install wrote the folder as the new account: its chain
+    file, in the new home, started empty, and the old account's own status
+    line ("mine", in the old home's chain file) was lost. A different Linux
+    home is a move too: the old one is taken out first, its command put
+    back, and the new install chains it."""
+    lin, run, old, new, d = _move_desk(
+        tmp_path, monkeypatch,
+        {"statusLine": {"type": "command", "command": "mine"}}, None)
+    lin2 = tmp_path / "lin2"
+    lin2.mkdir()
+    bin_dir = _fake_bin(tmp_path)
+    monkeypatch.setattr(install_statusline, "default_wsl_run",
+                        lambda h: _runner(h.linux_home, bin_dir))
+    probe = wsl.Probe(user="ann", home=str(lin2), shell="/bin/sh",
+                      config_dir=str(lin) + "/old", claude_exe="/x/claude",
+                      config_dir_set=True)
+    monkeypatch.setattr(wsl, "probe", lambda name, *a, **k: probe)
+    got = cli._setup_wsl(d)
+    assert got is not None and got.linux_home == str(lin2)
+    assert claude_home.recorded().linux_user == "ann"
+    doc = json.loads((lin / "old" / "settings.json").read_text())
+    assert doc["statusLine"]["command"] == _sl_cmd(lin2)
+    assert (lin2 / ".blink" / "statusline-chain").read_text() == "mine\n"
+    assert not (lin / ".blink" / "statusline-chain").exists()
+
+
+@posix_only
 @pytest.mark.parametrize("bad", [b"{not json", None])
 def test_a_first_install_that_stops_writes_nothing(tmp_path, monkeypatch,
                                                    bad):

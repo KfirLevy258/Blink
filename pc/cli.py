@@ -4560,7 +4560,7 @@ def _announce_wsl_record(home, named) -> None:
 
 def _moved_inside(prev, home, config_dir) -> bool:
     """Is `home` (just probed, its config folder `config_dir` as Linux
-    spells it) another folder or account inside the distribution `prev`
+    spells it) another folder or Linux home inside the distribution `prev`
     was recorded for? A record whose folder cannot be read back is taken
     as not moved: there would be nothing to find of it.
 
@@ -4572,14 +4572,19 @@ def _moved_inside(prev, home, config_dir) -> bool:
         old = install_statusline._linux_path(prev, prev.config_dir)
     except install_statusline.WslInstallError:
         return False
-    # The folder alone. An account renamed with `usermod -l` keeps its
-    # home and folder: taken for a move, the "new" folder -- the same one --
-    # was written and then Blink taken out of it from the snapshot, leaving
-    # no status line and no hooks (the review of 277b81a..4003b0b, item 4).
-    # A rename only updates the record's user.
-    del home
+    # The folder or the Linux home, never the user's name. An account
+    # renamed with `usermod -l` keeps its home and folder: taken for a
+    # move, the "new" folder -- the same one -- was written and then Blink
+    # taken out of it from the snapshot, leaving no status line and no
+    # hooks (the review of 277b81a..4003b0b, item 4). A rename only
+    # updates the record's user. But another account with another home
+    # and the same absolute CLAUDE_CONFIG_DIR is a move: the chain file
+    # lives in the Linux home, and installing as the new account started
+    # an empty one there, losing the old account's own status line (the
+    # scoped review of feat/spend-wsl-refresh, item 1).
     norm = claude_home.linux_norm
-    return norm(old) != norm(config_dir)
+    return (norm(old) != norm(config_dir)
+            or norm(prev.linux_home or "") != norm(home.linux_home or ""))
 
 
 _UNDO_FAILED = (install_statusline.WslInstallError,
