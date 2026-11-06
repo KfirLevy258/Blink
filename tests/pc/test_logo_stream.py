@@ -158,6 +158,7 @@ def test_the_stream_is_not_done_until_the_board_says_present():
     b.on_message({"t": "logo_ack", "off": 256})
     b.on_message({"t": "logo_ack", "off": 300})
     b.pump()
+    assert any(json.loads(r)["t"] == "logo_end" for r in usb.ring)
     assert b.logo_streaming() and b.logo_result is None
 
 

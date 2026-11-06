@@ -218,3 +218,12 @@ def test_the_pixel_budget_refuses_a_swarm_of_big_frames_fast():
     assert time.perf_counter() - t < 1.0
     # the panel-sized worst case still fits the budget
     assert 180 * 320 * 240 <= gd.GIF_MAX_PIXELS
+
+
+def test_an_ordinary_75_frame_640x360_clip_decodes():
+    """16 Mi pixels refused a 74-frame 640x360 clip (17 M) as "too large"."""
+    fs = [gg.frame(640, 360, bytes([(x // 40 + i) % 4 for x in range(640)]) * 360,
+                   delay_cs=4) for i in range(75)]
+    data = gg.build(640, 360, PAL, fs)
+    assert len(_got(data, max_frames=180)) == 75
+    assert 75 * 640 * 360 <= gd.GIF_MAX_PIXELS

@@ -1,5 +1,6 @@
 """pc/logo_encode: the daemon's own logo encoder and its board-limit checks."""
 import random
+from array import array
 import struct
 import zlib
 
@@ -253,3 +254,18 @@ def test_a_noisy_gif_stays_within_a_memory_bound():
     finally:
         tracemalloc.stop()
     assert peak < 45 * 1024 * 1024, peak
+
+
+def test_encoding_stops_at_the_size_cap_instead_of_finishing(monkeypatch):
+    """A noisy clip is refused after the frame that crosses LOGO_MAX, not after
+    every frame is encoded (19.8 s for 140 noisy frames before)."""
+    rng = random.Random(2)
+    calls = []
+    real = le._rect_payload
+    monkeypatch.setattr(le, "_rect_payload",
+                        lambda *a: calls.append(1) or real(*a))
+    noise = [array("H", [rng.getrandbits(16) for _ in range(320 * 240)])
+             for _ in range(40)]
+    with pytest.raises(ValueError, match=le.E_SIZE):
+        le.encode_ban1(noise, 10)
+    assert len(calls) <= 5          # ~153 KB a frame: the 4th crosses 512 KB

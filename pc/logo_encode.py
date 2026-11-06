@@ -178,6 +178,10 @@ def encode_ban1(frames565, fps):
             payload = _rect_payload(frame, x, y, w, h)
             blob += struct.pack("<HHHHI", x, y, w, h, len(payload)) + payload
         prev = frame
+        if len(blob) + HDR_LEN > LOGO_MAX:
+            # Early: a noisy 140-frame GIF burned 19.8 s encoding frames the
+            # size cap was always going to refuse.
+            raise ValueError(E_SIZE)
     return bytes(blob)
 
 
@@ -308,8 +312,8 @@ def gif_timing(delays_ms, hold_ms=0):
     Only fps values whose ticks fit LOGO_MAX_FRAMES and the total cap (with
     `hold_ms`) are candidates, and the LAST frame's ticks are cut to fit
     first, because the hold keeps that frame up anyway: 30 frames of 30 ms
-    then a 5 s last frame is fps 33 with a shortened last frame, not an
-    error. With no candidate the unconstrained best is returned and
+    then a 5 s last frame is fps 29 (tick 34, 177 ticks, fits whole; fps 33
+    would need 197 and a cut last frame), not an error. With no candidate the unconstrained best is returned and
     check_limits says why."""
     ds = [100 if d < 20 else d for d in delays_ms]
     best = fallback = None

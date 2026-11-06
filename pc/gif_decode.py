@@ -31,11 +31,11 @@ import struct
 GIF_MAX_SIDE = 2048
 # Sum of w*h over every frame's image descriptor. The side cap bounds one
 # frame (4 M pixels), not the file: a 2 MiB GIF holds ~360 frames of that (a
-# 2048x2048 two-colour frame is 5.8 KB), minutes of CPU for a logo. 16 Mi pixels
-# is 1.2 times what the frame cap allows at the panel's own size (180 frames of
-# 320x240 = 13.8 M) and four frames of the largest size the side cap lets in,
-# which decode in well under a second.
-GIF_MAX_PIXELS = 16 * 1024 * 1024
+# 2048x2048 two-colour frame is 5.8 KB). 64 Mi pixels is 16 such frames, which
+# decode in 0.83 s with C-speed compositing (measured), and it lets an ordinary
+# clip through: a 74-frame 640x360 GIF is 17 M, and 16 Mi refused it. The panel-
+# sized worst case, 180 frames of 320x240, is 13.8 M.
+GIF_MAX_PIXELS = 64 * 1024 * 1024
 CANVAS_W, CANVAS_H = 320, 240
 
 _NOT_GIF, _BIG, _MANY = "not a GIF", "too large", "too many frames"

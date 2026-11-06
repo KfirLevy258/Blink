@@ -1673,9 +1673,15 @@ same boundary the OTA image has.
   `body = offset[4] || bytes`, same 512-byte chunks, same ordered ring,
   same `off == got` and bound check (`LOGO_IMAGE_MAX = 0x80000`), same
   acks (`logo_ack off:<n>` at 16 KiB boundaries and at `got == size`),
-  same window on the daemon side, same abort on drop, takeover or
+  same window on the daemon side (32 KiB), same abort on drop, takeover or
   replacement. Over USB the same bytes travel as `logo_chunk` NDJSON lines
-  (`off`, `d` base64 of at most 256 bytes, so the line stays under 512 B),
+  (`off`, `d` base64 of at most 256 bytes, so the line stays under 512 B).
+  Every USB byte lands in the board's 2 KB UART RX ring, so over USB the
+  board acks EVERY chunk (`logo_ack off:<n>`, not at 16 KiB boundaries) and
+  the daemon keeps four chunks (about 1.5 KB) in flight; a 32 KiB window
+  would overflow the ring and the board would drop lines silently
+  (2026-11-07). The stream is done only when the board's `logo_state`
+  arrives after `logo_end` (`present` 1), and
   which is the one place the OTA path has no USB equivalent (OTA over USB
   is esptool). The control lines are shared by both links: `logo_begin`
   (`size`, `crc`), the chunks, `logo_end`; `logo_remove`; and the board's
