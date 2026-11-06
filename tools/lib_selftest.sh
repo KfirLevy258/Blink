@@ -233,7 +233,8 @@ blink_refuse_oversize() {
 		return 1
 	fi
 	_sz=$(wc -c < "$1" | tr -d ' ')
-	if [ "$_sz" -gt "$2" ]; then
+	# "could not measure" must not read as "fits".
+	if ! [ "$_sz" -le "$2" ] 2>/dev/null; then
 		echo "FATAL: $1 is $_sz bytes, above the OTA bound $2 (OTA_IMAGE_MAX)." >&2
 		echo "       The board would refuse it over WiFi." >&2
 		return 1
@@ -263,8 +264,25 @@ blink_refuse_test_knobs() {
 		return 1
 	fi
 	if grep -aqF '[test] ' "$2"; then
-		echo "FATAL: $2 contains a '[test] ' boot line, though the" >&2
+		echo "FATAL: $2 contains a [test] boot line, though the" >&2
 		echo "       .config says otherwise." >&2
+		return 1
+	fi
+	return 0
+}
+
+# blink_refuse_wifi_mode <.config>
+#
+# The deleted on-device sign-in switch (release.sh's old inline tripwire, now
+# a function so a test can run it). A missing .config refuses.
+blink_refuse_wifi_mode() {
+	if [ ! -f "$1" ]; then
+		echo "FATAL: no $1 -- cannot tell whether WIFI_MODE is on." >&2
+		return 1
+	fi
+	if grep -q "^CONFIG_BLINK_WIFI_MODE=y" "$1"; then
+		echo "FATAL: CONFIG_BLINK_WIFI_MODE=y in a release build." >&2
+		echo "       That ships the on-device sign-in and the token store." >&2
 		return 1
 	fi
 	return 0

@@ -184,11 +184,8 @@ BIN="$ROOT/firmware/build-sb/firmware/zephyr/zephyr.signed.bin"
 # Checks the ARTIFACT, not only the config, because the artifact is what ships.
 # If the OAuth path were ever linked in, these strings would be in the image.
 CFG="$ROOT/firmware/build-sb/firmware/zephyr/.config"
-if grep -q "^CONFIG_BLINK_WIFI_MODE=y" "$CFG"; then
-	echo "FATAL: CONFIG_BLINK_WIFI_MODE=y in a release build." >&2
-	echo "       That ships the on-device sign-in and the token store." >&2
-	exit 1
-fi
+source "$ROOT/tools/lib_selftest.sh"
+blink_refuse_wifi_mode "$CFG" || exit 1
 # `strings` runs inside a pipeline below, where a missing binary would leave
 # grep reading an empty stream and every pattern "absent" -- a guard against
 # shipping the OAuth path that silently passes because the tool that looks for
@@ -209,7 +206,6 @@ done
 # build-sb's CMake cache from a bench test and this build carries it without a
 # word; shipped, every desk that took the update would fault and halt. Checks
 # the .config and the artifact both -- see tools/lib_selftest.sh.
-source "$ROOT/tools/lib_selftest.sh"
 blink_refuse_selftest "$CFG" "$BIN" || exit 1
 # Nor a touch-inject image, which boots like a release and takes touches from
 # the cable: every desk that took it could be operated from the computer.
@@ -223,10 +219,6 @@ blink_refuse_pilot "$CFG" "$BIN" || exit 1
 # bench test knob (each would revert or hang every desk that took it).
 blink_refuse_standalone_net "$CFG" "$BIN" || exit 1
 blink_refuse_test_knobs "$CFG" "$BIN" || exit 1
-# Keep equal to OTA_IMAGE_MAX in firmware/src/ota_parse.h (slot 1 minus the
-# swap-move sector minus the aligned trailer, spec section 9).
-OTA_IMAGE_MAX=1318912
-blink_refuse_oversize "$BIN" "$OTA_IMAGE_MAX" || exit 1
 
 SIZE=$(stat -f%z "$BIN")
 SHA=$(shasum -a 256 "$BIN" | cut -d' ' -f1)
@@ -246,12 +238,16 @@ SLOT=$((0x150000))
 # catches --pad, which pads to the full slot -- this names the reason, so
 # nobody "fixes" it by padding here too. Over WiFi the board writes its own
 # slot 1 and MCUboot swaps and test-boots it; the image still ships
-# unconfirmed and unpadded, and must fit OTA_IMAGE_MAX (checked above).
+# unconfirmed and unpadded, and must fit OTA_IMAGE_MAX (checked below).
 [ "$SIZE" -lt "$SLOT" ] || {
 	echo "FATAL: $BIN is exactly the slot size -- it looks padded, and a"
 	echo "       padded image carries a trailer. The OTA artifact must be"
 	echo "       neither padded nor confirmed. See tools/sign_confirmed.py."
 	exit 1; }
+# Keep equal to OTA_IMAGE_MAX in firmware/src/ota_parse.h (slot 1 minus the
+# swap-move sector minus the aligned trailer, spec section 9).
+OTA_IMAGE_MAX=1318912
+blink_refuse_oversize "$BIN" "$OTA_IMAGE_MAX" || exit 1
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 cp "$BIN" "$TMP/blink-fw.bin"

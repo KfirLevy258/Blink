@@ -44,9 +44,14 @@ while [ $# -gt 0 ]; do
 	--logo) LOGO="$2"; shift 2 ;;
 	--keep-logo) KEEP_LOGO=1; shift ;;
 	--app-only) APP_ONLY=1; shift ;;
+	-*) echo "FATAL: unknown option $1" >&2; exit 1 ;;
 	*) break ;;
 	esac
 done
+# One optional port, and nothing after it: an option placed after the port
+# used to be dropped silently and the FULL path ran (MCUboot write, logo
+# erase) on a unit whose caller asked for --app-only.
+[ $# -le 1 ] || { echo "FATAL: unexpected argument '$2' after the port; options go first" >&2; exit 1; }
 # Must match logo_partition in firmware/boards/esp32_devkitc_esp32_procpu.overlay.
 LOGO_OFF=0x330000
 LOGO_SIZE=0x80000

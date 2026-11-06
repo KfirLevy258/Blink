@@ -684,15 +684,32 @@ def test_oversize_boundary(tmp_path):
     assert big.returncode == 1 and "FATAL" in big.stderr
 
 
-def test_release_sh_wires_the_guards_and_keeps_the_old_one():
+@_need_sh
+def test_old_wifi_mode_guard_runs(tmp_path):
+    ok = _sh(tmp_path, "blink_refuse_wifi_mode", _CLEAN)
+    assert ok.returncode == 0, ok.stderr
+    bad = _sh(tmp_path, "blink_refuse_wifi_mode", _CLEAN + "CONFIG_BLINK_WIFI_MODE=y\n")
+    assert bad.returncode == 1 and "WIFI_MODE" in bad.stderr
+    assert _sh(tmp_path / "x", "blink_refuse_wifi_mode", None, None).returncode == 1
+
+
+@_need_sh
+def test_oversize_refuses_when_it_cannot_measure(tmp_path):
+    assert _sh(tmp_path, "blink_refuse_oversize", None, b"x", "notanumber").returncode == 1
+    assert _sh(tmp_path / "y", "blink_refuse_oversize", None, None, "5").returncode == 1
+
+
+def test_release_sh_wires_the_guards_in_order():
     text = (_ROOT / "tools" / "release.sh").read_text(encoding="utf-8")
-    for call in ("blink_refuse_standalone_net", "blink_refuse_test_knobs",
-                 "blink_refuse_oversize", "CONFIG_BLINK_WIFI_MODE=y"):
+    for call in ("blink_refuse_wifi_mode", "blink_refuse_standalone_net",
+                 "blink_refuse_test_knobs", "blink_refuse_oversize"):
         assert call in text
     assert f"OTA_IMAGE_MAX={_OTA_IMAGE_MAX}" in text
+    # a padded image gets the sign_confirmed.py explanation, not the bound's
+    assert text.index("See tools/sign_confirmed.py") < text.index("blink_refuse_oversize")
     # Drift check once 5.1's header is on the tree.
     hdr = _ROOT / "firmware" / "src" / "ota_parse.h"
     if hdr.exists():
         m = re.search(r"define\s+OTA_IMAGE_MAX\s+(\d+)u?", hdr.read_text())
-        if m:
-            assert int(m.group(1)) == _OTA_IMAGE_MAX
+        if "OTA_IMAGE_MAX" in hdr.read_text():
+            assert m and int(m.group(1)) == _OTA_IMAGE_MAX

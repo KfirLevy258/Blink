@@ -44,8 +44,9 @@ def _setup(tmp_path, config="# CONFIG_X is not set\n"):
     return env, log
 
 
-def _run(env, *args):
-    return subprocess.run(["bash", str(SCRIPT), *args, "/dev/null"], env=env,
+def _run(env, *args, port=True):
+    args = (*args, "/dev/null") if port else args
+    return subprocess.run(["bash", str(SCRIPT), *args], env=env,
                           capture_output=True, text=True, timeout=60)
 
 
@@ -85,3 +86,25 @@ def test_knob_or_injector_refused_before_any_tool_runs(tmp_path, cfg, flag):
     r = _run(env, *flag)
     assert r.returncode != 0 and "FATAL" in r.stderr
     assert _log(log) == []
+
+
+@pytest.mark.parametrize("args", [["/dev/null", "--app-only"],
+                                  ["--app-only", "/dev/null", "extra"],
+                                  ["--bogus", "/dev/null"]])
+def test_an_option_after_the_port_or_unknown_is_refused_not_dropped(tmp_path, args):
+    env, log = _setup(tmp_path)
+    r = _run(env, *args, port=False)
+    assert r.returncode != 0 and "FATAL" in r.stderr
+    assert _log(log) == []
+
+
+def test_app_only_still_refuses_a_plaintext_chip_before_any_write(tmp_path):
+    env, log = _setup(tmp_path)
+    env.pop("BLINK_SKIP_EFUSE_CHECK")
+    e = Path(env["BLINK_ETOOLS"]) / "espefuse.py"
+    e.write_text("#!/bin/sh\necho 'FLASH_CRYPT_CNT (BLOCK0) 0b000 R/W (0b000)'\n")
+    e.chmod(0o755)
+    r = _run(env, "--app-only")
+    assert r.returncode != 0 and "NOT enabled" in r.stderr
+    assert not any(w in l for l in _log(log)
+                   for w in ("write_flash", "encrypt_flash_data", "erase_region"))
