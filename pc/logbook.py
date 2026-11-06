@@ -415,6 +415,9 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[wifi] session closed",
     "[wifi] handshake refused",
     "[wifi] verified",
+    # net_link.c / main.c: the leak mitigation (wl_heap.h)
+    "[wifi] heap low, restarting",
+    "[wifi] heap free",
 ), key=len, reverse=True))
 
 # "[ota] update %s: wanted %s, running %s (from %s)" (main.c:233) is the line

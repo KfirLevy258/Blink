@@ -35,6 +35,7 @@
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/sys_heap.h>
 #include <mbedtls/platform_util.h>
 #include <esp_wifi.h>
 #include <errno.h>
@@ -42,6 +43,7 @@
 
 #include "cfg_store.h"
 #include "net_link.h"
+#include "wl_heap.h"
 #include "wl_server.h"
 
 /* A connect result of 0 is our "joined": with this option the driver raises
@@ -82,6 +84,10 @@ static atomic_t ops;
 /* Rejoin (Task 2.5): the lost-network event asks (net_mgmt thread), a
  * requested join or down cancels (any thread); everything else here is the
  * network thread's alone, so the int64_t times never tear. */
+/* K_HEAP_DEFINE(_system_heap) in kernel/mempool.c: the heap k_malloc, mbedTLS
+ * and the WiFi blob draw on. Not the LVGL pool mem_stats.c reports. */
+extern struct k_heap _system_heap;
+static atomic_t heap_free = ATOMIC_INIT(-1);
 static atomic_t rejoin_want, rejoin_cancel;
 static int64_t rejoin_at;	/* 0: none scheduled */
 static unsigned int rejoin_n;
@@ -241,6 +247,26 @@ static void disconnect_wait(void)
 	}
 }
 
+/* One line a measurement, so the slope per association shows in the log. The
+ * value is our own counter, never a peer's; consumers that cut values still
+ * keep the stem. */
+static void heap_note(void)
+{
+	struct sys_memory_stats st;
+
+	if (sys_heap_runtime_stats_get(&_system_heap.heap, &st) == 0) {
+		atomic_set(&heap_free, (atomic_val_t)st.free_bytes);
+		printk("[wifi] heap free=%u\n", (unsigned)st.free_bytes);
+	}
+}
+
+size_t net_link_heap_free(void)
+{
+	atomic_val_t v = atomic_get(&heap_free);
+
+	return v < 0 ? SIZE_MAX : (size_t)v;
+}
+
 /* D46, in order. keep_failed: the idle down after a failed join leaves the
  * failure on show; a requested down is a fresh start. */
 static void do_down(bool keep_failed)
@@ -260,6 +286,7 @@ static void do_down(bool keep_failed)
 	}
 	/* 4. The RF, which nothing above stops (see the top of this file). */
 	(void)esp_wifi_stop();
+	heap_note();	/* after the down: what the leak left (wl_heap.h) */
 }
 
 static void scan_run(void)
@@ -490,6 +517,7 @@ static void auto_rejoin(void)
 	}
 	join_run(ssid, len, psk, t);
 	mbedtls_platform_zeroize(psk, sizeof(psk));
+	heap_note();
 	if (state == NL_UP) {
 		rejoin_n = 0;
 		rejoin_at = 0;

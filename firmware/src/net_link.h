@@ -57,6 +57,9 @@ void net_link_request_down(void);
 void net_link_refuse_selftest(void);
 /* Runs on wl_server's thread. net_link_due() says whether a call has work. */
 bool net_link_due(void);
+/* The system heap's free bytes as last measured (after each down and each
+ * automatic rejoin), or SIZE_MAX before the first. For wl_heap.h's decision. */
+size_t net_link_heap_free(void);
 void net_link_work(void);
 
 /*

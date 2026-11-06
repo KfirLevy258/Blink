@@ -95,6 +95,8 @@ LINES = [
     ("[wifi] handshake refused: bad tag", "[wifi] handshake refused",
      ["bad", "tag"]),
     ("[wifi] verified", "[wifi] verified", []),
+    ("[wifi] heap low, restarting", "[wifi] heap low, restarting", []),
+    ("[wifi] heap free=31244", "[wifi] heap free", ["31244"]),
     # a known stem with something riding on the end of it
     ("[theme] saved SECRET-TAIL", "[theme] saved", ["SECRET-TAIL"]),
     # no tag the firmware uses: the bootloader, Zephyr, the touch tracer,

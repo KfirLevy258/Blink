@@ -32,6 +32,7 @@
 #include "mem_stats.h"
 #include "wl_crypto.h"
 #include "net_link.h"
+#include "wl_heap.h"
 #include "wl_server.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
@@ -303,6 +304,19 @@ static bool reading_moved_again(void)
 				       usage_freshness_activity());
 }
 
+/* The leak mitigation (wl_heap.h): one clean restart, when the WiFi blob has
+ * eaten the heap and nothing would notice. */
+static void heap_restart_if_due(void)
+{
+	if (IS_ENABLED(CONFIG_BLINK_WIFI_LINK) &&
+	    wl_heap_reboot_due(net_link_heap_free(), wl_server_session_up(),
+			       ota_blocks_sleep(), ui_settings_busy())) {
+		printk("[wifi] heap low, restarting\n");
+		k_msleep(50);	/* let the console drain */
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+}
+
 static void run_usb(void)
 {
 	int64_t last_tick = k_uptime_get();
@@ -320,6 +334,7 @@ static void run_usb(void)
 
 	while (1) {
 		proto_service();
+		heap_restart_if_due();
 
 		if (usage_view_have_data()) {
 			ota_health = true;	/* daemon delivered usage */
