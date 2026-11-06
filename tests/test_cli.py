@@ -2135,3 +2135,13 @@ def test_launchd_not_loaded_names_the_frozen_service_from_a_checkout(
     line = cli._LaunchdBackend().status()
     assert line == (f"installed but not loaded -- run "
                     f"`{cli._quote_line(want)} install` to start it")
+
+
+def test_status_prints_the_link_line(tmp_path, monkeypatch, capsys):
+    from pc import link_status
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("BLINK_SKIP_SERVICE", "1")
+    os.makedirs(tmp_path / ".blink")
+    link_status.write(str(tmp_path / ".blink"), "usb", None)
+    cli.cmd_status(type("A", (), {})())
+    assert "Link        USB cable" in capsys.readouterr().out

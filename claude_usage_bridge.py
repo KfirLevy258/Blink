@@ -776,6 +776,7 @@ def main(argv=None):
     from pc.cli import (_frozen, _self_path, blink_home as _blink_home,
                         hook_shim_path, installed_bin, settings_path,
                         shim_path)
+    from pc import link_status
     self_bin = installed_bin()
     # Decided once, and everything that replaces this program keys off it:
     # the daily check below and the board-tapped update the Bridge runs. The
@@ -973,6 +974,7 @@ def main(argv=None):
     exit_on_sigterm()
 
     last_err = None
+    next_link_write = 0.0
     explicit_port = bool(args.port)
 
     # What we learned last time. A machine that has connected before opens the
@@ -1383,6 +1385,14 @@ def main(argv=None):
                 # its own thread. Every pass, so it goes out within one read
                 # timeout of the open returning.
                 bridge.pump()
+                if time.monotonic() >= next_link_write:
+                    # Only the cable exists on this branch; the link choice
+                    # (3.3) reports "wifi" through the same call.
+                    try:
+                        link_status.write(blink_home, "usb", None)
+                    except OSError:
+                        pass
+                    next_link_write = time.monotonic() + 60.0
                 if time.monotonic() >= next_poll:
                     # Poll only while the board is provably alive (pings within
                     # the liveness window): there is no point talking to a

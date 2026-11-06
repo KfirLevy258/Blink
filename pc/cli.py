@@ -3493,6 +3493,9 @@ def cmd_status(args) -> int:
         print("Bridge      " + bridge_status)
         bridge_running = bridge_status.startswith("running")
 
+    from pc import link_status, wifi_pair
+    print(link_status.status_line(link_status.read(blink_home()),
+                                  wifi_pair.load(blink_home()) is not None))
     print(f"App         {RELEASE_VERSION}")
     for line in _board_lines():
         print(line)
