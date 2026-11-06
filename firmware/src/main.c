@@ -627,8 +627,7 @@ static void run_usb(void)
 		if (now - last_tick >= 1000) {
 			usage_view_tick_1s();
 			last_tick = now;
-			/* Paired and on a link: say which. Unpaired on USB is
-			 * nothing (S5.7). */
+			/* Which glyph the header icon draws (S5.7). */
 			usage_view_set_link(cfg_paired() ? proto_link_kind() : 0);
 
 			int hh = -1, mm = 0;

@@ -160,7 +160,6 @@ static bool is_focus_line(const struct gauge *g)
  * owns what the row says -- mode, order, overflow -- and everything here only
  * positions and colours its answer.
  */
-static lv_obj_t *dot;		/* data health, top-right */
 static lv_obj_t *pip[PIP_MAX];		/* execution state, one per session */
 static lv_obj_t *pip_num[PIP_MAX];	/* its tally, in counts mode only */
 /*
@@ -172,11 +171,13 @@ static int pip_n_sess, pip_n_run, pip_n_wait, pip_n_stuck;
 static enum usage_status data_health = USAGE_STATUS_DISCONNECTED;
 static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
-/* The link mark left of the age (S5.7). Kept across a rebuild of the screen
- * in link_kind, as the counts are: it is the last thing said, not a widget. */
+/* The link icon, top-right: the host-link glyph (USB, or WiFi) coloured by
+ * data health. It replaced the health dot (owner, 2026-11-07), so it is always
+ * shown. Kept across a rebuild of the screen in link_kind, as the counts are:
+ * it is the last thing said, not a widget. */
 static lv_obj_t *link_lbl;
 static uint8_t link_kind;
-#define LINK_MARK_W 20		/* what the age gives up while the mark shows */
+#define LINK_MARK_W 22		/* icon width plus gap: where the age sits left of it */
 static lv_obj_t *clock_lbl;
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
 /*
@@ -721,9 +722,9 @@ void usage_view_deinit(void)
 	/*
 	 * Both header indicators the same way, and for the same reason:
 	 * usage_view_set_counts() and usage_view_set_status() both arrive on
-	 * the protocol thread and both call refresh_dots(), whose `if (dot)`
+	 * the protocol thread and both call refresh_dots(), whose `if (link_lbl)`
 	 * and `if (!pip[0])` guards are only guards if the pointers they test
-	 * are nulled here. `dot` was missed when this list was written -- it
+	 * are nulled here. `link_lbl` was missed when this list was written -- it
 	 * hangs off gauge_scr like everything else above and dies with it.
 	 *
 	 * The counts themselves survive: they are the last thing the daemon
@@ -731,7 +732,6 @@ void usage_view_deinit(void)
 	 * back on the next refresh_dots(), which is the next set_counts or
 	 * set_status, the same way the health dot does.
 	 */
-	dot = NULL;
 	link_lbl = NULL;
 	title_lbl = chev_r = chev_l = NULL;
 	for (int i = 0; i < PIP_MAX; i++) {
@@ -761,14 +761,9 @@ static void link_paint(void)
 	if (link_lbl == NULL) {
 		return;
 	}
-	if (link_kind == 0) {
-		lv_obj_add_flag(link_lbl, LV_OBJ_FLAG_HIDDEN);
-		lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -30, HDR_ROW_Y);
-		return;
-	}
+	/* USB is also the answer for no link at all: a USB-only board is the
+	 * common case and the icon is never hidden. */
 	lv_label_set_text(link_lbl, link_kind == 2 ? LV_SYMBOL_WIFI : LV_SYMBOL_USB);
-	lv_obj_clear_flag(link_lbl, LV_OBJ_FLAG_HIDDEN);
-	lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -30 - LINK_MARK_W, HDR_ROW_Y);
 }
 
 void usage_view_set_link(uint8_t kind)
@@ -804,16 +799,6 @@ void usage_view_init(void)
 	lv_obj_set_style_text_color(title, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(title, 2, 0);
 	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
-
-	dot = lv_obj_create(scr);
-	lv_obj_set_size(dot, DOT_SZ, DOT_SZ);
-	lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-	lv_obj_set_style_border_width(dot, 0, 0);
-	lv_obj_set_style_bg_color(dot, COL_GREY, 0);
-	lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -12, HDR_ROW_Y);
-	/* A swipe starting on this dot must still reach the screen below it,
-	 * or the settings gesture goes dead whenever the touch lands here. */
-	lv_obj_add_flag(dot, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
 	/*
 	 * The execution-state row, in the gap between the clock and the brand.
@@ -910,13 +895,13 @@ void usage_view_init(void)
 	age_lbl = lv_label_create(scr);
 	lv_label_set_text(age_lbl, "");
 	lv_obj_set_style_text_color(age_lbl, COL_DIM, 0);
-	lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -30, HDR_ROW_Y);
+	lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -12 - LINK_MARK_W, HDR_ROW_Y);
 
-	/* Beside the health dot, left of the age; nothing at all for an
-	 * unpaired board on USB, so that panel is pixel for pixel what it was. */
+	/* Where the health dot was. Its colour is data health (refresh_dots).
+	 */
 	link_lbl = lv_label_create(scr);
-	lv_obj_set_style_text_color(link_lbl, COL_DIM, 0);
-	lv_obj_align(link_lbl, LV_ALIGN_TOP_RIGHT, -30, HDR_ROW_Y);
+	lv_obj_set_style_text_color(link_lbl, COL_GREY, 0);
+	lv_obj_align(link_lbl, LV_ALIGN_TOP_RIGHT, -12, HDR_ROW_Y);
 	lv_obj_add_flag(link_lbl, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_clear_flag(link_lbl, LV_OBJ_FLAG_CLICKABLE);
 	link_paint();
@@ -2068,7 +2053,7 @@ static void refresh_dots(void)
 	int n;
 	int x;
 
-	if (dot) {
+	if (link_lbl) {
 		uint32_t live, stale;
 
 		/* Low and mid, unless both are neutral: theme.h says why. */
@@ -2097,8 +2082,7 @@ static void refresh_dots(void)
 			hc = lv_color_hex(live);
 			break;
 		}
-		lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-		lv_obj_set_style_bg_color(dot, hc, 0);
+		lv_obj_set_style_text_color(link_lbl, hc, 0);
 	}
 
 	if (!pip[0]) {
@@ -2883,7 +2867,6 @@ void usage_view_apply_theme(void)
 	lv_obj_set_style_bg_color(gauge_scr, COL_BG, 0);
 	lv_obj_set_style_text_color(title_lbl, COL_DIM, 0);
 	lv_obj_set_style_text_color(age_lbl, COL_DIM, 0);
-	lv_obj_set_style_text_color(link_lbl, COL_DIM, 0);
 	lv_obj_set_style_text_color(clock_lbl, COL_DIM, 0);
 	lv_obj_set_style_text_color(chev_r, COL_GREY, 0);
 	lv_obj_set_style_text_color(chev_l, COL_GREY, 0);

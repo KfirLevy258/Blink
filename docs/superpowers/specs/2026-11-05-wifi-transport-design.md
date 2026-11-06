@@ -512,10 +512,15 @@ rate-limit starvation it allows.
 
 ### 5.7 What the board shows
 
-- **Link mark** on the gauge screen, next to the status dot:
-  `LV_SYMBOL_USB` on USB, `LV_SYMBOL_WIFI` on WiFi, nothing when unpaired and
-  on USB (the panel looks exactly as it does today for every customer who
-  never opts in). Both glyphs are in the Montserrat fonts already enabled.
+- **Link icon** on the gauge screen, top right (owner decision 2026-11-07:
+  "remove the right top dot ... and just use the usb/wifi logo instead -
+  change the color based on the status"). The health dot is gone; this icon
+  sits where it was and is never hidden. `LV_SYMBOL_WIFI` on a WiFi link,
+  `LV_SYMBOL_USB` on USB or no link. Its colour is the dot's old data-health
+  colour: theme live (OK, or stale on another page), theme stale (stale on this
+  page), red (error), grey (disconnected). This supersedes the earlier "nothing
+  when unpaired, panel pixel-identical" rule: every gauge scene changes. Both
+  glyphs are in the Montserrat fonts already enabled.
 - **Settings > Connection**, a fifth tile, read-only:
   - `Link: USB cable` / `Link: WiFi`
   - `Network: <ssid>` (through `fmt_ascii`, ellipsised)
