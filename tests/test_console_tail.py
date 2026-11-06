@@ -136,3 +136,17 @@ def test_no_raw_flag():
         ct.main(["/dev/fake", "--raw"], open_port=lambda p: FakeSerial([]),
                 out=io.StringIO())
     assert e.value.code == 2
+
+
+def test_ctrl_c_inside_print_exits_cleanly():
+    """Review of Task 0.1: only ser.read caught KeyboardInterrupt, so Ctrl-C
+    landing in print (or the --tap write) came out as a traceback."""
+    class Out:
+        def write(self, s):
+            raise KeyboardInterrupt
+
+        def flush(self):
+            pass
+
+    ser = FakeSerial([b"hello\n"])
+    assert ct.main(["/dev/x"], open_port=lambda p: ser, out=Out()) == 0

@@ -1436,6 +1436,19 @@ def test_redact_is_a_field_allowlist():
     assert protocol.redact({"t": "nope"}) == {"t": "(unknown)"}
     assert protocol.redact({"no": "t"}) == {"t": "(unknown)"}
     assert protocol.redact("not a dict") == {"t": "(unknown)"}
+    # numeric fields: a string, even a short one, is not a number
+    assert protocol.redact({"t": "ota_ack", "off": "hello"}) == \
+        {"t": "ota_ack"}
+    assert protocol.redact({"t": "ota_ack", "off": True}) == {"t": "ota_ack"}
+    assert protocol.redact({"t": "ota_ack", "off": 16384}) == \
+        {"t": "ota_ack", "off": 16384}
+    assert protocol.redact({"t": "wifi_net", "i": "x", "n": 3}) == \
+        {"t": "wifi_net", "n": 3}
+    assert protocol.redact({"t": "usage", "session_pct": "41"}) == \
+        {"t": "usage"}
+    assert protocol.redact({"t": "usage", "session_pct": 4.5, "weekly_pct": 3,
+                            "stale": True}) == \
+        {"t": "usage", "session_pct": 4.5, "weekly_pct": 3, "stale": True}
     # a string past 64 characters is somebody's text
     assert protocol.redact({"t": "usage", "src": "x" * 65}) == {"t": "usage"}
     assert protocol.redact({"t": "usage", "src": "x" * 64})["src"] == "x" * 64

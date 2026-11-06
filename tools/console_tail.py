@@ -65,25 +65,29 @@ def main(argv, open_port=None, out=sys.stdout) -> int:
         return 2
     pending = b""
     try:
-        while True:
-            try:
-                chunk = ser.read(256)
-            except KeyboardInterrupt:
-                return 0
-            except Exception as e:
-                print(f"the port went away: {type(e).__name__}",
-                      file=sys.stderr)
-                return 1
-            *whole, pending = (pending + chunk).split(b"\n")
-            for raw in whole:
-                line = logbook.tap_console_line(
-                    raw.decode("utf-8", errors="replace").rstrip("\r"))
-                print(line, file=out, flush=True)
-                if args.tap:
-                    with open(args.tap, "a", encoding="utf-8") as f:
-                        f.write(json.dumps({"dir": "console",
-                                            "t": time.time(),
-                                            "line": line}) + "\n")
+        try:
+            while True:
+                try:
+                    chunk = ser.read(256)
+                except KeyboardInterrupt:
+                    return 0
+                except Exception as e:
+                    print(f"the port went away: {type(e).__name__}",
+                          file=sys.stderr)
+                    return 1
+                *whole, pending = (pending + chunk).split(b"\n")
+                for raw in whole:
+                    line = logbook.tap_console_line(
+                        raw.decode("utf-8", errors="replace").rstrip("\r"))
+                    print(line, file=out, flush=True)
+                    if args.tap:
+                        with open(args.tap, "a", encoding="utf-8") as f:
+                            f.write(json.dumps({"dir": "console",
+                                                "t": time.time(),
+                                                "line": line}) + "\n")
+        except KeyboardInterrupt:
+            # Ctrl-C can land in print or the --tap write, not only in read.
+            return 0
     finally:
         close = getattr(ser, "close", None)
         if close:

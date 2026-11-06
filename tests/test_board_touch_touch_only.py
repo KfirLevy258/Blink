@@ -135,3 +135,32 @@ def test_bench_scripts_have_no_injection(path):
             assert s.args[0] in WIDGETS, (path.name, s.line, s.args[0])
         if s.cmd == "tap":
             assert s.args[0] in bt.TARGETS, (path.name, s.line)
+
+
+def test_skip_missing_does_not_skip_a_tap_under_a_notice():
+    # settings.back needs scr=settings. With a notice up on the settings
+    # screen the tap must dismiss it and go ahead, as it does without the
+    # flag; the raw state has modal=notice, which is not "another screen".
+    b, link = _bench(skip_missing=True)
+    link.state.update(scr="settings", modal="notice", nt="ota")
+    orig = link.write
+
+    def write(raw):
+        if json.loads(raw).get("op") == "dismiss":
+            link.state.update(modal="none")
+        orig(raw)
+    link.write = write
+    b.run_script(bt.parse_script("tap settings.back\n"))
+    assert "skip tap" not in b.out.getvalue()
+    assert "notice dismissed" in b.out.getvalue()
+
+
+def test_touch_only_install_press_does_not_raise_at_the_end():
+    # end_install's ota_error / ota_none are not injector types; send()
+    # raised ValueError at the end of the run.
+    b, link = _bench(rows=[_w(0, "Update now")], touch_only=True)
+    b.install_pressed = True
+    b.run_with_restore([], restore=False)
+    assert set(_types(link)) <= bt.INJECT_TYPES
+    assert b.install_pressed is False
+    assert "left for the daemon" in b.out.getvalue()

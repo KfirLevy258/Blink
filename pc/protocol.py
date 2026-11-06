@@ -262,6 +262,20 @@ TAP_ENUMS = {
         "WiFi self-test failed", "Could not forget WiFi. Try again."}),
     "err": frozenset({"", "unconfirmed"}),
 }
+# Fields that are numbers on the wire (spec S6.1, S7.5). Review of Task 0.1:
+# redact() kept any string of 64 characters or fewer in them, so a board
+# printing text under `off` got it into the transcript. _INT_FIELDS must be a
+# real int (a bool is not one); _FLAG_FIELDS and _USAGE_NUM take an int, float
+# or bool (usage percentages are floats, stale and the p2 flags go out as
+# either) and reject only a string.
+_INT_FIELDS = frozenset({"off", "i", "n", "busy", "theme", "stored", "tp",
+                         "bl", "slp", "size", "epoch", "utc_offset_min"})
+_NUM_FIELDS = frozenset({
+    "ok", "done", "editing", "session_pct", "session_resets_in_s",
+    "weekly_pct", "weekly_resets_in_s", "stale", "fable_pct", "sonnet_pct",
+    "opus_pct", "n_sess", "n_run", "n_wait", "n_stuck", "n_agents",
+    "p2_session_pct", "p2_weekly_pct", "p2_s_in_s", "p2_w_in_s", "p2_stale",
+    "burn_pph", "age_s", "p2_age_s", "active_age_s"})
 _KID = re.compile(r"[0-9a-f]{8}\Z")
 TAP_STR_MAX = 64
 TAP_UNKNOWN = "(unknown)"
@@ -288,6 +302,12 @@ def redact(msg) -> dict:
                 continue
         elif k == "kid":
             if not isinstance(v, str) or not _KID.match(v):
+                continue
+        elif k in _INT_FIELDS:
+            if not isinstance(v, int) or isinstance(v, bool):
+                continue
+        elif k in _NUM_FIELDS:
+            if isinstance(v, str):
                 continue
         elif isinstance(v, str) and len(v) > TAP_STR_MAX:
             continue

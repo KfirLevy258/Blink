@@ -1573,10 +1573,12 @@ class Bench:
         # nothing, and the board's ping, ota_query and theme_edit go
         # unanswered; the board's own watchdogs are not what is under test.
         self.touch_only = touch_only
-        # --skip-missing (bench only): a click, tap or expect-widget on a
-        # widget that is not on the panel (for a tap: a target whose screen
-        # the board is not on) logs a skip and goes on. Only that step is
-        # skipped; a later expect that depended on it still fails.
+        # --skip-missing (bench only): a click, tap, expect-widget or
+        # wait-widget on a widget that is not on the panel (for a tap: a
+        # target whose scr or ov the board is not on; a notice or a doze does
+        # not count, run_target clears those) logs a skip and goes on. Only
+        # that step is skipped; a later expect that depended on it still
+        # fails.
         self.skip_missing = skip_missing
         if touch_only:
             edit_reply = None
@@ -2367,6 +2369,15 @@ class Bench:
         only put up a failure notice, on a bench board."""
         if not (self.ota_flash_pending or self.install_pressed):
             return
+        if self.touch_only:
+            # ota_error and ota_none are not injector types: send() would
+            # raise. The bench has not spoken, so there is no consent of
+            # its own to withdraw; the board's session owner answers it.
+            self.say("--touch-only: the install press is left for the "
+                     "daemon to answer")
+            self.ota_flash_pending = False
+            self.install_pressed = False
+            return
         if not self.ota_flash_pending:
             self._wait(lambda evs: next(
                 (e for e in evs if e["t"] == "ota_flash"), None),
@@ -2404,9 +2415,12 @@ class Bench:
     def run_step(self, s):
         if self.skip_missing and s.cmd == "tap":
             st = self.query_state()
+            # `modal` is left out: a notice on top is what run_target would
+            # dismiss and go ahead, so it is not "another screen".
             if st is not None and any(
                     str(st[k]) != str(v)
-                    for k, v in TARGETS[s.args[0]].needs.items()):
+                    for k, v in TARGETS[s.args[0]].needs.items()
+                    if k != "modal"):
                 self.say(f"skip tap {s.args[0]}: the board is not on its "
                          "screen (--skip-missing)")
                 return True

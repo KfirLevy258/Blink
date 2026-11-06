@@ -67,9 +67,10 @@ A5_PT = (b"Internet-Drafts are draft documents valid for a maximum of six "
          b"documents at any time. It is inappropriate to use Internet-Drafts"
          b" as reference material or to cite them other than as "
          b"/\xe2\x80\x9cwork in progress./\xe2\x80\x9d")
-# The tag is the RFC's own (A.5); the ciphertext was produced by an
-# independent implementation for the same inputs and agrees with the RFC's
-# printed first bytes and with this tag, which covers every byte of it.
+# The tag is the RFC's own (A.5). The ciphertext was NOT typed from the RFC:
+# it was generated with the `cryptography` package's ChaCha20Poly1305 for
+# these inputs, so the RFC's printed tag is what binds it (a Poly1305 tag
+# covers every ciphertext byte, and aead_open checks it).
 A5_CT = (
     "64a0861575861af460f062c79be643bd5e805cfd345cf389f108670ac76c8cb2"
     "4c6cfc18755d43eea09ee94e382d26b0bdb7b73c321b0100d4f03b7f355894cf"
@@ -101,7 +102,7 @@ def test_boundary_lengths_round_trip(n):
 
 @pytest.mark.parametrize("n", [1, 517])
 def test_a_flipped_bit_anywhere_fails(n):
-    aad = b"" * (n and 1)
+    aad = b"\x01\x02\x03" * (n and 1)
     pt = bytes(range(256)) * 3
     pt = pt[:n]
     ct, tag = wc.aead_seal(KEY00, bytes(12), aad, pt)
@@ -141,7 +142,7 @@ def test_auth_error_says_nothing_about_the_data():
 
 def test_rfc5869_case_1():
     """RFC 5869 appendix A.1, basic SHA-256."""
-    okm = wc.hkdf_sha256(bytes(range(13)), b"" * 22,
+    okm = wc.hkdf_sha256(bytes(range(13)), b"\x0b" * 22,
                          bytes(range(0xF0, 0xFA)), 42)
     assert okm.hex() == ("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c"
                          "5db02d56ecc4c5bf34007208d5b887185865")
@@ -159,7 +160,7 @@ def test_rfc5869_case_2():
 
 def test_rfc5869_case_3():
     """RFC 5869 appendix A.3, empty salt and info."""
-    okm = wc.hkdf_sha256(b"", b"" * 22, b"", 42)
+    okm = wc.hkdf_sha256(b"", b"\x0b" * 22, b"", 42)
     assert okm.hex() == ("8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879e"
                          "c3454e5f3c738d2d9d201395faa4b61a96c8")
 
