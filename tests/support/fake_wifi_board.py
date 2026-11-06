@@ -40,7 +40,9 @@ class FakeWifiBoard:
                  stall_m1=False, close_after_m1=False, garbage_frame=False,
                  ping_interval_s: float = 10.0, close_on_length=None,
                  verify_window: bool = False, usb_active: bool = False,
-                 extra_lines=(), hello_at_start: bool = False):
+                 extra_lines=(), hello_at_start: bool = False,
+                 ack_delay_s: float = 0.0, forget_avail: bool = False,
+                 bad_hash: bool = False):
         self.key, self.port = key, port
         self.wrong_key, self.stall_m1 = wrong_key, stall_m1
         self.close_after_m1, self.garbage_frame = close_after_m1, garbage_frame
@@ -49,6 +51,14 @@ class FakeWifiBoard:
         self.usb_active = usb_active or verify_window
         # A real board says hello once, at boot; a session starts silent.
         self.hello_at_start = hello_at_start
+        # Acks held back this long, to prove the daemon's loop keeps
+        # answering pings while its window is full.
+        self.ack_delay_s = ack_delay_s
+        # A board reset since its offer holds none (ota_begin -> "refused"),
+        # and one whose image fails the hash answers err "failed" at ota_end.
+        self.forget_avail, self.bad_hash = forget_avail, bad_hash
+        self.avail_sha = None
+        self.avail_size = -1            # from the ota_avail it saw (spec S9.3)
         self.extra_lines = list(extra_lines)    # sent after wifi_state
         self.lines, self.pongs = [], 0
         self.ota_sink, self.logo_sink = bytearray(), bytearray()
@@ -174,7 +184,10 @@ class FakeWifiBoard:
     def _session(self, c):
         nxt = time.monotonic() + self.ping_interval_s
         sinks = {}
+        held = []
         while not self._stop.is_set():
+            while held and held[0][0] <= time.monotonic():
+                self._line(c, held.pop(0)[1])
             if time.monotonic() >= nxt:
                 self._line(c, {"t": "ping"})
                 nxt += self.ping_interval_s
@@ -198,9 +211,24 @@ class FakeWifiBoard:
                         self._line(c, extra)
                 elif t == "pong":
                     self.pongs += 1
+                elif t == "ota_avail":
+                    if not self.forget_avail:
+                        self.avail_size = msg.get("size", -1)
+                        self.avail_sha = msg.get("sha256")
+                elif t == "ota_end":
+                    ok = (not self.bad_hash and len(self.ota_sink) == self.avail_size
+                          and hashlib.sha256(bytes(self.ota_sink)).hexdigest()
+                          == self.avail_sha)
+                    if not ok:
+                        self._line(c, {"t": "ota_ack", "err": "failed"})
+                    else:
+                        return          # sealed: the board reboots, the session drops
+                elif t == "ota_begin" and self.avail_size < 0:
+                    self._line(c, {"t": "ota_ack", "err": "refused"})
                 elif t in ("ota_begin", "logo_begin"):
                     kind = b"O" if t == "ota_begin" else b"G"
-                    sinks[kind] = [msg.get("size", -1), 0, "ota_ack" if kind == b"O" else "logo_ack"]
+                    size = self.avail_size if kind == b"O" else msg.get("size", -1)
+                    sinks[kind] = [size, 0, "ota_ack" if kind == b"O" else "logo_ack"]
                     self._line(c, {"t": sinks[kind][2], "off": 0})
             else:
                 off = struct.unpack(">I", body[:4])[0]
@@ -212,4 +240,8 @@ class FakeWifiBoard:
                 size, _, name = sinks.get(typ, [-1, 0, "ota_ack"])
                 got = len(sink)
                 if got // ACK_STEP > before // ACK_STEP or got == size:
-                    self._line(c, {"t": name, "off": got})
+                    ack = {"t": name, "off": got}
+                    if self.ack_delay_s:
+                        held.append((time.monotonic() + self.ack_delay_s, ack))
+                    else:
+                        self._line(c, ack)

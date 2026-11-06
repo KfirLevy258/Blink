@@ -1068,7 +1068,7 @@ def ota_avail(version, size, sha256, app=None):
     return msg
 
 
-def ota_begin(version, size=None):
+def ota_begin(version):
     """The firmware write is starting now.
 
     Distinct from consent. The board used to persist "I am installing X" the
@@ -1079,12 +1079,7 @@ def ota_begin(version, size=None):
     the firmware install has even begun. Then the real install finishes with
     the breadcrumb already spent, so the success notice never appears either.
     """
-    msg = {"t": "ota_begin", "v": VERSION, "version": version}
-    if size is not None:
-        # WiFi only: the stream's length, so the board can ack its final,
-        # not-a-multiple-of-16-KiB chunk (spec S9.3). Additive; USB omits it.
-        msg["size"] = int(size)
-    return msg
+    return {"t": "ota_begin", "v": VERSION, "version": version}
 
 
 def ota_resume(version):

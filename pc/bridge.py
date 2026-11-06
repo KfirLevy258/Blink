@@ -127,7 +127,6 @@ class Bridge:
         # is a stream pumped from pump(), not a call that owns the port.
         self._link = link
         self._ota_stream = None
-        self._ota_sealed = False
         # What the board says it is. Set from hello; None until it speaks.
         self._board_proto = None
         self._board_fw = None
@@ -744,10 +743,11 @@ class Bridge:
         # nothing else can come between this and esptool taking it away.
         if self._link is not None:
             # Over WiFi the board writes its own slot 1 and acks as it goes;
-            # the image follows the ready ack, from pump() (spec S9.3-4).
+            # the image follows the ready ack, from pump() (spec S9.3-4). The
+            # board took its size from the ota_avail it consented to.
             self._ota_stream = wifi_ota.WifiOtaStream(
                 blob, version, now=self._now)
-            self._write(protocol.ota_begin(version, size=len(blob)))
+            self._write(protocol.ota_begin(version))
             return
         self._write(protocol.ota_begin(version))
         self._flash(blob, version)
@@ -755,28 +755,29 @@ class Bridge:
     def ota_streaming(self) -> bool:
         return self._ota_stream is not None
 
-    def take_ota_sealed(self) -> bool:
-        """True once, after ota_end went out: the board is about to reboot,
-        and the reconnect should poll for it (wait_for_link after_ota)."""
-        sealed, self._ota_sealed = self._ota_sealed, False
-        return sealed
+    def ota_sealing(self) -> bool:
+        """ota_end is out and the board has not said no: it is verifying,
+        and its reboot drops the session. A reconnect then polls for it
+        (wait_for_link after_ota). False again if its verdict is an err."""
+        s = self._ota_stream
+        return s is not None and s.end_sent
 
     def _pump_ota(self):
         s = self._ota_stream
         if s is None:
             return
-        s.pump(self._link)          # a dead session raises: the loop reconnects
+        s.pump(self._link, self._write)     # a dead session raises: the loop reconnects
         res = s.done()
         if res is None:
             return
         self._ota_stream = None
-        ok, why = res
-        if ok:
-            self._ota_sealed = True
-            print("[bridge] ota: image sent", file=sys.stderr)
-        else:
-            print(f"[bridge] ota: FAILED: {why}", file=sys.stderr)
-            self._write(protocol.ota_error(why))
+        why = res[1]
+        print(f"[bridge] ota: FAILED: {why}", file=sys.stderr)
+        self._write(protocol.ota_error(why))
+        if s.refused:
+            # The board holds no offer (it was reset since): say it again, so
+            # the row returns to "Install". Not a retry -- the owner taps.
+            self._on_ota_query(self._board_fw or "0.0.0")
 
     # --- themes ---
 

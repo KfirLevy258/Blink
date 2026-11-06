@@ -912,12 +912,12 @@ def exit_on_sigterm():
 @contextlib.contextmanager
 def no_exit_while(what):
     """A SIGTERM during the block waits for the block, then exits."""
-    _TERM["holding"] = what
+    outer, _TERM["holding"] = _TERM["holding"], what
     try:
         yield
     finally:
-        _TERM["holding"] = None
-        if _TERM["pending"]:
+        _TERM["holding"] = outer
+        if _TERM["pending"] and not outer:
             sys.exit(0)
 
 
@@ -1200,10 +1200,13 @@ def main(argv=None):
     # middle would cut the stream, and the board would show a failed update.
     ota_hold, ota_after = None, False
 
+    def _release(hold):
+        if hold is not None:
+            hold.close()        # exits at once if a stop was waiting
+        return None
+
     while True:  # reconnect loop
-        if ota_hold is not None:
-            ota_hold.close()        # exits at once if a stop was waiting
-            ota_hold = None
+        ota_hold = _release(ota_hold)
         try:
             # A PLAIN open, with DTR and RTS left exactly as the OS sets them.
             #
@@ -1451,6 +1454,10 @@ def main(argv=None):
             # first usage line after it boots names them again; the serial-
             # lost handler below does the same, and status_page.WANT_TTL_S
             # covers the paths that cannot say so and run out instead.
+            if via == "wifi":
+                # Backstop: a WiFi flash is Bridge's stream, never esptool.
+                ser.close()
+                raise Reflashed("plug the board in to update")
             svc_watch.want(())
             time.sleep(4)
             print(f"[bridge] ota: closing port to flash {version}",
@@ -1620,10 +1627,8 @@ def main(argv=None):
                     ota_hold = contextlib.ExitStack()
                     ota_hold.enter_context(no_exit_while("firmware write"))
                 elif not bridge.ota_streaming() and ota_hold is not None:
-                    ota_hold.close()
-                    ota_hold = None
-                if bridge.take_ota_sealed():
-                    ota_after = True
+                    ota_hold = _release(ota_hold)
+                ota_after = bridge.ota_sealing()
                 if time.monotonic() >= next_link_write:
                     # Only ever "usb" or "wifi": the record is the ACTIVE
                     # link, written when it changes and every 60 s.
@@ -1674,7 +1679,10 @@ def main(argv=None):
                 # wiped hook too -- the watchdog's own interval keeps either
                 # path from checking more often than it should.
                 _upkeep()
-                if frozen and time.monotonic() >= next_update:
+                # Not mid-stream: the download blocks the loop past the 30 s
+                # stall, and the restart would replace the process under it.
+                if (frozen and time.monotonic() >= next_update
+                        and not bridge.ota_streaming()):
                     next_update = time.monotonic() + UPDATE_INTERVAL_S
                     try:
                         _self_update_tick(self_bin)
@@ -1683,6 +1691,9 @@ def main(argv=None):
                         # gauge working is worth more than the gauge being new.
                         print(f"[update] check failed: {e}", file=sys.stderr)
         except LeaveWifi:
+            # Before choose(), which can block: a hold left on would make a
+            # stop wait for a stream that is already dead.
+            ota_hold, ota_after = _release(ota_hold), False
             ser.close()
             link_state.wifi_dropped(time.monotonic())
             link_state.wifi_due = 0.0       # and back at once if the port fails
@@ -1698,10 +1709,12 @@ def main(argv=None):
             # ("chip has flash encryption", "esptool not found") in its log and
             # no way to say it.
             report_failure = r.why
+            ota_hold, ota_after = _release(ota_hold), False
             time.sleep(2)
             via, target = choose()
             continue
         except (serial.SerialException, OSError) as e:
+            ota_hold = _release(ota_hold)     # as at LeaveWifi
             if via == "wifi":
                 print("[wifi] link lost", file=sys.stderr)
                 link_state.wifi_dropped(time.monotonic())

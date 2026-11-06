@@ -222,7 +222,9 @@ def test_blobs_reach_the_fake_board_and_ack(board):
     b = board()
     s = connect(b)
     sess = ws.client_handshake(s, KEY)
-    s.sendall(sess.seal_line(b'{"t":"ota_begin","size":20000}\n'))
+    # The board takes the size from the offer it consented to (spec S9.3).
+    s.sendall(sess.seal_line(b'{"t":"ota_avail","size":20000}\n'))
+    s.sendall(sess.seal_line(b'{"t":"ota_begin"}\n'))
     img = os.urandom(20000)
     for off in range(0, len(img), 512):
         s.sendall(sess.seal_blob(b"O", off, img[off:off + 512]))

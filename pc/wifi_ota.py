@@ -20,7 +20,11 @@ WINDOW = 32 * 1024          # unacknowledged bytes in flight; the board acks eve
 ACK_EVERY = 16 * 1024
 # Fixed, board-facing: ota_error carries it to a 47-character panel line.
 UNCONFIRMED = "board has not confirmed its last update"
-STALLED = "update stalled"
+# No ack inside stall_s: a board that fell silent, or an ack the board lost
+# to a full TX ring (it has no retry). Either way the stream is over.
+STALLED = "Board stopped acknowledging the update"
+REJECTED = "Board rejected the update image"
+REFUSED = "Board refused the update"
 
 
 class WifiOtaStream:
@@ -31,6 +35,7 @@ class WifiOtaStream:
         self._sent = self._acked = 0
         self._ready = self._end_due = self._end_sent = False
         self._result = None
+        self.refused = False            # ota_begin refused: the board holds no offer
         self._progress_at = now()       # a board that never says ready stalls too
         self._pct = -1
 
@@ -46,8 +51,9 @@ class WifiOtaStream:
         if err:
             # Only "unconfirmed" is defined (D38); any err is a refusal, and
             # its text is the board's, so the reason said is ours.
+            self.refused = err == "refused"
             self._result = (False, UNCONFIRMED if err == "unconfirmed"
-                            else "board refused the update")
+                            else REJECTED if err == "failed" else REFUSED)
             return
         if not isinstance(off, int) or isinstance(off, bool):
             return
@@ -62,18 +68,25 @@ class WifiOtaStream:
             self._pct = pct
             self._end_due = off == len(self._blob)
 
-    def pump(self, link) -> None:
-        """Send up to WINDOW unacked bytes; ota_end once the last is acked."""
-        if self._result is not None or self._end_sent:
+    def pump(self, link, write=None) -> None:
+        """Send up to WINDOW unacked bytes; ota_end once the last is acked.
+        `write(msg)` carries ota_end like every other line (tapped, counted);
+        without it the line goes straight to the link."""
+        if self._result is not None:
             return
         if self._now() - self._progress_at > self._stall_s:
             self._result = (False, STALLED)
             return
+        if self._end_sent:
+            return              # sealing: the board's verdict is an err ack or a reboot
         if self._end_due:
-            raw, _ = protocol.encode_checked(protocol.ota_end(len(self._blob)))
-            link.write(raw)
+            end = protocol.ota_end(len(self._blob))
+            if write is not None:
+                write(end)
+            else:
+                link.write(protocol.encode_checked(end)[0])
             self._end_sent = True
-            self._result = (True, "")
+            self._progress_at = self._now()
             return
         if not self._ready:
             return
@@ -83,7 +96,12 @@ class WifiOtaStream:
             link.write_blob(b"O", self._sent, chunk)
             self._sent += len(chunk)
 
+    @property
+    def end_sent(self) -> bool:
+        return self._end_sent
+
     def done(self):
-        """None while running; (True, "") once ota_end is sent, or
-        (False, reason)."""
+        """None while running, and through sealing: the board sends no
+        success reply, it reboots and the session drops. (False, reason)
+        once it refused, failed to verify, or went quiet."""
         return self._result
