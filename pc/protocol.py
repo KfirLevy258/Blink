@@ -188,6 +188,9 @@ WIRE_TYPES = frozenset({
     "logo_chunk", "logo_end", "logo_remove", "pref_set",
     # board -> host
     "wifi_net", "wifi_state", "ota_ack", "logo_ack", "logo_state",
+    # The verify-only candidate's one exchange (S5.4): the PC's line is
+    # sealed on the WiFi session, so it never crosses the cable.
+    "verify", "verified",
 })
 
 UNKNOWN_TYPE = "(unknown type)"
@@ -249,6 +252,7 @@ TAP_FIELDS = {
     "logo_begin": frozenset({"t", "size"}), "logo_chunk": frozenset({"t", "off"}),
     "logo_end": _T, "logo_remove": _T,
     "pref_set": frozenset({"t", "main_src", "focus", "view", "bright"}),
+    "verify": _T, "verified": _T,
 }
 
 # The fixed words of the WiFi lines (spec S5.7, S6.1). A string in one of

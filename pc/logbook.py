@@ -409,6 +409,12 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[wifi] paired",
     "[wifi] forgotten",
     "[wifi] forget failed",
+    # wl_server.c (spec S5.8): the session's three fixed lines and the
+    # verify-only candidate's one.
+    "[wifi] session open",
+    "[wifi] session closed",
+    "[wifi] handshake refused",
+    "[wifi] verified",
 ), key=len, reverse=True))
 
 # "[ota] update %s: wanted %s, running %s (from %s)" (main.c:233) is the line

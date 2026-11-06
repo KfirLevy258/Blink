@@ -6,9 +6,8 @@
  * lets tests/link/host_test.c run it on a laptop.
  *
  * Threading: the state is written by two threads (main via link_usb_heard,
- * link_verify_window; the network thread via the rest). Nothing here locks,
- * and the int64_t fields tear on Xtensa (32-bit), so Task 2.5 must serialise
- * calls (one mutex around them).
+ * link_verify_window, link_emit; the network thread via the rest). Every call
+ * takes one spinlock in link.c, because the int64_t fields tear on Xtensa.
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -24,6 +23,7 @@ enum link_kind { LINK_NONE, LINK_USB, LINK_WIFI };
 void link_usb_heard(int64_t now_ms);
 /* The network thread has an authenticated, live session (never a verify one). */
 void link_wifi_up(bool up);
+bool link_wifi_is_up(void);
 /* USB if heard within LINK_HOST_TIMEOUT_MS, else WIFI if a session is up. */
 enum link_kind link_active(int64_t now_ms);
 

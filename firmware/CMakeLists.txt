@@ -44,7 +44,8 @@ target_sources(app PRIVATE
 )
 
 # The radio's station half (spec S5.1); on in every image (Kconfig).
-target_sources_ifdef(CONFIG_BLINK_WIFI_LINK app PRIVATE src/net_link.c)
+target_sources_ifdef(CONFIG_BLINK_WIFI_LINK app PRIVATE src/net_link.c
+		     src/wl_server.c src/wl_hs.c src/wl_frame.c)
 
 # Diagnostic only; CONFIG_BLINK_TOUCH_TRACE is off in release builds.
 target_sources_ifdef(CONFIG_BLINK_TOUCH_TRACE app PRIVATE src/touch_trace.c)

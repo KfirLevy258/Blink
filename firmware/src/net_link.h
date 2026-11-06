@@ -5,9 +5,8 @@
  * The station half of the radio (spec S5.1): scan, join, and down. Free of
  * Zephyr includes, so host tests and the panel's pure code can include it.
  *
- * Every request returns at once. The work runs in net_link_work(), on Task
- * 2.5's network thread once it exists and until then on a work queue of its
- * own (net_link.c), never on the main thread: a join waits up to 30 s for
+ * Every request returns at once. The work runs in net_link_work(), on the
+ * network thread (wl_server.c), never on the main thread: a join waits up to 30 s for
  * the router.
  *
  * An unpaired board never brings the interface up (D42). A scan brings it
@@ -56,6 +55,8 @@ void net_link_request_down(void);
  * NL_FAILED with NL_WHY_SELFTEST ("WiFi self-test failed") for the
  * Connection screen. Until reboot. */
 void net_link_refuse_selftest(void);
+/* Runs on wl_server's thread. net_link_due() says whether a call has work. */
+bool net_link_due(void);
 void net_link_work(void);
 
 /*
@@ -113,6 +114,25 @@ static inline void net_link_scan_add(struct net_link_ap *tab, int *n,
 	tab[weakest].ssid_len = (uint8_t)len;
 	tab[weakest].rssi = rssi;
 	tab[weakest].sec = sec;
+}
+
+/* The wait before automatic rejoin attempt n (0-based): 5 s, doubling to
+ * 300 s (5, 10, 20, 40, 80, 160, 300), then 30 min for good. A cap of 300 s
+ * limits the rate, not the total: 288 attempts a day, and each connection
+ * leaks about 40 B inside the WiFi blob. 30 min is 48 a day, and a router
+ * back after a power cut is found within half an hour. Pure, so
+ * tests/net_link/host_test.c pins it. */
+static inline int64_t net_link_rejoin_delay_ms(unsigned int n)
+{
+	int64_t d = 5000;
+
+	if (n >= 7) {
+		return 1800000;
+	}
+	while (n-- > 0 && d < 300000) {
+		d *= 2;
+	}
+	return d > 300000 ? 300000 : d;
 }
 
 /* Strongest first. Insertion sort: twenty entries, once a scan. */

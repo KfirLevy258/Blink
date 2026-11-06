@@ -99,5 +99,16 @@ int main(void)
 	}
 	eq("in falling order throughout", sorted, 1);
 
+	/* --- the rejoin backoff: 5 s doubling, capped at 5 min ---------- */
+	eq("first rejoin after 5 s", (int)net_link_rejoin_delay_ms(0), 5000);
+	eq("then 10 s", (int)net_link_rejoin_delay_ms(1), 10000);
+	eq("then 20 s", (int)net_link_rejoin_delay_ms(2), 20000);
+	eq("the sixth wait is 160 s", (int)net_link_rejoin_delay_ms(5), 160000);
+	eq("the seventh is capped at 300 s", (int)net_link_rejoin_delay_ms(6),
+	   300000);
+	eq("then 30 min", (int)net_link_rejoin_delay_ms(7), 1800000);
+	eq("and stays there for good", (int)net_link_rejoin_delay_ms(4000000000u),
+	   1800000);
+
 	return fails ? 1 : 0;
 }

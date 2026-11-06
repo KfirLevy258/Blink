@@ -40,7 +40,9 @@
 #include <errno.h>
 #include <string.h>
 
+#include "cfg_store.h"
 #include "net_link.h"
+#include "wl_server.h"
 
 /* A connect result of 0 is our "joined": with this option the driver raises
  * it at DHCP_BOUND, not at association (esp_wifi_drv.c:83, :305), so it means
@@ -66,6 +68,9 @@ BUILD_ASSERT(IS_ENABLED(CONFIG_ESP32_WIFI_STA_AUTO_DHCPV4),
 #define OP_DOWN BIT(0)
 #define OP_JOIN BIT(1)
 #define OP_SCAN BIT(2)
+/* A down queued by the router dropping us, kept apart from a requested one:
+ * it is stale if a join has come up since (see net_link_work). */
+#define OP_LOST_DOWN BIT(3)
 
 static struct net_if *iface;
 static struct net_mgmt_event_callback wifi_cb;
@@ -74,6 +79,14 @@ static K_SEM_DEFINE(sem_disc, 0, 1);
 static K_SEM_DEFINE(sem_scan, 0, 1);
 
 static atomic_t ops;
+/* Rejoin (Task 2.5): the lost-network event asks (net_mgmt thread), a
+ * requested join or down cancels (any thread); everything else here is the
+ * network thread's alone, so the int64_t times never tear. */
+static atomic_t rejoin_want, rejoin_cancel;
+static int64_t rejoin_at;	/* 0: none scheduled */
+static unsigned int rejoin_n;
+static int64_t rssi_at;
+static bool boot_checked;
 static atomic_t rssi_cache = ATOMIC_INIT(-127);
 static void kick(void);
 static atomic_t scanning;
@@ -81,6 +94,18 @@ static atomic_t run_ticket;
 static uint32_t req_seq;	/* under lock */
 static uint32_t req_ticket;	/* under lock */
 static bool req_pending;	/* under lock: a request not yet taken by do_join */
+
+/* Caller holds `lock`. Every join, requested or automatic, takes its own
+ * ticket here and none is reused or skipped, so a rejoin can never be
+ * credited to a wifi_set candidate (proto trusts a result only when
+ * net_link_run_ticket() equals the ticket its request returned). */
+static uint32_t next_ticket(void)
+{
+	if (++req_seq == 0) {
+		req_seq = 1;
+	}
+	return req_seq;
+}
 static volatile enum net_link_state state = NL_OFF;
 static volatile enum net_link_why why = NL_WHY_NONE;
 /* Set once at boot by net_link_refuse_selftest(), never cleared: a board
@@ -149,9 +174,13 @@ static void wifi_evt(struct net_mgmt_event_callback *cb, uint64_t ev,
 			state = NL_OFF;
 			printk("[wifi] lost the network\n");
 			/* Without this the interface stayed admin-up with the
-			 * RF on while net_link_state() said off. The rejoin,
-			 * with its backoff, is Task 2.5's (cfg_get_pairing). */
-			atomic_or(&ops, OP_DOWN);
+			 * RF on while net_link_state() said off. The rejoin
+			 * follows with its backoff (net_link_work). */
+			atomic_or(&ops, OP_LOST_DOWN);
+			/* Unconditional: cfg_paired() takes the config lock,
+			 * which an event callback must not wait on. The work
+			 * asks it. */
+			atomic_set(&rejoin_want, 2);
 			kick();
 		}
 	} else if (ev == NET_EVENT_WIFI_SCAN_RESULT) {
@@ -220,8 +249,9 @@ static void do_down(bool keep_failed)
 		state = NL_OFF;
 	}
 	idle_at = 0;
-	/* 1. Sockets: Task 2.5's network thread owns every one and closes
-	 * them before it asks for down. Until it exists there are none. */
+	/* 1. Sockets: the network thread owns every one, and this runs on
+	 * that thread, so it closes them itself, before the disconnect. */
+	wl_server_close_all();
 	/* 2. Disconnect, and wait for the event, bounded. */
 	disconnect_wait();
 	/* 3. The interface, and DHCP with it. */
@@ -311,6 +341,10 @@ static void join_run(const uint8_t *ssid, size_t ssid_len, const char *psk,
 	why = NL_WHY_NONE;
 	idle_at = 0;
 	atomic_set(&run_ticket, (atomic_val_t)ticket);	/* after the state */
+	/* A lost-path down queued before this join must not tear it down. */
+	atomic_and(&ops, ~OP_LOST_DOWN);
+	/* Sockets of an old session end before the radio moves (D46 step 1). */
+	wl_server_close_all();
 	radio_up();
 
 	/* The security type comes from the scan: PSK on a WPA3-only network
@@ -433,15 +467,81 @@ static void rssi_refresh(void)
 	}
 }
 
+/* 5 s, doubling, capped at 5 min. Every connection attempt leaks about 40 B
+ * inside the WiFi blob, so a board whose router is gone for a weekend must
+ * not try every few seconds (spec S5.1). */
+static void auto_rejoin(void)
+{
+	uint8_t ssid[32], key[CFG_PAIR_KEY_LEN];
+	size_t len = 0;
+	char psk[sizeof(req_psk)];
+	uint32_t t;
+
+	if (!cfg_get_pairing(ssid, &len, psk, sizeof(psk), key)) {
+		rejoin_at = 0;	/* forgotten meanwhile */
+		return;
+	}
+	mbedtls_platform_zeroize(key, sizeof(key));
+	{
+		k_spinlock_key_t k = k_spin_lock(&lock);
+
+		t = next_ticket();
+		k_spin_unlock(&lock, k);
+	}
+	join_run(ssid, len, psk, t);
+	mbedtls_platform_zeroize(psk, sizeof(psk));
+	if (state == NL_UP) {
+		rejoin_n = 0;
+		rejoin_at = 0;
+	} else {
+		rejoin_at = k_uptime_get() + net_link_rejoin_delay_ms(rejoin_n);
+		if (rejoin_n < 30) {
+			rejoin_n++;
+		}
+	}
+}
+
+bool net_link_due(void)
+{
+	int64_t now = k_uptime_get();
+
+	return atomic_get(&ops) != 0 || !boot_checked ||
+	       atomic_get(&rejoin_want) || atomic_get(&rejoin_cancel) ||
+	       (rejoin_at != 0 && now >= rejoin_at) ||
+	       (idle_at != 0 && now >= idle_at) ||
+	       (state == NL_UP && now >= rssi_at);
+}
+
 void net_link_work(void)
 {
-	atomic_val_t o;
+	atomic_val_t o, want;
+	int64_t now;
 
 	if (iface == NULL) {
 		return;
 	}
+	if (!boot_checked) {
+		/* The one boot join, here and nowhere else: a paired board
+		 * whose self-test passed (D24; this thread does not start
+		 * otherwise). */
+		boot_checked = true;
+		if (!refused && cfg_paired()) {
+			atomic_set(&rejoin_want, 1);
+		}
+	}
 	o = atomic_clear(&ops);
-	if (o & OP_DOWN) {
+	if (atomic_clear(&rejoin_cancel)) {
+		rejoin_at = 0;
+	}
+	want = atomic_clear(&rejoin_want);
+	if (want != 0 && cfg_paired()) {
+		/* 1: boot, at once. 2: a lost network, the router a moment
+		 * first. */
+		rejoin_n = want == 2 ? 1 : 0;
+		rejoin_at = k_uptime_get() +
+			    (want == 2 ? net_link_rejoin_delay_ms(0) : 0);
+	}
+	if ((o & OP_DOWN) || ((o & OP_LOST_DOWN) && state != NL_UP)) {
 		do_down(false);
 	}
 	if (o & OP_JOIN) {
@@ -450,50 +550,33 @@ void net_link_work(void)
 	if (o & OP_SCAN) {
 		do_scan();
 	}
+	now = k_uptime_get();
+	if (rejoin_at != 0 && now >= rejoin_at && !refused &&
+	    !(o & OP_JOIN) && !atomic_get(&ops) &&
+	    state != NL_UP && state != NL_JOINING) {
+		auto_rejoin();
+	}
 	if (idle_at != 0 && k_uptime_get() >= idle_at &&
 	    state != NL_UP && state != NL_JOINING) {
 		do_down(true);
 	}
-	rssi_refresh();
-}
-
-/* --- until Task 2.5's thread: a work queue of its own ------------------ */
-
-/* Not the system work queue: a join blocks for up to 30 s, and the driver
- * and the net stack queue their own work there (it peaked at 804 B with the
- * radio up, spike thread table). 4096 B at priority 7 is what Task 2.5's
- * network thread will take over: below main (0) and the driver (5), above
- * the log thread (14), as the spike measured it. */
-#define NL_STACK 4096
-#define NL_PRIO 7
-static K_THREAD_STACK_DEFINE(nl_stack, NL_STACK);
-static struct k_work_q nl_q;
-static struct k_work_delayable nl_dw;
-
-static void nl_handler(struct k_work *w)
-{
-	ARG_UNUSED(w);
-	net_link_work();
-	if (state == NL_UP) {
-		/* Keeps the cached RSSI fresh for the panel's Signal row. */
-		(void)k_work_schedule_for_queue(&nl_q, &nl_dw, K_SECONDS(RSSI_EVERY_S));
-	} else if (idle_at != 0) {
-		int64_t left = idle_at - k_uptime_get();
-
-		(void)k_work_schedule_for_queue(&nl_q, &nl_dw,
-						K_MSEC(left > 0 ? left : 0));
+	if (state != NL_UP || now >= rssi_at) {
+		rssi_refresh();
+		rssi_at = now + RSSI_EVERY_S * 1000;
 	}
 }
 
+/* The thread that calls net_link_work() is Task 2.5's (wl_server.c): a join
+ * blocks for up to 30 s, which is why it is never the main thread, nor the
+ * system work queue the driver and net stack share. Its 4096 B at priority 7
+ * is what the spike measured (below main, the driver, above the log thread).
+ * It polls net_link_due() every tick, so a request is picked up within one. */
 static void kick(void)
 {
-	(void)k_work_reschedule_for_queue(&nl_q, &nl_dw, K_NO_WAIT);
 }
 
 static int net_link_init(void)
 {
-	const struct k_work_queue_config cfg = { .name = "net_link" };
-
 	iface = net_if_get_first_wifi();
 	if (iface == NULL) {
 		return 0;
@@ -507,9 +590,6 @@ static int net_link_init(void)
 	/* Zephyr brought it admin-up in net_init (POST_KERNEL); the RF itself
 	 * starts only on a connect or a scan, so nothing has run yet (D42). */
 	net_if_down(iface);
-	k_work_init_delayable(&nl_dw, nl_handler);
-	k_work_queue_start(&nl_q, nl_stack, K_THREAD_STACK_SIZEOF(nl_stack),
-			   NL_PRIO, &cfg);
 	return 0;
 }
 
@@ -571,12 +651,10 @@ uint32_t net_link_request_join(const uint8_t *ssid, size_t ssid_len, const char 
 	req_ssid_len = ssid_len;
 	memcpy(req_psk, psk, plen);
 	req_psk[plen] = '\0';
-	if (++req_seq == 0) {
-		req_seq = 1;
-	}
-	ticket = req_ticket = req_seq;
+	ticket = req_ticket = next_ticket();
 	req_pending = true;
 	k_spin_unlock(&lock, key);
+	atomic_set(&rejoin_cancel, 1);
 	atomic_or(&ops, OP_JOIN);
 	kick();
 	return ticket;
@@ -601,6 +679,7 @@ void net_link_request_down(void)
 		k_spin_unlock(&lock, key);
 	}
 	atomic_and(&ops, ~OP_JOIN);
+	atomic_set(&rejoin_cancel, 1);
 	atomic_or(&ops, OP_DOWN);
 	kick();
 }

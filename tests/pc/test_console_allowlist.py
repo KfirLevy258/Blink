@@ -88,6 +88,13 @@ LINES = [
     ("[wifi] paired", "[wifi] paired", []),
     ("[wifi] forgotten MyNet", "[wifi] forgotten", ["MyNet"]),
     ("[wifi] forget failed", "[wifi] forget failed", []),
+    # wl_server.c -- the session lines; a peer's address riding on one is cut
+    ("[wifi] session open", "[wifi] session open", []),
+    ("[wifi] session closed 192.168.1.9", "[wifi] session closed",
+     ["192.168.1.9"]),
+    ("[wifi] handshake refused: bad tag", "[wifi] handshake refused",
+     ["bad", "tag"]),
+    ("[wifi] verified", "[wifi] verified", []),
     # a known stem with something riding on the end of it
     ("[theme] saved SECRET-TAIL", "[theme] saved", ["SECRET-TAIL"]),
     # no tag the firmware uses: the bootloader, Zephyr, the touch tracer,
@@ -252,6 +259,7 @@ _FIELDS = {
     "edit_state": "t editing", "wifi_scan": "t", "wifi_set": "t",
     "wifi_forget": "t", "ota_end": "t", "logo_begin": "t", "logo_chunk": "t",
     "logo_end": "t", "logo_remove": "t", "pref_set": "t",
+    "verify": "t", "verified": "t",
 }
 
 

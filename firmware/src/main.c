@@ -32,6 +32,7 @@
 #include "mem_stats.h"
 #include "wl_crypto.h"
 #include "net_link.h"
+#include "wl_server.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
@@ -614,6 +615,13 @@ int main(void)
 	ui_touchfx_init();	/* light touch-echo feedback on every press */
 
 	cfg_init();
+	/* The network thread, after cfg_init (it reads the pairing) and only
+	 * when the self-test passed (D24). It owns the boot join and every
+	 * rejoin, paired or not (D47: an unpaired board's thread still serves a
+	 * scan or a join the page asks for). */
+	if (IS_ENABLED(CONFIG_BLINK_WIFI_LINK)) {
+		(void)wl_server_start();	/* -EPERM after a failed self-test */
+	}
 	/* The stored theme, before a single screen exists, so every screen is
 	 * born in it and nothing has to be repainted at boot. */
 	ui_theme_init();

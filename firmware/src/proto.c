@@ -28,6 +28,11 @@
 #include "ui_theme.h"
 #include "ui_settings.h"
 #include "touch_inject.h"
+#if defined(CONFIG_BLINK_WIFI_LINK)
+#include <errno.h>
+#include "wl_frame.h"
+#include "wl_server.h"
+#endif
 
 #define PROTO_VERSION BLINK_PROTO_VERSION
 #define PING_INTERVAL_MS 10000
@@ -465,7 +470,9 @@ static struct net_link_ap scan_tab[NET_LINK_SCAN_MAX];
 
 /* What the last wifi_state said, so a change is noticed once. */
 /* -2: an override was just sent, so the real state is still owed. */
-static int last_st = -1, last_why = -1, last_link = -1;
+static int last_st = 0, last_why = 0, last_link = 'u';
+/* (0, 0, 'u': what the boot join used to set. The boot join itself is the
+ * network thread's now, wl_server.c / net_link_work, gated on the self-test.) */
 
 /* A plain memset of a buffer that is never read again can be optimised
  * away; these held a password and the pairing key. */
@@ -765,25 +772,6 @@ static void wifi_poll(void)
 	}
 }
 
-/* A paired board joins at boot (the pairing is the opt-in; an unpaired one
- * never brings the radio up, D42). */
-static void wifi_boot_join(void)
-{
-	uint8_t ssid[32];
-	size_t ssid_len = 0;
-	char psk[CFG_PSK_MAX];
-	uint8_t key[CFG_PAIR_KEY_LEN];
-
-	if (cfg_get_pairing(ssid, &ssid_len, psk, sizeof(psk), key)) {
-		net_link_request_join(ssid, ssid_len, psk);
-	}
-	wipe(psk, sizeof(psk));
-	wipe(key, sizeof(key));
-	last_st = 0;
-	last_why = 0;
-	last_link = 'u';
-}
-
 static void dispatch(const char *json, enum proto_src src)
 {
 	char type[16];
@@ -802,6 +790,8 @@ static void dispatch(const char *json, enum proto_src src)
 	}
 #endif
 	last_host_ms = k_uptime_get();
+	/* A line off the WiFi session is not a USB host: counting it would put
+	 * the link back on USB and close the session that carried it. */
 	if (src == PROTO_SRC_USB) {
 		link_usb_heard(last_host_ms);
 	}
@@ -1355,6 +1345,51 @@ static void drain_rx(void)
 	}
 }
 
+#if defined(CONFIG_BLINK_WIFI_LINK)
+/*
+ * The WiFi session's frames, in arrival order (D34). An L frame is one line
+ * and meets the same over-long rule as the UART: a line that does not fit
+ * LINE_MAX is dropped whole, never split. O and G frames go to the sinks
+ * Tasks 5.1 and 6.3 register; with none, the session is closed, since
+ * nothing may be half-applied.
+ */
+static void drain_wifi(void)
+{
+	static uint8_t body[WL_PT_MAX];
+	uint8_t type;
+	int n;
+
+	/* Bounded, so a flooding peer cannot hold the main thread. */
+	for (int i = 0; i < WL_RX_FRAMES; i++) {
+		n = wl_server_rx_frame(&type, body, sizeof(body));
+		if (n == -EAGAIN) {
+			return;
+		}
+		if (n < 0) {
+			continue;
+		}
+		if (type != WL_T_LINE) {
+			wl_server_sink(type, body, (size_t)n);
+			continue;
+		}
+		/* One line per frame: a newline anywhere but the end is two
+		 * lines in one, refused whole. */
+		if (n > 1 && memchr(body, '\n', (size_t)n - 1) != NULL) {
+			continue;
+		}
+		while (n > 0 && (body[n - 1] == '\n' || body[n - 1] == '\r')) {
+			n--;
+		}
+		if (n > 0 && n < LINE_MAX) {
+			/* In place: line[] belongs to the UART, which may be
+			 * halfway through a line. body has 517 bytes, n < 512. */
+			body[n] = '\0';
+			dispatch((const char *)body, PROTO_SRC_WIFI);
+		}
+	}
+}
+#endif
+
 void proto_init(void)
 {
 	line_len = 0;
@@ -1367,7 +1402,6 @@ void proto_init(void)
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 	touch_inject_init();
 #endif
-	wifi_boot_join();
 	send_hello();
 	last_ping_ms = k_uptime_get();
 }
@@ -1415,6 +1449,9 @@ void proto_service(void)
 {
 	drain_rx();
 	wifi_poll();
+#if defined(CONFIG_BLINK_WIFI_LINK)
+	drain_wifi();
+#endif
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 	touch_inject_service();
 #endif
