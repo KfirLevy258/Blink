@@ -14,7 +14,7 @@ import socket
 import sys
 import time
 
-from pc import wifi_pair
+from pc import private_file, wifi_pair
 from pc import wifi_session as ws
 
 _LOST = "link lost"
@@ -110,7 +110,10 @@ def discover(key: bytes, sendto=None, recv=None, tries: int = 3,
         for _ in range(tries):
             nq, q = ws.disc_query(key)
             nonces.append(nq)
-            sendto(q, ("255.255.255.255", ws.PORT))
+            try:
+                sendto(q, ("255.255.255.255", ws.PORT))
+            except OSError:
+                continue        # one transient failure must not cost the other tries
             end = time.monotonic() + gap_s
             while True:
                 left = end - time.monotonic()
@@ -118,7 +121,7 @@ def discover(key: bytes, sendto=None, recv=None, tries: int = 3,
                     break
                 try:
                     got = recv(left)
-                except (socket.timeout, BlockingIOError):
+                except OSError:     # includes socket.timeout
                     break
                 if not got:
                     break
@@ -127,8 +130,6 @@ def discover(key: bytes, sendto=None, recv=None, tries: int = 3,
                     port = ws.disc_answer_port(key, n, data)
                     if port:
                         return addr[0], port
-    except OSError:
-        return None
     finally:
         if sock is not None:
             sock.close()
@@ -171,7 +172,10 @@ def connect(home: str, create_connection=socket.create_connection,
         if found is not None and tuple(found) != tried:
             link = attempt(*found)
             if link is not None:
-                wifi_pair.update_ip(home, *found)
+                try:
+                    wifi_pair.update_ip(home, *found)
+                except (OSError, private_file.NotPrivate):
+                    pass        # a failed address refresh must not drop a good link
     if link is not None:
         _say("connected")
         return link, "connected"

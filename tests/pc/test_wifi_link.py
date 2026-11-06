@@ -198,3 +198,133 @@ def test_no_log_line_carries_an_address(tmp_path, board, capsys):
     assert err
     assert not re.search(r"\d+\.\d+\.\d+\.\d+", err)
     assert not re.search(r"[0-9a-fA-F]{5,}", err)
+
+
+# ---- fix round 1 ----
+
+from pc import private_file, wifi_session as ws
+
+FIXED = {"link lost", "bad frame", "frame too long",
+         "frame failed authentication", "handshake failed", "verify failed"}
+
+
+class StubSock:
+    """recv replays a script: bytes, b'' (EOF) or an exception instance."""
+
+    def __init__(self, script=(), send_error=None):
+        self.script, self.send_error, self.closed = list(script), send_error, 0
+
+    def settimeout(self, t):
+        pass
+
+    def recv(self, n):
+        item = self.script.pop(0) if self.script else socket.timeout()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def sendall(self, data):
+        if self.send_error:
+            raise self.send_error
+
+    def close(self):
+        self.closed += 1
+
+
+def _pair_sessions():
+    kt, kr = bytes([1]) * 32, bytes([2]) * 32
+    return ws.Session(kt, kr), ws.Session(kr, kt)       # link side, peer side
+
+
+def _assert_dead(link):
+    for call in (lambda: link.read(8), lambda: link.write(b"x\n")):
+        with pytest.raises(OSError) as e:
+            call()
+        assert str(e.value) in FIXED
+
+
+def test_every_failure_path_closes_the_socket():
+    mine, peer = _pair_sessions()
+    bad = bytearray(peer.seal_line(b'{"t":"ping"}\n'))
+    bad[-1] ^= 1
+    cases = [
+        (StubSock([b""]), lambda l: l.read(8)),                       # EOF
+        (StubSock([bytes(bad)]), lambda l: l.read(8)),                # corrupt tag
+        (StubSock([OSError()]), lambda l: l.read(8)),                 # recv error
+        (StubSock(send_error=BrokenPipeError()), lambda l: l.write(b"x\n")),
+    ]
+    for sock, act in cases:
+        link = wifi_link.WifiLink(sock, _pair_sessions()[0] if sock.script != [bytes(bad)] else mine)
+        with pytest.raises(OSError):
+            act(link)
+        assert sock.closed >= 1
+        _assert_dead(link)
+
+
+def test_a_failed_handshake_closes_the_socket(tmp_path):
+    _pair(tmp_path, 1)
+    sock = StubSock([b""])
+    link, out = wifi_link.connect(str(tmp_path), create_connection=lambda a, t: sock,
+                                  discover=_nodisc)
+    assert link is None and out == "failed" and sock.closed >= 1
+
+
+def test_a_frame_split_across_two_recvs():
+    mine, peer = _pair_sessions()
+    frame = peer.seal_line(b'{"t":"ping"}\n')
+    link = wifi_link.WifiLink(StubSock([frame[:7], frame[7:]]), mine)
+    assert link.read(512) == b""
+    assert link.read(512) == b'{"t":"ping"}\n'
+
+
+def test_a_failed_address_refresh_keeps_the_link(tmp_path, board, monkeypatch):
+    b = board()
+    _pair(tmp_path, _free_port())
+
+    def boom(*a):
+        raise private_file.NotPrivate
+
+    monkeypatch.setattr(wifi_pair, "update_ip", boom)
+    link, out = wifi_link.connect(
+        str(tmp_path), discover=lambda k: ("127.0.0.1", b.address[1]))
+    assert out == "connected"
+    assert json.loads(_read_line(link))["t"] == "hello"
+    link.close()
+
+
+def test_the_serial_loop_contract():
+    mine, peer = _pair_sessions()
+    link = wifi_link.WifiLink(StubSock(), mine)
+    t = time.monotonic()
+    assert link.in_waiting == 0
+    assert time.monotonic() - t < 0.1
+    assert link.read(1) == b""
+    link = wifi_link.WifiLink(StubSock([peer.seal_line(b'{"t":"ping"}\n')]), mine)
+    assert link.in_waiting == 13
+    assert link.read(5) == b'{"t":'
+    assert link.in_waiting == 8 and len(link.read(100)) == 8
+    # a real idle socket: read(1) gives up within about 0.2 s
+    a, b_ = socket.socketpair()
+    link = wifi_link.WifiLink(a, mine)
+    t = time.monotonic()
+    assert link.read(1) == b""
+    assert 0.1 < time.monotonic() - t < 0.5
+    t = time.monotonic()
+    assert link.in_waiting == 0
+    assert time.monotonic() - t < 0.1
+    link.close()
+    b_.close()
+
+
+def test_discovery_survives_a_transient_sendto_error():
+    sendto0, recv = _fake_air(KEY, 4321)
+    calls = []
+
+    def sendto(d, a):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError
+        sendto0(d, a)
+
+    assert wifi_link.discover(KEY, sendto, recv, gap_s=0.05) == ("127.0.0.1", 4321)
+    assert len(calls) == 2
