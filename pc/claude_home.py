@@ -241,6 +241,15 @@ def record_state():
     first, the daemon's watchdog installed Blink into ~/.claude and
     overwrote the chain file with that folder's command (the review of the
     WSL work, 2026-11-05)."""
+    return _record_read()[:2]
+
+
+def _record_read():
+    """record_state()'s (state, home), and whether the answer is shaky:
+    config.json caught absent or unreadable after the last good read was
+    a record. An absent read is not stored over that record, so a torn
+    read after it still gets the record rather than UNKNOWN (the scoped
+    review of feat/spend-wsl-refresh, item 3)."""
     path = user_config.path(_blink_home())
     try:
         st = os.stat(path)
@@ -251,8 +260,11 @@ def record_state():
         sig = None
     seen = _last.get(path)
     if seen is not None and seen[0] == sig and sig is not None:
-        return seen[1], seen[2]
+        return seen[1], seen[2], False
+    over_record = seen is not None and seen[1] == RECORDED
     if sig == "absent":
+        if over_record:
+            return NO_RECORD, None, True
         state, home = NO_RECORD, None
     else:
         try:
@@ -263,14 +275,14 @@ def record_state():
             # between its two halves made it one for good (review of
             # 277b81a..4003b0b, item 5).
             if seen is not None and seen[0] != "absent":
-                return seen[1], seen[2]
-            return UNKNOWN, None
+                return seen[1], seen[2], over_record
+            return UNKNOWN, None, False
         rec = doc.get(KEY)
         home = from_record(rec)
         state = (NO_RECORD if rec is None
                  else UNKNOWN if home is None else RECORDED)
     _last[path] = (sig, state, home)
-    return state, home
+    return state, home, False
 
 
 class Settled:
@@ -326,12 +338,21 @@ def recorded():
 
 
 def known():
-    """current(), or None while config.json holds a record that cannot be
-    read (UNKNOWN): for the writers that must not guess, the /usage
-    refresh and the board's ask (claude_usage_bridge)."""
-    if record_state()[0] == UNKNOWN:
+    """current(), or None while it is not known: config.json holds a
+    record that cannot be read (UNKNOWN), or, once this process has read
+    a record, is caught absent or unreadable. For the writers that must
+    not guess, the /usage refresh and the board's ask
+    (claude_usage_bridge). Settled's rule, which this kept only for
+    UNKNOWN: an editor's rename-then-write save caught absent answered
+    this computer's own Claude Code, and on a WSL desk a /usage run went
+    native for that tick (the scoped review of feat/spend-wsl-refresh,
+    item 3). A person's command reads record_state() as before."""
+    state, rec, shaky = _record_read()
+    if state == UNKNOWN or shaky:
         return None
-    return current()
+    if rec is not None and rec.kind == WSL:
+        return rec
+    return _native_from(rec)
 
 
 def native(environ=None):

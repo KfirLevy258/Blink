@@ -714,8 +714,16 @@ class ConfigLook:
         self._home = home
 
     def __call__(self, now_epoch):
+        h = self._home()
+        if h is None or h.kind != claude_home.NATIVE:
+            # Asked again a moment after the tick's own look: None fell
+            # through to config_path(None), which is current(), and read
+            # this computer's config on a WSL desk; a WSL home's is a UNC
+            # path, never stat'ed here (the scoped review of
+            # feat/spend-wsl-refresh, item 3).
+            return None
         try:
-            path = claude_plan.config_path(self._home())
+            path = claude_plan.config_path(h)
             st = os.stat(path)
         except FileNotFoundError:
             return claude_plan.EMPTY_VIEW       # no config: known, empty

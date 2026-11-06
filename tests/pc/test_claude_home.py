@@ -795,7 +795,9 @@ def test_an_absent_read_is_not_the_last_good_answer_for_a_torn_one(
         tmp_path):
     """Item 5: record_state handed an unreadable file the last good answer,
     and an absent read's NO_RECORD counted as one: the file there, half
-    written, then read as "no record"."""
+    written, then read as "no record". Since item 3 of the scoped review
+    of feat/spend-wsl-refresh the absent read is not stored over the
+    record at all, so the torn read gets the record itself."""
     _install_into(tmp_path, _j(tmp_path, "w"))
     assert claude_home.record_state()[0] == claude_home.RECORDED
     path = user_config.path(cli.blink_home())
@@ -803,7 +805,7 @@ def test_an_absent_read_is_not_the_last_good_answer_for_a_torn_one(
     assert claude_home.record_state()[0] == claude_home.NO_RECORD
     with open(path, "w") as f:
         f.write("{")
-    assert claude_home.record_state()[0] == claude_home.UNKNOWN
+    assert claude_home.record_state()[0] == claude_home.RECORDED
 
 
 def test_settled_acts_on_a_change_only_when_two_reads_agree():
@@ -957,3 +959,63 @@ def test_an_install_that_stopped_nothing_starts_nothing(tmp_path,
     with pytest.raises(KeyboardInterrupt):
         cli.main(["install"])
     assert [c[0] for c in calls] == ["halt"]
+
+
+# ------------------- scoped review of feat/spend-wsl-refresh, item 3
+
+@pytest.mark.parametrize("gap", ["absent", "torn", "absent-then-torn"])
+def test_known_says_unknown_while_a_seen_record_cannot_be_read(
+        tmp_path, gap):
+    """The scoped review of feat/spend-wsl-refresh, item 3: the rule that
+    a record once seen is never switched by a config.json caught absent
+    or unreadable was kept only by Settled. known(), which the /usage
+    refresh and the board's ask act on, answered this computer's own
+    Claude Code for an absent file -- on a WSL desk, a native run -- and
+    the absent read replaced the last good record, so a torn read after
+    it was UNKNOWN rather than the record. Now known() is None in such a
+    window, the last good record is kept, and a readable file is
+    answered again."""
+    rec = claude_home.wsl("{G}", "Ubuntu", "zoe", "/home/zoe",
+                          "\\\\wsl.localhost\\Ubuntu\\home\\zoe\\.claude",
+                          False)
+    claude_home.save(rec)
+    path = user_config.path(cli.blink_home())
+    with open(path, "rb") as f:
+        good = f.read()
+    assert claude_home.known() == rec
+    if gap.startswith("absent"):
+        os.remove(path)
+        assert claude_home.known() is None
+        assert claude_home.known() is None            # and from the cache
+        # A person's command still reads "no record" (cli).
+        assert claude_home.record_state() == (claude_home.NO_RECORD, None)
+    if gap.endswith("torn"):
+        with open(path, "w") as f:
+            f.write("{")
+        assert claude_home.known() is None
+        assert claude_home.record_state() == (claude_home.RECORDED, rec)
+    with open(path, "wb") as f:
+        f.write(good + b" ")
+    assert claude_home.known() == rec
+
+
+def test_known_reads_a_desk_that_never_had_a_record_as_native(tmp_path):
+    """A process that never saw a record: no config.json is a pre-record
+    desk, read natively, as before."""
+    assert claude_home.known() == claude_home.from_environ()
+
+
+def test_config_look_reads_nothing_for_an_unknown_home(tmp_path,
+                                                       monkeypatch):
+    """ConfigLook asks its home again, a moment after the tick did: a
+    None there fell through to claude_plan.config_path(None), which is
+    current(), and read this computer's own config on a WSL desk."""
+    from pc import usage_refresh
+    asked = []
+    monkeypatch.setattr(claude_plan, "config_path",
+                        lambda home=None: asked.append(home) or "/nope")
+    assert usage_refresh.config_view(lambda: None)(0) is None
+    wsl_home = claude_home.wsl("{G}", "Ubuntu", "zoe", "/home/zoe",
+                               "\\\\wsl.localhost\\Ubuntu\\x", False)
+    assert usage_refresh.config_view(lambda: wsl_home)(0) is None
+    assert asked == []
