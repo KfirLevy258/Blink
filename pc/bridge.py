@@ -9,6 +9,8 @@ import time
 
 from pc import ota as ota_mod
 from pc import protocol
+from pc import settings_ops
+from pc import wifi_pair
 from pc import status_page
 from pc.version import PROTO_VERSION, RELEASE_VERSION
 
@@ -95,7 +97,7 @@ class Bridge:
                  status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
                  edit_answers=None, builder_ended=None, builder_open=None,
-                 sleep=time.sleep):
+                 sleep=time.sleep, board_ops=None, home=None, verify=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
@@ -197,6 +199,19 @@ class Bridge:
         self._theme_quiet_until = None
         self._sleep = sleep
         self._store_until = None         # see THEME_SAVE_HOLD_S
+        # Settings-page ops (pc/settings_ops.py). `home` is ~/.blink, where
+        # the pairing file lives. _op is the one op in flight; _pending is
+        # the join waiting for its wifi_state. Only this thread touches them.
+        self._ops = board_ops
+        self._home = home
+        self._verify = verify or settings_ops.verify_board
+        self._op = None
+        self._join = None
+        self._scan = []
+        self._wifi_link = None
+        self._said_kid = False
+        if board_ops is not None:
+            board_ops.clear()
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -286,6 +301,12 @@ class Bridge:
                     self._resume_pending()
         if t in ("hello", "pref"):
             self._board_caps = protocol.board_caps(msg)
+            if self._ops is not None:
+                self._ops.note_device(
+                    id=self._wire_id(msg) or self._board_id,
+                    fw=msg.get("fw", self._board_fw),
+                    edition=msg.get("edition"),
+                    caps=sorted(self._board_caps), app=self._app_ver)
         if t == "pref":
             # The board's id, from firmware that puts it on pref (Addendum
             # 5). One without it says nothing either way: older firmware
@@ -335,6 +356,10 @@ class Bridge:
                 self._theme.board_now(msg, board_id=self._board_id)
         elif t == "theme_edit":
             self._on_theme_edit()
+        elif t == "wifi_net":
+            self._on_wifi_net(msg)
+        elif t == "wifi_state":
+            self._on_wifi_state(msg)
         # unknown types ignored
 
     # --- OTA, for a board with no network of its own -------------------
@@ -778,6 +803,115 @@ class Bridge:
         self._run_async(work)
         self.pump()
 
+    # --- settings-page ops, on the serial thread ---
+
+    def _drain_ops(self):
+        if self._ops is None:
+            return
+        op = self._op
+        if op is not None and op.abandoned:
+            self._op = self._join = None
+        while self._op is None:
+            try:
+                op = self._ops.queue.get_nowait()
+            except queue.Empty:
+                return
+            if not op.abandoned:
+                self._start_op(op)
+
+    def _finish(self, op, result=None, error=None):
+        op.args = None
+        op.result, op.error = result, error
+        op.done.set()
+        if self._op is op:
+            self._op = self._join = None
+
+    def _start_op(self, op):
+        if not self._board_can(protocol.BOARD_CAP_WIFI):
+            return self._finish(op, error="This board cannot join WiFi.")
+        if self._wifi_link == "wifi":
+            return self._finish(op, error=(
+                "Plug the board in with the cable to change its WiFi."))
+        self._op = op
+        if op.kind == "scan":
+            self._scan = []
+            self._write(protocol.wifi_scan())
+        elif op.kind == "join":
+            ssid, password = op.args
+            key = wifi_pair.new_key()
+            self._join = {"op": op, "key": key, "kid": wifi_pair.kid(key),
+                          "steps": []}
+            self._write(protocol.wifi_set(ssid, password, key))
+            op.args = ssid = password = None
+        else:
+            wifi_pair.remove(self._home)
+            self._write(protocol.wifi_forget())
+
+    def _on_wifi_net(self, msg):
+        op = self._op
+        if op is None or op.kind != "scan":
+            return
+        try:
+            self._scan.append({"s": msg["s"], "r": msg["r"], "sec": msg["sec"]})
+            last = int(msg["i"]) + 1 >= int(msg["n"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if last:
+            self._finish(op, result=self._scan)
+
+    def _on_wifi_state(self, msg):
+        self._wifi_link = msg.get("link")
+        if self._ops is not None:
+            self._ops.note_state(msg)
+        op, st = self._op, msg.get("st")
+        if op is not None and op.kind == "forget":
+            return self._finish(op, result=dict(self._ops.state()))
+        j = self._join
+        if j is not None:
+            if "sent" not in j["steps"]:
+                j["steps"].append("sent")
+            if st == "fail":
+                self._finish(op, result={"state": self._ops.state(),
+                                         "steps": j["steps"]})
+            elif st == "up" and msg.get("kid") == j["kid"]:
+                self._joined(j, msg)
+            return
+        if self._home is None or "kid" not in msg and st != "off":
+            return
+        pair = wifi_pair.load(self._home)
+        if pair is not None and msg.get("kid") != pair["kid"]:
+            wifi_pair.remove(self._home)
+            if not self._said_kid:
+                self._said_kid = True
+                print("[wifi] the board was set up from another computer or"
+                      " forgot this one; plug it in and open blink settings",
+                      file=sys.stderr)
+
+    def _joined(self, j, msg):
+        op, key = j["op"], j["key"]
+        ip, port = msg.get("ip"), msg.get("port")
+        j["steps"].append("joined")
+        try:
+            wifi_pair.save(self._home, self._board_id or "board", key, ip, port)
+        except (OSError, ValueError, TypeError):
+            return self._finish(op, error="Could not save the pairing.")
+        self._join = self._op = None    # the verify below answers the op
+        state = self._ops.state()
+
+        def work():
+            try:
+                self._verify(ip, port, key)
+                steps = j["steps"] + ["proved", "encrypted"]
+                res = {"state": state, "steps": steps}
+            except Exception:
+                res = {"state": state, "steps": j["steps"], "problem": (
+                    "The board joined, but this computer could not reach it"
+                    " over WiFi.")}
+            op.result = res
+            op.args = None
+            op.done.set()
+        self._run_async(work)
+
     def pump(self):
         """Write any theme_edit answers that are ready. Called by the daemon
         on every pass of its serial loop, so an answer goes out within one
@@ -788,6 +922,7 @@ class Bridge:
             except queue.Empty:
                 break
             self._write(protocol.theme_edit_reply(ok))
+        self._drain_ops()
         # After any answer, so a board that asked again as the old builder
         # ended hears "ok" for the new one before "done" for the old: its
         # done is ignored while an ask is in flight, never the other way.

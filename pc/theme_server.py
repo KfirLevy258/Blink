@@ -929,8 +929,9 @@ class Launcher:
     """The daemon's builder: at most one running, reopened on request."""
 
     def __init__(self, home, opener=None, make_server=BuilderServer,
-                 now=time.monotonic):
+                 now=time.monotonic, board_ops=None):
         self._home = home
+        self.board_ops = board_ops      # the settings page's way to the board
         # `is None`, not `or`: a stub that was falsy (a list subclass, empty
         # until its first call) became the real open_url, which is
         # webbrowser.open on macOS -- a review probe opened two tabs in the

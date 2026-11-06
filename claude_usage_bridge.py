@@ -19,8 +19,8 @@ from serial.tools import list_ports
 
 from pc import ota as ota_mod
 from pc import (ingest, install_statusline, interval, logbook, protocol,
-                status_page, statusline_source, theme, theme_server, update,
-                win_driver)
+                settings_ops, status_page, statusline_source, theme,
+                theme_server, update, win_driver)
 from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
@@ -957,7 +957,10 @@ def main(argv=None):
     # was nudged. The builder runs on its own threads (pc/theme_server.py);
     # this loop only ever reads the files it writes.
     theme_sync = theme.ThemeSync(blink_home)
-    theme_builder = theme_server.Launcher(blink_home)
+    # Settings-page ops, kept for the life of the process like theme_answers:
+    # the page's threads wait on it across a reconnect.
+    board_ops = settings_ops.BoardOps(queue.SimpleQueue())
+    theme_builder = theme_server.Launcher(blink_home, board_ops=board_ops)
     # theme_edit answers, kept for the life of the process like the two
     # above: an open that returns after a reconnect is answered on the new
     # connection rather than into a Bridge that is gone.
@@ -1298,6 +1301,7 @@ def main(argv=None):
                         builder_ended=theme_builder.ended,
                         builder_open=theme_builder.editing,
                         edit_answers=theme_answers,
+                        board_ops=board_ops, home=blink_home,
                         # What the board can show, until it says again.
                         board_caps_hint=known.get("caps"),
                         pending=update.PendingFirmware(
