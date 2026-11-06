@@ -102,7 +102,8 @@ class Bridge:
                  status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
                  edit_answers=None, builder_ended=None, builder_open=None,
-                 sleep=time.sleep, board_ops=None, home=None, verify=None):
+                 sleep=time.sleep, board_ops=None, home=None, verify=None,
+                 flash_refusal=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
@@ -118,6 +119,9 @@ class Bridge:
         self._fetch_firmware = fetch_firmware or ota_mod.fetch_firmware
         self._manifest = None            # release offered to the board
         self._flash = flash_image        # callable(blob, version); owns the port
+        # Why a flash cannot happen on this link (esptool needs the cable),
+        # said before anything is downloaded or ota_begin is sent.
+        self._flash_refusal = flash_refusal
         # What the board says it is. Set from hello; None until it speaks.
         self._board_proto = None
         self._board_fw = None
@@ -683,6 +687,9 @@ class Bridge:
             return
         if self._flash is None:
             self._write(protocol.ota_error("no flasher configured"))
+            return
+        if self._flash_refusal:
+            self._write(protocol.ota_error(self._flash_refusal))
             return
         try:
             blob = self._fetch_firmware()

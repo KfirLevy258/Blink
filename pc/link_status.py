@@ -48,6 +48,10 @@ def status_line(rec: dict | None, paired: bool) -> str:
         return "Link        unknown (app not reporting)"
     if rec.get("link") == "usb":
         return "Link        USB cable"
+    if rec.get("link") == "none" and not paired:
+        # The daemon is running and nothing answers on either link; there is
+        # no WiFi to say anything about.
+        return "Link        no board connected"
     ip = rec.get("ip")
     try:
         ip = str(ipaddress.IPv4Address(ip)) if ip else None

@@ -21,6 +21,10 @@ _LOST = "link lost"
 
 
 class WifiLink:
+    # __slots__ so that code written for serial.Serial fails loudly: setting
+    # link.dtr or link.rts raises AttributeError instead of quietly doing
+    # nothing, and the daemon never pulses reset over a socket (CLAUDE.md).
+    __slots__ = ("_sock", "_s", "_buf", "_closed")
     kind = "wifi"
 
     def __init__(self, sock, session):
@@ -146,6 +150,12 @@ def _say(msg: str) -> None:
 # once and again only after something else happened (a connect, or the other
 # failure); "connecting" is not repeated while a failure is standing.
 _standing = None
+
+
+def reset_standing() -> None:
+    """Forget the standing failure: a USB connect, or a test, starts over."""
+    global _standing
+    _standing = None
 
 
 def _fail_say(outcome: str, msg: str) -> None:

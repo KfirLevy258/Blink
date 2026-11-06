@@ -115,6 +115,15 @@ def move_home(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _wifi_link_says_everything_again():
+    """wifi_link remembers the last failure it said, process-wide."""
+    from pc import wifi_link
+    wifi_link.reset_standing()
+    yield
+    wifi_link.reset_standing()
+
+
+@pytest.fixture(autouse=True)
 def _no_real_login_service(monkeypatch):
     """Nothing in a unit test may register or remove a real login service."""
     monkeypatch.setenv("BLINK_SKIP_SERVICE", "1")

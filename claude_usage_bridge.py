@@ -676,6 +676,10 @@ class LinkChooser:
 
     def __init__(self):
         self.bad = {}            # port -> (strikes, excluded until)
+        # Ports that answered neither the fast nor the patient probe: left
+        # alone until the USB layout changes, the rule before WiFi existed.
+        # A stranger's Arduino must not be probed again every minute.
+        self.silent = set()
         self.topo = None
         self.wifi_due = 0.0      # the first WiFi attempt is never delayed
         self.wifi_delay = 5.0
@@ -693,7 +697,8 @@ class LinkChooser:
         self.bad.pop(port, None)
 
     def excluded(self, port, now):
-        return port in self.bad and now < self.bad[port][1]
+        return port in self.silent or (port in self.bad
+                                       and now < self.bad[port][1])
 
     def wifi_dropped(self, now):
         """A session that had been up reconnects at once; one that fell over
@@ -721,7 +726,7 @@ def wait_for_link(explicit=None, poll_s=3.0, on_wait=None, home=None,
                   force_wifi=False, connect=wifi_link.connect,
                   autodetect=autodetect_port, clock=time.monotonic,
                   after_ota=False, sleep=time.sleep, topology=usb_topology,
-                  chooser=None, prefer=None):
+                  chooser=None, prefer=None, exists=os.path.exists):
     """Block until there is a link, then return ("usb", port) or
     ("wifi", WifiLink). Spec 7.2.
 
@@ -754,9 +759,13 @@ def wait_for_link(explicit=None, poll_s=3.0, on_wait=None, home=None,
             else:
                 got = autodetect()
                 ports = [got] if isinstance(got, str) else list(got or [])
+            # As wait_for_port: a serial port is a filesystem node on POSIX,
+            # and a DOS device name on Windows where os.stat fails on it.
+            ports = [p for p in ports if sys.platform == "win32" or exists(p)]
             topo = topology()
             if topo != ch.topo:
                 ch.bad.clear()
+                ch.silent.clear()
                 ch.topo = topo
             want = prefer() if prefer else None
             if want in ports:
@@ -1129,13 +1138,32 @@ def main(argv=None):
     link_state = LinkChooser()
     force_wifi = os.environ.get("BLINK_FORCE_WIFI") == "1"
 
+    # Ports asked politely under the CURRENT layout. Not a permanent blacklist:
+    # it is discarded when the layout changes (silent ports) or on success.
+    asked = set()
+    none_due = [0.0]
+
+    def waiting_tick():
+        # Upkeep, and the link record while no link exists: "none" every 60 s
+        # so `blink status` says the daemon is alive and looking, rather than
+        # "app not reporting". status_line turns it into a sentence by whether
+        # a pairing exists.
+        _upkeep()
+        if time.monotonic() >= none_due[0]:
+            none_due[0] = time.monotonic() + 60.0
+            try:
+                link_status.write(blink_home, "none", None)
+            except OSError:
+                pass
+
     def choose(after_ota=False):
         # Lambdas, not the functions, so a test that replaces
         # candidate_ports or usb_topology on this module is heard.
         return wait_for_link(
-            args.port, on_wait=_upkeep, home=blink_home,
+            args.port, on_wait=waiting_tick, home=blink_home,
             force_wifi=force_wifi, autodetect=lambda: candidate_ports(),
             topology=lambda: usb_topology(), chooser=link_state,
+            exists=lambda p: os.path.exists(p),
             prefer=lambda: known.get("port"), after_ota=after_ota)
 
     via, target = choose()
@@ -1221,12 +1249,45 @@ def main(argv=None):
                 # pass is followed by one long enough to hear an unprompted
                 # ping, the only thing a board still booting will send.
                 ser.close()
-                link_state.port_failed(port, time.monotonic())
-                print(f"[bridge] {port} did not answer", file=sys.stderr)
-                patient = not patient
+                asked.add(port)
+                nxt = next((p for p in candidate_ports() if p not in asked), None)
+                if nxt is not None:
+                    print(f"[bridge] {port} did not answer; trying {nxt}",
+                          file=sys.stderr)
+                    via, target = "usb", nxt
+                    continue
+                if not patient:
+                    # Nothing answered quickly. Before writing this layout off,
+                    # go round once more listening long enough to hear an
+                    # unprompted ping -- which is the only thing a board that
+                    # was still booting during the fast pass will send.
+                    patient = True
+                    asked.clear()
+                    print("[bridge] nothing answered quickly; listening"
+                          " longer before giving up", file=sys.stderr)
+                    via, target = choose()
+                    continue
+                # Both passes failed: these ports are left alone until the USB
+                # layout changes (wait_for_link forgets them then), and the
+                # WiFi step gets the polls meanwhile.
+                link_state.silent.update(asked)
+                asked.clear()
+                patient = False
+                print("[bridge] nothing here answers; waiting for a board to"
+                      " be plugged in", file=sys.stderr)
                 via, target = choose()
                 continue
         except Exception as e:
+            if via == "wifi":
+                # Nothing to name: no port, and no reason worth saying.
+                try:
+                    target.close()
+                except Exception:
+                    pass
+                print("[wifi] link lost", file=sys.stderr)
+                link_state.wifi_dropped(time.monotonic())
+                via, target = choose()
+                continue
             # Deduplicated: a board left unplugged, or a port the user lacks
             # permission to open, would otherwise write this same line to
             # bridge.log every three seconds for as long as the service runs.
@@ -1253,8 +1314,12 @@ def main(argv=None):
                 last_err = err
             # No sleep here: the failure record sits this port out for 5 s,
             # then 10 ... 60, and wait_for_link gives WiFi the polls between.
-            if via == "usb":
+            # D51's 5..60 s sit-out only where a pairing exists: with none, a
+            # busy port is retried every 3 s exactly as before WiFi did.
+            if wifi_pair.load(blink_home) is not None:
                 link_state.port_failed(port, time.monotonic())
+            else:
+                time.sleep(3)
             via, target = choose()
             continue
         # Cleared on success so a later, genuine failure is reported again
@@ -1263,8 +1328,10 @@ def main(argv=None):
         if via == "usb":
             print(f"[bridge] connected on {port}", file=sys.stderr)
             link_state.port_answered(port)
+            wifi_link.reset_standing()
             patient = False
         next_link_write = 0.0       # a link change is written at once
+        none_due[0] = 0.0
         reader = protocol.LineReader()
         console = logbook.ConsoleEcho()
 
@@ -1425,6 +1492,8 @@ def main(argv=None):
                         builder_open=theme_builder.editing,
                         edit_answers=theme_answers,
                         board_ops=board_ops, home=blink_home,
+                        flash_refusal=("plug the board in to update"
+                                       if via == "wifi" else None),
                         # What the board can show, until it says again.
                         board_caps_hint=known.get("caps"),
                         pending=update.PendingFirmware(
@@ -1432,13 +1501,6 @@ def main(argv=None):
         report_failure = None   # handed to the Bridge above; never repeated
         # No reset means no boot `hello`, so nothing would trigger the
         # greeting -- see Bridge.greet.
-        if already_running:
-            bridge.greet()
-            # No hello means the board never said which firmware it runs;
-            # the last one it told us is in board.json. This is the path an
-            # app update takes -- the board keeps running through it -- and
-            # the one that left boards on old firmware (2026-08-29).
-            bridge.offer_if_newer(known.get("fw"))
         next_poll = time.monotonic()
         next_fast_poll = time.monotonic()
         # The rollback copy is kept until a board has actually talked to this
@@ -1446,6 +1508,15 @@ def main(argv=None):
         # the hardware is the thing the update was for.
         proven = False
         try:
+            # Inside the try: a write on a WifiLink that has just dropped
+            # raises, and out here that escaped main() into a crash loop.
+            if already_running:
+                bridge.greet()
+                # No hello means the board never said which firmware it runs;
+                # the last one it told us is in board.json. This is the path
+                # an app update takes -- the board keeps running through it --
+                # and the one that left boards on old firmware (2026-08-29).
+                bridge.offer_if_newer(known.get("fw"))
             while True:
                 # in_waiting first, then a blocking read(1) as the idle wait.
                 #
@@ -1499,7 +1570,12 @@ def main(argv=None):
                         # reset if it ever goes quiet. Written again whenever
                         # a message adds something -- a hello after a `pref`,
                         # a new firmware after a flash.
-                        learned = learn_board(known, port or known.get("port"), msg)
+                        # Over WiFi there is no port; the remembered one is
+                        # kept only for the board it was remembered for.
+                        keep = (port if via == "usb" else
+                                known.get("port") if msg.get("board_id") in
+                                (None, known.get("board_id")) else None)
+                        learned = learn_board(known, keep, msg)
                         if not proven or learned != known:
                             known = learned
                             remember_board(blink_home, known["port"],
@@ -1523,7 +1599,7 @@ def main(argv=None):
                     except OSError:
                         pass
                     next_link_write = time.monotonic() + 60.0
-                if via == "wifi" and link_state.usb_arrived(
+                if via == "wifi" and not force_wifi and link_state.usb_arrived(
                         time.monotonic(), lambda: usb_topology(),
                         lambda: candidate_ports()):
                     # The cable is in: USB wins within seconds (7.2 step 3).
@@ -1608,6 +1684,8 @@ def main(argv=None):
             # and whichever answers is the board from then on.
             if via == "usb":
                 link_state.bad.clear()
+                link_state.silent.clear()
+                asked.clear()
             patient = False
             # No board, no pages on show, so nothing to ask the status pages
             # about while the cable is out. Only the wanted set is cleared;

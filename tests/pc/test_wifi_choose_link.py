@@ -39,6 +39,7 @@ class Clock:
 
 def choose(clock, **kw):
     kw.setdefault("home", "h")
+    kw.setdefault("exists", lambda p: True)
     kw.setdefault("topology", lambda: ())
     kw.setdefault("autodetect", lambda: None)
     return bridge.wait_for_link(clock=clock, sleep=clock.sleep, **kw)
@@ -225,78 +226,297 @@ def test_no_serial_only_wait_survives_in_main():
                     and "wait_for_link" not in got)
 
 
+def test_a_wifi_link_has_no_dtr_or_rts():
+    link = wifi_link.WifiLink(None, None)
+    for name in ("dtr", "rts"):
+        with pytest.raises(AttributeError):
+            setattr(link, name, False)
+    assert not hasattr(link, "reset_input_buffer")
+
+
+def _refuse(addr, timeout=None):
+    raise OSError
+
+
+def test_a_standing_failure_is_said_once(tmp_path, capsys):
+    home = str(tmp_path)
+    wifi_pair.save(home, "board", KEY, "127.0.0.1", 1)
+    for _ in range(3):
+        wifi_link.connect(home, discover=lambda k: None,
+                          create_connection=_refuse)
+    err = capsys.readouterr().err
+    assert err.count("board not found") == 1 and err.count("connecting") == 1
+    wifi_link.reset_standing()          # what a USB connect does
+    wifi_link.connect(home, discover=lambda k: None, create_connection=_refuse)
+    assert capsys.readouterr().err.count("board not found") == 1
+
+
+def test_a_wifi_link_refuses_a_flash_before_anything_is_downloaded():
+    from pc.bridge import Bridge
+    from pc.version import PROTO_VERSION
+    sent, fetched = [], []
+    manifest = {"version": "0.4.9", "size": 5,
+                "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}
+    b = Bridge(write_msg=sent.append, fetch_usage=lambda: {},
+               fetch_manifest=lambda: manifest,
+               fetch_firmware=lambda: fetched.append(1) or b"hello",
+               flash_image=lambda blob, v: fetched.append("flash"),
+               fetch_signed_manifest=lambda: manifest,
+               flash_refusal="plug the board in to update")
+    b.on_message({"t": "hello", "v": PROTO_VERSION, "fw": "0.4.8"})
+    b.on_message({"t": "ota_query", "cur": "0.4.8"})
+    sent.clear()
+    b.on_message({"t": "ota_flash"})
+    assert [m["t"] for m in sent] == ["ota_error"]
+    assert "plug the board in" in json.dumps(sent[0]) and fetched == []
+
+
+def test_status_none_depends_on_a_pairing(tmp_path):
+    from pc import link_status as ls
+    ls.write(str(tmp_path), "none", None, now=lambda: 1000.0)
+    rec = ls.read(str(tmp_path), now=lambda: 1000.0)
+    assert ls.status_line(rec, True) == "Link        WiFi set up, board not found"
+    assert ls.status_line(rec, False) == "Link        no board connected"
+
+
 # ---- main() in a child process ---------------------------------------------
 
 CHILD = """
-import sys
+import json, os, sys, functools
 import serial
 import claude_usage_bridge as b
+from pc import wifi_link
 
 marker = sys.argv[1]
+mode = sys.argv[2]
+
+def note(what):
+    with open(marker, "a") as f:
+        f.write(what + "\\n")
+
+# A failed connect must never broadcast on the developer's LAN.
+_orig = b.wait_for_link
+b.wait_for_link = lambda *a, **k: _orig(
+    *a, connect=functools.partial(wifi_link.connect, discover=lambda key: None), **k)
+
+PORT = "/dev/stranger"
+_exists = os.path.exists
+b.os.path.exists = lambda p: True if p == PORT else _exists(p)
+
+class Silent:
+    in_waiting = 0
+    dtr = rts = None
+    def __init__(self, *a, **k): note("open")
+    def read(self, n=1): return b""
+    def write(self, raw): return len(raw)
+    def reset_input_buffer(self): pass
+    def close(self): pass
 
 def busy(*a, **k):
+    note("open")
     raise serial.SerialException("busy")
 
 def probed(*a, **k):
-    open(marker, "w").close()
+    note("probe")
     return False
 
-b.serial.Serial = busy
-b.probe_is_our_board = probed
-b.candidate_ports = lambda: ["/dev/always-busy"]
-b.usb_topology = lambda: (("/dev/always-busy", 1, 2, ""),)
-b.main(["--port", "/dev/always-busy"])
+if mode in ("busy", "greet-once"):
+    b.serial.Serial = busy
+    b.candidate_ports = lambda: [PORT]
+elif mode == "silent":
+    b.serial.Serial = Silent
+    b.PROBE_S, b.PROBE_PATIENT_S = 0.05, 0.1
+    b.candidate_ports = lambda: [PORT]
+else:   # no serial port at all
+    def nope(*a, **k):
+        note("serial opened")
+        raise serial.SerialException("busy")
+    b.serial.Serial = nope
+    b.candidate_ports = lambda: []
+if mode != "silent":
+    b.probe_is_our_board = probed
+b.usb_topology = lambda: ((PORT, 1, 2, ""),) if b.candidate_ports() else ()
+
+if mode == "greet-once":
+    from pc import bridge as pb, wifi_session as ws
+    real = pb.Bridge.greet
+    state = {"n": 0}
+    def greet(self):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise ws.SessionError("link lost")
+        return real(self)
+    pb.Bridge.greet = greet
+
+b.main(["--port", PORT] if mode == "busy" else [])
 """
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is POSIX")
-@pytest.mark.parametrize("force", [False, True])
-def test_main_reaches_wifi_with_no_serial_port_and_a_busy_one(tmp_path, force):
-    home = tmp_path / "home"
-    home.mkdir()
-    board = FakeWifiBoard(KEY, hello_at_start=True).start()
-    tap = tmp_path / "tap.ndjson"
-    probe_marker = tmp_path / "probed"
-    script = tmp_path / "child.py"
-    script.write_text(textwrap.dedent(CHILD), encoding="utf-8")
-    env = dict(os.environ, HOME=str(home), USERPROFILE=str(home),
-               PYTHONPATH=ROOT, PYTHONDONTWRITEBYTECODE="1",
-               BLINK_SKIP_SERVICE="1", BLINK_TAP=str(tap))
-    env.pop("BLINK_FORCE_WIFI", None)
-    if force:
-        env["BLINK_FORCE_WIFI"] = "1"
-    proc = None
-    try:
-        wifi_pair.save(str(home / ".blink"), "board", KEY, "127.0.0.1",
-                       board.address[1])
-        proc = subprocess.Popen(
-            [sys.executable, str(script), str(probe_marker)], env=env,
+class Daemon:
+    """main() in a child Python, stopped with SIGTERM like the service is."""
+
+    def __init__(self, tmp_path, mode, force=False, board=None, pair=True,
+                 board_json=None):
+        self.home = tmp_path / "home"
+        (self.home / ".blink").mkdir(parents=True)
+        self.tap = tmp_path / "tap.ndjson"
+        self.marker = tmp_path / "marker"
+        script = tmp_path / "child.py"
+        script.write_text(textwrap.dedent(CHILD), encoding="utf-8")
+        env = dict(os.environ, HOME=str(self.home), USERPROFILE=str(self.home),
+                   PYTHONPATH=ROOT, PYTHONDONTWRITEBYTECODE="1",
+                   BLINK_SKIP_SERVICE="1", BLINK_TAP=str(self.tap))
+        env.pop("BLINK_FORCE_WIFI", None)
+        if force:
+            env["BLINK_FORCE_WIFI"] = "1"
+        if pair and board is not None:
+            wifi_pair.save(str(self.home / ".blink"), "board", KEY, "127.0.0.1",
+                           board.address[1])
+        if board_json is not None:
+            (self.home / ".blink" / "board.json").write_text(json.dumps(board_json))
+        self.proc = subprocess.Popen(
+            [sys.executable, str(script), str(self.marker), mode], env=env,
             cwd=str(tmp_path), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        def seen():
-            try:
-                recs = [json.loads(l) for l in tap.read_text().splitlines()]
-            except (OSError, ValueError):
-                return set()
-            return {(r["dir"], r["msg"].get("t")) for r in recs if "msg" in r}
-        end = time.monotonic() + 10
-        while time.monotonic() < end and not {("tx", "welcome"), ("rx", "hello")} <= seen():
-            if proc.poll() is not None:
-                break
+    def seen(self):
+        try:
+            recs = [json.loads(l) for l in self.tap.read_text().splitlines()]
+        except (OSError, ValueError):
+            return []
+        return [(r["dir"], r["msg"].get("t")) for r in recs if "msg" in r]
+
+    def marks(self):
+        try:
+            return self.marker.read_text().split()
+        except OSError:
+            return []
+
+    def wait(self, cond, secs=10):
+        end = time.monotonic() + secs
+        while time.monotonic() < end and self.proc.poll() is None:
+            if cond():
+                return True
             time.sleep(0.05)
-        got = seen()
-        proc.send_signal(signal.SIGTERM)        # the daemon's own exit path
-        out, err = proc.communicate(timeout=20)
-        assert {("tx", "welcome"), ("rx", "hello")} <= got, err.decode(errors="replace")
-        assert proc.returncode == 0
-        assert not probe_marker.exists()   # no probe on a busy port or a WifiLink
-        log = err.decode(errors="replace")
-        assert "[wifi] connected" in log
-        assert "127.0.0.1" not in log
-        link = json.loads((home / ".blink" / "link.json").read_text())
-        assert link["link"] == "wifi"
+        return cond()
+
+    def stop(self):
+        if self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGTERM)    # the daemon's own exit
+        try:
+            _, err = self.proc.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            _, err = self.proc.communicate()
+        self.log = err.decode(errors="replace")
+        return self.log
+
+    def link(self):
+        return json.loads((self.home / ".blink" / "link.json").read_text())
+
+
+HANDSHAKE = {("tx", "welcome"), ("rx", "hello")}
+posix = pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is POSIX")
+
+
+@pytest.fixture
+def fake_board():
+    made = []
+
+    def make(**kw):
+        b = FakeWifiBoard(KEY, hello_at_start=True, **kw).start()
+        made.append(b)
+        return b
+    yield make
+    for b in made:
+        b.stop()
+
+
+@posix
+@pytest.mark.parametrize("force", [False, True])
+def test_main_reaches_wifi_with_no_serial_port_and_a_busy_one(
+        tmp_path, fake_board, force):
+    d = Daemon(tmp_path, "busy", force=force, board=fake_board())
+    try:
+        assert d.wait(lambda: HANDSHAKE <= set(d.seen()))
+        if force:
+            time.sleep(3.5)         # a flapping link would reconnect by now
+        assert d.link()["link"] == "wifi"
     finally:
-        if proc is not None and proc.poll() is None:
-            proc.kill()
-            proc.communicate()
-        board.stop()
+        log = d.stop()
+    assert d.proc.returncode == 0, log
+    assert "probe" not in d.marks()
+    assert "127.0.0.1" not in log
+    assert log.count("[wifi] connected") == 1, log
+
+
+@posix
+def test_restart_reconnects_over_wifi_without_serial_probe(tmp_path, fake_board):
+    d = Daemon(tmp_path, "nothing", board=fake_board())
+    try:
+        assert d.wait(lambda: HANDSHAKE <= set(d.seen()))
+    finally:
+        log = d.stop()
+    # No probe_is_our_board, no serial open, and a WifiLink raises on dtr/rts,
+    # so a pulse would have been a "link lost" here.
+    assert d.marks() == [] and "link lost" not in log
+    assert d.proc.returncode == 0
+
+
+@posix
+def test_a_session_error_on_the_first_write_is_a_dropped_link(tmp_path, fake_board):
+    d = Daemon(tmp_path, "greet-once", board=fake_board())
+    try:
+        assert d.wait(lambda: HANDSHAKE <= set(d.seen()), 15)
+    finally:
+        log = d.stop()
+    assert d.proc.returncode == 0, log
+    assert "[wifi] link lost" in log and "Traceback" not in log
+
+
+@posix
+def test_a_silent_stranger_is_not_probed_again_while_the_layout_is_unchanged(tmp_path):
+    d = Daemon(tmp_path, "silent", pair=False)
+    try:
+        assert d.wait(lambda: d.marks().count("open") >= 2, 15)
+        time.sleep(7)               # past D51's first sit-out (5 s) and more
+    finally:
+        log = d.stop()
+    assert d.marks().count("open") == 2, d.marks()    # fast pass + patient pass
+    assert log.count("nothing here answers") == 1, log
+
+
+@posix
+def test_with_no_pairing_a_busy_port_is_retried_every_three_seconds(tmp_path):
+    d = Daemon(tmp_path, "busy", pair=False)
+    try:
+        assert d.wait(lambda: d.marks().count("open") >= 3, 12)
+    finally:
+        d.stop()
+    assert d.marks().count("open") >= 3     # D51 would have said 0, 5, 15 s
+
+
+@posix
+def test_a_waiting_daemon_writes_none(tmp_path):
+    d = Daemon(tmp_path, "nothing", pair=False)
+    try:
+        assert d.wait(lambda: (d.home / ".blink" / "link.json").exists(), 10)
+        assert d.link()["link"] == "none"
+    finally:
+        d.stop()
+
+
+@posix
+@pytest.mark.parametrize("same", [True, False])
+def test_learn_board_over_wifi_keeps_the_port_only_for_the_same_board(
+        tmp_path, fake_board, same):
+    hello = {"t": "hello", "v": 1, "board_id": "aaaa" if same else "bbbb",
+             "fw": "1.0.0", "caps": []}
+    d = Daemon(tmp_path, "nothing", board=fake_board(extra_lines=[hello]),
+               board_json={"port": "/dev/known", "board_id": "aaaa"})
+    try:
+        assert d.wait(lambda: d.seen().count(("rx", "hello")) >= 2)
+        time.sleep(0.5)
+    finally:
+        d.stop()
+    rec = json.loads((d.home / ".blink" / "board.json").read_text())
+    assert rec["port"] == ("/dev/known" if same else None)
