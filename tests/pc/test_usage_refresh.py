@@ -2032,3 +2032,22 @@ def test_an_answer_that_cannot_be_saved_is_said_by_type(tmp_path, monkeypatch,
     assert err.splitlines() == [
         "usage refresh answer not saved (PermissionError)"]
     assert k.ask().times == 1
+
+
+def test_a_board_ask_fault_that_comes_back_is_said_again(tmp_path,
+                                                         monkeypatch, capsys):
+    # Once per streak, not once per process: a call that works ends it.
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+    real = k.a._due
+
+    def broken(caps):
+        raise PermissionError(13, "refused")
+    monkeypatch.setattr(k.a, "_due", broken)
+    k.a.due(CAPS)
+    monkeypatch.setattr(k.a, "_due", real)
+    k.a.due(CAPS)
+    monkeypatch.setattr(k.a, "_due", broken)
+    k.a.due(CAPS)
+    assert capsys.readouterr().err.splitlines() == [
+        "usage refresh ask failed (PermissionError)"] * 2

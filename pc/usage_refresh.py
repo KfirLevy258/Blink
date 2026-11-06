@@ -541,6 +541,13 @@ class BoardAsk:
             self._said = (what, name)
             print(f"usage refresh {what} ({name})", file=sys.stderr)
 
+    def _ok(self, what):
+        # A call that worked ends that streak, so the same fault coming back
+        # weeks later is said again (review of PR #8: it was once per
+        # process, the silence this was written to end).
+        if self._said is not None and self._said[0] == what:
+            self._said = None
+
     def _state(self):
         read = load_ask(self._blink_home)
         mem = self._mem
@@ -561,10 +568,12 @@ class BoardAsk:
     def due(self, board_caps):
         """Never raises: a question is never worth the thread."""
         try:
-            return self._due(frozenset(board_caps))
+            due = self._due(frozenset(board_caps))
         except Exception as e:
             self._say("ask failed", e)
             return False
+        self._ok("ask failed")
+        return due
 
     def _due(self, caps):
         now = self._now()
@@ -636,6 +645,8 @@ class BoardAsk:
                     # Not saved: an "on" is asked again tomorrow, a "no" is
                     # held by `declined` above.
                     self._say("answer not saved", e)
+                else:
+                    self._ok("answer not saved")
         except Exception as e:
             self._say("answer not saved", e)
 
