@@ -141,9 +141,9 @@ def test_every_control_rule_is_at_least_44_px_tall():
     page = theme_server.page()
     css = page[page.index("<style>"):page.index("</style>")]
     rules = _rules(css)
-    for control in (".btn", ".seg button", ".slot input[type=color]",
-                    ".slot input[type=text]", ".paste input",
-                    ".slider input", ".preset"):
+    for control in (".btn", ".seg button", ".chips button", ".tabs button",
+                    ".crow .pick", ".crow .hex", ".paste input", ".try input",
+                    ".link", ".th"):
         heights = [max(_px(d.get("min-height")) or 0, _px(d.get("height")) or 0)
                    for sels, d in rules if control in sels]
         assert heights and max(heights) >= 44, (control, heights)
@@ -884,9 +884,9 @@ def test_nothing_is_previewed_before_the_state_answers():
     the form is off and says it is waiting until the state is here."""
     r = builder_page.run("""
     await advance(10);
-    const off = """ + _FORM + """.every(e => e.disabled);
+    const off = """ + _FORM + """.filter(e => e.id !== 'cancel').every(e => e.disabled);
     const busy = document.querySelector('main').getAttribute('aria-busy');
-    const ocean = document.querySelectorAll('#presets button').find(b => b.querySelector('.pn').textContent === 'Ocean');
+    const ocean = document.querySelectorAll('#presets button').find(b => b.querySelector('.nm').textContent === 'Ocean');
     ocean.fire('click');         // arriving past disabled, as Save's does
     $('t-low').value = '#123456'; $('t-low').fire('input');
     await advance(300);
@@ -954,7 +954,7 @@ def test_a_handler_dispatched_past_disabled_before_the_state_does_nothing():
     r = builder_page.run(f"""
     await advance(10);
     const by = (sel, key, v) => document.querySelectorAll(sel).find(b => b.dataset[key] === v);
-    document.querySelectorAll('#presets button').find(b => b.querySelector('.pn').textContent === 'Ocean').fire('click');
+    document.querySelectorAll('#presets button').find(b => b.querySelector('.nm').textContent === 'Ocean').fire('click');
     $('c-low').value = '#123456'; $('c-low').fire('input');
     $('t-mid').value = '#654321'; $('t-mid').fire('input');
     by('[data-m]', 'm', 'gauge').fire('click');
@@ -1287,3 +1287,352 @@ def test_the_dim_line_wears_the_severity_colour_from_60(pct, slot):
     else:
         assert line[1].lower() == {"high": "#ff1900", "mid": "#ba8107"}[slot]
     assert colours["high"].lower() == "#ff1900"
+
+
+# ----------------------------------------------- the approved page (Task 4.2)
+#
+# One test per line of the design spec's section 4 (docs/design/settings-page.md).
+
+PERSISTENT = {"/api/state": {"status": 200, "body": {
+    "saved": {"id": 0}, "draft": None, "persistent": True}}}
+_CHIPS = "document.querySelectorAll('[data-panel]')"
+_SHOWN = "(id) => $(id).getAttribute('hidden') === null"
+
+
+def test_opening_state_is_board_status_and_three_controls():
+    markup, _ = builder_page.page_parts()
+    r = builder_page.run(f"""
+    await advance(300);
+    const shown = {_SHOWN};
+    const ctl = document.querySelectorAll('[aria-controls][aria-pressed]');
+    return {{ h1: document.querySelectorAll('h1').length,
+             ctl: ctl.map(b => [b.textContent, b.getAttribute('aria-pressed'), b.getAttribute('aria-controls')]),
+             open: ['pLook', 'pCust', 'pConn', 'pBoard'].filter(shown),
+             role: $('hero').getAttribute('role'), title: $('heroTitle').textContent }};
+    """, SAVED_DARK)
+    assert r["h1"] == 1
+    assert r["ctl"] == [["Look", "false", "pLook pCust"],
+                        ["Connect", "false", "pConn"],
+                        ["Board", "false", "pBoard"]]
+    assert r["open"] == [] and r["role"] == "img"
+    assert r["title"].startswith("Board preview, Dark theme: Claude, session 42%")
+
+
+def test_one_panel_at_a_time():
+    r = builder_page.run(f"""
+    await advance(300);
+    const shown = {_SHOWN}, c = {_CHIPS};
+    const open = () => ['pLook', 'pCust', 'pConn', 'pBoard'].filter(shown);
+    const out = [];
+    c[0].click(); out.push(open());
+    c[1].click(); out.push(open());
+    c[2].click(); out.push(open());
+    return {{ out, pressed: c.map(b => b.getAttribute('aria-pressed')) }};
+    """, SAVED_DARK)
+    assert r["out"] == [["pLook", "pCust"], ["pConn"], ["pBoard"]]
+    assert r["pressed"] == ["false", "false", "true"]
+
+
+def test_control_toggles_and_escape_closes_and_returns_focus():
+    r = builder_page.run(f"""
+    await advance(300);
+    const shown = {_SHOWN}, c = {_CHIPS};
+    c[1].click(); const a = shown('pConn');
+    c[1].click(); const b = shown('pConn');
+    c[0].click(); $('t-low').focus();
+    document.fire('keydown', {{ key: 'Escape' }});
+    return {{ a, b, look: shown('pLook'), focus: document.activeElement === c[0],
+             pressed: c[0].getAttribute('aria-pressed') }};
+    """, SAVED_DARK)
+    assert r == {"a": True, "b": False, "look": False, "focus": True,
+                 "pressed": "false"}
+
+
+def test_look_takes_both_sides_and_subtabs_roving_tabindex():
+    r = builder_page.run(f"""
+    await advance(300);
+    const shown = {_SHOWN};
+    {_CHIPS}[0].click();
+    const tabs = $('tThemes-t').parentNode.querySelectorAll('[role=tab]');
+    const state = () => tabs.map(t => [t.getAttribute('aria-selected'), t.getAttribute('tabindex')]);
+    const first = state();
+    $('tThemes-t').fire('keydown', {{ key: 'ArrowRight' }});
+    const second = state();
+    $('tLogo-t').fire('keydown', {{ key: 'ArrowRight' }});
+    return {{ both: [shown('pLook'), shown('pCust')], first, second, back: state(),
+             panels: [shown('tThemes'), shown('tLogo')],
+             roles: ['tThemes', 'tLogo'].map(i => $(i).getAttribute('role')),
+             screen: $('heroTitle').textContent }};
+    """, SAVED_DARK)
+    assert r["both"] == [True, True]
+    assert r["first"] == [["true", "0"], ["false", "-1"]]
+    assert r["second"] == [["false", "-1"], ["true", "0"]]
+    assert r["back"] == r["first"]
+    assert r["roles"] == ["tabpanel", "tabpanel"]
+    assert r["panels"] == [True, False]
+
+
+def test_logo_tab_shows_the_startup_screen_on_the_board():
+    r = builder_page.run(f"""
+    await advance(300);
+    {_CHIPS}[0].click();
+    $('tLogo-t').click();
+    return $('heroTitle').textContent;
+    """, SAVED_DARK)
+    assert "start-up screen, no logo yet" in r
+
+
+def test_theme_hover_and_focus_preview_and_click_commits():
+    r = builder_page.run("""
+    await advance(300);
+    const tiles = document.querySelectorAll('#presets button');
+    const ocean = tiles.find(b => b.querySelector('.nm').textContent === 'Ocean');
+    const before = $('heroTitle').textContent;
+    ocean.fire('pointerenter', { pointerType: 'mouse' });
+    const hover = $('heroTitle').textContent;
+    ocean.fire('pointerleave');
+    const left = $('heroTitle').textContent;
+    ocean.focus();
+    const focus = $('heroTitle').textContent;
+    $('t-low').focus();
+    const blurred = $('heroTitle').textContent;
+    ocean.fire('pointerenter', { pointerType: 'mouse' });
+    ocean.click();
+    ocean.fire('pointerleave');
+    await advance(300);
+    return { before, hover, left, focus, blurred, after: $('heroTitle').textContent,
+             pressed: ocean.getAttribute('aria-pressed'),
+             sent: requests.filter(q => q.path === '/api/preview').map(q => q.body) };
+    """, SAVED_DARK)
+    assert "Dark theme" in r["before"] and "Ocean theme" in r["hover"]
+    assert r["left"] == r["before"] and r["blurred"] == r["before"]
+    assert "Ocean theme" in r["focus"] and "Ocean theme" in r["after"]
+    assert r["pressed"] == "true"
+    # Pointing sent nothing; the click sent the one preview.
+    assert r["sent"] == [{"id": 4}]
+
+
+def test_settings_page_click_on_a_theme_saves_and_stays():
+    r = builder_page.run("""
+    await advance(300);
+    const out = { done: $('done').getAttribute('hidden'), cancel: $('cancel').getAttribute('hidden') };
+    preset('Ocean'); await advance(300);
+    return Object.assign(out, {
+      saves: requests.filter(q => q.path === '/api/save').map(q => q.body),
+      previews: requests.filter(q => q.path === '/api/preview').length,
+      popup: $('notice').getAttribute('hidden'), bar: $('status-text').textContent,
+      save: $('save').disabled });
+    """, PERSISTENT)
+    assert r["done"] is None and r["cancel"] == ""
+    assert r["saves"] == [{"id": 4}] and r["previews"] == 0
+    assert r["popup"] == "" and r["bar"] == "Saved: Ocean. Your board keeps it."
+    assert r["save"] is False
+
+
+def test_blink_theme_page_keeps_its_save_and_cancel():
+    r = builder_page.run("""
+    await advance(300);
+    preset('Ocean'); await advance(300);
+    return { done: $('done').getAttribute('hidden'), cancel: $('cancel').getAttribute('hidden'),
+             saves: requests.filter(q => q.path === '/api/save').length,
+             previews: requests.filter(q => q.path === '/api/preview').length };
+    """, SAVED_DARK)
+    assert r == {"done": "", "cancel": None, "saves": 0, "previews": 1}
+
+
+def test_done_ends_the_settings_session():
+    r = builder_page.run("""
+    await advance(300);
+    $('done').click(); await advance(10);
+    return { reqs: requests.filter(q => q.path === '/api/done').length,
+             title: $('notice-title').textContent, shown: $('notice').getAttribute('hidden') };
+    """, PERSISTENT)
+    assert r == {"reqs": 1, "title": "Done.", "shown": None}
+
+
+def test_customise_header_says_custom_changed_from_dark():
+    r = builder_page.run("""
+    await advance(300);
+    const start = $('themeName').textContent;
+    const resetHidden = $('resetBtn').getAttribute('hidden');
+    pick('c-low', '#123456'); await advance(10);
+    const edited = $('themeName').textContent;
+    const reset = [$('resetBtn').getAttribute('hidden'), $('resetBtn').textContent];
+    $('resetBtn').click(); await advance(10);
+    return { start, resetHidden, edited, reset, after: $('themeName').textContent };
+    """, SAVED_DARK)
+    assert r["start"] == "Starting from Dark" and r["resetHidden"] == ""
+    assert r["edited"] == "Custom, changed from Dark"
+    assert r["reset"] == [None, "Reset to Dark"]
+    assert r["after"] == "Starting from Dark"
+
+
+def test_hex_field_invalid_outline_and_revert_on_blur():
+    r = builder_page.run("""
+    await advance(300);
+    type('t-low', '#12345G');
+    const bad = [$('t-low').getAttribute('aria-invalid'), $('m-low').textContent];
+    $('t-mid').focus();
+    return { bad, after: [$('t-low').getAttribute('aria-invalid'), $('t-low').value, $('m-low').textContent],
+             accepted: (type('t-high', 'ABCDEF'), $('themeName').textContent) };
+    """, SAVED_DARK)
+    assert r["bad"] == ["true", "Use six hex digits, 0 to 9 and A to F."]
+    assert r["after"] == ["false", "#0DA243", ""]
+    assert r["accepted"] == "Custom, changed from Dark"
+
+
+@pytest.mark.parametrize("panel", ["look", "connect", "board"])
+def test_panel_query_opens_that_control(panel):
+    r = builder_page.run(f"""
+    await advance(300);
+    const shown = {_SHOWN};
+    return ['pLook', 'pCust', 'pConn', 'pBoard'].filter(shown);
+    """, SAVED_DARK, search=f"?panel={panel}")
+    assert r == {"look": ["pLook", "pCust"], "connect": ["pConn"],
+                 "board": ["pBoard"]}[panel]
+
+
+def test_an_unknown_panel_query_opens_nothing():
+    r = builder_page.run("""
+    await advance(300);
+    return document.querySelectorAll('[aria-controls][aria-pressed]').map(b => b.getAttribute('aria-pressed'));
+    """, SAVED_DARK, search="?panel=%3Cb%3E")
+    assert r == ["false"] * 3
+
+
+def test_board_show_moves_the_board_and_status_says_its_steps():
+    r = builder_page.run("""
+    await advance(300);
+    const api = window.blinkSettings, title = () => $('heroTitle').textContent;
+    api.board.show({ screen: 'settings' }); const settings = title();
+    api.board.show({ screen: 'usage', view: 'focus', focus: 'weekly', session_pct: 10, weekly_pct: 77 });
+    const focus = title();
+    api.board.show({ link: 'wifi' });
+    api.status.say('Live over WiFi, encrypted', 'live');
+    const line = [$('board-status-text').textContent, $('board-status').getAttribute('hidden'), $('board-dot').className];
+    api.status.say('Board not found, check the USB cable', 'danger');
+    const bad = $('board-dot').className;
+    api.status.steps(1, 'active');
+    const ticks = document.querySelectorAll('#hs li').map(li => li.className);
+    const step = [$('hs-text').textContent, $('hs').getAttribute('hidden'), $('board-status').getAttribute('hidden')];
+    api.status.steps(4, 'done');
+    const all = [document.querySelectorAll('#hs li').map(li => li.className), $('hs-text').textContent];
+    api.status.steps(null);
+    return { settings, focus, line, bad, ticks, step, all, back: $('hs').getAttribute('hidden'),
+             track: $('wifiTrack').getAttribute('class'), lock: $('lock').getAttribute('class') };
+    """, SAVED_DARK)
+    assert "Settings screen" in r["settings"]
+    assert "weekly 77%" in r["focus"]
+    assert r["line"] == ["Live over WiFi, encrypted", None, "dot"]
+    assert r["bad"] == "dot danger"
+    assert r["ticks"] == ["done", "active", "", ""]
+    assert r["step"] == ["Board joins the network", None, ""]
+    assert r["all"] == [["done"] * 4, "Connected. You can unplug the cable."]
+    assert r["back"] == ""
+    assert r["track"] == "track wifi live" and r["lock"] == "lock on"
+
+
+def _css():
+    page = theme_server.page()
+    return re.sub(r"/\*.*?\*/", "",
+                  page[page.index("<style>"):page.index("</style>")], flags=re.S)
+
+
+def test_dark_override_and_color_scheme():
+    css = _css()
+    assert re.search(r"@media \(prefers-color-scheme: dark\)\s*\{\s*:root:not\(\[data-theme=\"light\"\]\)", css)
+    assert ':root[data-theme="dark"]' in css
+    assert css.count("color-scheme: dark") >= 2 and "color-scheme: light" in css
+    for token, light, dark in (("--bg", "#e6e5e2", "#121110"),
+                               ("--panel", "#fbfbfa", "#1b1a18"),
+                               ("--accent", "#ff6a13", "#ff6a13"),
+                               ("--accent-ink", "#a8400a", "#ff9152"),
+                               ("--muted", "#5b5853", "#a29e97")):
+        assert f"{token}: {light}" in css and f"{token}: {dark}" in css
+
+
+def test_reduced_motion_disables_transitions():
+    css = _css()
+    m = re.search(r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*?)\}\s*\}",
+                  css, re.S)
+    assert m
+    assert "animation: none !important" in m.group(1)
+    assert "transition: none !important" in m.group(1)
+    assert "stroke-dasharray: none" in m.group(1)       # the pulse is a solid line
+
+
+def test_no_browser_dialogs_in_script():
+    _, script = builder_page.page_parts()
+    for call in ("alert(", "confirm(", "prompt("):
+        assert not re.search(r"(?<![\w.])" + re.escape(call), script), call
+
+
+def test_confirm_replaces_the_button_with_keep_focused():
+    r = builder_page.run("""
+    await advance(300);
+    const host = document.createElement('button'); host.textContent = 'Forget WiFi';
+    const wrap = document.createElement('div'); wrap.appendChild(host);
+    $('connect-body').appendChild(wrap);
+    let ran = 0;
+    const box = window.blinkSettings.confirm.ask(host, 'Forget it?', 'Forget it', () => { ran++; });
+    const [yes, keep] = box.querySelectorAll('button');
+    const open = { hostHidden: host.getAttribute('hidden'), focusKeep: document.activeElement === keep,
+                   labels: [yes.textContent, keep.textContent], inPage: wrap.children.length };
+    keep.click();
+    const kept = { hostHidden: host.getAttribute('hidden'), ran, focusHost: document.activeElement === host,
+                   inPage: wrap.children.length };
+    const box2 = window.blinkSettings.confirm.ask(host, 'Forget it?', 'Forget it', () => { ran++; });
+    box2.querySelectorAll('button')[0].click();
+    return { open, kept, ran };
+    """, SAVED_DARK)
+    assert r["open"] == {"hostHidden": "", "focusKeep": True,
+                         "labels": ["Forget it", "Keep"], "inPage": 2}
+    assert r["kept"] == {"hostHidden": None, "ran": 0, "focusHost": True,
+                         "inPage": 1}
+    assert r["ran"] == 1
+
+
+# The old renderer, moved and not rewritten: these three functions are the
+# board's own drawing, reviewed as such, and their texts are pinned by hash
+# of the commit before this page (24163b7).
+_RENDERER_HASHES = {
+    "gauge": "22f85fbb33ca5f32ca9ae11877596645ac4eb0571c3f67d5138fac1afc84a1f0",
+    "arcPath": "6b59b7039f1e84f813f324414e46d7d2f79bc7a3ff4d89e9d13dea63d65cebb4",
+    "customDim": "d9cd94478d8292ee55e6df9744f9a0e801c59b94ca23dc7d168830568e31401c",
+}
+
+
+def _function_text(script, name):
+    i = script.index(f"function {name}(")
+    depth = 0
+    for k in range(script.index("{", i), len(script)):
+        depth += script[k] == "{"
+        depth -= script[k] == "}"
+        if depth == 0:
+            return script[i:k + 1]
+
+
+def test_board_renderer_is_the_old_one():
+    import hashlib
+    _, script = builder_page.page_parts()
+    for name, want in _RENDERER_HASHES.items():
+        got = hashlib.sha256(_function_text(script, name).encode()).hexdigest()
+        assert got == want, name
+
+
+def test_every_target_in_the_markup_is_named():
+    """Icon-only controls carry a label; decorative svg is hidden."""
+    markup, _ = builder_page.page_parts()
+
+    def walk(n):
+        if isinstance(n, str):
+            return
+        yield n
+        for c in n["children"]:
+            yield from walk(c)
+    for n in walk(markup):
+        if n["tag"] == "svg" and n["attrs"].get("role") != "img":
+            assert n["attrs"].get("aria-hidden") == "true", n["attrs"]
+        if n["tag"] == "button":
+            text = "".join(c if isinstance(c, str) else "x" for c in n["children"])
+            assert text.strip() or n["attrs"].get("aria-label"), n["attrs"]

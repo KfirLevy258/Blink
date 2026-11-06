@@ -19,7 +19,7 @@ from pc import theme_server
 DOM_JS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       "builder_dom.js")
 _VOID = {"meta", "input", "br", "img", "link", "hr", "path", "rect",
-         "circle"}
+         "circle", "stop", "ellipse", "line"}
 
 
 class _Tree(html.parser.HTMLParser):
@@ -70,7 +70,7 @@ def page_parts():
     return t.root, "".join(t.script)
 
 
-def run(scenario, answers=None, tmp=None):
+def run(scenario, answers=None, tmp=None, search=""):
     """The scenario's return value. `answers` maps a path to the
     {"status": n, "body": {...}} the server gives it; anything not named
     answers 200 {"ok": true}."""
@@ -79,7 +79,7 @@ def run(scenario, answers=None, tmp=None):
         pytest.skip("needs node")
     markup, script = page_parts()
     case = {"markup": markup, "script": script, "scenario": scenario,
-            "answers": answers or {}}
+            "answers": answers or {}, "search": search}
     with tempfile.TemporaryDirectory(dir=tmp) as d:
         path = os.path.join(d, "case.json")
         with open(path, "w", encoding="utf-8") as f:

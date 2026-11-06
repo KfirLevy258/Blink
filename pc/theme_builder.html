@@ -4,369 +4,569 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>BLINK theme builder</title>
+<title>BLINK settings</title>
 <!--
-  Served by pc/theme_server.py from 127.0.0.1 only. Self-contained on purpose:
-  no fonts, scripts or styles from anywhere else, so it works on a desk with no
-  network and the server's Content-Security-Policy can forbid every outside
-  request. Built from the published design (claude.ai artifact
-  WG9LpsFRVuL7R6JsbwDUhB, 2026-10-25); the share code is the wire contract's
-  JSON form, not the design's packed bytes.
+  Served by pc/theme_server.py from 127.0.0.1 only, built to the owner-approved
+  design (docs/design/settings-page.md, 2026-11-06). It loads nothing from
+  anywhere else: no hosted scripts and no web fonts. It is served to a desk that may be
+  offline and from inside a frozen app, and the server's Content-Security-Policy
+  allows only this origin. The two Montserrat files the board's screen is drawn
+  in are vendored in pc/fonts and read through /font/; the page's own text is
+  the system stack, which is the design's stated fallback for IBM Plex.
 -->
 <style>
+@font-face { font-family: "Montserrat"; font-weight: 500; font-display: swap; src: url("/font/Montserrat-Medium-latin.woff2") format("woff2"); }
+@font-face { font-family: "Montserrat"; font-weight: 600; font-display: swap; src: url("/font/Montserrat-SemiBold-latin.woff2") format("woff2"); }
 /*
-  The page wears the board's own themes: Dark (firmware/src/theme.c, id 0)
-  first, because that is what a new board shows, and Light (id 9) when the
-  computer asks for light. --bad is the board's red, for borders. Words in
-  red take --bad-text: the board's #E74C3C measures 4.57:1 on the dark
-  card, a hair over the 4.5:1 small text needs, and 6.9:1 for the lighter
-  red. The marks in Checks are 11 px on a coloured chip, and white on the
-  board's red measured 3.8:1, so the NO chip is dark ink on --bad-text in
-  dark (7.4:1) and white on the board's light red in light (5.6:1). Dark
-  ink on the light scheme's amber measured 3.2:1, so --on-warn is white
-  there (5.9:1). --line is a hairline between parts of the page, at about
-  1.25:1; a box that takes typing is drawn in --edge instead, 3.3:1 on the
-  card and 3.4:1 on the sunk ground in dark, 3.6:1 and 3.4:1 in light,
-  since WCAG 1.4.11 asks 3:1 of the edge that says "this is a field" and
-  the empty paste box read as no box at all (review of fp/builder-look, N2).
-  The page's chrome sits under a header whose height is --top-h; the
-  script keeps it to the header as drawn (review, S4).
+  The tokens are the design's, light and dark, and the page follows the
+  system with data-theme="light|dark" on :root to override it. --warn and
+  --scrim are the two the design's table has no row for: the Check marks
+  and the ended-tab popup need them. --warn is the old builder's amber, 6.2:1
+  on --panel in light and 9.9:1 in dark; the contrast of every pair was
+  measured with the page's own helpers (task 4.2 report).
 */
 :root {
-  --top-h: 80px;
-  --bg: #0E1116; --card: #161A20; --sunk: #12151A; --line: #272C34; --edge: #646C76;
-  --text: #E6E8EB; --dim: #8A9199; --ok: #2ECC71; --ok-text: #2ECC71; --warn: #F1C40F; --on-warn: #0E1116;
-  --bad: #E74C3C; --bad-text: #FF7A6E; --on-bad: #0E1116; --accent: #2ECC71; --on-accent: #0E1116; --focus: #2ECC71;
-  --shadow: rgba(0,0,0,.55); --scrim: rgba(5,6,8,.72); color-scheme: dark;
-  --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --bg: #e6e5e2; --stage: #f7f6f4; --panel: #fbfbfa; --raise: #ffffff; --ink: #1c1b1a; --muted: #5b5853;
+  --line: #dcd9d4; --field: #efeeeb; --accent: #ff6a13; --accent-ink: #a8400a; --on-accent: #1f0b00;
+  --ok: #1b7642; --danger: #b1261d; --floor: rgba(60, 40, 20, .30); --warn: #8a5a00; --scrim: rgba(17, 20, 24, .45);
+  --shadow: 0 1px 2px rgba(50, 35, 20, .06), 0 18px 40px -16px rgba(50, 35, 20, .22);
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, Menlo, Consolas, monospace;
+  --out: cubic-bezier(.2, .7, .2, 1);
+  color-scheme: light;
 }
-@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) {
-  --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6; --edge: #80878F;
-  --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
-  --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
-  --shadow: rgba(17,20,24,.16); --scrim: rgba(17,20,24,.45); color-scheme: light; } }
-:root[data-theme="light"] {
-  --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6; --edge: #80878F;
-  --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
-  --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
-  --shadow: rgba(17,20,24,.16); --scrim: rgba(17,20,24,.45); color-scheme: light; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121110; --stage: #262421; --panel: #1b1a18; --raise: #2a2825; --ink: #eceae6; --muted: #a29e97;
+  --line: #2f2d2a; --field: #23211f; --accent: #ff6a13; --accent-ink: #ff9152; --on-accent: #1f0b00;
+  --ok: #5fd394; --danger: #ff8a7d; --floor: rgba(0, 0, 0, .55); --warn: #f1c40f; --scrim: rgba(5, 6, 8, .72);
+  --shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 22px 48px -16px rgba(0, 0, 0, .7);
+  color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #121110; --stage: #262421; --panel: #1b1a18; --raise: #2a2825; --ink: #eceae6; --muted: #a29e97;
+  --line: #2f2d2a; --field: #23211f; --accent: #ff6a13; --accent-ink: #ff9152; --on-accent: #1f0b00;
+  --ok: #5fd394; --danger: #ff8a7d; --floor: rgba(0, 0, 0, .55); --warn: #f1c40f; --scrim: rgba(5, 6, 8, .72);
+  --shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 22px 48px -16px rgba(0, 0, 0, .7);
+  color-scheme: dark;
+}
 
+[hidden] { display: none !important; }
 * { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
-button, input { font: inherit; color: inherit; }
-h1, h2 { margin: 0; }
-code { font-family: var(--mono); font-size: .875em; background: var(--sunk); border: 1px solid var(--line); padding: 1px 6px; border-radius: 6px; }
-:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-.icon { width: 18px; height: 18px; flex: none; }
-.eyebrow { font: 600 12px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); }
-.lede { color: var(--dim); margin: 0; max-width: 68ch; }
-.desc { color: var(--dim); margin: 6px 0 0; font-size: 14px; }
+html { scrollbar-gutter: stable; }
+body {
+  margin: 0; min-height: 100dvh; color: var(--ink); font: 400 14px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; background: var(--bg);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px; display: flex; flex-direction: column;
+}
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+h1, h2, p { margin: 0; }
+.label { font: 500 13px/1.4 var(--sans); color: var(--muted); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
-/* Every button, segment, swatch and box is at least 44 px tall: the page
-   is opened from the board, and as often as not on a touch laptop. The
-   segment buttons were 42 px and the claim was here regardless (review of
-   fp/builder-look, S6); tests/pc/test_theme_page.py reads each control's
-   rule now, rather than finding "44px" somewhere in the file. */
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 18px; border-radius: 10px;
-  border: 1px solid var(--line); background: var(--card); font-weight: 600; font-size: 15px; cursor: pointer; white-space: nowrap;
-  transition: background-color .2s ease, border-color .2s ease, color .2s ease, opacity .2s ease; }
-.btn:hover:not(:disabled) { border-color: var(--dim); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-.btn.primary:hover:not(:disabled) { border-color: var(--text); }
-.btn.ghost { background: transparent; }
-.btn.small { padding: 0 12px; font-size: 14px; }
+/* ---------- top bar: the mark and wordmark, then Done on the settings page ---------- */
+.top { display: flex; align-items: center; gap: 10px; max-width: 1720px; width: 100%; margin: 0 auto; }
+.top svg { width: 26px; height: 20px; color: var(--ink); flex: none; }
+h1 { font: 600 15px/1 var(--sans); letter-spacing: .14em; }
+h1 span { font-weight: 400; letter-spacing: 0; color: var(--muted); margin-left: 8px; }
+.top .done { margin-left: auto; }
+
+/* ---------- three columns, the board in the middle one ---------- */
+.page { flex: 1; width: 100%; max-width: 1720px; margin: 0 auto; display: grid; column-gap: 28px;
+  grid-template-columns: minmax(320px, 1fr) minmax(460px, 600px) minmax(320px, 1fr); grid-template-areas: "left hub right";
+  align-content: center; align-items: stretch; }
+.hub { grid-area: hub; display: flex; flex-direction: column; align-items: center; min-width: 0; position: relative; }
+/* A panel is out of flow with its top edge on the case's top edge, so its
+   height never changes the row and the board never moves. */
+.side { min-width: 0; position: relative; }
+.side .panel { position: absolute; top: 34px; }
+#sideL { grid-area: left; } #sideL .panel { right: 0; }
+#sideR { grid-area: right; } #sideR .panel { left: 0; }
+@media (min-width: 1680px) { .page { column-gap: 40px; grid-template-columns: minmax(320px, 1fr) 660px minmax(320px, 1fr); } }
+
+/* ---------- the studio: a light pool, a contact shadow, two desk objects ---------- */
+.stage { width: 100%; position: relative; isolation: isolate; }
+.stage::before { content: ""; position: absolute; z-index: -1; left: -14%; right: -14%; top: -10%; bottom: 4%;
+  background: radial-gradient(50% 50% at 50% 46%, var(--stage) 0%, color-mix(in srgb, var(--stage) 55%, var(--bg)) 45%, transparent 100%);
+  pointer-events: none; }
+svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
+.floor { fill: url(#floorG); }
+.track { fill: none; stroke: color-mix(in srgb, var(--muted) 55%, transparent); stroke-width: 1.4; stroke-linecap: round; transition: stroke .4s ease, opacity .4s ease; }
+.track.live { stroke: var(--muted); }
+.track.wifi { stroke-dasharray: 1 5; }
+.track.wifi.live { stroke-dasharray: none; }
+.pulse { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 0 101; opacity: 0; }
+.pulse.run { opacity: 1; stroke-dasharray: 10 91; animation: travel 1.3s var(--out) infinite; }
+@keyframes travel { from { stroke-dashoffset: 10; } to { stroke-dashoffset: -91; } }
+.node { transition: opacity .4s ease; }
+.node.ghost .glyph { opacity: .55; }
+.node.ghost .node-label { fill: var(--muted); }
+.lamp { fill: var(--ok); }
+.node.ghost .lamp { fill: none; }
+.node-ink { fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.node-fill { fill: var(--panel); }
+.node.ghost .node-ink { stroke-dasharray: 2 3; }
+.node-label { font: 500 13px var(--sans); fill: var(--ink); }
+.node-sub { font: 400 12px var(--sans); fill: var(--muted); }
+.lock { opacity: 0; transition: opacity .4s ease; }
+.lock.on { opacity: 1; }
+.lock circle { fill: var(--panel); stroke: var(--ok); stroke-width: 1.4; }
+.lock path { fill: none; stroke: var(--ok); stroke-width: 1.5; }
+.lock rect { fill: var(--ok); }
+@keyframes flow { to { stroke-dashoffset: -24; } }
+#scr .dash { animation: flow 1.2s linear infinite; }
+
+/* ---------- name, status, controls ---------- */
+.ident { display: flex; flex-direction: column; align-items: center; gap: 4px; margin-top: 4px; text-align: center; min-height: 52px; }
+.devname { font: 500 20px/1.3 var(--sans); letter-spacing: -.005em; }
+.hubstatus { font-size: 14px; color: var(--muted); display: inline-flex; align-items: center; gap: 8px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+.dot.danger { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent); }
+.dot.busy { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.hs { display: inline-flex; align-items: center; gap: 12px; font-size: 14px; color: var(--ink); }
+.hs ol { list-style: none; margin: 0; padding: 0; display: flex; gap: 4px; }
+.hs li { width: 18px; height: 3px; border-radius: 2px; background: var(--line); transition: background .3s ease; }
+.hs li.active { background: var(--accent); }
+.hs li.done { background: var(--ok); }
+.hs li.fail { background: var(--danger); }
+
+.chips { display: inline-flex; gap: 2px; padding: 4px; margin-top: 20px; border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 70%, transparent); box-shadow: inset 0 0 0 1px var(--line); }
+.chips button { min-height: 44px; min-width: 104px; padding: 0 18px; border: 0; border-radius: 10px; background: none;
+  color: var(--muted); font-weight: 500; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  transition: background .2s ease, color .2s ease, box-shadow .2s ease; }
+.chips svg { width: 16px; height: 16px; flex: none; }
+.chips button:hover { color: var(--ink); }
+.chips button[aria-pressed="true"] { background: var(--raise); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px var(--line); }
+.chips button[aria-pressed="true"] svg { color: var(--accent-ink); }
+
+/* ---------- panels ---------- */
+.panel { width: 100%; max-width: 372px; max-height: max(360px, calc(100dvh - 210px)); overflow: auto; overscroll-behavior: contain;
+  background: var(--panel); border-radius: 18px; padding: 24px; box-shadow: var(--shadow), 0 0 0 1px color-mix(in srgb, var(--line) 60%, transparent);
+  display: flex; flex-direction: column; gap: 20px; scrollbar-width: thin; }
+.panel.wide { max-width: 452px; }
+#sideL .panel { animation: inL .32s var(--out) both; }
+#sideR .panel { animation: inR .32s var(--out) both; }
+@keyframes inL { from { opacity: 0; transform: translateX(14px); } }
+@keyframes inR { from { opacity: 0; transform: translateX(-14px); } }
+.panel h2 { font: 600 17px/1.3 var(--sans); }
+.phead { display: flex; flex-direction: column; gap: 4px; }
+.phead p { font-size: 14px; color: var(--muted); }
+.phead p b { color: var(--ink); font-weight: 500; }
+.stack { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.sec { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.sec + .sec { border-top: 1px solid var(--line); padding-top: 20px; }
+.sec > .label, .sec-h { font: 600 14px/1.3 var(--sans); color: var(--ink); }
+.sec-h { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.note2 { font-size: 13px; color: var(--muted); }
+.tap { display: none; }
+@media (hover: none) { .hov { display: none; } .tap { display: inline; } }
+
+.btn { min-height: 44px; padding: 0 18px; border-radius: 10px; border: 0; background: var(--field); font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: filter .2s ease, background .2s ease, transform .1s ease; }
+.btn:hover:not(:disabled) { filter: brightness(1.04); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn.primary { width: 100%; background: var(--accent); color: var(--on-accent); box-shadow: inset 0 1px 0 rgba(255,255,255,.25), 0 1px 2px rgba(120,40,0,.25); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
-/* Until /api/state answers, the form is off (see "loaded" in the script),
-   and a preset or a segment button has no disabled look of its own, so the
-   controls dim -- the controls only. The whole studio at .6 put the dim
-   text (the lede, each .desc, the slot hints) at 2.6 to 2.9:1, from 5.5 to
-   7.0:1, in both schemes (review of fp/save-before-load, N2); the words
-   that say what the page is for stay as they are. .btn has its own
-   disabled look and is left to it. "waiting" comes 150 ms after the page
-   runs and not with it, so a state answered on loopback in a few
-   milliseconds does not flash the controls dim for a frame (N3). A class
-   set late and not an animation delay: the notice's fade is the one
-   motion here, and reduced motion takes every animation away. */
-.studio.waiting button:not(.btn), .studio.waiting input { opacity: .5; }
-.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn.danger { background: none; color: var(--danger); box-shadow: inset 0 0 0 1px currentColor; }
+.btn.danger.solid { background: var(--danger); color: var(--panel); box-shadow: none; }
+.link { min-height: 44px; border: 0; background: none; padding: 0; color: var(--muted); font-weight: 500; display: inline-flex; align-items: center; gap: 8px; align-self: flex-start; transition: color .2s ease; }
+.link:hover { color: var(--ink); }
+.link svg { width: 12px; height: 12px; transition: transform .25s var(--out); }
+.link[aria-expanded="true"] svg { transform: rotate(180deg); }
+.link.sm { margin-block: -12px; font-size: 13px; color: var(--accent-ink); }
+.link.sm:hover { color: var(--ink); }
+/* Until /api/state answers the form is off, and a segment or tile has no
+   disabled look of its own, so the controls dim -- the controls only, and
+   150 ms after the page runs and not with it, so a state answered on
+   loopback in a few milliseconds does not flash them dim for a frame. The
+   words that say what the page is for keep their contrast (review of
+   fp/save-before-load, N2, N3). */
+.waiting button:not(.btn), .waiting input { opacity: .5; }
 
-/* The status says how it went in its icon and colour as well as its words. */
-.status { display: flex; gap: 8px; align-items: flex-start; color: var(--dim); font-size: 15px; min-width: 0; transition: color .2s ease; }
-.status .icon { margin-top: 2px; display: none; }
-.status .s-info { display: block; }
-.status.ok { color: var(--text); } .status.ok .s-info { display: none; } .status.ok .s-ok { display: block; color: var(--ok); }
-.status.err { color: var(--bad-text); } .status.err .s-info { display: none; } .status.err .s-err { display: block; }
+/* sub-tabs: one tablist per panel, Left and Right move between them */
+.tabs { display: flex; gap: 2px; padding: 3px; border-radius: 12px; background: var(--field); }
+.tabs button { flex: 1; min-height: 44px; border: 0; border-radius: 9px; background: none; color: var(--muted); font-weight: 500; transition: background .2s ease, color .2s ease; }
+.tabs button:hover { color: var(--ink); }
+.tabs button[aria-selected="true"] { background: var(--raise); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px var(--line); }
+.tabpanel { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.tabpanel:focus-visible { outline: none; }
+.empty { min-height: 44px; }
 
-/* The board, framed as a device so the preview reads as the panel on the
-   desk and not as one more picture on a page. */
-.device { margin: 0; position: relative; padding: clamp(12px, 2.4vw, 26px); border-radius: clamp(16px, 2.6vw, 30px);
-  background: linear-gradient(155deg, #2A2F37 0%, #16191E 55%, #0B0D10 100%);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 0 0 1px rgba(255,255,255,.04), 0 40px 80px -40px var(--shadow), 0 12px 24px -12px var(--shadow); }
-.device::after { content: ""; position: absolute; right: -5px; top: 44%; width: 5px; height: 30px; border-radius: 0 3px 3px 0; background: #2A2F37; }
-.screen { border-radius: 4px; overflow: hidden; box-shadow: 0 0 0 2px #050608, 0 0 0 3px rgba(255,255,255,.05); }
-.screen svg { display: block; width: 100%; height: auto; }
+/* themes: each tile is that theme's screen in miniature */
+.themes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 12px; }
+.th { border: 0; background: none; padding: 0; min-height: 44px; display: flex; flex-direction: column; gap: 8px; min-width: 0; text-align: left; color: var(--muted); border-radius: 10px; }
+.th .scr { position: relative; display: block; aspect-ratio: 4 / 3; border-radius: 8px; overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(127,127,127,.25), 0 1px 2px rgba(0,0,0,.08); transition: box-shadow .2s ease, transform .25s var(--out); }
+.th .scr svg { width: 100%; height: 100%; display: block; }
+.th .nm { font-size: 13px; line-height: 1.3; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 2px; transition: color .2s ease; }
+.th:hover .scr { transform: translateY(-2px); box-shadow: 0 0 0 1px rgba(127,127,127,.35), 0 8px 18px -8px rgba(0,0,0,.35); }
+.th:hover .nm { color: var(--ink); }
+.th:focus-visible { outline: none; }
+.th:focus-visible .scr { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--ink); }
+.th[aria-pressed="true"] .scr { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--accent); }
+.th[aria-pressed="true"] .nm { color: var(--ink); font-weight: 600; }
+.th .tick { position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: var(--on-accent);
+  display: grid; place-items: center; opacity: 0; transform: scale(.6); transition: opacity .2s ease, transform .25s var(--out); }
+.th .tick svg { width: 12px; height: 12px; }
+.th[aria-pressed="true"] .tick { opacity: 1; transform: none; }
 
-.view { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
-.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--sunk); }
-.seg button { min-height: 44px; min-width: 44px; padding: 0 14px; border: 0; background: transparent; color: var(--dim); font-size: 15px; font-weight: 500; cursor: pointer;
-  transition: background-color .2s ease, color .2s ease; }
-.seg button + button { border-left: 1px solid var(--line); }
-.seg button:hover { color: var(--text); }
-.seg button[aria-pressed="true"] { background: var(--text); color: var(--bg); }
-.seg button:focus-visible { outline-offset: -3px; }
-.slider { display: flex; align-items: center; gap: 10px; font-size: 15px; color: var(--dim); min-width: 0; }
-.slider input { width: 120px; height: 44px; margin: 0; accent-color: var(--accent); }
-.slider output { font: 14px var(--mono); color: var(--text); min-width: 40px; font-variant-numeric: tabular-nums; }
-
-/* A built-in as a small board: its ground, a text line, and its three
-   level colours, drawn from the injected list (the script sets them). */
-.presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; }
-.preset { display: flex; flex-direction: column; gap: 8px; padding: 8px 8px 10px; min-height: 44px; border: 1px solid var(--line); border-radius: 12px;
-  background: var(--card); text-align: left; cursor: pointer; transition: border-color .2s ease, box-shadow .2s ease; }
-.preset:hover { border-color: var(--dim); }
-/* --focus, not --accent: the board's green on a white card is 2.1:1, under
-   the 3:1 a state needs; the light focus green is 3.5:1 (review, N1). */
-.preset[aria-pressed="true"] { border-color: var(--focus); box-shadow: inset 0 0 0 1px var(--focus); }
-.preset .pn { font-size: 14px; font-weight: 600; line-height: 1.25; padding: 0 2px; }
-.sw { position: relative; display: block; height: 48px; border-radius: 7px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(128,128,128,.28); }
-.sw i { position: absolute; display: block; border-radius: 2px; }
-.sw .sw-text { top: 9px; left: 9px; width: 38%; height: 4px; }
-.sw .sw-low, .sw .sw-mid, .sw .sw-high { bottom: 9px; height: 7px; width: calc((100% - 30px) / 3); }
-.sw .sw-low { left: 9px; } .sw .sw-mid { left: calc(12px + (100% - 30px) / 3); } .sw .sw-high { left: calc(15px + 2 * (100% - 30px) / 3); }
-
-.slots { display: grid; }
-.slot { display: grid; grid-template-columns: 44px minmax(0, 1fr) 112px; column-gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); transition: opacity .2s ease; }
-.slot:last-child { border-bottom: 0; }
-.slot input[type=color] { width: 44px; height: 44px; padding: 0; border: 1px solid var(--edge); border-radius: 10px; background: none; cursor: pointer; }
-.slot input[type=color]::-webkit-color-swatch-wrapper { padding: 3px; }
-.slot input[type=color]::-webkit-color-swatch { border: 0; border-radius: 7px; }
-.slot input[type=color]::-moz-color-swatch { border: 0; border-radius: 7px; }
-.slot label { font-weight: 600; font-size: 15px; line-height: 1.3; }
-.slot small { display: block; color: var(--dim); font-size: 13px; font-weight: 400; margin-top: 2px; }
-.slot input[type=text], .paste input { font: 15px var(--mono); width: 100%; min-height: 44px; padding: 0 10px; border: 1px solid var(--edge); border-radius: 10px; background: var(--sunk); color: var(--text); transition: border-color .2s ease; }
-.slot input[type=text] { text-transform: uppercase; letter-spacing: .02em; }
-.slot input[type=text]:hover, .paste input:hover { border-color: var(--dim); }
-[aria-invalid="true"] { border-color: var(--bad) !important; }
-.slot.off { opacity: .45; }
-/* A field's own message sits under it, across the label and the box. */
-.slot .fmsg { grid-column: 2 / -1; }
-.fmsg { margin: 6px 0 0; font-size: 14px; line-height: 1.4; }
+/* colour rows: swatch, name and hint, hex */
+.crow { display: grid; grid-template-columns: 48px minmax(0, 1fr) 96px; align-items: center; column-gap: 14px; min-height: 56px; padding: 6px; border-radius: 12px; background: var(--field); transition: opacity .2s ease; }
+.crow + .crow { margin-top: 6px; }
+.crow.off { opacity: .6; }
+.crow .pick { position: relative; width: 48px; height: 44px; border-radius: 9px; overflow: hidden; cursor: pointer; box-shadow: inset 0 0 0 1px rgba(127,127,127,.35); }
+.crow .pick:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.crow .pick input { position: absolute; inset: -8px; width: calc(100% + 16px); height: calc(100% + 16px); border: 0; padding: 0; cursor: pointer; background: none; }
+.crow .txt { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.crow .txt b { font-weight: 500; font-size: 14px; }
+.crow .txt span { font-size: 13px; color: var(--muted); }
+.crow .hex { width: 100%; min-height: 44px; border: 0; border-radius: 9px; padding: 0 10px; background: var(--panel); font: 400 13px var(--mono); font-variant-numeric: tabular-nums;
+  text-transform: uppercase; box-shadow: inset 0 0 0 1px var(--line); outline: none; transition: box-shadow .2s ease; }
+.crow .hex:focus-visible { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.crow .hex[aria-invalid="true"] { box-shadow: inset 0 0 0 1.5px var(--danger); }
+.crow .fmsg { grid-column: 1 / -1; padding: 0 6px 6px; }
+.fmsg { margin: 6px 0 0; font-size: 13px; line-height: 1.4; }
 .fmsg:empty { display: none; }
-.f-ok { color: var(--ok-text); } .f-warn { color: var(--warn); } .f-bad { color: var(--bad-text); }
+.f-ok { color: var(--ok); } .f-warn { color: var(--warn); } .f-bad { color: var(--danger); }
 
-.band { display: grid; grid-template-columns: repeat(3, 1fr); height: 8px; border-radius: 4px; overflow: hidden; margin: 14px 0 4px; }
-.bandl { display: grid; grid-template-columns: repeat(3, 1fr); font: 12px var(--mono); color: var(--dim); }
-.bandl span:nth-child(2) { text-align: center; } .bandl span:last-child { text-align: right; }
-.note { font-size: 14px; color: var(--dim); margin: 10px 0 0; }
+/* segmented groups: arc thickness, ends, dot, mode, screen, window */
+.seg { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 2px; padding: 3px; border-radius: 12px; background: var(--field); }
+.seg button { min-height: 44px; border: 0; border-radius: 9px; background: none; color: var(--muted); font-weight: 500; transition: background .2s ease, color .2s ease;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 6px 4px; }
+.seg button svg { width: 40px; height: 26px; }
+.seg button:hover { color: var(--ink); }
+.seg button[aria-pressed="true"] { background: var(--raise); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px var(--line); }
+.seg button[aria-pressed="true"] svg .on { stroke: var(--accent); }
 
-.opts { display: grid; gap: 12px; }
-.opt { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 12px; align-items: center; }
-.opt .seg { justify-self: start; }
-.olabel { font-size: 15px; color: var(--dim); }
+/* try it: sliders painted in the theme's own three colours */
+.try { display: flex; flex-direction: column; gap: 2px; }
+.try output { font: 500 20px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+.try input { -webkit-appearance: none; appearance: none; width: 100%; height: 44px; margin: 0; background: transparent; cursor: pointer; }
+.try input::-webkit-slider-runnable-track { height: 8px; border-radius: 4px;
+  background: linear-gradient(90deg, var(--lo) 0 60%, var(--mi) 60% 90%, var(--hi) 90% 100%); box-shadow: inset 0 0 0 1px rgba(127,127,127,.25); }
+.try input::-moz-range-track { height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--lo) 0 60%, var(--mi) 60% 90%, var(--hi) 90% 100%); }
+.try input::-webkit-slider-thumb { -webkit-appearance: none; width: 26px; height: 26px; margin-top: -9px; border-radius: 50%; background: #fff;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.18), 0 2px 6px rgba(0,0,0,.28); }
+.try input::-moz-range-thumb { width: 26px; height: 26px; border: 0; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.18), 0 2px 6px rgba(0,0,0,.28); }
+.try input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+.marks { position: relative; height: 18px; margin: 0 13px; font: 400 12px/1 var(--mono); color: var(--muted); }
+.marks span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.marks span::before { content: ""; position: absolute; left: 50%; top: -9px; width: 1px; height: 5px; background: currentColor; opacity: .6; }
+.marks span:first-child { transform: none; } .marks span:first-child::before { left: 0; }
 
-.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; font-size: 15px; }
+/* the checks, the share code and the terminal line */
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; font-size: 13px; }
 .checks li { display: flex; gap: 10px; align-items: baseline; }
-.mark { font: 700 11px/1 var(--mono); letter-spacing: .04em; padding: 4px 7px; border-radius: 5px; flex: none; color: var(--on-accent); }
-.m-ok { background: var(--ok); } .m-warn { background: var(--warn); color: var(--on-warn); } .m-bad { background: var(--bad-text); color: var(--on-bad); }
-
-.code, .cmd { font: 14px/1.6 var(--mono); background: var(--sunk); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
-/* anywhere, not break-all: the built-in sentence breaks at its spaces and
-   only the share code itself, one long word, breaks inside. */
+.mark { font: 600 11px/1 var(--mono); letter-spacing: .04em; padding: 4px 7px; border-radius: 5px; flex: none; }
+.m-ok { background: var(--ok); color: var(--panel); } .m-warn { background: var(--warn); color: var(--panel); } .m-bad { background: var(--danger); color: var(--panel); }
+.code, .cmd { font: 13px/1.6 var(--mono); background: var(--field); border-radius: 10px; padding: 12px 14px; min-width: 0; }
 .code { overflow-wrap: anywhere; }
 .cmd { white-space: pre; overflow-x: auto; }
-.cmd .k { color: var(--dim); } .cmd .v { color: var(--ok-text); }
-.paste { display: flex; gap: 8px; margin-top: 14px; }
-.paste input { flex: 1 1 auto; min-width: 0; }
-.termhead { display: flex; align-items: center; gap: 8px; margin: 22px 0 8px; font-weight: 600; font-size: 15px; }
-.termhead .btn { margin-left: auto; }
+.cmd .k { color: var(--muted); } .cmd .v { color: var(--ok); }
+.paste { display: flex; gap: 8px; }
+.paste input { flex: 1 1 auto; min-width: 0; min-height: 44px; border: 0; border-radius: 10px; padding: 0 12px; background: var(--field); font: 13px var(--mono); box-shadow: inset 0 0 0 1px var(--line); outline: none; }
+.paste input:focus-visible { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.paste input[aria-invalid="true"] { box-shadow: inset 0 0 0 1.5px var(--danger); }
+.paste .btn { width: auto; }
+.keep { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.keep .btn.primary { width: auto; flex: 1 1 160px; }
 
-/* ---------------------------------------------------------------- layout */
-.top { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 14px clamp(16px, 3vw, 40px);
-  background: var(--bg); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
-.brand { display: flex; align-items: center; gap: 12px; }
-.brand .icon { width: 26px; height: 26px; color: var(--ok); }
-.brand h1 { font-size: 18px; font-weight: 650; letter-spacing: -.01em; }
-.top .status { flex: 1 1 280px; }
-.studio { display: grid; grid-template-columns: minmax(0, 1fr) 460px; align-items: start; }
-.stage { position: sticky; top: var(--top-h); min-height: calc(100vh - var(--top-h)); display: grid; place-items: center; padding: 32px clamp(16px, 4vw, 64px);
-  background: radial-gradient(60% 55% at 50% 42%, color-mix(in srgb, var(--text) 7%, transparent), transparent 70%); }
-/* The device is sized by the window's height as well as its width, so the
-   Checks under it are in view on a laptop. Sized by width alone, it was
-   967 px of stage in a 900 px window at 1440x900, and the Checks list sat
-   below the fold through the whole scroll (review of fp/builder-look, S3).
-   The 420 px is what stands beside the screen at 1440x900, measured: the
-   view row (98, on two lines), the lede (68), three checks (89), the gaps
-   (60), the stage's padding (64) and the frame round the screen (about
-   13 over 3/4 of its width), with some 20 px spare for a check that wraps.
-   4/3 is the panel's shape. The floor keeps a short window from shrinking
-   it to a stamp. The Checks come before the lede, so it is the lede and
-   not a check that a window too short for both leaves below the fold: with
-   every warning showing, the checks wrap to five lines. */
-.stage-inner { width: 100%; max-width: clamp(420px, calc((100vh - var(--top-h) - 420px) * 4 / 3), 780px); display: grid; gap: 20px; }
-.stage .view { justify-content: center; }
-.stage .lede { text-align: center; margin: 0 auto; font-size: 15px; }
-.stage .checks { max-width: 560px; margin: 0 auto; width: 100%; }
-.inspector { background: var(--card); border-left: 1px solid var(--line); min-height: calc(100vh - var(--top-h)); }
-.group { padding: 24px 28px; border-bottom: 1px solid var(--line); }
-.group h2 { font: 600 12px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); margin-bottom: 16px; }
-.inspector .presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.colours .opt { margin-bottom: 6px; }
-@media (max-width: 1100px) {
-  .studio { grid-template-columns: minmax(0, 1fr); }
-  .stage { position: static; min-height: 0; padding: 32px 16px; }
-  .inspector { border-left: 0; border-top: 1px solid var(--line); min-height: 0; }
-  .inspector .presets { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
-}
-@media (max-width: 640px) {
-  .top { position: static; }
-  .top .actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
-  .top .actions #copy-code { grid-column: 1 / -1; }
-  .group { padding: 20px 16px; }
-  .slider input { width: 100%; } .slider { flex: 1 1 100%; } .slider span { width: 64px; flex: none; }
-  .opt { grid-template-columns: minmax(0, 1fr); gap: 6px; }
-  .slot { grid-template-columns: 44px minmax(0, 1fr) 100px; }
-}
-/* The popup a tab shows once it is no longer the live builder: saved,
+/* the theme message: how a preview or a save went, in words and an icon */
+.say { display: flex; gap: 8px; align-items: flex-start; color: var(--muted); font-size: 13px; min-width: 0; transition: color .2s ease; }
+.say .icon { width: 16px; height: 16px; flex: none; margin-top: 2px; display: none; }
+.say .s-info { display: block; }
+.say.ok { color: var(--ink); } .say.ok .s-info { display: none; } .say.ok .s-ok { display: block; color: var(--ok); }
+.say.err { color: var(--danger); } .say.err .s-info { display: none; } .say.err .s-err { display: block; }
+
+/* in-page confirm: the destructive button is replaced by this box */
+.confirm { display: flex; flex-direction: column; gap: 14px; padding: 14px; border-radius: 12px; background: color-mix(in srgb, var(--danger) 7%, var(--field)); }
+.confirm .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* The popup a tab shows once it is no longer the live page: saved,
    cancelled, taken over by a newer tab, or the builder gone. A browser
    refuses window.close() on most tabs it did not open by script, so the
-   status bar's last word was all an old tab said, in 15 px at the top of a
-   page that still looked live (the owner's report, 2026-10-29). It was
-   taken out for a status line on 2026-10-31 and put back the same day,
-   with the countdown inside it: the owner wanted the ending said where the
-   eye is, not at the top (2026-10-31, "lets do this in the popup"). The
-   card is drawn in the page's own tokens, so its words measure as the
-   page's do: --text on --card 14.2:1 dark and 18.5:1 light, --dim on
-   --card 5.5:1 and 7.0:1, the primary button 9.0:1. The scrim only dims;
-   nothing is read through it. Its fade is the one motion here, and the
-   reduced-motion rule below takes it away. */
+   status line's last word was all an old tab said, over a page that still
+   looked live (the owner's report, 2026-10-29; the wording, 2026-10-31).
+   Drawn in the page's own tokens: --ink on --panel 15.3:1 light and 14.5:1
+   dark, --muted on --panel 6.7:1 and 6.9:1. The scrim only dims. Its fade
+   is the one motion here, and reduced motion takes it away. */
 .notice { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 16px; background: var(--scrim); animation: notice-in .2s ease; }
 .notice[hidden] { display: none; }
-.notice-card { width: 100%; max-width: 440px; display: grid; gap: 12px; padding: 28px; border-radius: 16px; border: 1px solid var(--line);
-  background: var(--card); color: var(--text); box-shadow: 0 24px 64px -24px var(--shadow); }
-/* Focus is put on the card itself, as the dialog, so that a screen reader
-   reads its heading and words; it is not a control, and a ring round the
-   whole card on opening read as a fault. Its buttons keep the page's ring. */
+.notice-card { width: 100%; max-width: 440px; display: grid; gap: 12px; padding: 28px; border-radius: 16px;
+  background: var(--panel); color: var(--ink); box-shadow: var(--shadow), 0 0 0 1px color-mix(in srgb, var(--line) 60%, transparent); }
+/* Focus is put on the card itself, as the dialog, so a screen reader reads
+   its heading and words; it is not a control, and a ring round the whole
+   card on opening read as a fault. Its buttons keep the page's ring. */
 .notice-card:focus { outline: none; }
-.notice-card h2 { font-size: 20px; font-weight: 650; line-height: 1.3; letter-spacing: -.01em; }
+.notice-card h2 { font-size: 20px; font-weight: 600; line-height: 1.3; }
 .notice-card p { margin: 0; }
-.notice-card .n-end { color: var(--dim); }
-.notice-card .btn { justify-self: start; }
-/* .btn sets its own display, which outranks the hidden attribute. */
+.notice-card .n-end { color: var(--muted); }
+.notice-card .btn { justify-self: start; width: auto; }
 .notice-card [hidden] { display: none; }
 @keyframes notice-in { from { opacity: 0; } to { opacity: 1; } }
 @media (max-width: 640px) { .notice-card { padding: 22px 18px; } .notice-card .btn { justify-self: stretch; } }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+
+/* ---------- narrow: the board, name, status and controls stick; the desk goes ---------- */
+@media (max-width: 1199px) {
+  /* The stuck board covers the top of the viewport; a focused field must stay clear of it. */
+  html { scroll-padding-top: calc(min(34vh, 300px) + 150px); }
+  body { padding-top: 12px; }
+  .page { display: block; max-width: 600px; }
+  .hub { position: sticky; top: 0; z-index: 2; background: var(--bg); padding-block: 8px 16px;
+    margin-inline: calc(-1 * max(16px, env(safe-area-inset-left, 0px))); padding-inline: max(16px, env(safe-area-inset-left, 0px)); }
+  .side { margin-top: 16px; }
+  .side .panel { position: static; }
+  .panel.wide { max-width: none; }
+  #pCust { margin-top: 16px; }
+  .panel { max-width: none; max-height: none; overflow: visible; }
+  #sideL .panel, #sideR .panel { animation-name: inUp; }
+  @keyframes inUp { from { opacity: 0; transform: translateY(10px); } }
+  svg.hero { height: min(34vh, 300px); width: 100%; }
+  .stage::before { inset: -6% -4% 0; }
+  .track, .pulse, .node, .lock { display: none; }
+  .ident { min-height: 0; }
+  .devname { font-size: 17px; }
+  .chips { display: flex; width: 100%; margin-top: 14px; }
+  .chips button { min-width: 0; flex: 1; padding: 0 8px; }
+}
+@media (max-width: 420px) {
+  .themes { gap: 12px 8px; }
+  .crow { grid-template-columns: 44px minmax(0, 1fr) 92px; column-gap: 10px; }
+  .crow .pick { width: 44px; }
+  .panel { padding: 20px; }
+  .hubstatus { font-size: 13px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  .pulse.run { stroke-dasharray: none; opacity: .9; }
+}
 </style>
 </head>
 <body>
-<!--
-  Laid out as a product shot (the owner's pick of three directions,
-  2026-10-29): the board is the largest thing on the page and stays in view
-  while the panel beside it scrolls, because every control is judged by what
-  it does to the panel. Icons are inline and drawn in currentColor, so the
-  page fetches nothing and every icon follows the light or dark scheme.
--->
 <header class="top">
-  <div class="brand">
-    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="M7 15a5 5 0 0 1 10 0"/></svg>
-    <div><span class="eyebrow">BLINK</span><h1>Theme builder</h1></div>
-  </div>
-  <div class="status" id="status" role="status" aria-live="polite">
-    <svg class="icon s-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5v.01"/></svg>
-    <svg class="icon s-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9.5"/></svg>
-    <svg class="icon s-err" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>
-    <span id="status-text">Loading your current theme. You can make changes once it is here.</span>
-  </div>
-  <div class="actions">
-    <button type="button" class="btn primary" id="save" disabled><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Save to board</span></button>
-    <button type="button" class="btn" id="cancel"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg><span>Cancel</span></button>
-    <button type="button" class="btn ghost" id="copy-code"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
-  </div>
+  <svg viewBox="0 0 120 92" aria-hidden="true" focusable="false"><rect x="4" y="4" width="112" height="84" rx="17" fill="none" stroke="currentColor" stroke-width="8"/><rect x="24" y="34" width="24" height="24" rx="7" fill="currentColor"/><path d="M92 34 L73 46 L92 58" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  <h1 translate="no">BLINK<span translate="yes">Settings</span></h1>
+  <button type="button" class="btn done" id="done" hidden>Done</button>
 </header>
 
-<main class="studio" aria-busy="true">
-  <section class="stage" aria-label="Preview">
-    <div class="stage-inner">
-      <figure class="device">
-        <div class="screen"><svg id="scr" viewBox="0 0 320 240" role="img" aria-label="Preview of the board screen"></svg></div>
-        <figcaption class="visually-hidden">The board, 320 by 240</figcaption>
-      </figure>
-      <div class="view">
-        <div class="seg" role="group" aria-label="Screen">
-          <button type="button" data-v="gauges" aria-pressed="true">Gauges</button>
-          <button type="button" data-v="focus" aria-pressed="false">Focus mode</button>
-        </div>
-        <div class="seg" role="group" aria-label="Focus window">
-          <button type="button" data-f="session" aria-pressed="true">Session</button>
-          <button type="button" data-f="weekly" aria-pressed="false">Weekly</button>
-        </div>
-        <label class="slider" for="p1"><span>Session</span><input type="range" id="p1" min="0" max="100" value="42"><output id="o1">42%</output></label>
-        <label class="slider" for="p2"><span>Weekly</span><input type="range" id="p2" min="0" max="100" value="91"><output id="o2">91%</output></label>
+<main class="page studio" aria-busy="true">
+  <!-- the board, always centred -->
+  <section class="hub" aria-label="Your board">
+    <div class="stage">
+      <svg class="hero" id="hero" viewBox="0 0 600 470" role="img" aria-labelledby="heroTitle">
+        <title id="heroTitle">Board preview</title>
+        <defs>
+          <clipPath id="scrClip"><rect x="0" y="0" width="320" height="240"/></clipPath>
+          <linearGradient id="faceG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff8a45"/><stop offset=".35" stop-color="#ff7425"/><stop offset="1" stop-color="#ee600f"/></linearGradient>
+          <linearGradient id="sheenG" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#000" stop-opacity=".07"/><stop offset=".22" stop-color="#fff" stop-opacity=".05"/><stop offset=".6" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".09"/></linearGradient>
+          <linearGradient id="wallG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b9480a"/><stop offset=".12" stop-color="#d8590d"/><stop offset="1" stop-color="#f77026"/></linearGradient>
+          <linearGradient id="earL" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#c94f08"/><stop offset="1" stop-color="#e2600f"/></linearGradient>
+          <linearGradient id="earR" x1="1" y1="0" x2="0" y2="0"><stop offset="0" stop-color="#c94f08"/><stop offset="1" stop-color="#e2600f"/></linearGradient>
+          <linearGradient id="legG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a94006"/><stop offset=".3" stop-color="#d4580c"/><stop offset="1" stop-color="#e5651a"/></linearGradient>
+          <linearGradient id="glassG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#17181a"/><stop offset=".5" stop-color="#0b0c0d"/><stop offset="1" stop-color="#060607"/></linearGradient>
+          <pattern id="layers" width="8" height="3" patternUnits="userSpaceOnUse"><rect width="8" height=".7" fill="#5a1e00" opacity=".09"/></pattern>
+          <radialGradient id="floorG" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="var(--floor)" style="stop-color: var(--floor)"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+        </defs>
+
+        <ellipse class="floor" cx="300" cy="412" rx="236" ry="20"/>
+        <ellipse class="floor" cx="58" cy="412" rx="44" ry="6"/>
+        <ellipse class="floor" cx="542" cy="412" rx="44" ry="6"/>
+
+        <path class="track" id="usbTrack" d="M80 252 C48 268 52 330 62 374"/>
+        <path class="pulse" id="usbBeam" pathLength="100" d="M80 252 C48 268 52 330 62 374"/>
+        <path class="track wifi" id="wifiTrack" d="M520 252 C552 268 548 330 540 378"/>
+        <path class="pulse" id="wifiBeam" pathLength="100" d="M540 378 C548 330 552 268 520 252"/>
+        <g class="lock" id="lock" transform="translate(553 318)">
+          <circle r="13"/><path d="M-4 -1 v-3 a4 4 0 0 1 8 0 v3"/><rect x="-6" y="-1" width="12" height="8.5" rx="1.5"/>
+        </g>
+
+        <g class="node" id="nodePc">
+          <g class="glyph">
+            <rect class="node-fill" x="36" y="376" width="50" height="32" rx="3"/>
+            <rect class="node-ink" x="36" y="376" width="50" height="32" rx="3"/>
+            <path class="node-ink" d="M26 410 h70"/>
+          </g>
+          <text class="node-label" x="61" y="440" text-anchor="middle">This computer</text>
+          <text class="node-sub" x="61" y="456" text-anchor="middle">USB cable</text>
+        </g>
+        <g class="node ghost" id="nodeRouter">
+          <g class="glyph">
+            <rect class="node-fill" x="516" y="392" width="52" height="18" rx="5"/>
+            <rect class="node-ink" x="516" y="392" width="52" height="18" rx="5"/>
+            <path class="node-ink" d="M528 378 v14 M556 378 v14"/>
+            <circle cx="530" cy="401" r="1.6" class="lamp"/>
+          </g>
+          <text class="node-label" x="542" y="440" text-anchor="middle" id="routerName">WiFi</text>
+          <text class="node-sub" x="542" y="456" text-anchor="middle" id="routerSub">Not set up</text>
+        </g>
+
+        <g id="case">
+          <g fill="url(#legG)">
+            <rect x="152" y="336" width="30" height="74" rx="4"/><rect x="204" y="336" width="30" height="74" rx="4"/>
+            <rect x="366" y="336" width="30" height="74" rx="4"/><rect x="418" y="336" width="30" height="74" rx="4"/>
+          </g>
+          <rect x="74" y="148" width="40" height="122" rx="6" fill="url(#earL)"/>
+          <rect x="486" y="148" width="40" height="122" rx="6" fill="url(#earR)"/>
+          <rect x="100" y="46" width="400" height="320" rx="24" fill="#b94707"/>
+          <rect x="100" y="38" width="400" height="320" rx="24" fill="url(#faceG)"/>
+          <rect x="100" y="38" width="400" height="320" rx="24" fill="url(#sheenG)"/>
+          <rect x="100" y="38" width="400" height="320" rx="24" fill="url(#layers)"/>
+          <path d="M124 39.5 H476" stroke="#ffc49e" stroke-width="1.5" stroke-linecap="round" opacity=".75"/>
+          <rect x="126" y="66" width="348" height="268" rx="9" fill="url(#wallG)"/>
+          <path d="M136 333.5 H464" stroke="#ffa36a" stroke-width="1" opacity=".55"/>
+          <rect x="133" y="73" width="334" height="254" rx="3" fill="url(#glassG)"/>
+          <g transform="translate(140 80)">
+            <g clip-path="url(#scrClip)"><g id="scr"></g></g>
+          </g>
+        </g>
+      </svg>
+    </div>
+
+    <div class="ident">
+      <p class="devname" id="devLabel" translate="no">Your BLINK</p>
+      <p class="hubstatus" id="board-status" aria-live="polite" hidden><span class="dot" id="board-dot"></span><span id="board-status-text"></span></p>
+      <div class="hs" id="hs" hidden>
+        <ol aria-hidden="true"><li></li><li></li><li></li><li></li></ol>
+        <span id="hs-text" aria-live="polite"></span>
       </div>
-      <ul class="checks" id="checks" aria-label="Checks"></ul>
-      <p class="lede">Pick a theme or choose the seven colours. Your board shows each change as a preview, without keeping it. Save keeps it on the board; Cancel, closing this tab, or ten minutes without a change puts the board back as it was.</p>
+    </div>
+
+    <div class="chips" role="group" aria-label="Settings">
+      <button type="button" data-panel="look" aria-controls="pLook pCust" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3.2 12.2A6 6 0 1 1 12.8 12.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3.2 12.2A6 6 0 0 1 4 4.4" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>Look</button>
+      <button type="button" data-panel="connect" aria-controls="pConn" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M2 6.2a8.5 8.5 0 0 1 12 0M4.4 8.8a5 5 0 0 1 7.2 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="8" cy="12" r="1.5" fill="currentColor"/></svg>Connect</button>
+      <button type="button" data-panel="board" aria-controls="pBoard" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="1.8" y="3" width="12.4" height="9.4" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 14.5v-2M11 14.5v-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Board</button>
     </div>
   </section>
 
-  <aside class="inspector" aria-label="Theme settings">
-    <section class="group">
-      <h2>Built-in themes</h2>
-      <div class="presets" id="presets"></div>
-    </section>
-
-    <section class="group colours">
-      <h2>Colours</h2>
-      <div class="opt"><span class="olabel">Arc colour</span>
-        <div class="seg" role="group" aria-label="Arc colour">
-          <button type="button" data-m="level" aria-pressed="true">By level</button>
-          <button type="button" data-m="gauge" aria-pressed="false">Per gauge</button>
+  <div class="side" id="sideL">
+    <!-- Look, the left half: themes, and the logo (Task 6.4) -->
+    <section class="panel wide" id="pLook" aria-labelledby="hLook" hidden>
+      <div class="phead"><h2 id="hLook">Look</h2></div>
+      <div class="tabs" role="tablist" aria-label="Look"><button type="button" role="tab" id="tThemes-t" aria-controls="tThemes" aria-selected="true" tabindex="0">Themes</button><button type="button" role="tab" id="tLogo-t" aria-controls="tLogo" aria-selected="false" tabindex="-1">Logo</button></div>
+      <div class="tabpanel" role="tabpanel" id="tThemes" aria-labelledby="tThemes-t" tabindex="0">
+        <p class="note2"><span class="hov">Point at a theme to preview it on the board.</span><span class="tap">Tap a theme to put it on the board.</span></p>
+        <div class="themes" id="presets" role="group" aria-label="Themes"></div>
+        <div class="say" id="status" role="status" aria-live="polite">
+          <svg class="icon s-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5v.01"/></svg>
+          <svg class="icon s-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9.5"/></svg>
+          <svg class="icon s-err" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>
+          <span id="status-text">Loading your current theme. You can make changes once it is here.</span>
         </div>
       </div>
-      <div class="slots" id="slots"></div>
-      <div class="band" id="band" aria-hidden="true"></div>
-      <div class="bandl" aria-hidden="true"><span>0</span><span>60%</span><span>90% · 100</span></div>
-      <p class="note" id="modenote"></p>
+      <div class="tabpanel" role="tabpanel" id="tLogo" aria-labelledby="tLogo-t" tabindex="0" hidden><div class="empty" id="logo-body"></div></div>
+    </section>
+  </div>
+
+  <div class="side" id="sideR">
+    <!-- Look, the right half: customise -->
+    <section class="panel wide" id="pCust" aria-labelledby="hCust" hidden>
+      <div class="phead">
+        <h2 id="hCust">Customise</h2>
+        <p id="themeName" aria-live="polite"></p>
+      </div>
+      <div class="tabs" role="tablist" aria-label="Customise"><button type="button" role="tab" id="tColours-t" aria-controls="tColours" aria-selected="true" tabindex="0">Colours</button><button type="button" role="tab" id="tScreen-t" aria-controls="tScreen" aria-selected="false" tabindex="-1">Screen</button><button type="button" role="tab" id="tTry-t" aria-controls="tTry" aria-selected="false" tabindex="-1">Try it</button></div>
+      <div class="tabpanel" role="tabpanel" id="tColours" aria-labelledby="tColours-t" tabindex="0">
+        <div class="sec">
+          <div class="sec-h"><span>Colours</span><button type="button" class="link sm" id="resetBtn" hidden>Reset</button></div>
+          <div id="slots"></div>
+          <button type="button" class="link" id="more-btn" aria-expanded="false" aria-controls="more">More colours <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+          <div id="more" hidden>
+            <div class="stack" style="margin-bottom:12px">
+              <span class="label" id="lMode">Arc colour</span>
+              <div class="seg" role="group" aria-labelledby="lMode">
+                <button type="button" data-m="level" aria-pressed="true">By level</button>
+                <button type="button" data-m="gauge" aria-pressed="false">Per gauge</button>
+              </div>
+              <p class="note2" id="modenote"></p>
+            </div>
+            <div id="slots-more"></div>
+          </div>
+        </div>
+        <div class="sec">
+          <span class="label" id="lW">Arc thickness</span>
+          <div class="seg" role="group" aria-labelledby="lW" id="segW">
+            <button type="button" data-w="5"><svg viewBox="0 0 40 26" aria-hidden="true" focusable="false"><path d="M6 22 A15 15 0 0 1 34 22" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="2" stroke-linecap="round"/><path class="on" d="M6 22 A15 15 0 0 1 20 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Thin</button><button type="button" data-w="12"><svg viewBox="0 0 40 26" aria-hidden="true" focusable="false"><path d="M6 22 A15 15 0 0 1 34 22" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="4.5" stroke-linecap="round"/><path class="on" d="M6 22 A15 15 0 0 1 20 7" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round"/></svg>Medium</button><button type="button" data-w="22"><svg viewBox="0 0 40 26" aria-hidden="true" focusable="false"><path d="M6 22 A15 15 0 0 1 34 22" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="8" stroke-linecap="round"/><path class="on" d="M6 22 A15 15 0 0 1 20 7" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"/></svg>Bold</button>
+          </div>
+          <span class="label" id="lE">Arc ends</span>
+          <div class="seg" role="group" aria-labelledby="lE"><button type="button" data-e="round" aria-pressed="true">Round</button><button type="button" data-e="flat" aria-pressed="false">Flat</button></div>
+          <span class="label" id="lD">Moving dot</span>
+          <div class="seg" role="group" aria-labelledby="lD"><button type="button" data-d="on" aria-pressed="true">Show</button><button type="button" data-d="off" aria-pressed="false">Hide</button></div>
+        </div>
+        <div class="sec">
+          <span class="sec-h">Checks</span>
+          <ul class="checks" id="checks" aria-label="Checks"></ul>
+        </div>
+        <div class="sec">
+          <div class="keep">
+            <button type="button" class="btn primary" id="save" disabled>Save to board</button>
+            <button type="button" class="btn" id="cancel">Cancel</button>
+          </div>
+        </div>
+        <div class="sec">
+          <span class="sec-h">Share code</span>
+          <div class="code" id="code"></div>
+          <p class="note2">The same theme as one code, for blink theme set on another desk, or to post for other people.</p>
+          <div class="keep"><button type="button" class="btn" id="copy-code"><span class="lbl">Copy share code</span></button></div>
+          <div class="paste">
+            <label class="sr" for="paste">Share code to load</label>
+            <input type="text" id="paste" placeholder="Paste a share code (BT1.…)" spellcheck="false" autocomplete="off" aria-describedby="m-paste">
+            <button type="button" class="btn" id="load"><span>Load</span></button>
+          </div>
+          <p class="fmsg" id="m-paste" aria-live="polite"></p>
+          <span class="sec-h">The same from a terminal</span>
+          <div class="cmd" id="cmd"></div>
+          <div class="keep"><button type="button" class="btn" id="copy-cmd"><span class="lbl">Copy command</span></button></div>
+          <p class="note2">Runs on this computer and saves the theme exactly as Save does.</p>
+        </div>
+      </div>
+      <div class="tabpanel" role="tabpanel" id="tScreen" aria-labelledby="tScreen-t" tabindex="0" hidden>
+        <div class="sec">
+          <span class="label" id="vL">Main screen</span>
+          <div class="seg" role="group" aria-labelledby="vL">
+            <button type="button" data-v="gauges" aria-pressed="true">Two gauges</button>
+            <button type="button" data-v="focus" aria-pressed="false">Focus</button>
+          </div>
+          <span class="label" id="fL">Big window in focus</span>
+          <div class="seg" role="group" aria-labelledby="fL">
+            <button type="button" data-f="session" aria-pressed="true">Session</button>
+            <button type="button" data-f="weekly" aria-pressed="false">Weekly</button>
+          </div>
+        </div>
+      </div>
+      <div class="tabpanel" role="tabpanel" id="tTry" aria-labelledby="tTry-t" tabindex="0" hidden>
+        <p class="note2">Move the gauges to see every colour. This changes only the preview.</p>
+        <div class="sec try">
+          <div class="sec-h"><label for="p1">Try session at</label><output id="o1" for="p1">42%</output></div>
+          <div><input type="range" id="p1" min="0" max="100" value="42"><div class="marks" aria-hidden="true"><span style="left:0">0</span><span style="left:60%">60%</span><span style="left:90%">90%</span></div></div>
+        </div>
+        <div class="sec try">
+          <div class="sec-h"><label for="p2">Try weekly at</label><output id="o2" for="p2">91%</output></div>
+          <div><input type="range" id="p2" min="0" max="100" value="91"><div class="marks" aria-hidden="true"><span style="left:0">0</span><span style="left:60%">60%</span><span style="left:90%">90%</span></div></div>
+        </div>
+      </div>
     </section>
 
-    <section class="group">
-      <h2>Arcs and dot</h2>
-      <div class="opts">
-        <div class="opt"><span class="olabel">Arc thickness</span><div class="seg" role="group" aria-label="Arc thickness">
-          <button type="button" data-w="5" aria-pressed="false">Thin</button><button type="button" data-w="12" aria-pressed="true">Normal</button><button type="button" data-w="22" aria-pressed="false">Thick</button></div></div>
-        <div class="opt"><span class="olabel">Arc ends</span><div class="seg" role="group" aria-label="Arc ends">
-          <button type="button" data-e="round" aria-pressed="true">Round</button><button type="button" data-e="flat" aria-pressed="false">Flat</button></div></div>
-        <div class="opt"><span class="olabel">Moving dot</span><div class="seg" role="group" aria-label="Moving dot">
-          <button type="button" data-d="on" aria-pressed="true">Show</button><button type="button" data-d="off" aria-pressed="false">Hide</button></div></div>
-      </div>
+    <!-- Connect: filled by Task 4.4 -->
+    <section class="panel" id="pConn" aria-labelledby="hConn" hidden>
+      <h2 id="hConn">Connect</h2>
+      <div class="empty" id="connect-body"></div>
     </section>
 
-    <section class="group">
-      <h2>Share code</h2>
-      <div class="code" id="code"></div>
-      <p class="desc">The same theme as one code, for <code>blink theme set &lt;code&gt;</code> on another desk, or to post for other people.</p>
-      <div class="paste">
-        <label class="visually-hidden" for="paste">Share code to load</label>
-        <input type="text" id="paste" placeholder="Paste a share code (BT1.…)" spellcheck="false" autocomplete="off" aria-describedby="m-paste">
-        <button type="button" class="btn" id="load"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span>Load</span></button>
-      </div>
-      <p class="fmsg" id="m-paste" aria-live="polite"></p>
-      <div class="termhead">
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
-        <span>The same from a terminal</span>
-        <button type="button" class="btn small ghost" id="copy-cmd"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy</span></button>
-      </div>
-      <div class="cmd" id="cmd"></div>
-      <p class="desc">Runs on this computer and saves the theme exactly as Save does.</p>
+    <!-- Board: filled by Task 6.4 -->
+    <section class="panel wide" id="pBoard" aria-labelledby="hBoard" hidden>
+      <h2 id="hBoard">Board</h2>
+      <div class="tabs" role="tablist" aria-label="Board"><button type="button" role="tab" id="tDevice-t" aria-controls="tDevice" aria-selected="true" tabindex="0">This board</button><button type="button" role="tab" id="tComputer-t" aria-controls="tComputer" aria-selected="false" tabindex="-1">This computer</button></div>
+      <div class="tabpanel" role="tabpanel" id="tDevice" aria-labelledby="tDevice-t" tabindex="0"><div class="empty" id="device-body"></div></div>
+      <div class="tabpanel" role="tabpanel" id="tComputer" aria-labelledby="tComputer-t" tabindex="0" hidden><div class="empty" id="computer-body"></div></div>
     </section>
-  </aside>
+  </div>
 </main>
 
 <!--
   Shown, and the page behind it made inert, when this tab stops being the
-  live builder. Its words are written by the script with textContent; the
+  live page. Its words are written by the script with textContent; the
   heading and the reason sentence change with the ending, so they are
   empty here (see showNotice). The last line is the countdown after a save
   or a cancel, and "You can close this tab." otherwise.
@@ -376,7 +576,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     <h2 id="notice-title"></h2>
     <p id="notice-why"></p>
     <p id="notice-keep-text" hidden></p>
-    <button type="button" class="btn primary" id="notice-copy" hidden><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
+    <button type="button" class="btn primary" id="notice-copy" hidden><span class="lbl">Copy share code</span></button>
     <div class="code" id="notice-code" hidden></div>
     <p class="n-end" id="notice-end" aria-live="polite">You can close this tab.</p>
     <button type="button" class="btn primary" id="notice-close"><span class="lbl">Close tab</span></button>
@@ -388,13 +588,13 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   'use strict';
   // The order of the colours on the wire (contract "c"), and their keys here.
   var SLOTS = [
-    { k: 'bg',   w: 'bg',     name: 'Background',     hint: 'Behind everything' },
+    { k: 'bg',   w: 'bg',     name: 'Background',     hint: 'Behind everything', main: 1 },
     { k: 'text', w: 'text',   name: 'Text',           hint: 'Numbers, labels, the dot' },
     { k: 'g1',   w: 'gauge1', name: 'Gauge 1',        hint: 'Left arc (session), in per-gauge mode', mode: 'gauge' },
     { k: 'g2',   w: 'gauge2', name: 'Gauge 2',        hint: 'Right arc (weekly), in per-gauge mode', mode: 'gauge' },
-    { k: 'low',  w: 'low',    name: 'Under 60%',      hint: 'Plenty left' },
-    { k: 'mid',  w: 'mid',    name: '60% to 90%',     hint: 'Getting there' },
-    { k: 'high', w: 'high',   name: '90% and above',  hint: 'Almost used up; also the warning line' }
+    { k: 'low',  w: 'low',    name: 'Low',            hint: 'Under 60%', main: 1 },
+    { k: 'mid',  w: 'mid',    name: 'Middle',         hint: '60% to 90%', main: 1 },
+    { k: 'high', w: 'high',   name: 'High',           hint: '90% and above', main: 1 }
   ];
   // THEME_IDS 0..11, in id order, written in by pc/theme_server.py from
   // pc/theme_builtins.py, which is generated from the firmware's own table
@@ -415,7 +615,14 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var HEX = /^[0-9a-fA-F]{6}$/;
 
   // preset: the id of an untouched built-in, or -1 for the custom theme.
-  var st = Object.assign({ mode: 'level', view: 'gauges', fw: 'session', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
+  // base: the built-in the edits started from, for "Custom, changed from Dark".
+  // screen: what the board draws, usage | settings | startup | connection.
+  var st = Object.assign({ mode: 'level', view: 'gauges', fw: 'session', p1: 42, p2: 91, preset: 0, base: 0,
+                           screen: 'usage', link: null, logo: null, bright: null, versions: null }, PRESETS[0][1]);
+  // The settings page (BuilderServer persistent) stays up through a theme
+  // save and takes a click on a theme as the save; `blink theme` does not.
+  // Known once /api/state answers.
+  var persistent = false;
   var finished = false, previewTimer = null, lastSent = null;
   // loaded: /api/state has answered and the page shows the owner's theme.
   // Until then the page holds only its own default, preset 0, and Save was
@@ -494,8 +701,12 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // and aria-invalid stayed under a valid colour after a preset click
   // (review of fp/builder-look, S1).
   function fromOutside() { bad = {}; }
+  function pickPreset(i) { Object.assign(st, PRESETS[i][1]); st.preset = i; st.base = i; fromOutside(); }
 
-  // ---------------------------------------------------------------- drawing
+  // ---------------------------------------------------------------- the board
+  // render(), gauge(), arcPath(), el(), customDim and dotColours below are the
+  // old builder's, unchanged (tests/pc/test_theme_page.py pins three of them
+  // by hash): the preview is the board's own drawing and was reviewed as such.
   var NS = 'http://www.w3.org/2000/svg';
   function el(tag, attrs, text) { var e = document.createElementNS(NS, tag); for (var k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; return e; }
   function pt(cx, cy, r, deg) { var a = deg * Math.PI / 180; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
@@ -511,7 +722,148 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     if (st.d === 'on') { var k = pt(cx, cy, r, end); svg.appendChild(el('circle', { cx: k[0], cy: k[1], r: Math.max(5, w / 2 + 2), fill: '#' + txt, stroke: '#' + st.bg, 'stroke-width': 2 })); }
     svg.appendChild(el('text', { x: cx, y: cy + pctSize * .36, 'text-anchor': 'middle', 'font-family': 'Montserrat, sans-serif', 'font-size': pctSize, 'font-weight': 500, fill: '#' + txt }, Math.round(p) + '%'));
   }
-  function render() {
+
+  // The screens beside usage, as the firmware draws them: arcs, rects, lines,
+  // text in Montserrat and the logo, no blur or gradient. Colours the
+  // firmware fixes (the boot screen's white and black, the connection
+  // screen's orange) are written as rgb() and names, not as the theme's
+  // hex: a six-digit literal in this script is a palette that did not come
+  // from theme.c, and tests/pc/test_theme_builtins.py fails on one.
+  var WHITE = 'white', BLACK = 'black', ORANGE = 'rgb(255,106,19)', GREY = 'rgb(138,145,153)';
+  function txtF(g, x, y, size, fill, s, extra) {
+    var a = { x: x, y: y, 'text-anchor': 'middle', 'font-family': 'Montserrat, sans-serif', 'font-size': size, fill: fill };
+    for (var k in extra) a[k] = extra[k];
+    g.appendChild(el('text', a, s));
+  }
+  function txt(g, x, y, size, col, s, extra) { txtF(g, x, y, size, '#' + col, s, extra); }
+  // The status-bar link mark, about 19 px wide. USB is a USB-C cable end
+  // lying flat: the classic trident read as a fork at this size, and a plug
+  // standing up read as a padlock, which is the "Encrypted" mark.
+  function linkMark(g, x, y, col) {
+    var c = '#' + col;
+    if (st.link === 'wifi') {
+      var s = { fill: 'none', stroke: c, 'stroke-width': 1.6, 'stroke-linecap': 'round' };
+      g.appendChild(el('path', Object.assign({ d: 'M' + (x - 7) + ' ' + (y - 1) + ' a10 10 0 0 1 14 0' }, s)));
+      g.appendChild(el('path', Object.assign({ d: 'M' + (x - 4) + ' ' + (y + 2) + ' a5.5 5.5 0 0 1 8 0' }, s)));
+      g.appendChild(el('circle', { cx: x, cy: y + 5, r: 1.6, fill: c }));
+    } else {
+      g.appendChild(el('path', { d: 'M' + (x - 9.5) + ' ' + y + ' H' + (x - 6), stroke: c, 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
+      g.appendChild(el('rect', { x: x - 6.5, y: y - 3.6, width: 7, height: 7.2, rx: 1.6, fill: c }));
+      g.appendChild(el('rect', { x: x + .9, y: y - 2.5, width: 8, height: 5, rx: 2.5, fill: 'none', stroke: c, 'stroke-width': 1.4 }));
+    }
+  }
+  function tileIcon(g, kind, cx, cy, c) {
+    var s = { fill: 'none', stroke: '#' + c, 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
+    function P(d) { g.appendChild(el('path', Object.assign({ d: d }, s))); }
+    if (kind === 'sun') {
+      g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 4.5 }, s)));
+      for (var i = 0; i < 8; i++) { var a = i * Math.PI / 4; P('M' + (cx + 7.5 * Math.cos(a)).toFixed(1) + ' ' + (cy + 7.5 * Math.sin(a)).toFixed(1) + ' L' + (cx + 10 * Math.cos(a)).toFixed(1) + ' ' + (cy + 10 * Math.sin(a)).toFixed(1)); }
+    }
+    if (kind === 'open') { P('M' + (cx - 10) + ' ' + (cy + 6) + ' h20 M' + (cx - 8) + ' ' + (cy + 4) + ' v-11 h16 v11'); P('M' + (cx - 2) + ' ' + (cy + 1) + ' l5 -5 M' + (cx - .5) + ' ' + (cy - 4) + ' h3.5 v3.5'); }
+    if (kind === 'focus') { g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 9 }, s))); g.appendChild(el('circle', { cx: cx, cy: cy, r: 3.5, fill: '#' + c })); }
+    if (kind === 'update') { P('M' + (cx + 8) + ' ' + (cy - 2) + ' A8.5 8.5 0 1 0 ' + (cx + 7) + ' ' + (cy + 5)); P('M' + (cx + 9) + ' ' + (cy - 8) + ' V' + (cy - 2) + ' H' + (cx + 3)); }
+  }
+  // The board's own Settings screen (ui_settings.c): Back, the title, a rule
+  // at y 40, four 144 x 71 tiles from (12, 46) and the footer. A tile's
+  // second line is drawn only when the page has the figure: the page shows
+  // nothing it was not told.
+  function drawSettings(g, dim) {
+    var card = mix(st.bg, st.text, .06), line = mix(st.bg, st.text, .1);
+    g.appendChild(el('rect', { x: 6, y: 4, width: 60, height: 32, rx: 6, fill: '#' + card, stroke: '#' + line }));
+    g.appendChild(el('path', { d: 'M39 14 L33 20 L39 26', fill: 'none', stroke: '#' + st.text, 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
+    txt(g, 160, 26, 14, st.text, 'Settings', { 'font-weight': 600 });
+    g.appendChild(el('rect', { x: 0, y: 40, width: 320, height: 1, fill: '#' + line }));
+    var focus = st.view === 'focus' ? (st.fw === 'weekly' ? 'Weekly' : 'Session') : 'Off';
+    [['sun', 'Brightness', st.bright == null ? '' : st.bright + '%'], ['open', 'Open settings', 'On your computer'],
+     ['focus', 'Focus', focus], ['update', 'Update', '']].forEach(function (t, k) {
+      var x = 12 + (k % 2) * 152, y = 46 + Math.floor(k / 2) * 79, hi = k === 1;
+      g.appendChild(el('rect', { x: x + .5, y: y + .5, width: 143, height: 70, rx: 8, fill: '#' + card, stroke: '#' + (hi ? st.g1 : line), 'stroke-width': hi ? 1.5 : 1 }));
+      tileIcon(g, t[0], x + 72, y + 16, hi ? st.g1 : st.text);
+      txt(g, x + 72, y + 45, 13, st.text, t[1], { 'font-weight': 500 });
+      if (t[2]) txt(g, x + 72, y + 63, 11.5, dim, t[2]);
+    });
+    if (st.versions) txt(g, 160, 216, 12, dim, 'Blink ' + st.versions.board + '  |  App ' + st.versions.app);
+    txt(g, 160, 234, 12, dim, 'Keep the cable connected');
+  }
+  // The start-up screen: the logo fitted on its background, or the BLINK mark
+  // the boot animation ends on.
+  function drawStartup(g) {
+    var L = st.logo;
+    g.appendChild(el('rect', { x: 0, y: 0, width: 320, height: 240, fill: L ? L.bg : BLACK }));
+    if (L) {
+      var k = Math.min(320 / L.w, 240 / L.h) * (L.scale || 1), w = L.w * k, h = L.h * k;
+      g.appendChild(el('image', { href: L.url, x: (160 - w / 2).toFixed(1), y: (120 - h / 2).toFixed(1), width: w.toFixed(1), height: h.toFixed(1), preserveAspectRatio: 'none' }));
+    } else {
+      g.appendChild(el('rect', { x: 112, y: 84, width: 96, height: 72, rx: 15, fill: 'none', stroke: WHITE, 'stroke-width': 6 }));
+      g.appendChild(el('rect', { x: 130, y: 110, width: 20, height: 20, rx: 6, fill: WHITE }));
+      g.appendChild(el('path', { d: 'M190 110 L174 120 L190 130', fill: 'none', stroke: WHITE, 'stroke-width': 7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+      txtF(g, 160, 192, 12, GREY, 'No logo yet');
+    }
+  }
+  // Shown for a few seconds after a WiFi join succeeds: circles, a dashed
+  // line (an offset shift is cheap in LVGL) and two labels.
+  function drawConnection(g, dim, track, pill) {
+    g.appendChild(el('circle', { cx: 160, cy: 92, r: 70, fill: 'none', stroke: '#' + track, 'stroke-dasharray': '2 6' }));
+    g.appendChild(el('line', { 'class': 'dash', x1: 86, y1: 92, x2: 234, y2: 92, stroke: '#' + st.low, 'stroke-width': 3, 'stroke-dasharray': '6 6' }));
+    g.appendChild(el('circle', { cx: 70, cy: 92, r: 16, fill: '#' + pill, stroke: '#' + st.text, 'stroke-width': 2 }));
+    g.appendChild(el('rect', { x: 62, y: 86, width: 16, height: 11, rx: 2, fill: 'none', stroke: '#' + st.text, 'stroke-width': 1.6 }));
+    g.appendChild(el('line', { x1: 59, y1: 100, x2: 81, y2: 100, stroke: '#' + st.text, 'stroke-width': 1.6 }));
+    g.appendChild(el('circle', { cx: 250, cy: 92, r: 16, fill: ORANGE }));
+    g.appendChild(el('rect', { x: 242, y: 86, width: 16, height: 12, rx: 1.5, fill: '#' + st.bg }));
+    txt(g, 160, 190, 17, st.text, 'Linked to this computer', { 'font-weight': 600 });
+    txt(g, 160, 212, 13, dim, 'WiFi • encrypted');
+  }
+  function drawOther(g, dim, track, pill) {
+    if (st.screen === 'settings') drawSettings(g, dim);
+    else if (st.screen === 'startup') drawStartup(g);
+    else if (st.screen === 'connection') drawConnection(g, dim, track, pill);
+  }
+  // The title says what the board shows, for a screen reader: the hero is
+  // role="img" and a drawing says nothing otherwise.
+  function setTitle() {
+    var t = 'Board preview, ' + (st.preset >= 0 ? PRESETS[st.preset][0] + ' theme' : 'custom theme') + ': ', wk = st.fw === 'weekly';
+    if (st.screen === 'settings') t += "the board's Settings screen.";
+    else if (st.screen === 'startup') t += st.logo ? 'the start-up screen with your logo.' : 'the start-up screen, no logo yet.';
+    else if (st.screen === 'connection') t += 'the connection screen, linked to this computer over WiFi.';
+    else if (st.view === 'focus') t += 'Claude, ' + (wk ? 'weekly ' + Math.round(st.p2) + '%, resets in 1d 1h; session ' + Math.round(st.p1) + '%.' : 'session ' + Math.round(st.p1) + '%, resets in 3h 40m; weekly ' + Math.round(st.p2) + '%.');
+    else t += 'Claude, session ' + Math.round(st.p1) + '%, resets in 3h 40m; weekly ' + Math.round(st.p2) + '%, resets in 1d 1h.';
+    var e = document.getElementById('heroTitle');
+    if (e.textContent !== t) e.textContent = t;
+  }
+  // What a task further on (Connect, Board) calls to move the board: any of
+  // theme (a wire theme), view, focus, session_pct, weekly_pct, link,
+  // screen, logo. A board's screen is a thing the page was told, not a guess.
+  var board = {
+    draw: drawBoard,
+    show: function (s) {
+      if ('theme' in s && s.theme) applyTheme(s.theme);
+      if ('view' in s) st.view = s.view;
+      if ('focus' in s) st.fw = s.focus;
+      if ('session_pct' in s) st.p1 = +s.session_pct;
+      if ('weekly_pct' in s) st.p2 = +s.weekly_pct;
+      if ('link' in s) { st.link = s.link; paintLink(); }
+      if ('screen' in s) st.screen = s.screen;
+      if ('logo' in s) st.logo = s.logo;
+      render();
+    },
+    // The connection screen for 4.2 s, then whatever the panels say.
+    connected: function () {
+      clearTimeout(board.timer);
+      st.screen = 'connection'; render();
+      board.timer = setTimeout(function () { board.timer = null; syncScreen(); render(); }, 4200);
+    },
+    timer: null
+  };
+  // The desk beside the case: the cable line and the router follow the link.
+  function paintLink() {
+    var w = st.link === 'wifi', u = st.link === 'usb';
+    document.getElementById('usbTrack').setAttribute('class', 'track' + (u ? ' live' : ''));
+    document.getElementById('wifiTrack').setAttribute('class', 'track wifi' + (w ? ' live' : ''));
+    document.getElementById('nodeRouter').setAttribute('class', 'node' + (w ? '' : ' ghost'));
+    document.getElementById('routerSub').textContent = w ? 'WiFi router' : 'Not set up';
+    document.getElementById('lock').setAttribute('class', 'lock' + (w ? ' on' : ''));
+  }
+  function drawBoard() {
     var svg = document.getElementById('scr'); while (svg.firstChild) svg.removeChild(svg.firstChild);
     // The board derives dim text and the arc track by mixing text and bg
     // (contract: 25% bg into text, and 15% text into bg); so does this.
@@ -520,10 +872,12 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     var dim = customDim(st.text, st.bg), track = mix(st.bg, st.text, .15), pill = mix(st.bg, st.text, .1);
     svg.appendChild(el('rect', { x: 0, y: 0, width: 320, height: 240, fill: '#' + st.bg }));
     var F = 'Montserrat, sans-serif';
+    if (st.screen !== 'usage') { drawOther(svg, dim, track, pill); setTitle(); return; }
     if (st.view === 'gauges') {
       svg.appendChild(el('text', { x: 160, y: 18, 'text-anchor': 'middle', 'font-family': F, 'font-size': 11.5, 'letter-spacing': 3, fill: '#' + dim }, 'BLINK'));
       var warn = Math.max(st.p1, st.p2) >= 95;
       svg.appendChild(el('text', { x: 160, y: 34, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (warn ? st.high : dim) }, warn ? (st.p1 >= st.p2 ? 'Session almost used up' : 'Weekly almost used up') : '14:05'));
+      if (st.link) linkMark(svg, 284, 14, dim);
       svg.appendChild(el('circle', { cx: 302, cy: 14, r: 5, fill: '#' + dotColours(st.low, st.mid, st.bg)[0] }));
       gauge(svg, 80, 104, 120, st.w, st.p1, arcCol(1, st.p1), track, st.text, 20);
       gauge(svg, 240, 104, 120, st.w, st.p2, arcCol(2, st.p2), track, st.text, 20);
@@ -555,8 +909,9 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       svg.appendChild(el('text', { x: 160, y: 196, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (otherP >= 90 ? st.high : otherP >= 60 ? st.mid : dim) },
                          (wk ? 'Session ' : 'Weekly ') + Math.round(otherP) + '% \u2022 ' + (wk ? '3h 40m' : '1d 1h')));
     }
-    paintControls(); checks(); output();
+    setTitle();
   }
+  function render() { drawBoard(); paintControls(); checks(); output(); }
   function paintControls() {
     SLOTS.forEach(function (s) {
       var row = document.getElementById('row-' + s.k);
@@ -564,14 +919,27 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       document.getElementById('c-' + s.k).value = '#' + st[s.k].toLowerCase();
       var t = document.getElementById('t-' + s.k); if (document.activeElement !== t) t.value = '#' + st[s.k];
     });
-    var band = document.getElementById('band'); while (band.firstChild) band.removeChild(band.firstChild);
-    ['low','mid','high'].forEach(function (k) { var d = document.createElement('span'); d.style.background = '#' + st[k]; band.appendChild(d); });
     document.getElementById('modenote').textContent = st.mode === 'level'
       ? 'By level: both arcs take the colour of their own level. Gauge 1 and Gauge 2 are not used.'
       : 'Per gauge: each arc keeps its own colour, and switches to the 90%-and-above colour near the limit so a warning is never missed. The status dot uses the under-60% colour, or, when it and the 60%-to-90% colour are both greys, whichever stands out more.';
     press('[data-m]', 'm', st.mode); press('[data-w]', 'w', String(st.w)); press('[data-e]', 'e', st.e); press('[data-d]', 'd', st.d); press('[data-v]', 'v', st.view); press('[data-f]', 'f', st.fw);
     document.querySelectorAll('#presets button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.p === st.preset)); });
+    // The try-it tracks are painted in the theme's own three colours.
+    cssVar('--lo', '#' + st.low); cssVar('--mi', '#' + st.mid); cssVar('--hi', '#' + st.high);
+    // "Starting from Dark", or "Custom, changed from Dark". Rewritten only
+    // when it changes: it is a live region.
+    var tn = document.getElementById('themeName'), base = PRESETS[st.base][0], key = st.preset + ':' + st.base;
+    if (tn.dataset.key !== key) {
+      tn.dataset.key = key; tn.textContent = '';
+      var b = document.createElement('b');
+      if (st.preset >= 0) { tn.appendChild(document.createTextNode('Starting from ')); b.textContent = PRESETS[st.preset][0]; tn.appendChild(b); }
+      else { b.textContent = 'Custom'; tn.appendChild(b); tn.appendChild(document.createTextNode(', changed from ' + base)); }
+    }
+    var reset = document.getElementById('resetBtn');
+    if (st.preset >= 0) reset.setAttribute('hidden', ''); else reset.removeAttribute('hidden');
+    reset.textContent = 'Reset to ' + base;
   }
+  function cssVar(k, v) { var s = document.documentElement.style; if (s.setProperty) s.setProperty(k, v); }
   function press(sel, key, val) { document.querySelectorAll(sel).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset[key] === val)); }); }
   function textContrast() { return contrast(st.text, st.bg); }
   // A ratio as the words give it: cut to two decimals, never rounded. One
@@ -868,8 +1236,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   function stopped() {
     if (saving) { stopOwed = true; return; }
     var keep = holdsDraft();
-    retire('The builder stopped.', 'Run blink theme on your computer to start it again.',
-           'The builder stopped. Run blink theme on your computer to start it again.', true, keep && KEEP_LINE);
+    var again = 'Run ' + (persistent ? 'blink settings' : 'blink theme') + ' on your computer to start it again.';
+    retire('The builder stopped.', again, 'The builder stopped. ' + again, true, keep && KEEP_LINE);
   }
   function schedulePreview() {
     if (finished) return;
@@ -948,35 +1316,77 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   function changed() { render(); schedulePreview(); }
 
   // ---------------------------------------------------------------- controls
+  // Each theme is its own screen in miniature: the header, two gauges at 38%
+  // and 74% in the theme's low and mid, the ball if it has one, the pill.
+  function mini(p) {
+    var w = p.w / 2, cap = p.e === 'round' ? 'round' : 'butt', dim = customDim(p.text, p.bg), tr = mix(p.bg, p.text, .15);
+    var s = el('svg', { viewBox: '0 0 160 120', 'aria-hidden': 'true', focusable: 'false' });
+    s.appendChild(el('rect', { width: 160, height: 120, fill: '#' + p.bg }));
+    s.appendChild(el('text', { x: 80, y: 13, 'text-anchor': 'middle', 'font-family': 'Montserrat, sans-serif', 'font-size': 7, 'letter-spacing': 1.6, fill: '#' + dim }, 'BLINK'));
+    [[42, 58, 38, p.low], [118, 58, 74, p.mid]].forEach(function (g) {
+      var r = 27 - w / 2, end = 135 + 270 * g[2] / 100;
+      s.appendChild(el('path', { d: arcPath(g[0], g[1], r, 135, 405), fill: 'none', stroke: '#' + tr, 'stroke-width': w, 'stroke-linecap': cap }));
+      s.appendChild(el('path', { d: arcPath(g[0], g[1], r, 135, end), fill: 'none', stroke: '#' + g[3], 'stroke-width': w, 'stroke-linecap': cap }));
+      if (p.d === 'on') { var k = pt(g[0], g[1], r, end); s.appendChild(el('circle', { cx: k[0].toFixed(1), cy: k[1].toFixed(1), r: Math.max(2.5, w / 2 + 1), fill: '#' + p.text, stroke: '#' + p.bg })); }
+      s.appendChild(el('text', { x: g[0], y: g[1] + 4, 'text-anchor': 'middle', 'font-family': 'Montserrat, sans-serif', 'font-size': 11, 'font-weight': 500, fill: '#' + p.text }, g[2] + '%'));
+    });
+    s.appendChild(el('rect', { x: 62, y: 98, width: 36, height: 11, rx: 5.5, fill: '#' + mix(p.bg, p.text, .1) }));
+    s.appendChild(el('rect', { x: 70, y: 102.5, width: 20, height: 2, rx: 1, fill: '#' + p.high }));
+    return s;
+  }
+  // What the board shows while a tile is pointed at or focused by keyboard,
+  // and put back when it is left. Nothing is sent: it moves the drawing only.
+  var held = null, LOOK = ['preset', 'bg', 'text', 'g1', 'g2', 'low', 'mid', 'high', 'w', 'e', 'd', 'mode'];
+  function peek(i) {
+    if (!loaded || finished) return;
+    if (!held) { held = {}; LOOK.forEach(function (k) { held[k] = st[k]; }); }
+    Object.assign(st, PRESETS[i][1]); st.preset = i; drawBoard();
+  }
+  function unpeek() { if (!held) return; Object.assign(st, held); held = null; drawBoard(); }
   var pre = document.getElementById('presets');
   PRESETS.forEach(function (entry, i) {
-    // A card: the theme's ground with its text and three level colours on
-    // it, as a small board would show them, then the name its tile shows.
-    var name = entry[0], p = entry[1], b = document.createElement('button'), sw = document.createElement('span');
-    b.type = 'button'; b.dataset.p = String(i); b.className = 'preset';
-    sw.className = 'sw'; sw.setAttribute('aria-hidden', 'true');
-    sw.style.background = '#' + p.bg;
-    ['text', 'low', 'mid', 'high'].forEach(function (k) { var d = document.createElement('i'); d.className = 'sw-' + k; d.style.background = '#' + p[k]; sw.appendChild(d); });
-    var n = document.createElement('span'); n.className = 'pn'; n.textContent = name;
-    b.appendChild(sw); b.appendChild(n);
-    b.addEventListener('click', function () { if (!loaded) return; Object.assign(st, PRESETS[i][1]); st.preset = i; fromOutside(); fieldSay('paste', null); changed(); });
+    var name = entry[0], b = document.createElement('button'), sc = document.createElement('span'), tick = document.createElement('span');
+    b.type = 'button'; b.dataset.p = String(i); b.className = 'th'; b.setAttribute('aria-pressed', 'false');
+    sc.className = 'scr'; sc.appendChild(mini(entry[1]));
+    tick.className = 'tick';
+    var ts = el('svg', { viewBox: '0 0 12 12', 'aria-hidden': 'true', focusable: 'false' });
+    ts.appendChild(el('path', { d: 'M2.5 6.2l2.3 2.3 4.7-4.8', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+    tick.appendChild(ts); sc.appendChild(tick);
+    var n = document.createElement('span'); n.className = 'nm'; n.textContent = name;
+    b.appendChild(sc); b.appendChild(n);
+    b.addEventListener('pointerenter', function (e) { if (!e.pointerType || e.pointerType === 'mouse') peek(i); });
+    b.addEventListener('pointerleave', unpeek);
+    b.addEventListener('focus', function () { if (typeof b.matches !== 'function' || b.matches(':focus-visible')) peek(i); });
+    b.addEventListener('blur', unpeek);
+    b.addEventListener('click', function () {
+      if (!loaded || finished) return;
+      held = null; pickPreset(i); fieldSay('paste', null);
+      // On the settings page a click is the save; the page stays up after
+      // it (BuilderServer persistent), and the next preview still reaches
+      // the board. `blink theme` keeps its Save button.
+      if (persistent) { render(); save(); } else changed();
+    });
     pre.appendChild(b);
   });
-  var slots = document.getElementById('slots');
+  var slots = document.getElementById('slots'), more = document.getElementById('slots-more');
   SLOTS.forEach(function (s) {
-    var row = document.createElement('div'); row.className = 'slot'; row.id = 'row-' + s.k;
-    var c = document.createElement('input'); c.type = 'color'; c.id = 'c-' + s.k; c.setAttribute('aria-label', s.name);
-    var l = document.createElement('label'); l.htmlFor = c.id; l.textContent = s.name;
-    var sm = document.createElement('small'); sm.textContent = s.hint; l.appendChild(sm);
-    var t = document.createElement('input'); t.type = 'text'; t.id = 't-' + s.k; t.maxLength = 7; t.setAttribute('aria-label', s.name + ' hex');
+    var row = document.createElement('div'); row.className = 'crow'; row.id = 'row-' + s.k;
+    var pick = document.createElement('label'); pick.className = 'pick';
+    var c = document.createElement('input'); c.type = 'color'; c.id = 'c-' + s.k; c.setAttribute('aria-label', s.name); c.setAttribute('aria-describedby', 'h-' + s.k);
+    pick.appendChild(c);
+    var tx = document.createElement('div'); tx.className = 'txt';
+    var nm = document.createElement('b'); nm.textContent = s.name;
+    var hn = document.createElement('span'); hn.id = 'h-' + s.k; hn.textContent = s.hint;
+    tx.appendChild(nm); tx.appendChild(hn);
+    var t = document.createElement('input'); t.type = 'text'; t.className = 'hex'; t.id = 't-' + s.k; t.maxLength = 7; t.setAttribute('aria-label', s.name + ', hex value');
     t.spellcheck = false; t.autocomplete = 'off'; t.setAttribute('aria-describedby', 'm-' + s.k);
     // Live, except the background's: its note is the text's, word for
     // word, and a screen reader heard it twice (review, S5).
     var m = document.createElement('p'); m.className = 'fmsg'; m.id = 'm-' + s.k; if (s.k !== 'bg') m.setAttribute('aria-live', 'polite');
-    row.appendChild(c); row.appendChild(l); row.appendChild(t); row.appendChild(m); slots.appendChild(row);
+    row.appendChild(pick); row.appendChild(tx); row.appendChild(t); row.appendChild(m); (s.main ? slots : more).appendChild(row);
     c.addEventListener('input', function (e) { if (!loaded) return; st[s.k] = e.target.value.slice(1).toUpperCase(); delete bad[s.k]; markCustom(); changed(); });
     // Half-typed is not wrong, so a box is only told off once it has its
-    // seven characters, or when it is left with something it cannot use.
+    // seven characters. Leaving it puts back the colour it holds.
     function typed() {
       if (!loaded) return;
       var v = t.value.replace('#', '');
@@ -985,7 +1395,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       else if (bad[s.k]) { delete bad[s.k]; fieldSay(s.k, null); }
     }
     t.addEventListener('input', function () { typed(); });
-    t.addEventListener('blur', function () { if (bad[s.k]) return; if (!HEX.test(t.value.replace('#', ''))) { t.value = '#' + st[s.k]; fieldSay(s.k, null); render(); } });
+    t.addEventListener('blur', function () {
+      if (!loaded) return;
+      delete bad[s.k]; t.value = '#' + st[s.k]; fieldSay(s.k, null); render();
+    });
   });
   document.querySelectorAll('[data-m]').forEach(function (b) { b.addEventListener('click', function () { if (!loaded) return; st.mode = b.dataset.m; markCustom(); changed(); }); });
   document.querySelectorAll('[data-w]').forEach(function (b) { b.addEventListener('click', function () { if (!loaded) return; st.w = +b.dataset.w; markCustom(); changed(); }); });
@@ -1063,7 +1476,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     else fieldSay('paste', ['bad', 'That share code holds a theme the board cannot use.']);
   });
 
-  document.getElementById('save').addEventListener('click', function () {
+  function save() {
     // A click is ignored before the state, not only kept off by disabled:
     // disabled is whatever the last render() left, and a click dispatched
     // by script or an extension reaches this handler whatever it says.
@@ -1099,6 +1512,15 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       var owed = settled();
       if (j.status === 200) {
         savedKey = JSON.stringify(sent);
+        if (persistent) {
+          // The page stays up. The server wrote its cancel with the save, so
+          // what the board shows is the saved theme, and a later preview of
+          // any theme must go out even if it equals the last one sent.
+          lastSent = savedKey;
+          say('Saved: ' + name + '. Your board keeps it.', 'ok');
+          if (owed) ping();
+          return;
+        }
         var keep = holdsDraft();
         if (retire('Saved.', 'Your board keeps ' + name + '.', 'Saved: ' + name + '. Your board keeps it.', 'ok',
                    keep && KEEP_AFTER_SAVE, closeLine(CLOSE_AFTER_S)) && !keep) closeSoon();
@@ -1112,7 +1534,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       else if (j.status === 400 || j.status === 500) { say(j.error || 'The board would refuse that theme.', true); if (owed) ping(); }
       else stopped();
     }, function () { settled(); stopped(); });
-  });
+  }
+  document.getElementById('save').addEventListener('click', save);
   document.getElementById('cancel').addEventListener('click', function () {
     if (finished) return;
     clearTimeout(previewTimer);
@@ -1181,21 +1604,156 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // way out, and the builder may have ended since: ask before it is used.
   window.addEventListener('pageshow', function (e) { if (e.persisted) ping(); });
 
-  // --top-h follows the header: 80 px as a rule, more when a long status
-  // wraps it. It was 73 px, written in, with the header at 80 (review of
-  // fp/builder-look, S4).
-  (function () {
-    var top = document.querySelector('.top'), rootStyle = document.documentElement.style;
-    function fit() { if (top.offsetHeight) rootStyle.setProperty('--top-h', top.offsetHeight + 'px'); }
-    if (window.ResizeObserver) new ResizeObserver(fit).observe(top);
-    fit();
-  })();
+
+  // ---------------------------------------------------------------- the shell
+  // The hub's status line and the handshake ticks. kind: live | danger | busy.
+  // steps(i, state): ticks before i are done, i is `state` (active | done |
+  // fail), the rest pending; 4 with 'done' is all four, and only then does
+  // "Connected. You can unplug the cable." appear (Task 4.4 reports each
+  // step as the real event happens). steps(null) goes back to the line.
+  var STEP_TEXT = ['Pairing over the cable', 'Board joins the network', 'Both prove their keys over WiFi', 'Encrypting the link'];
+  var status = {
+    say: function (text, kind) {
+      var p = document.getElementById('board-status'), t = document.getElementById('board-status-text'), d = document.getElementById('board-dot');
+      if (t.textContent !== text) t.textContent = text;
+      d.className = 'dot' + (kind === 'danger' ? ' danger' : kind === 'busy' ? ' busy' : '');
+      if (document.getElementById('hs').getAttribute('hidden') === null) return;   // the handshake is showing
+      if (text) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
+    },
+    steps: function (i, state) {
+      var hs = document.getElementById('hs'), line = document.getElementById('board-status');
+      if (i == null) { hs.setAttribute('hidden', ''); if (document.getElementById('board-status-text').textContent) line.removeAttribute('hidden'); return; }
+      var ticks = hs.querySelectorAll('li');
+      ticks.forEach(function (li, j) { li.className = j < i ? 'done' : j === i ? (state === 'done' ? 'done' : state || 'active') : ''; });
+      var text = i >= 4 ? 'Connected. You can unplug the cable.' : STEP_TEXT[i];
+      var e = document.getElementById('hs-text'); if (e.textContent !== text) e.textContent = text;
+      line.setAttribute('hidden', ''); hs.removeAttribute('hidden');
+    }
+  };
+
+  // One control open at a time: Look takes both sides, Connect and Board the
+  // right. Pressing the open one again closes it, and so does Escape.
+  var SIDES = { look: ['pLook', 'pCust'], connect: ['pConn'], board: ['pBoard'] };
+  var chips = document.querySelectorAll('[data-panel]');
+  var panel = {
+    current: null,
+    open: function (name) {
+      if (!SIDES[name]) name = null;
+      panel.current = name;
+      chips.forEach(function (c) { c.setAttribute('aria-pressed', String(c.dataset.panel === name)); });
+      Object.keys(SIDES).forEach(function (k) {
+        SIDES[k].forEach(function (id) {
+          var p = document.getElementById(id);
+          if (k === name) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
+        });
+      });
+      syncScreen(); render();
+    },
+    close: function () { panel.open(null); }
+  };
+  // What the board shows follows what is being edited: the start-up screen
+  // while the Logo tab is open, its own Settings screen while the Board
+  // panel has asked for it, the usage screen otherwise. The connection
+  // screen holds for its 4.2 s first.
+  function syncScreen() {
+    if (board.timer) return;
+    var logo = document.getElementById('tLogo').getAttribute('hidden') === null;
+    var set = document.getElementById('pBoard').getAttribute('hidden') === null && st.showSettings;
+    st.screen = panel.current === 'look' && logo ? 'startup' : set ? 'settings' : 'usage';
+  }
+  chips.forEach(function (c) {
+    c.addEventListener('click', function () { panel.open(c.getAttribute('aria-pressed') === 'true' ? null : c.dataset.panel); });
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape' || noticeOpen() || !panel.current) return;
+    var on = document.querySelector('[data-panel][aria-pressed="true"]');
+    panel.close(); if (on) on.focus();
+  });
+  // Sub-tabs: one tablist per panel, Left and Right move between them, and
+  // only the selected tab is in the tab order.
+  document.querySelectorAll('[role="tablist"]').forEach(function (list) {
+    var tabs = list.querySelectorAll('[role="tab"]');
+    function choose(t, focus) {
+      tabs.forEach(function (x) {
+        var on = x === t, p = document.getElementById(x.getAttribute('aria-controls'));
+        x.setAttribute('aria-selected', String(on)); x.setAttribute('tabindex', on ? '0' : '-1');
+        if (on) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
+      });
+      if (focus) t.focus();
+      syncScreen(); render();
+    }
+    tabs.forEach(function (t, i) {
+      t.addEventListener('click', function () { choose(t); });
+      t.addEventListener('keydown', function (e) {
+        var d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+        if (d) { e.preventDefault(); choose(tabs[(i + d + tabs.length) % tabs.length], true); }
+      });
+    });
+  });
+  // The in-page confirm, in place of the browser's dialog: the destructive button is
+  // replaced by a tinted box with the question, the solid action and a quiet
+  // Keep, and focus goes to Keep, the safe one.
+  var confirm = {
+    ask: function (host, question, actionLabel, onConfirm) {
+      var box = document.createElement('div'), q = document.createElement('p'), btns = document.createElement('div');
+      var yes = document.createElement('button'), keep = document.createElement('button');
+      box.className = 'confirm'; box.setAttribute('role', 'group'); q.textContent = question; btns.className = 'btns';
+      yes.type = 'button'; yes.className = 'btn danger solid'; yes.textContent = actionLabel;
+      keep.type = 'button'; keep.className = 'btn'; keep.textContent = 'Keep';
+      btns.appendChild(yes); btns.appendChild(keep); box.appendChild(q); box.appendChild(btns);
+      function put(back) { host.parentNode.removeChild(box); host.removeAttribute('hidden'); if (back) host.focus(); }
+      yes.addEventListener('click', function () { put(false); onConfirm(); });
+      keep.addEventListener('click', function () { put(true); });
+      host.setAttribute('hidden', '');
+      host.parentNode.insertBefore(box, host.nextSibling);
+      keep.focus();
+      return box;
+    }
+  };
+  // Hub status from the daemon's view of the link. One ask, on load: nothing
+  // moves while the page is idle. `blink theme` has no board to ask, and
+  // says nothing here.
+  function loadHub() {
+    var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    var limit = ctl ? setTimeout(function () { ctl.abort(); }, REQUEST_MS) : null;
+    fetch('/api/wifi', { credentials: 'same-origin', signal: ctl ? ctl.signal : undefined }).then(function (r) {
+      clearTimeout(limit);
+      return r.status === 200 ? r.json() : null;
+    }).then(function (j) {
+      if (!j || finished) return;
+      if (j.link === 'usb' || j.link === 'wifi') {
+        board.show({ link: j.link });
+        status.say(j.link === 'usb' ? 'Live over USB' : 'Live over WiFi, encrypted', 'live');
+      } else if (j.link === 'none') status.say('Board not found, check the USB cable', 'danger');
+    }, function () { clearTimeout(limit); });
+  }
+  document.getElementById('resetBtn').addEventListener('click', function () {
+    if (!loaded || finished) return;
+    pickPreset(st.base); fieldSay('paste', null); changed();
+    document.getElementById('t-' + SLOTS[0].k).focus();
+  });
+  // For the tasks that fill Connect and Board, and for the page's tests.
+  window.blinkSettings = { board: board, panel: panel, status: status, confirm: confirm };
+  document.getElementById('done').addEventListener('click', function () {
+    if (finished) return;
+    clearTimeout(previewTimer);
+    post('/api/done', null, true).then(function (j) {
+      if (j.status === 409) return superseded();
+      var keep = holdsDraft();
+      if (retire('Done.', 'Your board keeps what it has now.', 'Done. Your board keeps what it has now.', 'ok',
+                 keep && KEEP_AFTER_SAVE, closeLine(CLOSE_AFTER_S)) && !keep) closeSoon();
+    }, stopped);
+  });
+  // ?panel=look|connect|board: the board's "Edit on computer" and
+  // `blink theme` open the page with that control open.
+  var want = /[?&]panel=(look|connect|board)\b/.exec(typeof location === 'undefined' ? '' : location.search || '');
+  if (want) panel.open(want[1]);
 
   // A theme as /api/state gives it, onto the page. False if it is neither a
   // built-in nor a custom theme this page can show.
   function applyTheme(t) {
     if (t && t.id === CUSTOM) return applyCustom(t);
-    if (t && t.id >= 0 && t.id < PRESETS.length) { Object.assign(st, PRESETS[t.id][1]); st.preset = t.id; fromOutside(); return true; }
+    if (t && t.id >= 0 && t.id < PRESETS.length) { pickPreset(t.id); return true; }
     return false;
   }
   // Limited like the posts, and ending the same way as a refused one: the
@@ -1213,7 +1771,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // Cancel stays on: it writes nothing of its own, only puts the board
   // back on the theme it keeps.
   var FORM = 'main button, main input, #copy-code';
-  document.querySelectorAll(FORM).forEach(function (e) { e.disabled = true; });
+  // Cancel stays on: it writes nothing of its own, only puts the board back.
+  document.querySelectorAll(FORM).forEach(function (e) { e.disabled = e.id !== 'cancel'; });
   var studio = document.querySelector('main');
   var waiting = setTimeout(function () { if (!loaded) studio.classList.add('waiting'); }, 150);
   var stateCtl = typeof AbortController === 'function' ? new AbortController() : null;
@@ -1225,6 +1784,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     clearTimeout(stateLimit);
     var t = j.saved;
     oldBoard = !!j.board && j.board.themes === false;
+    persistent = !!j.persistent;
+    if (persistent) { document.getElementById('done').removeAttribute('hidden'); document.getElementById('cancel').setAttribute('hidden', ''); }
     applyTheme(t);
     savedKey = JSON.stringify(wireTheme());
     lastSent = savedKey;
@@ -1241,6 +1802,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     say(oldBoard ? OLD_BOARD_LOAD : draft ? 'This picks up the changes you had not saved. Your board shows them as a preview.'
         : t ? 'This is the theme your board has now. Changes show on it as a preview.' : 'Your board is on its own theme. Changes show on it as a preview.');
     render();
+    if (persistent) loadHub();
   }, function () { clearTimeout(stateLimit); render(); stopped(); });
   render();
 })();

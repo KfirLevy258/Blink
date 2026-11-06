@@ -4433,7 +4433,7 @@ def _theme_builder(home) -> int:
         print(f"The theme builder could not start: {e}")
         return 1
     server.start()
-    url = server.new_link()
+    url = server.new_link(panel="look")
     # The link is printed only here, to the person's own terminal: it is the
     # one-time key to the server, and the daemon never prints it.
     print("Opening the theme builder in your browser.")

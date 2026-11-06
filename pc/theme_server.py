@@ -80,6 +80,7 @@ TICK_S = 0.25
 # stopped anyway.
 LINK_LIFE_S = 600
 # Routes that need the board; with no board_ops they answer 409.
+PANELS = ("look", "connect", "board")
 BOARD_PATHS = ("/api/wifi", "/api/device", "/api/logo", "/api/pref")
 MAX_BODY = 4096         # the widest theme is about 200 bytes of JSON
 # The page's tab id on a preview, save or cancel. A header and not a body
@@ -182,6 +183,26 @@ def page():
         # caller already says so for a missing one.
         raise FileNotFoundError(f"{PAGE_FILE} has no place for the themes")
     return text.replace(BUILTINS_MARK, builtins_json())
+
+
+# The two faces the board's screen is drawn in (Montserrat is LVGL's font),
+# vendored so the page loads nothing from the network: it is served to a desk
+# that may be offline and runs inside a frozen app. Latin subset of the
+# upstream OFL release; the licence sits beside them.
+FONT_NAMES = ("Montserrat-Medium-latin.woff2", "Montserrat-SemiBold-latin.woff2")
+
+
+def font_path(name):
+    """Where a vendored font is, found the way the page itself is: beside
+    this file, which in the frozen app is also under sys._MEIPASS/pc (where
+    tools/build_binary.sh --add-data puts pc/fonts). The bundle is asked
+    first so a frozen build never reads a stray source tree."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None):
+        bundled = os.path.join(sys._MEIPASS, "pc", "fonts", name)
+        if os.path.isfile(bundled):
+            return bundled
+    return os.path.join(here, "fonts", name)
 
 
 # ------------------------------------------------------------- opening a browser
@@ -310,7 +331,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        if not any(k.lower() == "cache-control" for k, _ in headers):
+            self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         for k, v in headers:
@@ -351,6 +373,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         return origin in (f"http://127.0.0.1:{port}",
                           f"http://localhost:{port}")
 
+    def _active(self, path):
+        """The settings page's idle clock follows any request: a person
+        scanning for networks or flipping a switch is not idle, though they
+        are editing no theme. Not the page's own heartbeat or its close,
+        which say nothing about a person (a ping every 20 s would keep it up
+        for good, and a touch would cancel a close's grace)."""
+        if self.builder.persistent and path not in ("/api/ping",
+                                                    "/api/closed"):
+            self.builder.touch()
+
     # -- GET
 
     def do_GET(self):
@@ -370,13 +402,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     return self._send(403, b"This link was opened already."
                                       b" Use the tab it opened.\n")
                 return self._refuse()
+            # ?panel= rides the one-time link through the redirect, only if
+            # it names one of the three controls: it opens that control.
+            panel = urllib.parse.parse_qs(url.query).get("panel", [""])[0]
+            where = f"/?panel={panel}" if panel in PANELS else "/"
             return self._send(303, headers=(
-                ("Location", "/"),
+                ("Location", where),
                 ("Set-Cookie", f"{cookie_name(self.builder.port)}="
                                f"{session}; HttpOnly;"
                                " SameSite=Strict; Path=/")))
         if not self._session_ok():
             return self._refuse()
+        self._active(url.path)
         if url.path == "/":
             self.builder.page_served()
             return self._send(200, self.builder.page_bytes,
@@ -384,9 +421,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 ("Content-Security-Policy",
                  "default-src 'none'; script-src 'unsafe-inline';"
                  " style-src 'unsafe-inline'; connect-src 'self';"
-                 " img-src data:; frame-ancestors 'none';"
+                 " font-src 'self'; img-src data:; frame-ancestors 'none';"
                  " form-action 'none'; base-uri 'none'"),
                 ("X-Frame-Options", "DENY")))
+        if url.path.startswith("/font/"):
+            name = url.path[len("/font/"):]
+            if name not in FONT_NAMES:
+                return self._refuse(404)
+            try:
+                with open(font_path(name), "rb") as f:
+                    data = f.read()
+            except OSError:
+                return self._refuse(404)
+            return self._send(200, data, "font/woff2", headers=(
+                ("Cache-Control", "max-age=86400"),))
         if url.path == "/api/state":
             self.builder.touch()
             # "draft": the last preview this builder took, so a tab opened
@@ -404,6 +452,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, {"saved": theme.load_saved(
                 self.builder.home), "draft": self.builder.draft,
                 "idle_s": self.builder.idle_s,
+                "persistent": self.builder.persistent,
                 "board": {"themes": takes},
                 "waiting_s": theme.preview_waiting_s(self.builder.home)})
         if self._theme_only(url.path):
@@ -509,6 +558,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 and self._origin_ok()):
             return self._refuse()
         path = urllib.parse.urlsplit(self.path).path
+        self._active(path)
         self.builder.count(path)
         want = None
         settings = path.startswith(("/api/wifi/", "/api/computer"))
@@ -536,7 +586,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         # said the builder had stopped (review of fp/edit-reset r2,
         # SHOULD-2). 409 with "newer", so the page stops as a ping would
         # have told it to.
-        if path in ("/api/preview", "/api/save", "/api/cancel") and \
+        if path in ("/api/preview", "/api/save", "/api/cancel",
+                    "/api/done") and \
                 self.builder.superseded(_tab_id(
                     self.headers.get(TAB_HEADER))):
             return self._json(409, {"newer": True, "error":
@@ -548,6 +599,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/cancel":
             self._json(200, {"ok": True})
             return self.builder.finish("cancelled")
+        if path == "/api/done":
+            # The settings page's Done button: the session ends, and an
+            # unsaved preview is cancelled by finish() as on any non-save.
+            self._json(200, {"ok": True})
+            return self.builder.finish("done")
         if path == "/api/closed":
             self.builder.closing(_tab_of(raw))
             return self._json(200, {"ok": True})
@@ -596,9 +652,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             # to end it (review NICE-4). ThemeSync.outgoing drops the cancel
             # when a save is owed.
             theme.write_cancel(self.builder.home)
-            self.builder.stop_writing()
+            # The settings page keeps writing on: stop_writing() would make
+            # every later preview return False, so the next theme clicked
+            # would silently not reach the board. finish() ends it.
+            if not self.builder.persistent:
+                self.builder.stop_writing()
+            else:
+                # Nothing is unsaved now: a tab opened next must not start
+                # on the preview this save replaced.
+                self.builder.draft = None
         self._json(200, {"ok": True})
-        self.builder.finish("saved")
+        if not self.builder.persistent:
+            self.builder.finish("saved")
 
 
 def _tab_of(raw):
@@ -661,8 +726,13 @@ class BuilderServer:
     """One builder session: a server, its tokens, and its deadlines."""
 
     def __init__(self, home, idle_s=IDLE_S, now=time.monotonic,
-                 tick_s=TICK_S, board_ops=None, panel="look", token=None):
+                 tick_s=TICK_S, board_ops=None, panel="look", token=None,
+                 persistent=False):
         self.home = home
+        # True for the settings page, which stays up through a theme save
+        # (Connect and Board go on working); `blink theme` is False and ends
+        # on save as it always did.
+        self.persistent = persistent
         self.board_ops = board_ops      # None: `blink theme`, no board routes
         self.panel = panel
         self.nets = []                  # the last scan, for GET /api/wifi/nets
@@ -772,7 +842,7 @@ class BuilderServer:
 
     # -- tokens
 
-    def new_link(self):
+    def new_link(self, panel=None):
         """A one-time link. It replaces any link not yet used, and lives
         LINK_LIFE_S: "Edit on computer" mints one on every reshow (contract
         Addendum 6), and each used to stay valid, unspent, for the server's
@@ -783,7 +853,8 @@ class BuilderServer:
             for old in self._links:
                 self._retire_link(old, "replaced")
             self._links = {k: self._now()}
-        return f"http://127.0.0.1:{self.port}/open?k={k}"
+        extra = f"&panel={panel}" if panel in PANELS else ""
+        return f"http://127.0.0.1:{self.port}/open?k={k}{extra}"
 
     def add_token(self, token):
         """Another one-time link token, beside any unspent one."""
@@ -1054,8 +1125,9 @@ class Launcher:
     """The daemon's builder: at most one running, reopened on request."""
 
     def __init__(self, home, opener=None, make_server=BuilderServer,
-                 now=time.monotonic, board_ops=None):
+                 now=time.monotonic, board_ops=None, persistent=False):
         self._home = home
+        self.persistent = persistent    # the settings page; see BuilderServer
         self.board_ops = board_ops      # the settings page's way to the board
         # `is None`, not `or`: a stub that was falsy (a list subclass, empty
         # until its first call) became the real open_url, which is
@@ -1152,8 +1224,10 @@ class Launcher:
         fresh = server is None
         if fresh:
             try:
-                server = self._make(self._home) if self.board_ops is None \
-                    else self._make(self._home, board_ops=self.board_ops)
+                more = {"persistent": True} if self.persistent else {}
+                server = self._make(self._home, **more) \
+                    if self.board_ops is None else self._make(
+                        self._home, board_ops=self.board_ops, **more)
             except OSError as e:
                 # The page missing from a broken install, or no port to
                 # bind. One line, and the board's own fallback.

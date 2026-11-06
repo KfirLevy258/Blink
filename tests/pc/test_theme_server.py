@@ -8,6 +8,7 @@ import json
 import os
 import re
 import socket
+import sys
 import threading
 import time
 import urllib.parse
@@ -394,7 +395,8 @@ def test_the_page_follows_the_computer_and_is_usable_without_a_mouse():
     # a ring on whatever the keyboard is on; and no motion for someone who
     # turned it off.
     markup, _ = _markup_and_script(theme_server.page())
-    assert "@media (prefers-color-scheme: light)" in markup
+    assert "@media (prefers-color-scheme: dark)" in markup
+    assert ':root:not([data-theme="light"])' in markup and ':root[data-theme="dark"]' in markup
     assert "@media (prefers-reduced-motion: reduce)" in markup
     assert ":focus-visible" in markup
     # The 44 px rule is checked control by control in test_theme_page.py:
@@ -1145,3 +1147,150 @@ def test_no_opener_given_means_the_real_one(home, monkeypatch):
         assert lau._opener is theme_server.open_url
     finally:
         lau.close()
+
+
+# ----------------------------------------------- the settings page (Task 4.2)
+
+@pytest.fixture
+def settings_server(home):
+    clock = Clock()
+    s = theme_server.BuilderServer(home, now=clock, tick_s=3600,
+                                   persistent=True)
+    s.clock = clock
+    s.start()
+    yield s
+    s.finish("test over")
+    s.wait(5)
+
+
+def test_font_route_serves_the_two_files_and_404s_the_rest(server):
+    cookie = login(server)
+    for name in theme_server.FONT_NAMES:
+        status, headers, body = request(server, "GET", f"/font/{name}",
+                                        cookie=cookie)
+        assert status == 200
+        assert headers["Content-Type"] == "font/woff2"
+        assert headers["Cache-Control"] == "max-age=86400"
+        assert body[:4] == b"wOF2"
+    for bad in ("OFL.txt", "../theme_server.py", "Montserrat-Bold.woff2", ""):
+        assert request(server, "GET", "/font/" + bad, cookie=cookie)[0] == 404
+    # Not before the token either.
+    assert request(server, "GET",
+                   f"/font/{theme_server.FONT_NAMES[0]}")[0] == 403
+
+
+def test_font_path_resolves_under_a_frozen_bundle(tmp_path, monkeypatch):
+    name = theme_server.FONT_NAMES[0]
+    fonts = tmp_path / "pc" / "fonts"
+    fonts.mkdir(parents=True)
+    (fonts / name).write_bytes(b"x")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert theme_server.font_path(name) == str(fonts / name)
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    here = os.path.dirname(os.path.abspath(theme_server.__file__))
+    assert theme_server.font_path(name) == os.path.join(here, "fonts", name)
+
+
+def test_the_csp_allows_this_origins_fonts_and_nothing_else_new(server):
+    cookie = login(server)
+    _, headers, _ = request(server, "GET", "/", cookie=cookie)
+    csp = headers["Content-Security-Policy"]
+    assert "default-src 'none'" in csp and "font-src 'self'" in csp
+    assert "connect-src 'self'" in csp and "script-src 'unsafe-inline'" in csp
+
+
+def test_panel_rides_the_token_redirect_when_it_names_a_control(server):
+    for panel, want in (("connect", "/?panel=connect"), ("look", "/?panel=look"),
+                        ("board", "/?panel=board"), ("evil", "/"),
+                        ("look&x=1", "/")):
+        link = urllib.parse.urlsplit(server.new_link(
+            panel if panel in theme_server.PANELS else None))
+        path = link.path + "?" + link.query
+        if panel not in theme_server.PANELS:
+            path += "&panel=" + urllib.parse.quote(panel)
+        status, headers, _ = request(server, "GET", path)
+        assert status == 303 and headers["Location"] == want, panel
+
+
+def test_a_link_without_a_panel_redirects_to_the_bare_page(server):
+    link = urllib.parse.urlsplit(server.new_link())
+    status, headers, _ = request(server, "GET", link.path + "?" + link.query)
+    assert status == 303 and headers["Location"] == "/"
+
+
+def test_persistent_save_keeps_preview_alive(settings_server, home):
+    """One settings session: a theme save returns 200 and the server goes
+    on serving; the next preview still reaches the board (stop_writing()
+    would make write_preview return False for good); /api/device answers;
+    the board receives exactly one save line."""
+    class Ops:
+        def device(self):
+            return {"name": "x"}
+        def state(self):
+            return {"link": "usb"}
+    settings_server.board_ops = Ops()
+    cookie = login(settings_server)
+    assert json.loads(request(settings_server, "GET", "/api/state",
+                              cookie=cookie)[2])["persistent"] is True
+    theme.save(home, {"id": 4})
+    sync = theme.ThemeSync(home)
+    sync.board_now({"t": "theme_now", "v": 2, "id": 4, "why": "boot"})
+    status, _, _ = request(settings_server, "POST", "/api/save", {"id": 6},
+                           cookie=cookie)
+    assert status == 200 and not settings_server.done
+    assert theme.load_saved(home) == {"id": 6}
+    assert sync.outgoing() == [theme.message("save", {"id": 6})]
+    t2 = theme.validate({"id": 1})
+    assert settings_server.write_preview(t2) is True
+    assert request(settings_server, "GET", "/api/device",
+                   cookie=cookie)[0] == 200
+    assert request(settings_server, "GET", "/api/state",
+                   cookie=cookie)[0] == 200
+    assert settings_server.draft == t2
+    assert sync.outgoing() == [theme.message("preview", t2)]
+
+
+def test_blink_theme_still_finishes_on_save(server, home):
+    cookie = login(server)
+    assert request(server, "POST", "/api/save", {"id": 4},
+                   cookie=cookie)[0] == 200
+    assert server.wait(5) == "saved"
+    assert server.write_preview(theme.validate({"id": 1})) is False
+
+
+@pytest.mark.parametrize("how", ["done", "close", "idle"])
+def test_settings_session_ends_on_close_idle_or_done(settings_server, home,
+                                                     how):
+    s = settings_server
+    cookie = login(s)
+    request(s, "POST", "/api/ping", {"tab": "a"}, cookie=cookie)
+    assert s.write_preview(theme.validate({"id": 2}))
+    if how == "done":
+        assert request(s, "POST", "/api/done", cookie=cookie)[0] == 200
+    elif how == "close":
+        request(s, "POST", "/api/closed", {"tab": "a"}, cookie=cookie)
+        s.clock.t += 10
+        s.tick()
+    else:
+        s.clock.t += s.idle_s + 1
+        s.tick()
+    assert s.wait(5) == {"done": "done", "close": "closed",
+                         "idle": "idle"}[how]
+    # Each writes the cancel for an unsaved preview, as today.
+    assert theme.take_preview(home) == ("cancel", None)
+
+
+def test_any_request_but_the_heartbeat_touches_a_settings_sessions_idle_clock(
+        settings_server):
+    s = settings_server
+    cookie = login(s)
+    s.clock.t += s.idle_s - 5
+    request(s, "GET", "/font/" + theme_server.FONT_NAMES[0], cookie=cookie)
+    s.clock.t += s.idle_s - 5
+    s.tick()
+    assert not s.done
+    request(s, "POST", "/api/ping", {"tab": "a"}, cookie=cookie)
+    s.clock.t += s.idle_s + 1
+    s.tick()
+    assert s.wait(5) == "idle"

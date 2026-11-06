@@ -44,6 +44,7 @@ class Node {
   set id(v) { this.attrs.id = v; }
   get firstChild() { return this.children[0] || null; }
   appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
+  insertBefore(c, ref) { c.parentNode = this; const i = ref ? this.children.indexOf(ref) : -1; if (i < 0) this.children.push(c); else this.children.splice(i, 0, c); return c; }
   removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parentNode = null; return c; }
   get textContent() { return this.tagName === '#TEXT' ? this._text : this._text + this.children.map((c) => c.textContent).join(''); }
   // Every write counts, the same text included: a live region re-announces
@@ -63,7 +64,7 @@ class Node {
     if (e.bubbles) (document.listeners[t] || []).forEach((f) => f(e));
   }
   click() { if (!this.disabled) this.fire('click'); }
-  focus() { if (active && active !== this) { const was = active; active = null; was.fire('blur'); } active = this; }
+  focus() { if (active === this) return; if (active) { const was = active; active = null; was.fire('blur'); } active = this; this.fire('focus'); }
   blur() { if (active === this) { active = null; this.fire('blur'); } }
   contains(o) { for (let n = o; n; n = n.parentNode) if (n === this) return true; return false; }
   descendants() { const out = []; const walk = (n) => n.children.forEach((c) => { out.push(c); walk(c); }); walk(this); return out; }
@@ -72,12 +73,21 @@ class Node {
 }
 
 function simple(tok, n) {
-  if (tok.startsWith('#')) return n.id === tok.slice(1);
-  if (tok.startsWith('.')) return n.classList.contains(tok.slice(1));
-  const m = /^\[data-([a-z]+)\]$/.exec(tok);
-  if (m) return m[1] in n.dataset;
-  if (/^[a-z]+$/.test(tok)) return n.tagName === tok.toUpperCase();
-  throw new Error('builder_dom.js does not know the selector ' + tok);
+  // tag, #id, .class and [attr] / [attr=value] / [data-x], in any mix.
+  const re = /^([a-z0-9]*)((?:[#.][\w-]+|\[[\w-]+(?:="?[^\]"]*"?)?\])*)$/i;
+  const m = re.exec(tok);
+  if (!m || tok === '') throw new Error('builder_dom.js does not know the selector ' + tok);
+  if (m[1] && n.tagName !== m[1].toUpperCase()) return false;
+  for (const part of m[2].match(/[#.][\w-]+|\[[^\]]+\]/g) || []) {
+    if (part[0] === '#') { if (n.id !== part.slice(1)) return false; }
+    else if (part[0] === '.') { if (!n.classList.contains(part.slice(1))) return false; }
+    else {
+      const [k, v] = part.slice(1, -1).split('=');
+      if (k.startsWith('data-')) { if (!(k.slice(5) in n.dataset)) return false; if (v !== undefined && n.dataset[k.slice(5)] !== v.replace(/"/g, '')) return false; }
+      else if (n.getAttribute(k) === null || (v !== undefined && n.getAttribute(k) !== v.replace(/"/g, ''))) return false;
+    }
+  }
+  return true;
 }
 function select(sel, scope) {
   const pool = scope.descendants();
@@ -181,6 +191,7 @@ document.createRange = () => ({ selectNodeContents(n) { this.node = n; } });
 function hold() { let release; const p = new Promise((r) => { release = r; }); return { p, release }; }
 
 const sandbox = {
+  location: { search: spec.search || '' },
   document, window: win, fetch: fetch_, setTimeout: setTimeout_, setInterval: setInterval_,
   clearTimeout: clearTimer, clearInterval: clearTimer, navigator: { clipboard },
   getSelection: () => ({ removeAllRanges() { selection.node = null; }, addRange(r) { selection.node = r.node; } }),
@@ -208,7 +219,7 @@ const $ = (id) => document.getElementById(id);
 function type(id, text) { const e = $(id); e.focus(); e.value = text; e.fire('input'); }
 function pick(id, hex) { const e = $(id); e.value = hex; e.fire('input'); }
 function preset(name) {
-  const b = document.querySelectorAll('#presets button').find((x) => x.querySelector('.pn').textContent === name);
+  const b = document.querySelectorAll('#presets button').find((x) => x.querySelector('.nm').textContent === name);
   if (!b) throw new Error('no preset ' + name);
   b.focus(); b.click();
 }
