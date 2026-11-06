@@ -186,7 +186,12 @@ def test_a_zero_cap_is_reached_not_a_failure(tmp_path, capfd):
     bus = bus_on(clock)
     msg = bus.poll()
     assert msg["session_pct"] >= 100
-    assert capfd.readouterr().err == ""
+    # Nothing said about the zero cap. On Windows the bus also names the
+    # Desktop folder once (ingest._note_desktop_folder, from PR #3), which is
+    # not a failure and failed this on the Windows VM after the merge.
+    said = [l for l in capfd.readouterr().err.splitlines()
+            if not l.startswith("[ingest] Desktop data folder: ")]
+    assert said == []
 
 
 def test_running_daemon_rolls_over_on_the_first(tmp_path):
