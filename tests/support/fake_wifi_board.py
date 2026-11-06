@@ -42,7 +42,7 @@ class FakeWifiBoard:
                  verify_window: bool = False, usb_active: bool = False,
                  extra_lines=(), hello_at_start: bool = False,
                  ack_delay_s: float = 0.0, forget_avail: bool = False,
-                 bad_hash: bool = False):
+                 bad_hash: bool = False, silent_after_seal: bool = False):
         self.key, self.port = key, port
         self.wrong_key, self.stall_m1 = wrong_key, stall_m1
         self.close_after_m1, self.garbage_frame = close_after_m1, garbage_frame
@@ -57,6 +57,9 @@ class FakeWifiBoard:
         # A board reset since its offer holds none (ota_begin -> "refused"),
         # and one whose image fails the hash answers err "failed" at ota_end.
         self.forget_avail, self.bad_hash = forget_avail, bad_hash
+        # The real board reboots without closing the socket (proto.c): it just
+        # stops answering. The default closes, which is the kinder model.
+        self.silent_after_seal = silent_after_seal
         self.avail_sha = None
         self.avail_size = -1            # from the ota_avail it saw (spec S9.3)
         self.extra_lines = list(extra_lines)    # sent after wifi_state
@@ -222,6 +225,9 @@ class FakeWifiBoard:
                     if not ok:
                         self._line(c, {"t": "ota_ack", "err": "failed"})
                     else:
+                        if self.silent_after_seal:
+                            while not self._stop.is_set():
+                                time.sleep(0.05)
                         return          # sealed: the board reboots, the session drops
                 elif t == "ota_begin" and self.avail_size < 0:
                     self._line(c, {"t": "ota_ack", "err": "refused"})

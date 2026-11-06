@@ -767,6 +767,11 @@ class Bridge:
         if s is None:
             return
         s.pump(self._link, self._write)     # a dead session raises: the loop reconnects
+        if s.went_quiet:
+            # End the session as a drop, with the stream left in sealing so the
+            # reconnect polls for the new image (after_ota); no failure said.
+            self._link.close()
+            raise OSError("link lost")
         res = s.done()
         if res is None:
             return

@@ -56,6 +56,9 @@ class FakeLink:
     def write_blob(self, kind, off, chunk):
         self.blobs.append((off, len(chunk)))
 
+    def close(self):
+        self.closed = True
+
     def unacked(self, acked):
         return sum(n for _, n in self.blobs) - acked
 
@@ -305,11 +308,14 @@ def test_every_reconnect_handler_releases_the_stream_hold_before_it_can_block():
     assert len(handlers) == 3
     for h in handlers:
         calls = [n for st in h.body for n in ast.walk(st)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
-        names = [(n.lineno, n.col_offset, n.func.id) for n in calls]
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, (ast.Name, ast.Attribute))]
+        names = [(n.lineno, n.col_offset,
+                  n.func.id if isinstance(n.func, ast.Name) else n.func.attr)
+                 for n in calls]
         rel = [x for x in names if x[2] == "_release"]
-        block = [x for x in names if x[2] in ("choose", "sleep")
-                 or (x[2] == "sleep")]
+        block = [x for x in names if x[2] in ("choose", "sleep")]
+        assert block, ast.dump(h.type)
         assert rel, ast.dump(h.type)
         assert all(rel[0][:2] < b[:2] for b in block)
 
@@ -381,7 +387,7 @@ def test_a_bad_hash_at_ota_end_is_a_failure_not_a_success(rig):
                                "why": wifi_ota.REJECTED}
 
 
-def test_the_sealing_stream_waits_for_a_verdict_then_stalls_out():
+def test_the_sealing_stream_waits_for_a_verdict_then_reads_silence_as_the_reboot():
     clock = [0.0]
     link = FakeLink()
     b = _bridge(_blob(600), link, now=lambda: clock[0])
@@ -392,8 +398,9 @@ def test_the_sealing_stream_waits_for_a_verdict_then_stalls_out():
     b.pump()
     assert b.ota_sealing() and b.ota_streaming()
     clock[0] += 31
-    b.pump()
-    assert not b.ota_sealing() and link.lines[-1]["why"] == wifi_ota.STALLED
+    with pytest.raises(OSError):        # silence after ota_end is the reboot
+        b.pump()
+    assert b.ota_sealing() and link.lines[-1]["t"] == "ota_end"
 
 
 def test_a_refused_begin_sends_a_fresh_offer_and_does_not_loop(rig):
@@ -408,3 +415,17 @@ def test_a_refused_begin_sends_a_fresh_offer_and_does_not_loop(rig):
     kinds = [m.get("t") for m in board.lines]
     assert kinds.count("ota_begin") == 1 and kinds.count("ota_avail") == 3    # hello, query, then the fresh one
     assert board.ota_sink == b"" and not b.ota_streaming()
+
+
+def test_silence_after_a_sealed_ota_end_is_the_reboot_not_a_failure(rig, capsys):
+    clock = [1000.0]
+    board, link = rig(silent_after_seal=True)
+    b = _bridge(_blob(20000), link, now=lambda: clock[0])
+    _offer(b)
+    assert _drive(b, link, lambda: b.ota_sealing())
+    clock[0] += 31
+    with pytest.raises(OSError):
+        b.pump()
+    assert b.ota_sealing()              # the reconnect keeps after_ota
+    assert not any(m.get("t") == "ota_error" for m in board.lines)
+    assert "FAILED" not in capsys.readouterr().err

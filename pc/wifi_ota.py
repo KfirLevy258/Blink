@@ -35,6 +35,7 @@ class WifiOtaStream:
         self._sent = self._acked = 0
         self._ready = self._end_due = self._end_sent = False
         self._result = None
+        self.went_quiet = False         # silent after ota_end: the board rebooted
         self.refused = False            # ota_begin refused: the board holds no offer
         self._progress_at = now()       # a board that never says ready stalls too
         self._pct = -1
@@ -75,7 +76,13 @@ class WifiOtaStream:
         if self._result is not None:
             return
         if self._now() - self._progress_at > self._stall_s:
-            self._result = (False, STALLED)
+            if self._end_sent:
+                # The real board answers a good ota_end with a screen, a 1 s
+                # sleep and a cold reboot, and never closes the socket. Silence
+                # after ota_end is the reboot, not a failure.
+                self.went_quiet = True
+            else:
+                self._result = (False, STALLED)
             return
         if self._end_sent:
             return              # sealing: the board's verdict is an err ack or a reboot
