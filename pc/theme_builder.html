@@ -858,7 +858,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
   function linkColour() {
     var dc = dotColours(st.low, st.mid, st.bg);
     var grey = st.preset >= 0 && PRESETS[st.preset] ? PRESETS[st.preset][1].grey : customGrey(st.text, st.bg);
-    return '#' + { live: dc[0], stale: dc[1], error: st.high, none: grey }[st.linkState || 'live'];
+    return '#' + { live: dc[0], stale: dc[1], error: st.high, none: grey }[st.linkState || 'none'];
   }
   function linkMark(g, x, y) {
     var c = linkColour();
@@ -969,6 +969,9 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       if ('session_pct' in s) st.p1 = +s.session_pct;
       if ('weekly_pct' in s) st.p2 = +s.weekly_pct;
       if ('link' in s) { st.link = s.link; paintLink(); }
+      // live | stale | error | none, set by the page's own link events (a link
+      // made, no board, a failed join), never by the status line's kind. Stale
+      // (data old) is not an event the page has: it asks once on load.
       if ('linkState' in s) st.linkState = s.linkState;
       if ('screen' in s) st.screen = s.screen;
       if ('logo' in s) st.logo = s.logo;
@@ -1005,7 +1008,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       svg.appendChild(el('text', { x: 160, y: 18, 'text-anchor': 'middle', 'font-family': F, 'font-size': 11.5, 'letter-spacing': 3, fill: '#' + dim }, 'BLINK'));
       var warn = Math.max(st.p1, st.p2) >= 95;
       svg.appendChild(el('text', { x: 160, y: 34, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (warn ? st.high : dim) }, warn ? (st.p1 >= st.p2 ? 'Session almost used up' : 'Weekly almost used up') : '14:05'));
-      if (st.link) linkMark(svg, 297, 14);
+      linkMark(svg, 297, 14);   // always drawn: the board draws USB when unpaired
       gauge(svg, 80, 104, 120, st.w, st.p1, arcCol(1, st.p1), track, st.text, 20);
       gauge(svg, 240, 104, 120, st.w, st.p2, arcCol(2, st.p2), track, st.text, 20);
       [['SESSION 5h', '3h 40m', 80], ['WEEKLY 7d', '1d 1h', 240]].forEach(function (g) {
@@ -1743,7 +1746,6 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
     say: function (text, kind) {
       var p = document.getElementById('board-status'), t = document.getElementById('board-status-text'), d = document.getElementById('board-dot');
       if (t.textContent !== text) t.textContent = text;
-      if (kind) board.show({ linkState: kind === 'danger' ? 'none' : kind === 'busy' ? 'stale' : 'live' });
       d.className = 'dot' + (kind === 'danger' ? ' danger' : kind === 'busy' ? ' busy' : '');
       if (document.getElementById('hs').getAttribute('hidden') === null) return;   // the handshake is showing
       if (text) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
@@ -1996,6 +1998,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
         if (j.status === 400) { bad(true); note(j.why || 'That was not a network.'); return; }
         // The PC waits 30 s and the board can take about 50: the pairing is
         // saved the moment the board comes up, so a late board still works.
+        board.show({ linkState: 'error' });   // a failed WiFi join is a link-level failure
         if (j.why === 'The board did not answer.') note('The board has not answered yet. If it joins the network late, the pairing is still saved. Give it a minute, then check the status line.');
         else note(j.why || 'The board did not answer.');
         return;
@@ -2006,11 +2009,12 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       if (k === 4 && !j.problem) {
         status.steps(4, 'done'); say('Connected. You can unplug the cable.', 'ok');
         show('c-picker', false); show('c-move', true); g('c-move').setAttribute('aria-expanded', 'false');
-        board.show({ link: 'wifi' }); board.connected();
+        board.show({ link: 'wifi', linkState: 'live' }); board.connected();
         later(function () { status.steps(null); status.say('Live over WiFi, ' + nm + ', encrypted', 'live'); }, HOLD_MS);
         return;
       }
       status.steps(k, 'fail');
+      board.show({ linkState: 'error' });
       later(function () { status.steps(null); }, 3000);
       if (k >= 2) note('The board joined ' + nm + ' but could not be reached over WiFi. Check that the network lets devices talk to each other.');
       else {
@@ -2026,7 +2030,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
         say('');
         post('/api/wifi/forget', null).then(function (j) {
           if (j.status !== 200) { note(j.why || 'The board did not answer.'); return; }
-          paint(j); board.show({ link: 'usb' }); status.say('Live over USB', 'live');
+          paint(j); board.show({ link: 'usb', linkState: 'live' }); status.say('Live over USB', 'live');
           g('c-move').focus();
         }, function () { note('The app did not answer.'); });
       });
@@ -2065,9 +2069,9 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       conn.paint(j);
       var n = conn.good(j.s) ? conn.name(j.s) : '';
       if (j.link === 'usb' || j.link === 'wifi') {
-        board.show({ link: j.link });
+        board.show({ link: j.link, linkState: 'live' });
         status.say(j.link === 'usb' ? 'Live over USB' : 'Live over WiFi, ' + (n ? n + ', ' : '') + 'encrypted', 'live');
-      } else status.say('Board not found, check the USB cable', 'danger');
+      } else { board.show({ linkState: 'none' }); status.say('Board not found, check the USB cable', 'danger'); }
     }, function () { clearTimeout(limit); conn.down(); });
   }
   document.getElementById('resetBtn').addEventListener('click', function () {

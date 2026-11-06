@@ -1998,3 +1998,38 @@ def test_save_shows_only_while_look_is_open():
     """, SAVED_DARK)
     assert r["out"] == [False, True, False, False, True, False]
     assert r["label"] == "Save theme to board"
+
+
+def test_the_drawn_link_icon_takes_glyph_and_colour_from_the_link_and_its_state():
+    """Review of 19d432e. The mark is always drawn (USB unless the link is
+    WiFi) and its stroke or fill is the theme's live colour, its stale
+    colour, its high (the board's COL_RED) or its grey (COL_GREY): a swapped
+    stale and live, or a red that is not the theme's high, fails here.
+    Dark's colours: live 0DA243, stale BA8107, high FF1900, grey 6B7280."""
+    r = builder_page.run("""
+    await advance(300);
+    const api = window.blinkSettings, out = {};
+    const mark = () => {
+      const all = [];
+      const walk = (n) => { for (const c of n.children || []) { if (typeof c === 'string') continue; all.push(c); walk(c); } };
+      walk($('scr'));
+      const wifi = all.filter(n => n.tagName === 'PATH' && /a13 13/.test(n.getAttribute('d') || ''));
+      const usb = all.filter(n => n.tagName === 'CIRCLE' && n.getAttribute('r') === '2.2');
+      const m = wifi[0] || usb[0];
+      return { glyph: wifi.length ? 'wifi' : usb.length ? 'usb' : 'none',
+               colour: m ? (m.tagName === 'PATH' ? m.getAttribute('stroke') : m.getAttribute('fill')) : null };
+    };
+    out.fresh = mark();
+    for (const link of ['usb', 'wifi'])
+      for (const state of ['live', 'stale', 'error', 'none']) {
+        api.board.show({ link, linkState: state });
+        out[link + '-' + state] = mark();
+      }
+    return out;
+    """, SAVED_DARK)
+    assert r["fresh"] == {"glyph": "usb", "colour": "#6B7280"}
+    want = {"live": "#0DA243", "stale": "#BA8107", "error": "#FF1900",
+            "none": "#6B7280"}
+    for link in ("usb", "wifi"):
+        for state, col in want.items():
+            assert r[f"{link}-{state}"] == {"glyph": link, "colour": col}, (link, state)
