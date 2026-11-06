@@ -397,6 +397,92 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
 .actions { display: flex; flex-direction: column; gap: 4px; }
 .actions .link { align-self: center; }
 
+/* main-screen views, each a little drawing of its layout */
+.views { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.vw { border: 0; border-radius: 12px; background: var(--field); padding: 6px 6px 8px; display: flex; flex-direction: column; gap: 8px; align-items: stretch; text-align: left; color: var(--muted); min-height: 44px;
+  box-shadow: inset 0 0 0 1px transparent; transition: box-shadow .2s ease, color .2s ease; }
+.vw svg { width: 100%; height: auto; display: block; border-radius: 6px; }
+.vw b { font-weight: 500; font-size: 12px; line-height: 1.3; color: var(--ink); text-align: center; }
+.vw:hover { color: var(--ink); }
+.vw[aria-pressed="true"] { box-shadow: inset 0 0 0 1.5px var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--field)); }
+.vw[aria-pressed="true"] .lit { stroke: var(--accent); }
+.vw[aria-pressed="true"] .litf { fill: var(--accent); }
+
+/* on/off rows */
+.sw2 { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; min-height: 56px; }
+.sw2 + .sw2 { border-top: 1px solid var(--line); padding-top: 12px; margin-top: -4px; }
+.sw2 b { display: block; font-weight: 500; }
+.sw2 span { display: block; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.sw2 span.new { display: inline-block; font-size: 11px; color: var(--accent-ink); line-height: 1.5; }
+.sw2 > div { padding-block: 6px; }
+.switch { width: 52px; height: 44px; border: 0; padding: 0; background: none; display: grid; place-items: center; }
+.switch i { width: 44px; height: 26px; border-radius: 13px; background: var(--line); position: relative; transition: background .2s ease; display: block; }
+.switch i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .2s var(--out); }
+.switch[aria-checked="true"] i { background: var(--accent); }
+.switch[aria-checked="true"] i::after { transform: translateX(18px); }
+
+/* brightness levels: the five the board stores */
+.seg5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.onboard { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px; border-radius: 12px; background: var(--field); }
+.onboard p { font-size: 13px; color: var(--muted); }
+.onboard .btn { background: var(--panel); box-shadow: inset 0 0 0 1px var(--line); font-weight: 500; }
+.onboard .btn[aria-pressed="true"] { box-shadow: inset 0 0 0 1.5px var(--accent); }
+
+/* logo */
+.dropzone { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; min-height: 150px; padding: 20px; border-radius: 14px; text-align: center;
+  border: 1.5px dashed color-mix(in srgb, var(--muted) 55%, transparent); background: var(--field); cursor: pointer; transition: border-color .2s ease, background .2s ease; }
+.dropzone svg { width: 28px; height: 28px; color: var(--muted); margin-bottom: 4px; }
+.dropzone b { font-weight: 500; }
+.dropzone span { font-size: 13px; color: var(--muted); }
+.dropzone u { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.dropzone.over, .dropzone:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--field)); }
+#logoFile:focus-visible + .dropzone { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lfile { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 8px; border-radius: 12px; background: var(--field); }
+.lfile .thumb { width: 56px; height: 42px; border-radius: 6px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(127,127,127,.3); display: grid; place-items: center; }
+.lfile .thumb img { max-width: 90%; max-height: 90%; display: block; }
+.lfile b { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lfile span { font-size: 13px; color: var(--muted); }
+.lfile .link { align-self: center; }
+.facts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+.facts li { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 8px; }
+.facts li::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; margin: 7px 0 0 4px; opacity: .7; }
+.lrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 44px; }
+.bgpick { display: flex; gap: 8px; align-items: center; }
+.bgpick .pick { position: relative; width: 44px; height: 44px; border-radius: 9px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(127,127,127,.35); cursor: pointer; }
+.bgpick .pick:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.bgpick .pick input { position: absolute; inset: -8px; width: calc(100% + 16px); height: calc(100% + 16px); border: 0; padding: 0; cursor: pointer; }
+select.mini { min-height: 44px; border: 0; border-radius: 10px; background: var(--field); padding: 0 34px 0 12px; box-shadow: inset 0 0 0 1px var(--line); appearance: none; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+.sendrow { display: flex; flex-direction: column; gap: 6px; }
+.btnrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.btnrow .btn.primary { width: 100%; }
+.progress { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s linear; }
+
+.tryrow { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 14px; align-items: start; }
+.play { width: 44px; height: 44px; border: 0; border-radius: 50%; background: var(--field); color: var(--ink); display: grid; place-items: center;
+  box-shadow: inset 0 0 0 1px var(--line); transition: background .2s ease, color .2s ease; }
+.play:hover { background: var(--accent); color: var(--on-accent); box-shadow: none; }
+.play svg { width: 16px; height: 16px; }
+.new { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font: 600 11px/1.5 var(--sans); vertical-align: 2px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-ink); }
+/* board */
+.name { min-height: 44px; border: 0; border-radius: 10px; background: var(--field); padding: 0 14px; font-size: 14px; font-weight: 500; width: 100%; min-width: 0; box-shadow: inset 0 0 0 1px var(--line); outline: none; transition: box-shadow .2s ease; }
+.name:focus-visible { box-shadow: inset 0 0 0 1.5px var(--accent); }
+select.name { appearance: none; padding-right: 40px; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 20px) 50%, calc(100% - 15px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+.fw { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fw .tag { font-size: 13px; color: var(--ok); display: inline-flex; align-items: center; gap: 6px; }
+.fw .tag svg { width: 13px; height: 13px; }
+.vw:disabled { opacity: .45; cursor: not-allowed; }
+.vw small { font-size: 11px; line-height: 1.3; color: var(--muted); text-align: center; }
+.switch:disabled { opacity: .45; cursor: not-allowed; }
+.fw .tag.old { color: var(--muted); }
+.lhave { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 12px; background: var(--field); }
+.lhave .btn { width: auto; }
+.ok-quiet { color: var(--ok); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
   .pulse.run { stroke-dasharray: none; opacity: .9; }
@@ -502,7 +588,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
   </section>
 
   <div class="side" id="sideL">
-    <!-- Look, the left half: themes, and the logo (Task 6.4) -->
+    <!-- Look, the left half: themes, and the logo -->
     <section class="panel wide" id="pLook" aria-labelledby="hLook" hidden>
       <div class="phead"><h2 id="hLook">Look</h2></div>
       <div class="tabs" role="tablist" aria-label="Look"><button type="button" role="tab" id="tThemes-t" aria-controls="tThemes" aria-selected="true" tabindex="0">Themes</button><button type="button" role="tab" id="tLogo-t" aria-controls="tLogo" aria-selected="false" tabindex="-1">Logo</button></div>
@@ -516,7 +602,39 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
           <span id="status-text">Loading your current theme. You can make changes once it is here.</span>
         </div>
       </div>
-      <div class="tabpanel" role="tabpanel" id="tLogo" aria-labelledby="tLogo-t" tabindex="0" hidden><div class="empty" id="logo-body"></div></div>
+      <div class="tabpanel" role="tabpanel" id="tLogo" aria-labelledby="tLogo-t" tabindex="0" hidden>
+        <p class="note2">Your company logo, shown each time the board starts.</p>
+        <div class="lhave" id="lHave" hidden><span>A logo is on the board.</span><button type="button" class="btn danger" id="lRemoveB">Remove</button></div>
+        <div id="logoEmpty">
+          <input type="file" id="logoFile" class="sr" accept=".png,.svg,.jpg,.jpeg,.gif,image/png,image/svg+xml,image/jpeg,image/gif">
+          <label class="dropzone" for="logoFile" id="drop"><svg viewBox="0 0 28 28" aria-hidden="true"><rect x="3" y="5" width="22" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M14 18V10M10.5 13.5 14 10l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><b>Drop a logo here</b><span>or <u>choose a file</u>. PNG, SVG, JPEG or GIF.</span></label>
+        </div>
+        <div class="stack" id="logoOn" hidden style="gap:16px">
+          <div class="lfile"><span class="thumb" id="lThumb"></span><div style="min-width:0"><b id="lName"></b><span id="lSize" aria-live="polite"></span></div><button type="button" class="link" id="lReplace">Replace</button></div>
+          <div class="stack">
+            <span class="label" id="lScaleL">Size on the screen</span>
+            <div class="seg" role="group" aria-labelledby="lScaleL" id="lScale">
+              <button type="button" data-s="fill" aria-pressed="true">Fill</button><button type="button" data-s="large" aria-pressed="false">Large</button><button type="button" data-s="margin" aria-pressed="false">With margin</button>
+            </div>
+          </div>
+          <div class="lrow">
+            <div><span class="label" id="lBgL">Background</span><p class="note2" id="lBgNote">From the picture's corner</p></div>
+            <div class="bgpick"><label class="pick" title="Pick a background"><input type="color" id="lBg" value="#000000" aria-labelledby="lBgL"></label><button type="button" class="link sm" id="lBgAuto" style="margin:0">Auto</button></div>
+          </div>
+          <div class="lrow">
+            <label class="label" for="lHold">Stays up for</label>
+            <select class="mini" id="lHold"><option value="3000">3 seconds</option><option value="5000">5 seconds</option><option value="10000">10 seconds</option></select>
+          </div>
+          <div class="sendrow">
+            <div class="btnrow"><button type="button" class="btn primary" id="lSend" disabled>Send to board</button><button type="button" class="btn danger" id="lRemove">Remove</button></div>
+            <p class="msg" id="lMsg" role="status"></p>
+          </div>
+        </div>
+        <ul class="facts" aria-label="What the board can show">
+          <li>Fitted inside 320 by 240 pixels, 65,536 colours, up to 512 KB.</li>
+          <li>Shown after the BLINK animation, for up to 15 seconds.</li>
+        </ul>
+      </div>
     </section>
   </div>
 
@@ -584,22 +702,24 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       <div class="tabpanel" role="tabpanel" id="tScreen" aria-labelledby="tScreen-t" tabindex="0" hidden>
         <div class="sec">
           <span class="label" id="vL">Main screen</span>
-          <div class="seg" role="group" aria-labelledby="vL">
-            <button type="button" data-v="gauges" aria-pressed="true">Two gauges</button>
-            <button type="button" data-v="focus" aria-pressed="false">Focus</button>
-          </div>
-          <span class="label" id="fL">Big window in focus</span>
-          <div class="seg" role="group" aria-labelledby="fL">
-            <button type="button" data-f="session" aria-pressed="true">Session</button>
-            <button type="button" data-f="weekly" aria-pressed="false">Weekly</button>
-          </div>
+          <div class="views" role="group" aria-labelledby="vL" id="views"><button type="button" class="vw" data-v="gauges" aria-pressed="false"><svg viewBox="0 0 80 60" aria-hidden="true"><rect x=".5" y=".5" width="79" height="59" rx="5" fill="none" stroke="currentColor" stroke-opacity=".35"/><path d="M16.2 35.8 A11 11 0 1 1 31.8 35.8" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="3" stroke-linecap="round"/><path class="lit" d="M16.2 35.8 A11 11 0 0 1 19.0 18.2" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><path d="M48.2 35.8 A11 11 0 1 1 63.8 35.8" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="3" stroke-linecap="round"/><path class="lit" d="M48.2 35.8 A11 11 0 1 1 64.9 21.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><rect x="14" y="44" width="20" height="2" rx="1" fill="currentColor" opacity=".4"/><rect x="46" y="44" width="20" height="2" rx="1" fill="currentColor" opacity=".4"/></svg><b>Two gauges</b></button><button type="button" class="vw" data-v="focus" data-f="session" aria-pressed="false"><svg viewBox="0 0 80 60" aria-hidden="true"><rect x=".5" y=".5" width="79" height="59" rx="5" fill="none" stroke="currentColor" stroke-opacity=".35"/><path d="M29.4 37.6 A15 15 0 1 1 50.6 37.6" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="4" stroke-linecap="round"/><path class="lit" d="M29.4 37.6 A15 15 0 0 1 33.2 13.6" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><rect x="24" y="48" width="32" height="2" rx="1" fill="currentColor" opacity=".4"/></svg><b>Session big</b></button><button type="button" class="vw" data-v="focus" data-f="weekly" aria-pressed="false"><svg viewBox="0 0 80 60" aria-hidden="true"><rect x=".5" y=".5" width="79" height="59" rx="5" fill="none" stroke="currentColor" stroke-opacity=".35"/><path d="M29.4 37.6 A15 15 0 1 1 50.6 37.6" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="4" stroke-linecap="round"/><path class="lit" d="M29.4 37.6 A15 15 0 1 1 52.1 18.2" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><rect x="24" y="48" width="32" height="2" rx="1" fill="currentColor" opacity=".4"/></svg><b>Weekly big</b></button><button type="button" class="vw" data-soon="1" data-card="burn" aria-pressed="false" title="Needs the burn view"><svg viewBox="0 0 80 60" aria-hidden="true"><rect x=".5" y=".5" width="79" height="59" rx="5" fill="none" stroke="currentColor" stroke-opacity=".35"/><rect x="12" y="13" width="18" height="4" rx="1" fill="currentColor" opacity=".5"/><rect class="litf" x="9" y="36" width="2" height="4" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="12" y="34" width="2" height="6" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="15" y="35" width="2" height="5" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="18" y="32" width="2" height="8" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="21" y="33" width="2" height="7" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="24" y="30" width="2" height="10" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="27" y="31" width="2" height="9" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="30" y="28" width="2" height="12" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="33" y="26" width="2" height="14" fill="currentColor" stroke="none" opacity="1"/><rect class="litf" x="36" y="27" width="2" height="13" fill="currentColor" stroke="none" opacity="1"/><rect class="litf" x="39" y="23" width="2" height="17" fill="currentColor" stroke="none" opacity="1"/><rect class="litf" x="42" y="20" width="2" height="20" fill="currentColor" stroke="none" opacity="1"/><rect x="8" y="40" width="37" height="1" fill="currentColor" opacity=".5"/><path d="M50.9 35.1 A10 10 0 1 1 65.1 35.1" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="3" stroke-linecap="round"/><path class="lit" d="M50.9 35.1 A10 10 0 1 1 66.1 22.1" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg><b>Burn view</b><small>Needs the burn view</small></button></div>
+          <p class="note2" id="vNote" aria-live="polite"></p>
+        </div>
+        <div class="sec">
+          <span class="label" id="mainL">Main provider</span>
+          <div class="seg" role="group" aria-labelledby="mainL" id="segMain" style="grid-template-columns: repeat(2, minmax(0, 1fr))"><button type="button" data-src="claude" aria-pressed="false">Claude</button><button type="button" data-src="codex" aria-pressed="false">Codex</button></div>
+          <p class="note2">Its gauges come first when the board shows both.</p>
+          <p class="msg" id="s-msg" role="status"></p>
         </div>
       </div>
       <div class="tabpanel" role="tabpanel" id="tTry" aria-labelledby="tTry-t" tabindex="0" hidden>
         <p class="note2">Move the gauges to see every colour. This changes only the preview.</p>
         <div class="sec try">
           <div class="sec-h"><label for="p1">Try session at</label><output id="o1" for="p1">42%</output></div>
-          <div><input type="range" id="p1" min="0" max="100" value="42"><div class="marks" aria-hidden="true"><span style="left:0">0</span><span style="left:60%">60%</span><span style="left:90%">90%</span></div></div>
+          <div class="tryrow">
+            <div><input type="range" id="p1" min="0" max="100" value="42"><div class="marks" aria-hidden="true"><span style="left:0">0</span><span style="left:60%">60%</span><span style="left:90%">90%</span></div></div>
+            <button type="button" class="play" id="sweep" aria-label="Sweep both arcs from 0 to 100%" title="Sweep 0 to 100%"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.2v9.6l7.6-4.8z" fill="currentColor"/></svg></button>
+          </div>
         </div>
         <div class="sec try">
           <div class="sec-h"><label for="p2">Try weekly at</label><output id="o2" for="p2">91%</output></div>
@@ -655,12 +775,49 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       </div>
     </section>
 
-    <!-- Board: filled by Task 6.4 -->
     <section class="panel wide" id="pBoard" aria-labelledby="hBoard" hidden>
       <h2 id="hBoard">Board</h2>
       <div class="tabs" role="tablist" aria-label="Board"><button type="button" role="tab" id="tDevice-t" aria-controls="tDevice" aria-selected="true" tabindex="0">This board</button><button type="button" role="tab" id="tComputer-t" aria-controls="tComputer" aria-selected="false" tabindex="-1">This computer</button></div>
-      <div class="tabpanel" role="tabpanel" id="tDevice" aria-labelledby="tDevice-t" tabindex="0"><div class="empty" id="device-body"></div></div>
-      <div class="tabpanel" role="tabpanel" id="tComputer" aria-labelledby="tComputer-t" tabindex="0" hidden><div class="empty" id="computer-body"></div></div>
+      <div class="tabpanel rows" role="tabpanel" id="tDevice" aria-labelledby="tDevice-t" tabindex="0">
+        <div class="stack">
+          <span class="label" id="devIdL">Board id</span>
+          <span class="val" id="devId" aria-labelledby="devIdL" translate="no">Not reported yet</span>
+        </div>
+        <div class="stack">
+          <span class="label" id="brL">Brightness</span>
+          <div class="seg seg5" role="group" aria-labelledby="brL" id="segBr">
+            <button type="button" data-b="20" aria-pressed="false">20%</button><button type="button" data-b="40" aria-pressed="false">40%</button><button type="button" data-b="60" aria-pressed="false">60%</button><button type="button" data-b="80" aria-pressed="false">80%</button><button type="button" data-b="100" aria-pressed="false">100%</button>
+          </div>
+          <p class="msg" id="b-msg" role="status"></p>
+        </div>
+        <div class="fw">
+          <span class="quiet">Firmware <span class="val" id="devFw">unknown</span></span>
+          <span class="tag" id="devTag" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="devTagT">Up to date</span></span>
+        </div>
+        <div class="onboard">
+          <b style="font-weight:500">On the board<span class="new">New</span></b>
+          <p>The board's Settings screen swaps its Theme button for Open settings, which opens this page on your computer.</p>
+          <button type="button" class="btn" id="showSet" aria-pressed="false">Show it on the board</button>
+        </div>
+        <div class="stack">
+          <button type="button" class="link" id="detBtn" aria-expanded="false" aria-controls="det">Details <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+          <div class="stack" id="det" hidden style="gap:14px">
+            <div class="line"><span class="label">Address</span><span class="val" id="devAddr">Unknown</span></div>
+            <div class="line"><span class="label">Saved WiFi</span><span class="quiet" id="savedNet">None</span></div>
+            <button type="button" class="btn danger" id="forgetBtn" hidden>Forget WiFi</button>
+          </div>
+        </div>
+      </div>
+      <div class="tabpanel" role="tabpanel" id="tComputer" aria-labelledby="tComputer-t" tabindex="0" hidden>
+        <div class="line"><span class="label">Usage comes from</span><span class="quiet" id="envName">This computer</span></div>
+        <div>
+          <div class="sw2"><div><b id="cfgStatusL">Service incidents</b><span id="cfgStatusH">Show outages from status.claude.com and status.openai.com on the board</span></div><button type="button" class="switch" role="switch" id="cfgStatus" data-key="status_page" aria-checked="false" aria-labelledby="cfgStatusL" aria-describedby="cfgStatusH"><i></i></button></div>
+          <div class="sw2"><div><b id="cfgUpdateL">Update the app by itself</b><span id="cfgUpdateH">New versions install when the board is idle</span></div><button type="button" class="switch" role="switch" id="cfgUpdate" data-key="auto_update" aria-checked="false" aria-labelledby="cfgUpdateL" aria-describedby="cfgUpdateH"><i></i></button></div>
+          <div class="sw2"><div><b id="cfgRefreshL">Keep figures fresh<span class="new">New</span></b><span id="cfgRefreshH">Runs Claude Code's own /usage now and then. Sends no messages.</span></div><button type="button" class="switch" role="switch" id="cfgRefresh" data-soon="1" aria-checked="false" aria-labelledby="cfgRefreshL" aria-describedby="cfgRefreshH"><i></i></button></div>
+          <div class="sw2"><div><b id="cfgDozeL">Doze when nobody's around<span class="new">New</span></b><span id="cfgDozeH">Dims the board after 4 hours with nothing running</span></div><button type="button" class="switch" role="switch" id="cfgDoze" data-soon="1" aria-checked="false" aria-labelledby="cfgDozeL" aria-describedby="cfgDozeH"><i></i></button></div>
+        </div>
+        <p class="msg" id="k-msg" role="status"></p>
+      </div>
     </section>
   </div>
 </main>
@@ -1054,6 +1211,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       : 'Per gauge: each arc keeps its own colour, and switches to the 90%-and-above colour near the limit so a warning is never missed. The status dot uses the under-60% colour, or, when it and the 60%-to-90% colour are both greys, whichever stands out more.';
     press('[data-m]', 'm', st.mode); press('[data-w]', 'w', String(st.w)); press('[data-e]', 'e', st.e); press('[data-d]', 'd', st.d); press('[data-v]', 'v', st.view); press('[data-f]', 'f', st.fw);
     document.querySelectorAll('#presets button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.p === st.preset)); });
+    paintCards();
     // The try-it tracks are painted in the theme's own three colours.
     cssVar('--lo', '#' + st.low); cssVar('--mi', '#' + st.mid); cssVar('--hi', '#' + st.high);
     // "Starting from Dark", or "Custom, changed from Dark". Rewritten only
@@ -1871,6 +2029,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
     function paint(j) {
       var link = j.link === 'usb' || j.link === 'wifi' ? j.link : null;
       saved = good(j.s) ? j.s : null;
+      deviceWifi(link, saved ? name(saved) : null, j.ip);
       show('c-problem', !link); show('connect-body', !!link);
       if (!link) return;
       g('c-title').textContent = link === 'wifi' ? 'Over WiFi' : 'Over USB';
@@ -2024,9 +2183,9 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       }
     }
 
-    function forget() {
+    function forget(host) {
       if (!saved) return;
-      confirm.ask(g('c-forget'), 'Forget ' + name(saved) + '? The board deletes the password and its key, and goes back to USB only.', 'Forget it', function () {
+      confirm.ask(host || g('c-forget'), 'Forget ' + name(saved) + '? The board deletes the password and its key, and goes back to USB only.', 'Forget it', function () {
         say('');
         post('/api/wifi/forget', null).then(function (j) {
           if (j.status !== 200) { note(j.why || 'The board did not answer.'); return; }
@@ -2041,7 +2200,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
     g('c-scan').addEventListener('click', scan);
     g('c-cancel').addEventListener('click', function () { if (busy) return; closePicker(); say(''); g('c-move').focus(); });
     g('c-go').addEventListener('click', join);
-    g('c-forget').addEventListener('click', forget);
+    g('c-forget').addEventListener('click', function () { forget(); });
     g('c-pw').addEventListener('input', function () { bad(false); });
     g('c-pw').addEventListener('keydown', function (e) { if (e.key === 'Enter') join(); });
     var tog = g('c-show');
@@ -2051,7 +2210,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       tog.textContent = on ? 'Hide' : 'Show'; tog.setAttribute('aria-label', on ? 'Hide password' : 'Show password');
     });
     g('c-retry').addEventListener('click', function () { loadHub(); });
-    return { paint: paint, down: down, name: name, good: good, note: note };
+    return { paint: paint, down: down, name: name, good: good, note: note, forget: forget };
   })();
 
   // Hub status from the daemon's view of the link. One ask, on load: nothing
@@ -2079,6 +2238,290 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
     pickPreset(st.base); fieldSay('paste', null); changed();
     document.getElementById('t-' + SLOTS[0].k).focus();
   });
+
+  // ---------------------------------------------------------------- Look: Screen, Try it
+  // The four view cards. Two gauges and Session big are the board's own Focus
+  // preference (focus 0 / 1, through /api/pref). Weekly big is a preview only:
+  // there is no weekly scope on the page (D61), because the board no longer
+  // reads weekly_sel, so a control for it would persist a byte nothing draws.
+  // Burn view waits for feat/ultra-burn and is greyed until then. What the
+  // owner's own tap on a card is, a theme-less board write, is a flash write,
+  // so it goes out once per click and never from a drag.
+  var VNOTE = {
+    gauges: 'Both windows, side by side.',
+    session: 'Session big, weekly as a line.',
+    weekly: 'Weekly big, session as a line. This one previews here only: the board keeps the window its Focus tile names.'
+  };
+  function cardOf(b) { return b.dataset.card || (b.dataset.v === 'gauges' ? 'gauges' : b.dataset.f); }
+  function paintCards() {
+    var which = st.view === 'focus' ? st.fw : 'gauges';
+    document.querySelectorAll('.vw').forEach(function (b) { b.setAttribute('aria-pressed', String(cardOf(b) === which)); });
+    var n = document.getElementById('vNote'), t = VNOTE[which] || '';
+    if (n.textContent !== t) n.textContent = t;
+  }
+  function msgSet(id, text, kind) {
+    var m = document.getElementById(id);
+    if (m.textContent !== text) m.textContent = text;
+    m.className = 'msg' + (kind ? ' ' + kind : '');
+  }
+  // One pref_set at a time, in the order asked: the board answers each with
+  // its own pref and carries no request id.
+  var prefChain = Promise.resolve();
+  function prefSet(fields, mid) {
+    if (!persistent || finished) return;
+    prefChain = prefChain.then(function () {
+      return post('/api/pref', fields, true).then(function (j) {
+        if (j.status !== 200 || !j.pref) { msgSet(mid, j.why || 'The board did not accept that setting.', 'bad'); return; }
+        msgSet(mid, '');
+        applyPref(j.pref);
+      }, function () { msgSet(mid, 'The app did not answer.', 'bad'); });
+    });
+  }
+  // What the board says it holds now (its pref line): the provider, Focus on
+  // or off, and the brightness level. The page asks nothing at load: the
+  // board reports these only when something is set, so nothing is marked
+  // until the owner has chosen.
+  function applyPref(p) {
+    if (p.bright != null) { st.bright = +p.bright; press('[data-b]', 'b', String(st.bright)); }
+    if (typeof p.provider === 'string') press('[data-src]', 'src', p.provider);
+    if (p.focus === 1 && st.view !== 'focus') st.view = 'focus';
+    if (p.focus === 0 && st.view === 'focus') st.view = 'gauges';
+    render();
+  }
+  document.querySelectorAll('.vw').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var c = cardOf(b);
+      if (b.disabled || c === 'burn') return;
+      if (c === 'gauges') { st.view = 'gauges'; render(); prefSet({ focus: 0 }, 's-msg'); }
+      else if (c === 'session') { st.view = 'focus'; st.fw = 'session'; render(); prefSet({ focus: 1 }, 's-msg'); }
+      else { st.view = 'focus'; st.fw = 'weekly'; render(); }
+    });
+  });
+  document.querySelectorAll('[data-src]').forEach(function (b) {
+    b.addEventListener('click', function () { if (loaded) prefSet({ main_src: b.dataset.src }, 's-msg'); });
+  });
+  // Sweep both arcs 0 to 100 in the preview: the drawing only.
+  var sweepTimer = null;
+  function setTry(a, b) {
+    st.p1 = a; st.p2 = b;
+    [['p1', 'o1', a], ['p2', 'o2', b]].forEach(function (x) { document.getElementById(x[0]).value = String(x[2]); document.getElementById(x[1]).textContent = x[2] + '%'; });
+    render();
+  }
+  document.getElementById('sweep').addEventListener('click', function () {
+    clearInterval(sweepTimer);
+    var v = 0; setTry(0, 0);
+    sweepTimer = setInterval(function () { v = Math.min(100, v + 2); setTry(v, v); if (v >= 100) { clearInterval(sweepTimer); sweepTimer = null; } }, 30);
+  });
+  ['p1', 'p2'].forEach(function (id) { document.getElementById(id).addEventListener('input', function () { clearInterval(sweepTimer); }); });
+
+  // ---------------------------------------------------------------- Look: Logo
+  // The file is read here and goes nowhere but this computer's own app: a GIF
+  // as its bytes (the app decodes it with its own player, so the board keeps
+  // the GIF's delays), anything else drawn to a 320x240 canvas at the chosen
+  // scale and sent as raw RGBA. The page keeps the picture only as long as
+  // the tab is open and never writes it down. "About N KB" is the app's own
+  // encoding, asked for with ?check=1, not an estimate made here.
+  var FITS = { fill: 1, large: .8, margin: .6 };
+  var MAX_PICK = 20 * 1024 * 1024, MAX_GIF = 2 * 1024 * 1024 - 1024;
+  var lg = null, onBoard = false, lgBusy = false, checkSeq = 0, checkTimer = null;
+  function byId(id) { return document.getElementById(id); }
+  function vis(id, on) { if (on) byId(id).removeAttribute('hidden'); else byId(id).setAttribute('hidden', ''); }
+  function lmsg(t, kind) { msgSet('lMsg', t, kind); }
+  function paintLogo() {
+    vis('logoEmpty', !lg); vis('logoOn', !!lg); vis('lHave', onBoard && !lg);
+    if (lg) {
+      byId('lName').textContent = lg.name;
+      press('#lScale button', 's', lg.fit);
+      byId('lBg').value = '#' + lg.bg.toLowerCase();
+      byId('lBgNote').textContent = lg.bgAuto ? "From the picture's corner" : 'Your colour';
+      byId('lHold').value = String(lg.hold);
+      byId('lRemove').disabled = !onBoard || lgBusy;
+      byId('lSend').disabled = lgBusy || lg.kb == null;
+      byId('lSend').textContent = lgBusy ? 'Sending…' : 'Send to board';
+    }
+    board.show({ logo: lg ? { url: lg.url, w: lg.w, h: lg.h, bg: '#' + lg.bg, scale: FITS[lg.fit] } : null });
+  }
+  function readDataURL(file) {
+    return new Promise(function (ok, no) {
+      var r = new FileReader();
+      r.onload = function () { ok(String(r.result)); };
+      r.onerror = function () { no(new Error('read')); };
+      r.readAsDataURL(file);
+    });
+  }
+  function loadImg(url) {
+    return new Promise(function (ok, no) { var i = new Image(); i.onload = function () { ok(i); }; i.onerror = function () { no(new Error('img')); }; i.src = url; });
+  }
+  function canvas(w, h) { var c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+  // The colour in the picture's top-left corner; black when it is clear,
+  // or when the browser will not say.
+  var CLEAR = rgb2hex([0, 0, 0]);   // computed, so the palette test finds no literal
+  function corner(img) {
+    try {
+      var c = canvas(64, 64), x = c.getContext('2d');
+      x.drawImage(img, 0, 0, 64, 64);
+      var d = x.getImageData(0, 0, 1, 1).data;
+      return d[3] < 128 ? CLEAR : rgb2hex([d[0], d[1], d[2]]);
+    } catch (e) { return CLEAR; }
+  }
+  // The still, as the board will get it: the picture fitted inside 320x240
+  // at the chosen scale on a clear canvas (the app fills the clear part with
+  // the background colour).
+  function stillRGBA() {
+    var c = canvas(320, 240), x = c.getContext('2d');
+    var k = Math.min(320 / lg.w, 240 / lg.h) * FITS[lg.fit], w = lg.w * k, h = lg.h * k;
+    x.clearRect(0, 0, 320, 240);
+    x.drawImage(lg.img, (320 - w) / 2, (240 - h) / 2, w, h);
+    return x.getImageData(0, 0, 320, 240).data;
+  }
+  function sendLogo(path) {
+    var body = lg.kind === 'gif' ? lg.bytes : stillRGBA();
+    return fetch(path, { method: 'POST', credentials: 'same-origin', body: body, headers: {
+      'Content-Type': 'application/octet-stream', 'X-Blink-Tab': TAB, 'X-Blink-Logo': lg.kind === 'gif' ? 'gif' : 'rgba',
+      'X-Blink-Bg': lg.bg.toLowerCase(), 'X-Blink-Hold-Ms': String(lg.hold), 'X-Blink-Fit': lg.fit } })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j.status = r.status; return j; }); });
+  }
+  var TOO_BIG = 'Too big for the board. Pick a plainer background or a smaller size.';
+  function reason(j) { return /too big for the board/i.test(j.why || '') ? TOO_BIG : j.why || 'The app could not use that picture.'; }
+  // The size, asked of the app after any change that moves it. A late answer
+  // for an older choice is dropped.
+  function check() {
+    clearTimeout(checkTimer);
+    if (!lg) return;
+    var mine = ++checkSeq;
+    lg.kb = null; byId('lSend').disabled = true;
+    byId('lSize').textContent = 'Working out the size…'; lmsg('');
+    checkTimer = setTimeout(function () {
+      sendLogo('/api/logo?check=1').then(function (j) {
+        if (mine !== checkSeq || !lg) return;
+        if (j.status === 200 && typeof j.bytes === 'number') {
+          lg.kb = Math.max(1, Math.round(j.bytes / 1024));
+          byId('lSize').textContent = 'About ' + lg.kb + ' KB of 512 KB on the board';
+          byId('lSend').disabled = lgBusy;
+        } else { byId('lSize').textContent = ''; lmsg(reason(j), 'bad'); }
+      }, function () { if (mine === checkSeq) { byId('lSize').textContent = ''; lmsg('The app did not answer.', 'bad'); } });
+    }, 250);
+  }
+  function takeFile(file) {
+    if (!file || !loaded || finished) return;
+    lmsg('');
+    if (file.size > MAX_PICK) return lmsg('That file is too big to open here.', 'bad');
+    file.arrayBuffer().then(function (buf) {
+      var u = new Uint8Array(buf), gif = u.length > 3 && u[0] === 71 && u[1] === 73 && u[2] === 70 && u[3] === 56;
+      if (gif && u.length > MAX_GIF) throw new Error('gifbig');
+      return readDataURL(file).then(loadImg).then(function (img) {
+        var next = { kind: gif ? 'gif' : 'still', name: String(file.name || 'logo').slice(0, 80), bytes: gif ? u : null, img: img,
+                     url: img.src, w: img.naturalWidth || 320, h: img.naturalHeight || 240, fit: lg ? lg.fit : 'fill',
+                     hold: lg ? lg.hold : 3000, bgAuto: true, bg: corner(img), kb: null };
+        lg = next;
+        var t = byId('lThumb'); while (t.firstChild) t.removeChild(t.firstChild);
+        var im = document.createElement('img'); im.setAttribute('src', next.url); im.setAttribute('alt', ''); t.appendChild(im);
+        paintLogo(); check();
+      });
+    }).then(null, function (e) {
+      lmsg(e && e.message === 'gifbig' ? 'That GIF is over 2 MB. Pick a smaller one.' : 'That picture could not be opened.', 'bad');
+    });
+  }
+  byId('logoFile').addEventListener('change', function (e) { var f = e.target.files && e.target.files[0]; takeFile(f); try { e.target.value = ''; } catch (x) {} });
+  ['dragenter', 'dragover'].forEach(function (t) { byId('drop').addEventListener(t, function (e) { e.preventDefault(); byId('drop').classList.add('over'); }); });
+  byId('drop').addEventListener('dragleave', function () { byId('drop').classList.remove('over'); });
+  byId('drop').addEventListener('drop', function (e) { e.preventDefault(); byId('drop').classList.remove('over'); takeFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]); });
+  byId('lReplace').addEventListener('click', function () { byId('logoFile').click(); });
+  document.querySelectorAll('#lScale button').forEach(function (b) {
+    b.addEventListener('click', function () { if (!lg) return; lg.fit = b.dataset.s; if (lg.bgAuto) lg.bg = corner(lg.img); paintLogo(); check(); });
+  });
+  byId('lBg').addEventListener('input', function () { if (!lg) return; lg.bgAuto = false; lg.bg = byId('lBg').value.slice(1).toUpperCase(); paintLogo(); check(); });
+  byId('lBgAuto').addEventListener('click', function () { if (!lg) return; lg.bgAuto = true; lg.bg = corner(lg.img); paintLogo(); check(); });
+  byId('lHold').addEventListener('change', function () { if (!lg) return; lg.hold = +byId('lHold').value; check(); });
+  byId('lSend').addEventListener('click', function () {
+    if (!lg || lg.kb == null || lgBusy || !loaded) return;
+    lgBusy = true; paintLogo(); lmsg('Sending to the board. A big logo takes about a minute.');
+    sendLogo('/api/logo').then(function (j) {
+      lgBusy = false;
+      if (j.status === 200 && j.logo && j.logo.present === 1) { onBoard = true; lmsg('The logo is on the board. It shows when the board starts.', 'ok'); }
+      else lmsg(j.why || 'The board refused the logo.', 'bad');
+      paintLogo();
+    }, function () { lgBusy = false; lmsg('The app did not answer.', 'bad'); paintLogo(); });
+  });
+  // Remove, behind the in-page confirm, from either button.
+  function removeLogo(host) {
+    confirm.ask(host, 'Remove the logo from the board? It starts with the BLINK animation only.', 'Remove it', function () {
+      post('/api/logo/remove', null).then(function (j) {
+        if (j.status !== 200) { lmsg(j.why || 'The board did not answer.', 'bad'); return; }
+        onBoard = false; lg = null; lmsg('');
+        paintLogo(); byId('logoFile').focus();
+      }, function () { lmsg('The app did not answer.', 'bad'); });
+    });
+  }
+  byId('lRemove').addEventListener('click', function () { removeLogo(byId('lRemove')); });
+  byId('lRemoveB').addEventListener('click', function () { removeLogo(byId('lRemoveB')); });
+
+  // ---------------------------------------------------------------- Board
+  function getJSON(path) {
+    var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    var limit = ctl ? setTimeout(function () { ctl.abort(); }, REQUEST_MS) : null;
+    return fetch(path, { credentials: 'same-origin', signal: ctl ? ctl.signal : undefined }).then(function (r) {
+      clearTimeout(limit); return r.status === 200 ? r.json() : null;
+    }, function () { clearTimeout(limit); return null; });
+  }
+  function vnum(v) { return String(v || '').split('.').map(function (x) { return parseInt(x, 10) || 0; }); }
+  function vless(a, b) { a = vnum(a); b = vnum(b); for (var i = 0; i < 3; i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) < (b[i] || 0); } return false; }
+  function paintDevice(d) {
+    if (!d) return;
+    if (typeof d.id === 'string' && d.id) byId('devId').textContent = d.id;
+    if (typeof d.fw === 'string' && d.fw) {
+      byId('devFw').textContent = d.fw;
+      var old = typeof d.app === 'string' && vless(d.fw, d.app);
+      byId('devTagT').textContent = old ? 'The app has ' + d.app : 'Up to date';
+      byId('devTag').className = 'tag' + (old ? ' old' : ''); vis('devTag', true);
+      if (typeof d.app === 'string') { st.versions = { board: d.fw, app: d.app }; render(); }
+    }
+    if (d.logo && d.logo.present === 1) { onBoard = true; paintLogo(); }
+  }
+  // The address and the saved network, from /api/wifi through Connect's paint.
+  function deviceWifi(link, savedName, ip) {
+    byId('devAddr').textContent = link === 'wifi' ? 'WiFi' + (typeof ip === 'string' && ip ? ', ' + ip : '') : link === 'usb' ? 'USB' : 'Unknown';
+    byId('savedNet').textContent = savedName || 'None';
+    vis('forgetBtn', link === 'usb' && !!savedName);
+  }
+  byId('forgetBtn').addEventListener('click', function () { conn.forget(byId('forgetBtn')); });
+  byId('detBtn').addEventListener('click', function () {
+    var on = byId('detBtn').getAttribute('aria-expanded') !== 'true';
+    byId('detBtn').setAttribute('aria-expanded', String(on)); vis('det', on);
+  });
+  // Brightness: the five levels the board stores. Marked only when the
+  // board has said it took one.
+  document.querySelectorAll('[data-b]').forEach(function (b) {
+    b.addEventListener('click', function () { if (loaded) prefSet({ bright: +b.dataset.b }, 'b-msg'); });
+  });
+  byId('showSet').addEventListener('click', function () {
+    st.showSettings = !st.showSettings;
+    byId('showSet').setAttribute('aria-pressed', String(st.showSettings));
+    byId('showSet').textContent = st.showSettings ? 'Show the usage screen' : 'Show it on the board';
+    syncScreen(); render();
+  });
+  // This computer.
+  function paintComputer(c) {
+    if (!c) return;
+    document.querySelectorAll('.switch[data-key]').forEach(function (b) { if (typeof c[b.dataset.key] === 'boolean') b.setAttribute('aria-checked', String(c[b.dataset.key])); });
+  }
+  document.querySelectorAll('.switch[data-key]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      if (!loaded || finished) return;
+      var want = {}; want[b.dataset.key] = b.getAttribute('aria-checked') !== 'true';
+      post('/api/computer', want).then(function (j) {
+        if (j.status !== 200) { msgSet('k-msg', j.why || 'This computer could not save that setting.', 'bad'); return; }
+        msgSet('k-msg', ''); paintComputer(j);
+      }, function () { msgSet('k-msg', 'The app did not answer.', 'bad'); });
+    });
+  });
+  function loadBoardPanel() {
+    getJSON('/api/device').then(paintDevice);
+    getJSON('/api/computer').then(paintComputer);
+  }
+  // The rows that wait for another branch stay off whatever the form does.
+  function soon() { document.querySelectorAll('[data-soon]').forEach(function (e) { e.disabled = true; }); }
+
   // For the tasks that fill Connect and Board, and for the page's tests.
   window.blinkSettings = { board: board, panel: panel, status: status, confirm: confirm };
   document.getElementById('done').addEventListener('click', function () {
@@ -2149,7 +2592,8 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
     say(oldBoard ? OLD_BOARD_LOAD : draft ? 'This picks up the changes you had not saved. Your board shows them as a preview.'
         : t ? 'This is the theme your board has now. Changes show on it as a preview.' : 'Your board is on its own theme. Changes show on it as a preview.');
     render();
-    if (persistent) loadHub();
+    soon();
+    if (persistent) { loadHub(); loadBoardPanel(); }
   }, function () { clearTimeout(stateLimit); render(); stopped(); });
   render();
 })();

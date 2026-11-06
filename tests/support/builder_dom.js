@@ -120,7 +120,7 @@ const document = {
   listeners: {},
   get activeElement() { return active; },
   getElementById(id) { return root.descendants().find((n) => n.id === id) || null; },
-  createElement(tag) { return new Node(tag); },
+  createElement(tag) { const n = new Node(tag); if (tag === 'canvas') n.getContext = () => ctx2d(n); return n; },
   createElementNS(ns, tag) { return new Node(tag); },
   createTextNode(t) { const n = new Node(); n._text = String(t); return n; },
   querySelectorAll(sel) { return select(sel, root); },
@@ -148,7 +148,11 @@ const held = {};
 Object.entries(spec.answers || {}).forEach(([p, a]) => { answers[p] = () => a; });
 function fetch_(path, opts) {
   opts = opts || {};
-  const req = { path, method: opts.method || 'GET', headers: opts.headers || {}, body: opts.body ? JSON.parse(opts.body || 'null') : null };
+  // A string body is JSON, as every page post but the logo's; the logo's is
+  // bytes (a Uint8Array or the canvas's Uint8ClampedArray), kept as `raw`.
+  const text = typeof opts.body === 'string';
+  const req = { path, method: opts.method || 'GET', headers: opts.headers || {}, body: text && opts.body ? JSON.parse(opts.body) : null,
+                raw: text ? null : opts.body, bytes: text || !opts.body ? 0 : opts.body.length };
   requests.push(req);
   const a = (answers[path] || (() => ({ status: 200, body: { ok: true } })))(req);
   // An answer can be a promise, from hold(), so a scenario decides when a
@@ -190,7 +194,45 @@ document.createRange = () => ({ selectNodeContents(n) { this.node = n; } });
 // with an answer ({status, body} or 'fail').
 function hold() { let release; const p = new Promise((r) => { release = r; }); return { p, release }; }
 
+// A canvas that records what was drawn and hands back a recognisable image:
+// every pixel is `pixel` (a scenario sets it), 4 bytes each, so a page that
+// posts "the canvas" posts exactly width * height * 4 bytes. `drawn` lists
+// every drawImage as [x, y, w, h].
+const canvasLog = { drawn: [], pixel: [10, 20, 30, 255] };
+function ctx2d(cv) {
+  return {
+    clearRect() {}, fillRect() {},
+    drawImage(img, x, y, w, h) { canvasLog.drawn.push([cv.width, cv.height, x, y, w, h]); },
+    getImageData(x, y, w, h) {
+      const d = new Uint8ClampedArray(w * h * 4);
+      for (let i = 0; i < w * h; i++) d.set(canvasLog.pixel, i * 4);
+      return { data: d, width: w, height: h };
+    },
+  };
+}
+// A picked file, and the browser's way of reading and decoding it. imageSize
+// is what a decoded picture reports; imageFails makes the decode fail.
+const picture = { w: 200, h: 100, fails: false };
+function fakeFile(name, type, bytes) {
+  const u = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes);
+  return { name, type, size: u.length, arrayBuffer: () => Promise.resolve(u.buffer.slice(u.byteOffset, u.byteOffset + u.length)) };
+}
+class FakeReader {
+  readAsDataURL(f) { Promise.resolve().then(() => { this.result = 'data:' + f.type + ';base64,AAAA'; this.onload(); }); }
+}
+class FakeImage {
+  set src(v) {
+    this._src = v;
+    Promise.resolve().then(() => {
+      if (picture.fails) return this.onerror();
+      this.naturalWidth = picture.w; this.naturalHeight = picture.h; this.onload();
+    });
+  }
+  get src() { return this._src; }
+}
+
 const sandbox = {
+  FileReader: FakeReader, Image: FakeImage,
   location: { search: spec.search || '' },
   document, window: win, fetch: fetch_, setTimeout: setTimeout_, setInterval: setInterval_,
   clearTimeout: clearTimer, clearInterval: clearTimer, navigator: { clipboard },
@@ -230,7 +272,7 @@ function liveWrites() {
   return out;
 }
 
-const helpers = { $, document, window: win, advance, flush, type, pick, preset, answer, requests, liveWrites, clipboard, selection, hold, held };
+const helpers = { fakeFile, picture, canvasLog, $, document, window: win, advance, flush, type, pick, preset, answer, requests, liveWrites, clipboard, selection, hold, held };
 const names = Object.keys(sandbox);
 // The page script, as the browser would run it, against this DOM.
 new Function(...names, spec.script)(...names.map((k) => sandbox[k]));

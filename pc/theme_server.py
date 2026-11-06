@@ -47,7 +47,8 @@ import time
 import urllib.parse
 import webbrowser
 
-from pc import settings_ops, status_page, theme, update, user_config, wifi_pair
+from pc import (logo_encode, settings_ops, status_page, theme, update,
+                user_config, wifi_pair)
 
 IDLE_S = 600            # 10 minutes with no edit (plan, revision 2026-10-25)
 # A reload fires pagehide too, then loads the page again, and the builder
@@ -83,6 +84,18 @@ LINK_LIFE_S = 600
 PANELS = ("look", "connect", "board")
 BOARD_PATHS = ("/api/wifi", "/api/device", "/api/logo", "/api/pref")
 MAX_BODY = 4096         # the widest theme is about 200 bytes of JSON
+# POST /api/logo only: a GIF as the owner picked it, or 307200 bytes of RGBA.
+# Checked against Content-Length before a byte is read; every other route
+# keeps MAX_BODY, so the bigger limit buys nothing to a request that is not
+# a logo. 2 MiB is above any GIF the encoder would accept (180 frames at
+# 320x240 compress far smaller) and below what a hostile page could use to
+# hold the handler thread and memory.
+MAX_LOGO_BODY = 2 * 1024 * 1024
+# What POST /api/pref takes, and the values the board's own checks allow
+# (proto.c pref_set_line). view is an integer the board ignores until
+# feat/ultra-burn gives it meaning; the page sends 0.
+PREF_ENUMS = {"main_src": ("claude", "codex"), "focus": (0, 1),
+              "bright": (20, 40, 60, 80, 100)}
 # The page's tab id on a preview, save or cancel. A header and not a body
 # field because those bodies are the theme itself, which theme.validate
 # checks key by key; see _Handler.do_POST.
@@ -466,6 +479,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, ops.device())
         if url.path == "/api/computer":
             return self._computer_state()
+        if url.path == "/api/logo":
+            return self._json(200, {"logo": ops.device().get("logo")})
         return self._refuse(404)
 
     # -- the settings endpoints
@@ -542,6 +557,89 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except settings_ops.BoardOpError as e:
             self._json(409, {"why": str(e)})
 
+    def _pref_ok(self, want):
+        if not (isinstance(want, dict) and want):
+            return False
+        for k, v in want.items():
+            if k == "view":
+                if isinstance(v, bool) or not isinstance(v, int) \
+                        or not 0 <= v <= 255:
+                    return False
+            elif k not in PREF_ENUMS or isinstance(v, bool) \
+                    or v not in PREF_ENUMS[k]:
+                return False
+        return True
+
+    def _post_pref(self, want):
+        if not self._pref_ok(want):
+            return self._json(400, {"why": "That was not a setting."})
+        try:
+            self._json(200, {"pref": self.builder.board_ops.pref_set(**want)})
+        except settings_ops.BoardOpError as e:
+            self._json(409, {"why": str(e)})
+
+    def _post_logo(self):
+        """The logo as the page chose it, as raw bytes. Every refusal is one
+        sentence and costs the board nothing: the image is encoded and
+        checked here, and only a blob logo_encode.parse accepted goes on.
+        Nothing about the body is logged or echoed."""
+        h = self.headers
+
+        def refuse(status, why):
+            self.close_connection = True      # the body was not read
+            self._json(status, {"why": why})
+
+        if h.get("Content-Type", "").split(";")[0].strip().lower() \
+                != "application/octet-stream":
+            return refuse(415, "That was not a picture.")
+        try:
+            n = int(h.get("Content-Length", ""))
+        except ValueError:
+            return refuse(400, "That was not a picture.")
+        if n < 0 or n > MAX_LOGO_BODY:
+            return refuse(413, "That file is too big. Pick a smaller one.")
+        kind = h.get("X-Blink-Logo")
+        hold = h.get("X-Blink-Hold-Ms", "")
+        fit = h.get("X-Blink-Fit")
+        bg = h.get("X-Blink-Bg", "")
+        if kind not in ("rgba", "gif"):
+            return refuse(400, "That was not a picture.")
+        if not hold.isdigit() or int(hold) not in logo_encode.HOLD_CHOICES:
+            return refuse(400, "Pick 3, 5 or 10 seconds.")
+        if kind == "gif" and fit not in logo_encode.FIT_SCALE:
+            return refuse(400, "Pick a size on the screen.")
+        if len(bg) != 6 or any(c not in "0123456789abcdefABCDEF" for c in bg):
+            return refuse(400, "That was not a background colour.")
+        bgc = tuple(bytes.fromhex(bg))
+        raw = self.rfile.read(n)
+        try:
+            if kind == "rgba":
+                blob = logo_encode.from_rgba(raw, bgc, int(hold))
+            else:
+                blob = logo_encode.from_gif(raw, bgc, int(hold), fit)
+        except ValueError as e:
+            msg = str(e)
+            return self._json(400, {"why": msg[:1].upper() + msg[1:] + "."})
+        finally:
+            raw = None
+        # ?check=1: the same encoding and the same refusals, and then the
+        # size alone. The page asks before it offers Send, so "About N KB"
+        # is the encoder's number and a too-big logo is refused on the
+        # page rather than after a minute on the cable.
+        if "check=1" in urllib.parse.urlsplit(self.path).query.split("&"):
+            return self._json(200, {"bytes": len(blob)})
+        try:
+            state = self.builder.board_ops.logo(blob)
+        except settings_ops.BoardOpError as e:
+            return self._json(409, {"why": str(e)})
+        self._json(200, {"logo": state, "bytes": len(blob)})
+
+    def _post_logo_remove(self):
+        try:
+            self._json(200, {"logo": self.builder.board_ops.logo_remove()})
+        except settings_ops.BoardOpError as e:
+            self._json(409, {"why": str(e)})
+
     # -- POST
 
     def _body(self):
@@ -561,9 +659,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._active(path)
         self.builder.count(path)
         want = None
-        settings = path.startswith(("/api/wifi/", "/api/computer"))
+        settings = path.startswith(("/api/wifi/", "/api/computer",
+                                    "/api/pref", "/api/logo/remove"))
         if self._theme_only(path):
             return
+        if path == "/api/logo":
+            return self._post_logo()
         if settings:
             if self.headers.get("Content-Type", "").split(";")[0].strip() \
                     .lower() != "application/json":
@@ -596,6 +697,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._post_wifi(path, want)
         if path == "/api/computer":
             return self._post_computer(want)
+        if path == "/api/pref":
+            return self._post_pref(want)
+        if path == "/api/logo/remove":
+            return self._post_logo_remove()
         if path == "/api/cancel":
             self._json(200, {"ok": True})
             return self.builder.finish("cancelled")

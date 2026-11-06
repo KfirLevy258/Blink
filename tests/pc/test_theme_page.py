@@ -892,7 +892,7 @@ def test_nothing_is_previewed_before_the_state_answers():
     await advance(300);
     const early = requests.filter(q => q.path === '/api/preview').length;
     """ + _RELEASE_SYNTHWAVE + """
-    const on = """ + _FORM + """.every(e => !e.disabled);
+    const on = """ + _FORM + """.every(e => !e.disabled || e.dataset.soon);
     const busyAfter = document.querySelector('main').getAttribute('aria-busy');
     const bar = $('status-text').textContent;
     preset('Ocean'); await advance(300);
@@ -2033,3 +2033,277 @@ def test_the_drawn_link_icon_takes_glyph_and_colour_from_the_link_and_its_state(
     for link in ("usb", "wifi"):
         for state, col in want.items():
             assert r[f"{link}-{state}"] == {"glyph": link, "colour": col}, (link, state)
+
+
+# ------------------------------------- Look's Customise and Logo, the Board panel
+#
+# Task 6.4. The page's own state is driven against a fake server (answers by
+# path); the real handler is covered by tests/pc/test_settings_server.py.
+
+def _live(**more):
+    a = {"/api/state": {"status": 200, "body": {
+             "saved": {"id": 0}, "draft": None, "persistent": True}},
+         "/api/wifi": {"status": 200, "body": {"link": "usb", "usb": True}},
+         "/api/device": {"status": 200, "body": {"id": "ab12", "fw": "1.5.0",
+                                                 "app": "1.5.0"}},
+         "/api/computer": {"status": 200, "body": {"status_page": False,
+                                                   "auto_update": True}}}
+    a.update(more)
+    return a
+
+
+_POSTS = "requests.filter(q => q.method === 'POST' && q.path !== '/api/ping')"
+_PNG = "[137, 80, 78, 71, 1, 2, 3, 4]"
+_GIF = "[71, 73, 70, 56, 57, 97, 1, 2, 3, 4, 5, 6]"
+_PICK = """
+    await advance(300);
+    picture.w = 200; picture.h = 100;
+    const pick = async (name, type, bytes) => {
+      $('logoFile').files = [fakeFile(name, type, bytes)];
+      $('logoFile').fire('change');
+      await advance(400);
+    };
+"""
+
+
+def test_screen_subtab_lists_view_focus_provider_and_no_weekly_scope():
+    r = builder_page.run("""
+    await advance(300);
+    const cards = document.querySelectorAll('.vw');
+    const names = cards.map(b => b.querySelector('b').textContent);
+    const main = document.querySelectorAll('#segMain button').map(b => b.textContent);
+    const click = (n) => cards.find(b => b.querySelector('b').textContent === n).click();
+    click('Session big'); await advance(10);
+    click('Weekly big'); await advance(10);
+    click('Two gauges'); await advance(10);
+    document.querySelectorAll('#segMain button')[1].click(); await advance(10);
+    return { names, main, pressed: cards.map(b => b.getAttribute('aria-pressed')),
+             posts: """ + _POSTS + """.map(q => [q.path, q.body]),
+             text: $('tScreen').textContent };
+    """, _live(**{"/api/pref": {"status": 200, "body": {"pref": {
+        "provider": "codex", "focus": 0, "bright": 60, "view": 0}}}}))
+    assert r["names"] == ["Two gauges", "Session big", "Weekly big", "Burn view"]
+    assert r["main"] == ["Claude", "Codex"]
+    # Weekly big is a preview: no pref goes out for it, and nothing anywhere
+    # on the tab or the wire names a weekly scope (D61).
+    assert r["posts"] == [["/api/pref", {"focus": 1}],
+                          ["/api/pref", {"focus": 0}],
+                          ["/api/pref", {"main_src": "codex"}]]
+    assert "scope" not in r["text"].lower()
+    assert r["pressed"] == ["true", "false", "false", "false"]
+
+
+def test_burn_view_card_is_greyed_until_the_branch():
+    r = builder_page.run("""
+    await advance(300);
+    const burn = document.querySelectorAll('.vw').find(b => b.querySelector('b').textContent === 'Burn view');
+    burn.click(); await advance(10);
+    return { off: burn.disabled, text: burn.textContent, pressed: burn.getAttribute('aria-pressed'),
+             posts: """ + _POSTS + """.length, title: $('heroTitle').textContent };
+    """, _live())
+    assert r["off"] is True and "needs the burn view" in r["text"].lower()
+    assert r["pressed"] == "false" and r["posts"] == 0
+    assert "burn" not in r["title"].lower()
+
+
+def test_preview_sliders_send_nothing():
+    r = builder_page.run("""
+    await advance(300);
+    $('p1').value = '70'; $('p1').fire('input');
+    $('p2').value = '12'; $('p2').fire('input');
+    const slid = [$('o1').textContent, $('o2').textContent];
+    $('sweep').click(); await advance(2000);
+    return { slid, end: [$('p1').value, $('p2').value, $('o1').textContent],
+             posts: """ + _POSTS + """.length, label: $('sweep').getAttribute('aria-label'),
+             title: $('heroTitle').textContent };
+    """, _live())
+    assert r["slid"] == ["70%", "12%"]
+    assert r["end"] == ["100", "100", "100%"] and r["posts"] == 0
+    assert r["label"] == "Sweep both arcs from 0 to 100%"
+    assert "session 100%" in r["title"]
+
+
+def test_logo_picker_draws_to_canvas_and_posts_rgba():
+    r = builder_page.run(_PICK + """
+    await pick('mark.png', 'image/png', """ + _PNG + """);
+    const sent = $('lSend').disabled;
+    $('lSend').click(); await advance(10);
+    const q = requests.find(x => x.path === '/api/logo');
+    return { sent, bytes: q.bytes, h: q.headers, type: q.raw.constructor.name,
+             drawn: canvasLog.drawn[canvasLog.drawn.length - 1], msg: $('lMsg').textContent };
+    """, _live(**{"/api/logo?check=1": {"status": 200, "body": {"bytes": 51200}},
+                  "/api/logo": {"status": 200, "body": {
+                      "logo": {"present": 1}, "bytes": 51200}}}))
+    assert r["sent"] is False and r["bytes"] == 320 * 240 * 4
+    assert r["h"]["X-Blink-Logo"] == "rgba"
+    assert r["h"]["Content-Type"] == "application/octet-stream"
+    assert r["h"]["X-Blink-Hold-Ms"] == "3000" and r["h"]["X-Blink-Fit"] == "fill"
+    assert r["h"]["X-Blink-Bg"] == "0a141e"          # the canvas corner's pixel
+    # 200x100 fitted to 320x240 at scale 1: 320 wide, 160 high, centred.
+    assert r["drawn"] == [320, 240, 0, 40, 320, 160]
+    assert "on the board" in r["msg"]
+
+
+def test_logo_picker_posts_a_gif_as_bytes():
+    r = builder_page.run(_PICK + """
+    await pick('spin.gif', 'image/gif', """ + _GIF + """);
+    $('lHold').value = '10000'; $('lHold').fire('change');
+    document.querySelectorAll('#lScale button').find(b => b.dataset.s === 'margin').click();
+    await advance(400);
+    $('lSend').click(); await advance(10);
+    const q = requests.filter(x => x.path === '/api/logo').pop();
+    return { n: q.bytes, h: q.headers, first: Array.from(q.raw.slice(0, 4)),
+             canvasUsedForSend: canvasLog.drawn.some(d => d[0] === 320 && d[1] === 240) };
+    """, _live(**{"/api/logo?check=1": {"status": 200, "body": {"bytes": 30000}},
+                  "/api/logo": {"status": 200, "body": {"logo": {"present": 1}}}}))
+    assert r["n"] == 12 and r["first"] == [71, 73, 70, 56]
+    assert r["h"]["X-Blink-Logo"] == "gif"
+    assert r["h"]["X-Blink-Hold-Ms"] == "10000" and r["h"]["X-Blink-Fit"] == "margin"
+    assert r["canvasUsedForSend"] is False
+
+
+def test_stays_up_for_offers_3_5_10_only():
+    r = builder_page.run("""
+    await advance(300);
+    return document.querySelectorAll('#lHold option').map(o => [o.getAttribute('value'), o.textContent]);
+    """, _live())
+    assert r == [["3000", "3 seconds"], ["5000", "5 seconds"], ["10000", "10 seconds"]]
+
+
+def test_logo_tab_shows_the_startup_screen_on_the_board():
+    r = builder_page.run(_PICK + """
+    document.querySelectorAll('[data-panel]')[0].click();
+    $('tLogo-t').click();
+    const empty = $('heroTitle').textContent;
+    await pick('mark.png', 'image/png', """ + _PNG + """);
+    const withLogo = $('heroTitle').textContent;
+    $('tThemes-t').click();
+    return { empty, withLogo, back: $('heroTitle').textContent,
+             facts: $('tLogo').textContent };
+    """, _live(**{"/api/logo?check=1": {"status": 200, "body": {"bytes": 2048}}}))
+    assert "start-up screen, no logo yet" in r["empty"]
+    assert "start-up screen with your logo" in r["withLogo"]
+    assert "usage" not in r["back"] and "session" in r["back"]
+    assert "for up to 15 seconds" in r["facts"]
+    assert "30 seconds" not in r["facts"]
+
+
+def test_logo_size_comes_from_the_real_encoder():
+    r = builder_page.run(_PICK + """
+    let n = 0;
+    answer('/api/logo?check=1', () => ({ status: 200, body: { bytes: [40960, 70000][n++] } }));
+    await pick('mark.png', 'image/png', """ + _PNG + """);
+    const one = $('lSize').textContent;
+    document.querySelectorAll('#lScale button').find(b => b.dataset.s === 'large').click();
+    await advance(400);
+    const two = $('lSize').textContent;
+    answer('/api/logo?check=1', () => ({ status: 400, body: { why: 'The logo is too big for the board.' } }));
+    document.querySelectorAll('#lScale button').find(b => b.dataset.s === 'margin').click();
+    await advance(400);
+    return { one, two, big: $('lMsg').textContent, off: $('lSend').disabled,
+             checks: requests.filter(q => q.path === '/api/logo?check=1').length };
+    """, _live())
+    assert r["one"] == "About 40 KB of 512 KB on the board"
+    assert r["two"] == "About 68 KB of 512 KB on the board"
+    assert r["big"] == "Too big for the board. Pick a plainer background or a smaller size."
+    assert r["off"] is True and r["checks"] == 3
+
+
+def test_remove_logo_uses_the_in_page_confirm():
+    r = builder_page.run("""
+    await advance(300);
+    const have = $('lHave').getAttribute('hidden');
+    $('lRemoveB').click();
+    const box = document.querySelector('.confirm');
+    const asked = box.querySelector('p').textContent;
+    const keep = document.activeElement.textContent;
+    const none = requests.filter(q => q.path === '/api/logo/remove').length;
+    box.querySelectorAll('button')[0].click(); await advance(10);
+    return { have, asked, keep, none, sent: requests.filter(q => q.path === '/api/logo/remove').length,
+             gone: $('lHave').getAttribute('hidden') };
+    """, _live(**{"/api/device": {"status": 200, "body": {
+        "id": "ab12", "fw": "1.5.0", "app": "1.5.0", "logo": {"present": 1}}},
+        "/api/logo/remove": {"status": 200, "body": {"logo": {"present": 0}}}}))
+    assert r["have"] is None
+    assert r["asked"].startswith("Remove the logo from the board?")
+    assert r["keep"] == "Keep" and r["none"] == 0 and r["sent"] == 1
+    assert r["gone"] == ""
+
+
+def test_board_show_it_on_the_board_switches_the_preview():
+    r = builder_page.run("""
+    await advance(300);
+    const title = () => $('heroTitle').textContent;
+    const before = title();
+    $('showSet').click();
+    const on = [title(), $('showSet').textContent, $('showSet').getAttribute('aria-pressed')];
+    $('showSet').click();
+    return { before, on, off: [title(), $('showSet').textContent] };
+    """, _live(), search="?panel=board")
+    assert "Settings screen" not in r["before"]
+    assert "Settings screen" in r["on"][0]
+    assert r["on"][1:] == ["Show the usage screen", "true"]
+    assert "Settings screen" not in r["off"][0] and r["off"][1] == "Show it on the board"
+
+
+def test_board_this_board_shows_id_firmware_and_details():
+    r = builder_page.run("""
+    await advance(300);
+    $('detBtn').click();
+    return [$('devId').textContent, $('devFw').textContent, $('devTagT').textContent,
+            $('devAddr').textContent, $('savedNet').textContent, $('forgetBtn').getAttribute('hidden'),
+            $('det').getAttribute('hidden')];
+    """, _live(**{"/api/wifi": {"status": 200, "body": {
+        "link": "usb", "usb": True, "s": _hex("Home-2G")}}}), search="?panel=board")
+    assert r == ["ab12", "1.5.0", "Up to date", "USB", "Home-2G", None, None]
+
+
+def test_brightness_posts_a_board_level():
+    r = builder_page.run("""
+    await advance(300);
+    document.querySelectorAll('[data-b]').find(b => b.dataset.b === '40').click(); await advance(10);
+    const ok = document.querySelectorAll('[data-b]').map(b => b.getAttribute('aria-pressed'));
+    answer('/api/pref', () => ({ status: 409, body: { why: 'The board did not accept that setting.' } }));
+    document.querySelectorAll('[data-b]').find(b => b.dataset.b === '80').click(); await advance(10);
+    return { ok, posts: """ + _POSTS + """.map(q => q.body), msg: $('b-msg').textContent,
+             pressed: document.querySelectorAll('[data-b]').map(b => b.getAttribute('aria-pressed')) };
+    """, _live(**{"/api/pref": {"status": 200, "body": {"pref": {
+        "provider": "claude", "focus": 0, "bright": 40, "view": 0}}}}),
+        search="?panel=board")
+    assert r["posts"] == [{"bright": 40}, {"bright": 80}]
+    assert r["ok"] == ["false", "true", "false", "false", "false"]
+    assert r["msg"] == "The board did not accept that setting."
+    assert r["pressed"] == r["ok"]          # a refused level is not marked
+
+
+def test_computer_switches_round_trip():
+    r = builder_page.run("""
+    await advance(300);
+    const sw = () => [$('cfgStatus').getAttribute('aria-checked'), $('cfgUpdate').getAttribute('aria-checked')];
+    const first = sw();
+    answer('/api/computer', (q) => q.method === 'POST'
+      ? { status: 200, body: { status_page: true, auto_update: true } }
+      : { status: 200, body: { status_page: false, auto_update: true } });
+    $('cfgStatus').click(); await advance(10);
+    const after = sw();
+    answer('/api/computer', () => ({ status: 500, body: { why: 'This computer could not save that setting.' } }));
+    $('cfgUpdate').click(); await advance(10);
+    return { first, after, kept: sw(), msg: $('k-msg').textContent,
+             posts: """ + _POSTS + """.map(q => q.body) };
+    """, _live(), search="?panel=board")
+    assert r["first"] == ["false", "true"] and r["after"] == ["true", "true"]
+    assert r["kept"] == ["true", "true"]
+    assert r["posts"] == [{"status_page": True}, {"auto_update": False}]
+    assert r["msg"] == "This computer could not save that setting."
+
+
+def test_new_rows_are_disabled_with_their_sentences():
+    r = builder_page.run("""
+    await advance(300);
+    const row = (id) => [$(id).disabled, $(id).getAttribute('aria-checked'), $($(id).getAttribute('aria-describedby')).textContent];
+    return { refresh: row('cfgRefresh'), doze: row('cfgDoze'),
+             posts: """ + _POSTS + """.length };
+    """, _live(), search="?panel=board")
+    assert r["refresh"] == [True, "false", "Runs Claude Code's own /usage now and then. Sends no messages."]
+    assert r["doze"] == [True, "false", "Dims the board after 4 hours with nothing running"]
+    assert r["posts"] == 0

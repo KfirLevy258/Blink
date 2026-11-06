@@ -2,13 +2,15 @@
 
 Real loopback server, a fake BoardOps. No browser, no board.
 """
+import http.client
 import json
 import os
 
 import pytest
 
-from pc import settings_ops, theme_server, user_config
+from pc import logo_encode, settings_ops, theme_server, user_config
 from tests.pc.test_theme_server import Clock, login, request
+from tests.support import gen_gif
 
 PW = "hunter2-hunter2"
 SSID = b"home net".hex()
@@ -18,6 +20,11 @@ class FakeOps:
     def __init__(self):
         self.joins = []
         self.fail = None
+        self.logos = []
+        self.removes = 0
+        self.prefs = []
+        self.logo_state = {"t": "logo_state", "present": 1, "bytes": 1,
+                           "frames": 1}
 
     def state(self):
         return {"st": "idle", "link": "usb", "usb": True}
@@ -36,6 +43,24 @@ class FakeOps:
 
     def forget(self):
         return {"ok": True}
+
+    def logo(self, blob):
+        self.logos.append(blob)
+        if self.fail:
+            raise settings_ops.BoardOpError(self.fail)
+        return self.logo_state
+
+    def logo_remove(self):
+        self.removes += 1
+        return {"t": "logo_state", "present": 0}
+
+    def pref_set(self, **fields):
+        self.prefs.append(fields)
+        if self.fail:
+            raise settings_ops.BoardOpError(self.fail)
+        return dict({"provider": "claude", "focus": 0, "bright": 100,
+                     "view": 0}, **{k: v for k, v in fields.items()
+                                    if k != "main_src"})
 
 
 @pytest.fixture
@@ -220,3 +245,223 @@ def test_computer_settings_round_trip(server, home):
     assert not os.path.exists(os.path.join(home, "no-auto-update"))
     assert post(server, "/api/computer", {"status_page": "yes"}, c)[0] == 400
     assert post(server, "/api/computer", {}, c)[0] == 400
+
+
+# ------------------------------------------------------------ the logo route
+
+RAW = {"Content-Type": "application/octet-stream"}
+
+
+def _logo_headers(kind="rgba", hold="3000", fit="fill", bg="102030"):
+    h = {"X-Blink-Logo": kind, "X-Blink-Hold-Ms": hold, "X-Blink-Bg": bg}
+    if fit:
+        h["X-Blink-Fit"] = fit
+    return h
+
+
+def _logo(server, c, body, **kw):
+    return request(server, "POST", "/api/logo", body, cookie=c,
+                   ctype="application/octet-stream",
+                   extra=_logo_headers(**kw))
+
+
+def _gif(frames=2, comment=0, size=(320, 240), colour=(255, 255, 255)):
+    pal = [(0, 0, 0), colour]
+    fs = [gen_gif.frame(size[0], size[1], bytes([1]) * (size[0] * size[1]),
+                        delay_cs=10) for _ in range(frames)]
+    img = gen_gif.build(size[0], size[1], pal, fs)
+    if comment:
+        img = img[:-1] + b"\x21\xfe" + gen_gif._blocks(b"x" * comment) + b";"
+    return img
+
+
+def test_logo_rgba_full_size_succeeds_through_the_real_handler(server, ops):
+    c = login(server)
+    raw = bytes([9, 8, 7, 255]) * (320 * 240)
+    s, _, body = _logo(server, c, raw)
+    assert s == 200 and json.loads(body)["logo"]["present"] == 1
+    assert len(ops.logos) == 1
+    assert ops.logos[0] == logo_encode.from_rgba(raw, (16, 32, 48), 3000)
+
+
+def test_logo_gif_1_5_mib_succeeds(server, ops):
+    c = login(server)
+    g = _gif(comment=1_500_000)
+    assert len(g) > 1_500_000
+    s, _, body = _logo(server, c, g, kind="gif")
+    assert s == 200 and len(ops.logos) == 1
+
+
+def test_logo_over_2_mib_is_413_before_reading(server, ops):
+    c = login(server)
+    conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+    conn.putrequest("POST", "/api/logo")
+    h = dict(RAW, Host=f"127.0.0.1:{server.port}", Cookie=c,
+             Origin=f"http://127.0.0.1:{server.port}",
+             **_logo_headers())
+    h["Content-Length"] = str(2 * 1024 * 1024 + 1)
+    for k, v in h.items():
+        conn.putheader(k, v)
+    conn.endheaders()                       # no body is ever sent
+    assert conn.getresponse().status == 413
+    conn.close()
+    assert ops.logos == []
+
+
+def test_other_routes_keep_4096(server):
+    c = login(server)
+    big = {"s": SSID, "p": "x" * 5000}
+    assert post(server, "/api/wifi/join", big, c)[0] == 413
+    assert post(server, "/api/pref", {"bright": 40, "pad": "x" * 5000},
+                c)[0] == 413
+    assert post(server, "/api/preview", {"id": 0, "pad": "x" * 5000},
+                c)[0] == 413
+
+
+def test_logo_post_needs_exactly_320x240x4_for_rgba(server, ops):
+    c = login(server)
+    for n in (0, 307199, 307201, 4):
+        s, _, body = _logo(server, c, bytes(n))
+        assert s == 400 and json.loads(body)["why"], n
+    assert ops.logos == []
+
+
+def test_logo_post_needs_origin(server, ops):
+    c = login(server)
+    for origin in ("absent", "null", "http://evil.test"):
+        assert request(server, "POST", "/api/logo", bytes(307200), cookie=c,
+                       origin=origin, ctype="application/octet-stream",
+                       extra=_logo_headers())[0] == 403
+    assert request(server, "POST", "/api/logo", bytes(307200),
+                   ctype="application/octet-stream",
+                   origin=own(server), extra=_logo_headers())[0] == 403
+    assert ops.logos == []
+
+
+def test_logo_post_needs_octet_stream(server, ops):
+    c = login(server)
+    s, _, _ = request(server, "POST", "/api/logo", bytes(307200), cookie=c,
+                      ctype="application/json", extra=_logo_headers())
+    assert s == 415 and ops.logos == []
+
+
+def test_logo_limits_reported_as_one_sentence(server, ops):
+    c = login(server)
+    fs = [gen_gif.frame(1, 1, b"\x01", delay_cs=10) for _ in range(181)]
+    g = gen_gif.build(320, 240, [(0, 0, 0), (255, 255, 255)], fs)
+    s, _, body = _logo(server, c, g, kind="gif")
+    why = json.loads(body)["why"]
+    assert s == 400 and why == "Too many frames for the board."
+    s, _, body = _logo(server, c, b"GIF89a-not-really", kind="gif")
+    assert s == 400 and json.loads(body)["why"].endswith(".")
+    assert ops.logos == []
+
+
+def test_logo_hold_and_fit_headers_reach_the_encoder(server, ops):
+    c = login(server)
+    s, _, _ = _logo(server, c, _gif(), kind="gif", hold="10000",
+                    fit="margin", bg="000000")
+    assert s == 200
+    info = logo_encode.parse(ops.logos[0], frames=True)
+    assert info["hold_ms"] == 10000
+    row = info["frames"][0][120 * 320:121 * 320]
+    assert set(row[:64]) == {0} and row[70] == 0xFFFF   # the 64 px band
+    for bad in ({"hold": "30000"}, {"hold": "abc"}, {"fit": "huge"},
+                {"fit": None}, {"bg": "12345"}, {"bg": "zzzzzz"}):
+        s, _, body = _logo(server, c, _gif(), kind="gif", **bad)
+        assert s == 400 and json.loads(body)["why"], bad
+    s, _, _ = request(server, "POST", "/api/logo", _gif(), cookie=c,
+                      ctype="application/octet-stream",
+                      extra={"X-Blink-Logo": "gif", "X-Blink-Fit": "fill",
+                             "X-Blink-Bg": "000000"})
+    assert s == 400                                      # no hold header
+    s, _, _ = _logo(server, c, bytes(307200), kind="png")
+    assert s == 400
+    assert len(ops.logos) == 1
+
+
+def test_logo_fit_is_ignored_for_rgba(server, ops):
+    c = login(server)
+    assert _logo(server, c, bytes([1, 2, 3, 255]) * 76800, fit=None)[0] == 200
+    assert _logo(server, c, bytes([1, 2, 3, 255]) * 76800,
+                 fit="huge")[0] == 200
+
+
+def test_logo_remove_and_state(server, ops):
+    c = login(server)
+    s, _, body = post(server, "/api/logo/remove", {}, c)
+    assert s == 200 and ops.removes == 1
+    assert json.loads(body)["logo"]["present"] == 0
+    assert json.loads(request(server, "GET", "/api/logo",
+                              cookie=c)[2]) == {"logo": None}
+    ops.device = lambda: {"logo": {"present": 1}}
+    assert json.loads(request(server, "GET", "/api/logo",
+                              cookie=c)[2])["logo"]["present"] == 1
+
+
+def test_logo_board_errors_are_409(server, ops):
+    c = login(server)
+    ops.fail = "The board refused the logo."
+    s, _, body = _logo(server, c, bytes(307200))
+    assert s == 409 and json.loads(body)["why"] == ops.fail
+
+
+def test_pref_post_validates_enums(server, ops):
+    c = login(server)
+    for good in ({"bright": 20}, {"bright": 100}, {"focus": 1},
+                 {"main_src": "codex"}, {"view": 0},
+                 {"bright": 40, "focus": 0, "main_src": "claude"}):
+        s, _, body = post(server, "/api/pref", good, c)
+        assert s == 200 and "pref" in json.loads(body), good
+    assert [p for p in ops.prefs][:2] == [{"bright": 20}, {"bright": 100}]
+    n = len(ops.prefs)
+    for bad in ({}, [], "x", {"bright": 30}, {"bright": "40"},
+                {"bright": True}, {"focus": 2}, {"focus": True},
+                {"main_src": "gemini"}, {"view": -1}, {"view": 256},
+                {"view": 1.5}, {"weekly": 1}, {"bright": 40, "x": 1}):
+        s, _, body = post(server, "/api/pref", bad, c)
+        assert s == 400, bad
+    assert len(ops.prefs) == n
+    ops.fail = "The board did not accept that setting."
+    s, _, body = post(server, "/api/pref", {"bright": 40}, c)
+    assert s == 409 and json.loads(body)["why"] == ops.fail
+
+
+def test_logo_bytes_never_logged(server, ops, capsys):
+    c = login(server)
+    _logo(server, c, bytes([77, 78, 79, 255]) * 76800)
+    _logo(server, c, b"junk")
+    post(server, "/api/pref", {"bright": 40}, c)
+    out = capsys.readouterr()
+    assert out.out == "" and out.err == ""
+
+
+def test_one_session_saves_previews_and_sets_a_board_setting(home, ops):
+    s = make(home, board_ops=ops, persistent=True)
+    try:
+        c = login(s)
+        dark = {"id": 0}
+        assert post(s, "/api/save", dark, c)[0] == 200
+        assert post(s, "/api/preview", {"id": 4}, c)[0] == 200
+        st, _, body = post(s, "/api/pref", {"bright": 40}, c)
+        assert st == 200 and json.loads(body)["pref"]["bright"] == 40
+        assert request(s, "GET", "/api/state", cookie=c)[0] == 200
+        assert ops.prefs == [{"bright": 40}]
+    finally:
+        s.finish("test over")
+        s.wait(5)
+
+
+def test_logo_check_gives_the_encoders_size_and_sends_nothing(server, ops):
+    c = login(server)
+    raw = bytes([9, 8, 7, 255]) * 76800
+    s, _, body = request(server, "POST", "/api/logo?check=1", raw, cookie=c,
+                         ctype="application/octet-stream",
+                         extra=_logo_headers())
+    want = len(logo_encode.from_rgba(raw, (16, 32, 48), 3000))
+    assert s == 200 and json.loads(body) == {"bytes": want}
+    assert ops.logos == []
+    s, _, body = request(server, "POST", "/api/logo?check=1", b"x", cookie=c,
+                         ctype="application/octet-stream",
+                         extra=_logo_headers())
+    assert s == 400
