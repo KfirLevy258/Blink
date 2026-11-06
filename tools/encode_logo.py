@@ -16,6 +16,10 @@ Three ways to author one:
   # A drawn clip: <DIR>/*.png in sorted order, each already 320x240:
   tools/encode_logo.py --frames acme-frames/ --fps 15 --hold 0.5 --out acme.bin
 
+  # An animated GIF (--image too): its own frame delays are kept, on the
+  # integer fps grid the board's player ticks at (pc/logo_encode.gif_timing):
+  tools/encode_logo.py --image acme.gif --out acme.bin
+
   # A short video (ffmpeg): scaled to fit, letterboxed onto --bg:
   tools/encode_logo.py --video acme.mp4 --duration 3 --out acme.bin
 
@@ -43,13 +47,18 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import encode_bootanim as ba  # noqa: E402
+# The caps and the GIF decoder live in the daemon (pc/, standard library
+# only), so a GIF burned at the factory and one uploaded from the settings
+# page are decoded, timed and refused by the same code with the same words.
+from pc import gif_decode, logo_encode  # noqa: E402
 
 CANVAS_W, CANVAS_H = ba.CANVAS_W, ba.CANVAS_H
 HDR_LEN = 32
 VERSION = 1
 MAGIC = b"BLGO"
-PARTITION_BYTES = 0x80000
+PARTITION_BYTES = logo_encode.LOGO_MAX
 # esptool pads to 4; the encrypted path (espsecure) wants 32-byte blocks, and
 # a file that is already a multiple of 32 flashes identically both ways.
 ALIGN = 32
@@ -89,6 +98,33 @@ def fit_canvas(im, bg, scale=1.0):
     canvas = Image.new("RGBA", (CANVAS_W, CANVAS_H), bg + (255,))
     canvas.alpha_composite(im, ((CANVAS_W - nw) // 2, (CANVAS_H - nh) // 2))
     return np.asarray(canvas.convert("RGB"))
+
+
+def is_gif(path):
+    with open(path, "rb") as f:
+        return f.read(6) in (b"GIF87a", b"GIF89a")
+
+
+def load_gif(path, bg, scale):
+    """Decode with pc.gif_decode, honouring the delays: returns (canvases,
+    fps) with each source frame repeated for its ticks, so the gate and the
+    zero-rect hold records come out as pc.logo_encode.from_gif's do."""
+    with open(path, "rb") as f:
+        data = f.read()
+    try:
+        got = list(gif_decode.decode(data, logo_encode.LOGO_MAX_FRAMES, bg,
+                                     scale))
+        fps, ticks = logo_encode.gif_timing([d for d, _ in got])
+        if sum(ticks) > logo_encode.LOGO_MAX_FRAMES:
+            raise ValueError(logo_encode.E_FRAMES)
+    except ValueError as e:
+        sys.exit(f"{path}: {e}")
+    canvases = []
+    for (_d, rows), n in zip(got, ticks):
+        a = np.frombuffer(b"".join(rows), dtype=np.uint8).reshape(
+            CANVAS_H, CANVAS_W, 3)
+        canvases += [a] * n
+    return np.stack(canvases), fps
 
 
 def load_frames_dir(directory):
@@ -208,12 +244,25 @@ def main():
         with open(args.info, "rb") as f:
             info = parse(f.read())
         frames = info["frames"]
+        with open(args.info, "rb") as f:
+            raw = f.read()
+        # Headers and walk only, caps not enforced: Task 6.3 runs this over
+        # the factory .bin files that predate the caps to size them.
+        try:
+            walk = logo_encode.parse(raw, check=False)
+            rects = f", max {walk['max_rects']} rect(s) in a frame"
+        except ValueError:
+            rects = ""
         print(f"{args.info}: {len(frames)} frame(s) @ {info['fps']} fps, "
               f"hold {info['hold_ms']} ms, bg #{bytes(info['bg']).hex()}, "
-              f"blob {info['blob_len']} bytes")
+              f"blob {info['blob_len']} bytes{rects}")
         if args.preview:
             write_preview(args.preview, frames, info["fps"], info["hold_ms"])
             print(f"preview: {args.preview}")
+        try:
+            logo_encode.parse(raw)
+        except ValueError as e:
+            sys.exit(f"the board would refuse this logo: {e}")
         return
 
     if not (args.image or args.frames or args.video):
@@ -221,13 +270,19 @@ def main():
     if not (args.out or args.preview):
         sys.exit("give --out and/or --preview")
 
-    still = bool(args.image)
+    gif = bool(args.image) and is_gif(args.image)
+    if gif:
+        bg = parse_bg(args.bg) if args.bg != "auto" else (0, 0, 0)
+        canvases, fps = load_gif(args.image, bg, args.scale)
+    still = (bool(args.image) and not gif) or (gif and len(canvases) == 1)
     hold = args.hold if args.hold is not None else (3.0 if still else 0.5)
     if not 0 <= hold <= 60:
         sys.exit("--hold must be 0..60 seconds")
     hold_ms = int(round(hold * 1000))
 
-    if args.image:
+    if gif:
+        pass
+    elif args.image:
         im = Image.open(args.image)
         bg = parse_bg(args.bg, im)
         canvases = fit_canvas(im, bg, args.scale)[None]
@@ -245,6 +300,10 @@ def main():
     if not 1 <= fps <= 60:
         sys.exit("--fps must be 1..60")
 
+    try:
+        logo_encode.check_limits(len(canvases), fps, hold_ms)
+    except ValueError as e:
+        sys.exit(str(e))
     frames565 = quantise(canvases, args.threshold)
     # The header's background is what the screen shows before frame 0
     # lands, so it must be the QUANTISED colour the frame actually carries.
@@ -266,6 +325,10 @@ def main():
     if len(img) > PARTITION_BYTES:
         sys.exit(f"too big: {len(img)} bytes, the partition holds "
                  f"{PARTITION_BYTES}. Fewer frames, or less motion.")
+    try:
+        logo_encode.parse(img)
+    except ValueError as e:
+        sys.exit(f"the board would refuse this logo: {e}")
     if args.preview:
         write_preview(args.preview, frames565, fps, hold_ms)
         print(f"preview: {args.preview}")

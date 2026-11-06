@@ -4,6 +4,7 @@ One JSON object per line, UTF-8, '\n'-terminated. Every message carries
 `t` (type) and `v` (version). Non-JSON lines (logs) and unknown types are
 ignored by callers. v2.
 """
+import base64
 import json
 import math
 import re
@@ -227,7 +228,8 @@ TAP_FIELDS = {
     "wifi_net": frozenset({"t", "i", "n", "sec"}),
     "wifi_state": frozenset({"t", "st", "link", "kid", "why"}),
     "ota_ack": frozenset({"t", "off", "err"}),
-    "logo_ack": _T, "logo_state": _T,
+    "logo_ack": frozenset({"t", "off", "err"}),
+    "logo_state": frozenset({"t", "present", "bytes", "frames"}),
     # host -> board
     "welcome": frozenset({"t", "app", "app_ver", "editing"}),
     "bye": _T, "pong": _T,
@@ -244,8 +246,9 @@ TAP_FIELDS = {
     "ota_none": _T, "ota_error": _T,
     "edit_state": frozenset({"t", "editing"}),
     "wifi_scan": _T, "wifi_set": _T, "wifi_forget": _T, "ota_end": _T,
-    "logo_begin": _T, "logo_chunk": _T, "logo_end": _T, "logo_remove": _T,
-    "pref_set": _T,
+    "logo_begin": frozenset({"t", "size"}), "logo_chunk": frozenset({"t", "off"}),
+    "logo_end": _T, "logo_remove": _T,
+    "pref_set": frozenset({"t", "main_src", "focus", "view", "bright"}),
 }
 
 # The fixed words of the WiFi lines (spec S5.7, S6.1). A string in one of
@@ -269,9 +272,10 @@ TAP_ENUMS = {
 # or bool (usage percentages are floats, stale and the p2 flags go out as
 # either) and reject only a string.
 _INT_FIELDS = frozenset({"off", "i", "n", "busy", "theme", "stored", "tp",
-                         "bl", "slp", "size", "epoch", "utc_offset_min"})
+                         "bl", "slp", "size", "epoch", "utc_offset_min", "bytes",
+                         "frames", "bright"})
 _NUM_FIELDS = frozenset({
-    "ok", "done", "editing", "session_pct", "session_resets_in_s",
+    "ok", "done", "editing", "present", "focus", "session_pct", "session_resets_in_s",
     "weekly_pct", "weekly_resets_in_s", "stale", "fable_pct", "sonnet_pct",
     "opus_pct", "n_sess", "n_run", "n_wait", "n_stuck", "n_agents",
     "p2_session_pct", "p2_weekly_pct", "p2_s_in_s", "p2_w_in_s", "p2_stale",
@@ -1141,6 +1145,40 @@ def wifi_set(ssid, password, key):
 
 def wifi_forget():
     return {"t": "wifi_forget", "v": VERSION}
+
+
+# --- the company logo and the viewing preferences (spec S15.2, S15.3) ---
+# logo_chunk carries image bytes; redact() lists only t and off for it, so a
+# transcript never holds a byte of a logo.
+
+
+def logo_begin(size, crc):
+    return {"t": "logo_begin", "v": VERSION, "size": int(size),
+            "crc": int(crc)}
+
+
+def logo_chunk(off, data):
+    """USB only (WiFi sends G frames). 256 bytes is 344 base64 characters, a
+    line of about 390 bytes, inside the board's 512."""
+    return {"t": "logo_chunk", "v": VERSION, "off": int(off),
+            "d": base64.b64encode(bytes(data)).decode("ascii")}
+
+
+def logo_end():
+    return {"t": "logo_end", "v": VERSION}
+
+
+def logo_remove():
+    return {"t": "logo_remove", "v": VERSION}
+
+
+def pref_set(**fields):
+    """Only the fields given are sent; the board validates each against its
+    enum (S15.3). An unknown name is a bug here, not something to forward."""
+    bad = set(fields) - {"main_src", "focus", "view", "bright"}
+    if bad:
+        raise ValueError("unknown preference field")
+    return dict({"t": "pref_set", "v": VERSION}, **fields)
 
 # --------------------------------------------------------------- overage cap
 

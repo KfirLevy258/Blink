@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 
+from pc import logo_stream
 from pc import ota as ota_mod
 from pc import wifi_ota
 from pc import private_file
@@ -106,6 +107,8 @@ class Bridge:
                  sleep=time.sleep, board_ops=None, home=None, verify=None,
                  flash_refusal=None, link=None):
         self._write = write_msg          # callable(dict)
+        self._logo = None                # (LogoStream, link) while one runs
+        self.logo_result = None          # (ok, why) of the last stream
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
         # None on a daemon wired without a bus (the tests do this).
@@ -364,6 +367,9 @@ class Bridge:
         elif t == "ota_ack":
             if self._ota_stream is not None:
                 self._ota_stream.ack(msg.get("off"), msg.get("err"))
+        elif t == "logo_ack":
+            if self._logo is not None:
+                self._logo[0].ack(msg.get("off"), msg.get("err"))
         elif t == "theme_now":
             # Recorded, never answered here: whatever it makes owed goes out
             # on the next tick (see THEME_QUIET_S).
@@ -1020,6 +1026,29 @@ class Bridge:
             op.done.set()
         self._run_async(work)
 
+    def start_logo(self, blob, link):
+        """Stream a logo image (pc/logo_stream.py) over `link`, pumped from
+        pump() like an OTA. ValueError before anything is sent when the image
+        is over the board's limit. `link` is the WifiLink, or whatever has
+        write(raw) for a serial port (kind defaults to usb)."""
+        self._logo = (logo_stream.LogoStream(
+            blob, getattr(link, "kind", "usb"), now=self._now), link)
+        self.logo_result = None
+
+    def logo_streaming(self) -> bool:
+        return self._logo is not None
+
+    def _pump_logo(self):
+        if self._logo is None:
+            return
+        stream, link = self._logo
+        stream.pump(link)           # a dead link raises: the stream is dropped
+        res = stream.done()         # with the connection, never sealed
+        if res is not None:
+            self._logo, self.logo_result = None, res
+            print("[bridge] logo: " + ("sent" if res[0] else "FAILED: " + res[1]),
+                  file=sys.stderr)
+
     def pump(self):
         """Write any theme_edit answers that are ready. Called by the daemon
         on every pass of its serial loop, so an answer goes out within one
@@ -1032,6 +1061,7 @@ class Bridge:
             self._write(protocol.theme_edit_reply(ok))
         self._drain_ops()
         self._pump_ota()
+        self._pump_logo()
         # After any answer, so a board that asked again as the old builder
         # ended hears "ok" for the new one before "done" for the old: its
         # done is ignored while an ask is in flight, never the other way.

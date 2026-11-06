@@ -348,7 +348,7 @@ if [ -n "$LOGO" ]; then
 			src="--frames"
 		else
 			case "$LOGO" in
-			*.mp4|*.mov|*.webm|*.mkv|*.gif) src="--video" ;;
+			*.mp4|*.mov|*.webm|*.mkv) src="--video" ;;
 			*) src="--image" ;;
 			esac
 		fi

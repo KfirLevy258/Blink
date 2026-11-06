@@ -1501,6 +1501,14 @@ def _builders():
         ("wifi_set", protocol.wifi_set(b"net", "SECRETpw", bytes(32)),
          {"t"}, {"v", "s", "p", "k"}),
         ("wifi_forget", protocol.wifi_forget(), {"t"}, {"v"}),
+        ("logo_begin", protocol.logo_begin(900, 7), {"t", "size"}, {"v", "crc"}),
+        ("logo_chunk", protocol.logo_chunk(512, b"\x01\x02"), {"t", "off"},
+         {"v", "d"}),
+        ("logo_end", protocol.logo_end(), {"t"}, {"v"}),
+        ("logo_remove", protocol.logo_remove(), {"t"}, {"v"}),
+        ("pref_set", protocol.pref_set(main_src="codex", focus=1, view=2,
+                                       bright=40),
+         {"t", "main_src", "focus", "view", "bright"}, {"v"}),
     ]
 
 
