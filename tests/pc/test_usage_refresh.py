@@ -2196,3 +2196,15 @@ def test_the_board_never_asks_with_a_claude_too_old_for_usage(tmp_path,
     assert k.a.due(CAPS) is False
     monkeypatch.setattr(ur, "version_of", lambda *a, **k: (2, 1, 120))
     assert k.a.due(CAPS) is True
+
+
+def test_a_claude_found_too_old_clears_wasnt_found(tmp_path, monkeypatch):
+    # Status checks "wasn't found" before the version, so a held one would
+    # hide "update Claude Code" for good.
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    monkeypatch.setattr(ur, "version_of", lambda *a, **k: (2, 1, 100))
+    t = _Watch(tmp_path, monkeypatch, runner=lambda *a, **k: 1 / 0)
+    ur.save_state(str(t.blink), State(missing=True))
+    t.w.tick_once()
+    assert t.state().missing is False

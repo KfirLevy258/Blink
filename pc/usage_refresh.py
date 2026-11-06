@@ -954,6 +954,12 @@ class RefreshWatch:
             # Not run: its answer would read as COST and turn the refresh off
             # for a cost nobody paid (USAGE_SINCE). Said once; `blink status`
             # names it, and an updated Claude Code is run at the next tick.
+            # It was found, so a "wasn't found" held from before goes: status
+            # checks that first and would never get to "update Claude Code".
+            unsaved = (self._keep(dataclasses.replace(state, missing=False))
+                       if state.missing else None)
+            if unsaved:
+                self._say_failure(unsaved)
             if self._said != "too old":
                 self._said = "too old"
                 print("usage refresh skipped (Claude Code too old for"
