@@ -3060,13 +3060,15 @@ static void conn_yes_cb(lv_event_t *e)
 	ARG_UNUSED(e);
 	mem_stats_report("forget-close");
 	/*
-	 * Cleared first, then the radio: on a failed write the pairing is
+	 * The candidate first (proto_wifi_cancel: an in-flight wifi_set must
+	 * not persist after this and the radio is asked down), then the
+	 * pairing, then the radio again. On a failed write the pairing is
 	 * already gone from RAM (cfg_clear_pairing), so the board stops using
-	 * the network either way, and the radio goes down whatever the flash
-	 * said. Only the words differ: the screen stays and says the sector
-	 * may still hold the password. TODO(Task 2.5): close the live session
-	 * here as well, once the network thread exists on feat.
+	 * the network either way and only the words differ: the screen stays
+	 * and says the sector may still hold the password. Task 2.5's review:
+	 * clear plus net_link_request_down is enough, no listener stop.
 	 */
+	proto_wifi_cancel();
 	int rc = cfg_clear_pairing();
 
 	net_link_request_down();

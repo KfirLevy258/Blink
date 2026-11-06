@@ -253,6 +253,7 @@ uint8_t proto_link_kind(void)
 }
 
 void net_link_request_down(void) {}
+void proto_wifi_cancel(void) {}
 enum net_link_state net_link_state(void) { return NL_UP; }
 enum net_link_why net_link_why(void) { return NL_WHY_NONE; }
 bool net_link_ip(char *buf, size_t len)
