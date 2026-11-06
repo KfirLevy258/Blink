@@ -104,4 +104,19 @@ bool usage_toast_change(const struct usage_counts *prev,
 			enum usage_activity aggregate,
 			struct usage_toast *out);
 
+/*
+ * Which of four colours the header link icon takes for a data-health status.
+ * The icon is the only health indicator now, so the mapping is pure and tested:
+ * swapping live/stale or red/grey must fail tests/usage_state. STALE is amber
+ * only when the page in front of you is the stale one (stale_here), else live.
+ */
+enum usage_health_colour {
+	USAGE_HC_LIVE,
+	USAGE_HC_STALE,
+	USAGE_HC_RED,
+	USAGE_HC_GREY,
+};
+enum usage_health_colour usage_health_colour(enum usage_status status,
+					     bool stale_here);
+
 #endif /* USAGE_STATE_H */

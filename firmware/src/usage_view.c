@@ -730,7 +730,7 @@ void usage_view_deinit(void)
 	 * The counts themselves survive: they are the last thing the daemon
 	 * said, not a widget. Nothing repaints the row at init -- it comes
 	 * back on the next refresh_dots(), which is the next set_counts or
-	 * set_status, the same way the health dot does.
+	 * set_status, the same way the link icon does.
 	 */
 	link_lbl = NULL;
 	title_lbl = chev_r = chev_l = NULL;
@@ -790,7 +790,7 @@ void usage_view_init(void)
 	lv_scr_load(scr);
 
 	/* Header: brand dead-center, quiet data in the corners -- clock left,
-	 * age + dot right, everything at the same small size (the 20 px clock
+	 * age + link icon right, everything at the same small size (the 20 px clock
 	 * shouted over the gauges; user feedback 2026-07-16). */
 	lv_obj_t *title = lv_label_create(scr);
 
@@ -2058,26 +2058,20 @@ static void refresh_dots(void)
 
 		/* Low and mid, unless both are neutral: theme.h says why. */
 		theme_dot_colours(theme_pal(), &live, &stale);
-		switch (data_health) {
-		case USAGE_STATUS_ERROR:
+		/* Only the page in front of you can be stale-amber: proto.c arms
+		 * STALE when EITHER provider is old, and a fresh page must not
+		 * wear the other's amber (usage_health_colour). */
+		switch (usage_health_colour(data_health, stale_here())) {
+		case USAGE_HC_RED:
 			hc = COL_RED;
 			break;
-		case USAGE_STATUS_STALE:
-			/*
-			 * Only the page in front of you can be stale-amber.
-			 * proto.c arms STALE when EITHER provider is old
-			 * (`stale = stale || p2stale`), so on a two-provider
-			 * desk a Codex reading last touched this morning must
-			 * not put amber over a Claude page that is fresh --
-			 * this page's numbers really are sound. What the tool
-			 * is doing is the other dot's business now.
-			 */
-			hc = lv_color_hex(stale_here() ? stale : live);
+		case USAGE_HC_STALE:
+			hc = lv_color_hex(stale);
 			break;
-		case USAGE_STATUS_DISCONNECTED:
+		case USAGE_HC_GREY:
 			hc = COL_GREY;
 			break;
-		case USAGE_STATUS_OK:
+		case USAGE_HC_LIVE:
 		default:
 			hc = lv_color_hex(live);
 			break;
@@ -2896,7 +2890,7 @@ void usage_view_apply_theme(void)
 
 	render_gauges();	/* arcs, and refresh_provider1() with them */
 	refresh_rail();
-	usage_view_set_status(last_status);	/* hint, dot, pips */
+	usage_view_set_status(last_status);	/* hint, link icon, pips */
 	lv_obj_invalidate(gauge_scr);
 }
 
