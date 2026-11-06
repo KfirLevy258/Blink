@@ -50,7 +50,7 @@ FIRST_RETRY_AFTER_S = 60.0
 MAX_RETRY_AFTER_S = 900.0
 
 
-def default_providers(counter=None, plan=None, home=None):
+def default_providers(counter=None, plan=None, home=None, sweep=True):
     """Every provider shipped today, in preference order.
 
     Order is not the merge rule -- pc/normalizer merges by recency per field,
@@ -69,7 +69,7 @@ def default_providers(counter=None, plan=None, home=None):
     return [ClaudeCliProvider(counter=counter, plan=plan, home=home),
             ClaudeDesktopProvider(),
             ClaudeDesktopLocalStorageProvider(),
-            ClaudeStateProvider(home=home), CodexCliProvider(),
+            ClaudeStateProvider(home=home, sweep=sweep), CodexCliProvider(),
             # LAST: it only ever offers a remembered projection, and every
             # source above it is polled first so any of them carrying a real
             # weekly reset is what observe() below learns from this cycle.
@@ -92,7 +92,8 @@ DEFAULT_VERDICT = object()
 class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
                  now=time.time, burn=None, verdict=DEFAULT_VERDICT,
-                 account=None, counter=None, plan_source=None, home=None):
+                 account=None, counter=None, plan_source=None, home=None,
+                 read_only=False):
         """`plan_source`, when given, is where the bus's one reader of
         Claude Code's config takes its view from instead of the file: a
         WSL home's pc/wsl_watch.WslWatch.view, which answers from memory,
@@ -155,7 +156,7 @@ class IngestionBus:
                 counter = spend_count.SpendCounter()
             self._counter = counter
             self._providers = default_providers(counter, self._plan_reader,
-                                                home)
+                                                home, sweep=not read_only)
         else:
             self._providers = list(providers)
         self._preferred = preferred_provider
@@ -170,6 +171,18 @@ class IngestionBus:
         # it for them on a bench.
         self._verdict = (session_verdict.SessionVerdict()
                          if verdict is DEFAULT_VERDICT else verdict)
+        # `read_only`: the daemon's interim bus (claude_usage_bridge.
+        # build_bus), built while the record cannot be read, which may yet
+        # name a WSL home. Its spend count, verdict and weekly anchor are
+        # the same files that home's bus keeps, and its bind() to this
+        # computer's own login emptied the WSL seat's count (the scoped
+        # review of feat/spend-wsl-refresh, item 5). It reads them and
+        # writes nothing -- no save, no exit flush, no anchor, no sweep of
+        # the hook state -- until allow_writes(), once the record settles
+        # on this bus.
+        self._writes = True
+        if read_only:
+            self._set_writes(False)
         # What answers burn() below: anything with poll(now) -> (q, tokens)
         # or None -- pc/burn_reader.BurnReader on a desk, the scenario's
         # replay under BLINK_SCENARIO. None, the default, means no burn line
@@ -318,7 +331,7 @@ class IngestionBus:
         and a V8 decode of the conversation store on the first poll of every
         process to learn something the next few lines were about to be told.
         """
-        if self._seeded:
+        if self._seeded or not self._writes:
             return
         self._seeded = True
         try:
@@ -456,8 +469,9 @@ class IngestionBus:
             # republishes with provider="claude" -- a different account's
             # reset, presented as this one's.
             claude_frames = [f for f in frames if f.provider == "claude"]
-            weekly_anchor.observe(
-                claude_frames, weekly_anchor.anchor_path(), now)
+            if self._writes:
+                weekly_anchor.observe(
+                    claude_frames, weekly_anchor.anchor_path(), now)
         except Exception:
             pass
 
@@ -486,6 +500,19 @@ class IngestionBus:
             except Exception:
                 pass
         return frames
+
+    def _set_writes(self, on):
+        self._writes = on
+        for obj in (self._counter, self._verdict):
+            if hasattr(obj, "writable"):
+                obj.writable = on
+        for p in self._providers:
+            if isinstance(p, ClaudeStateProvider):
+                p._sweep = on
+
+    def allow_writes(self):
+        """The record settled on this bus: it keeps its files from now."""
+        self._set_writes(True)
 
     def verdict(self):
         """The bus's SessionVerdict, or None: for `blink status`, which says
@@ -858,6 +885,7 @@ class DeferredBus:
         self._built = True
         if bus is self._bus:
             bus._seeded = False
+            bus.allow_writes()
             return
         if self._preferred is not None:
             bus.set_preferred(self._preferred)

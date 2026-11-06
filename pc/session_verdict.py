@@ -206,6 +206,8 @@ class SessionVerdict:
         # None: verdict_path(), asked at first use, not here.
         self._path = path
         self._persist = persist
+        # False on the daemon's interim bus (ingest.IngestionBus.allow_writes).
+        self.writable = True
         self._current = None
         self._loaded = False
         # The state on disk as this process last knew it, (has_window,
@@ -255,7 +257,8 @@ class SessionVerdict:
         # step back of an hour held the retry off for that hour, and a
         # restart in it read the superseded verdict (the re-review of
         # 2026-11-01, finding 15).
-        if (self._persist and cur is not None and cur[:2] != self._on_disk
+        if (self._persist and self.writable and cur is not None
+                and cur[:2] != self._on_disk
                 and (self._failed_at is None
                      or not 0 <= now_epoch - self._failed_at < SAVE_RETRY_S)):
             if save(self.path(), cur):

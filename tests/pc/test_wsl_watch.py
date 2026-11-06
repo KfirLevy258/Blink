@@ -1020,6 +1020,97 @@ def test_a_save_caught_half_done_still_reaches_the_wsl_bus(
     assert [h.distro_guid for h in _WatchRecorder.built] == [GUID]
 
 
+def _render(tmp_path, doc, at):
+    """A status line render where the interim native bus reads it, under
+    the caller's home (tests/support/home)."""
+    from pc import statusline_source
+    from tests.support.home import inside
+    p = inside(tmp_path, statusline_source.payload_path(
+        claude_home.native()))
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(doc, f)
+    os.utime(p, (at, at))
+
+
+def test_the_interim_bus_leaves_the_spend_count_byte_identical(
+        tmp_path, monkeypatch):
+    """The scoped review of feat/spend-wsl-refresh, item 5: while the
+    record could not be read, the interim native bus on a WSL desk owned
+    the spend count: its bind() to Windows' own login emptied the WSL
+    seat's count and saved that. The interim bus writes nothing, at a
+    poll or at the exit flush, until the record settles; settled on
+    native, the same bus keeps it from then on."""
+    from pc import spend_count
+    from tests.support.home import inside
+    with open(inside(tmp_path, str(tmp_path / ".claude.json")), "w") as f:
+        json.dump({"oauthAccount": {"accountUuid": "acc-1",
+                                    "organizationUuid": "org-1",
+                                    "seatTier": "enterprise_usage_based"}}, f)
+    count = inside(tmp_path, spend_count._default_path())
+    seat = spend_count.SpendCounter(path=count)
+    seat.bind("the-wsl-seat", 0)
+    seat.observe("w", 3.00, time.time() - 600)
+    seat.save()
+    seat.close()
+    with open(count, "rb") as f:
+        before = f.read()
+    bus, home, path = _unreadable_at_start(tmp_path, monkeypatch)
+    fetch = bus.fetch()
+    now = time.time()
+    _render(tmp_path, {"session_id": "s1", "cost": {"total_cost_usd": 1.0}},
+            now - 30)
+    fetch()
+    _render(tmp_path, {"session_id": "s1", "cost": {"total_cost_usd": 1.7}},
+            now - 20)
+    fetch()
+    spend_count.flush_all()
+    with open(count, "rb") as f:
+        assert f.read() == before
+    # Settled on this computer's own Claude Code: the count is its now.
+    _record(path, claude_home.native())
+    _render(tmp_path, {"session_id": "s1", "cost": {"total_cost_usd": 2.0}},
+            now - 10)
+    fetch()
+    spend_count.flush_all()
+    with open(count, "rb") as f:
+        assert f.read() != before
+
+
+def test_the_interim_bus_saves_no_verdict_and_no_anchor(tmp_path,
+                                                        monkeypatch):
+    """Item 5, the bus's other persistent writers: the session verdict
+    (~/.blink/session-window.json) and the weekly anchor, both shared
+    with the WSL bus that the record may yet name."""
+    from pc import session_verdict, weekly_anchor
+    saved = []
+    monkeypatch.setattr(session_verdict, "save",
+                        lambda *a: saved.append("verdict") or True)
+    monkeypatch.setattr(weekly_anchor, "save",
+                        lambda *a: saved.append("anchor"))
+    bus, home, path = _unreadable_at_start(tmp_path, monkeypatch)
+    fetch = bus.fetch()
+    now = time.time()
+
+    def render(at):
+        _render(tmp_path, {"session_id": "s", "model": {"id": "m"},
+                           "cost": {"total_cost_usd": 1.0},
+                           "rate_limits": {
+                               "five_hour": {"used_percentage": 10,
+                                             "resets_at": now + 3600},
+                               "seven_day": {"used_percentage": 2,
+                                             "resets_at": now + 3 * 86400}}},
+                at)
+    render(now - 5)
+    fetch()
+    fetch()
+    assert saved == []
+    _record(path, claude_home.native())
+    render(now - 2)
+    fetch()
+    assert "verdict" in saved and "anchor" in saved
+
+
 def test_the_stand_in_bus_never_walks_the_seeders(tmp_path, monkeypatch):
     """verify/v4/c10_extra_walk.py: the stand-in's first poll ran the
     one-shot Cowork / IndexedDB anchor seeder, an os.walk and a decode of

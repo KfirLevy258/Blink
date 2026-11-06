@@ -308,6 +308,10 @@ class SpendCounter:
     def __init__(self, path=None, persist=True, clock=time.monotonic):
         self._path = path
         self._persist = persist
+        # False while the daemon's bus is the interim one: the file is
+        # loaded, and nothing is written over it until the record settles
+        # (ingest.IngestionBus.allow_writes).
+        self.writable = True
         self._clock = clock
         self._saved_at = None  # self._clock() at the last write
         self._failed_at = None  # self._clock() at the last refused write
@@ -590,7 +594,7 @@ class SpendCounter:
         (the final review of 2026-11-04, U8). The count stays in memory
         meanwhile; what a restart in that minute loses is what any unsaved
         rise loses (the module docstring)."""
-        if not self._persist or not self._dirty:
+        if not self._persist or not self.writable or not self._dirty:
             return
         tick = self._clock()
         if (self._failed_at is not None and tick >= self._failed_at
@@ -616,7 +620,8 @@ class SpendCounter:
         file the last write went to, pacing and back-off aside. An exit
         can land in the middle of observe() or bind(); both are ordered so
         that what it leaves is safe to save (see observe)."""
-        if self._persist and self._dirty and self._written_to is not None:
+        if (self._persist and self.writable and self._dirty
+                and self._written_to is not None):
             self._write(self._written_to, self._clock())
 
     def _write(self, target, tick):

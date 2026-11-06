@@ -344,8 +344,9 @@ def board_ask(blink_home, bus=None):
         other_at=None if bus is None else (lambda: claude_activity_at(bus)))
 
 
-def _bus_for(home):
-    """The real bus for `home`, a claude_home.ClaudeHome: see build_bus."""
+def _bus_for(home, read_only=False):
+    """The real bus for `home`, a claude_home.ClaudeHome: see build_bus.
+    `read_only` for the interim native bus (ingest.IngestionBus)."""
     from pc import claude_home
     from pc.burn_reader import BurnReader, CodexBurnReader
     if home.kind == claude_home.WSL:
@@ -372,7 +373,7 @@ def _bus_for(home):
     native = claude_home.native
     return ingest.IngestionBus(burn={"claude": BurnReader(home=native),
                                      "codex": CodexBurnReader()},
-                               home=native)
+                               home=native, read_only=read_only)
 
 
 def build_bus():
@@ -414,7 +415,10 @@ def build_bus():
                   " this computer's own readings until it can",
                   file=sys.stderr)
             settled = claude_home.Settled()
-            interim = _bus_for(claude_home.native())
+            # Read-only until the record settles on it (item 5 of the
+            # scoped review of feat/spend-wsl-refresh): its files are the
+            # ones a WSL home's bus keeps.
+            interim = _bus_for(claude_home.native(), read_only=True)
 
             def decide():
                 s = settled.read()
