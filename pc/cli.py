@@ -533,15 +533,27 @@ def desktop_app_installed() -> bool:
     machines that never ran Desktop, and it survives an uninstall -- on
     Linux, where there is no Desktop, it can only be such a leftover. Local
     Storage is written by the app's own browser engine and nothing else
-    (review, 2026-10-19).
+    (review, 2026-10-19). IndexedDB is written by that same engine and
+    nothing else, and the folder resolver admits a folder on either, so this
+    asks for either: a folder admitted on IndexedDB alone used to print "not
+    installed" beside "data found in the Store package folder" (review of
+    PR #3, 2026-11-05).
     """
-    from pc import desktop_local_storage
-    try:
-        # The "Local Storage" folder, one above the leveldb store: the
-        # Windows measurement saw the folder, not what was inside it.
-        return os.path.isdir(os.path.dirname(desktop_local_storage.store_path()))
-    except Exception:
-        return False
+    from pc import desktop_idb, desktop_local_storage
+    # The "Local Storage" and "IndexedDB" folders, one above each leveldb
+    # store: the Windows measurement saw the folders, not what was inside
+    # them. Each looked up on its own: the pair used to be built in one
+    # tuple inside one try, so a lookup that raised for IndexedDB threw
+    # away Local Storage's evidence too and printed "not installed"
+    # (review of PR #3, 2026-11-06).
+    for store_path in (desktop_local_storage.store_path,
+                       desktop_idb.store_path):
+        try:
+            if os.path.isdir(os.path.dirname(store_path())):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def desktop_staleness_note(age_s):
@@ -3932,13 +3944,20 @@ def cmd_status(args) -> int:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
     codex = _source_lines(desk)
-    if getattr(args, "wire", False):
-        # The Session rows come out of the same poll as the wire line.
-        _wire_line()
-    else:
-        from pc import normalizer
-        _session_window_line(*_claude_page(desk))
-        _codex_session_line(normalizer.merge(codex) if codex else None)
+    # The Local Storage read in _claude_page and the bus poll behind --wire
+    # each resolve the Desktop folder on their own; pinning read_desk's answer
+    # around them keeps every line of this run on the one folder the Desktop
+    # row named (pc/desktop_paths: status holds one answer so its lines
+    # cannot contradict each other).
+    from pc import desktop_paths
+    with desktop_paths.one_answer(desk.desktop_paths):
+        if getattr(args, "wire", False):
+            # The Session rows come out of the same poll as the wire line.
+            _wire_line()
+        else:
+            from pc import normalizer
+            _session_window_line(*_claude_page(desk))
+            _codex_session_line(normalizer.merge(codex) if codex else None)
     return 0
 
 
@@ -4311,10 +4330,14 @@ def _source_lines_desktop(desk, folder, now):
             print("Desktop     no usage cache (Claude Desktop not installed,"
                   " or never signed in)")
         print(f"            looked at {desktop.path()}")
+        _print_other_places_looked(folder)
         if folder.dangling:
             # The app left a note saying where its data went, and that
-            # folder is gone. Reading Roaming instead is the right fallback,
-            # and this line is what a Store-build report needs to say why.
+            # folder is gone. No folder holds a cache here (a cache always
+            # wins, and this branch is "none found"), so the answer is the
+            # folder whose app files are newest, or Roaming; the lines above
+            # list every place tried. This line is what a Store-build report
+            # needs to say why the marker was not followed.
             print("            Store build marker found but its folder"
                   " is gone")
     if folder.moved:
@@ -4323,12 +4346,67 @@ def _source_lines_desktop(desk, folder, now):
         # actually read leaves the reader guessing which of two layouts
         # this desk has. See pc/desktop_paths.
         print(f"            data moved by the Store build: {folder.path}")
-    elif folder.ignored:
-        # A marker and its folder are there, but Roaming was written more
-        # recently -- the exe build back in use. Without this line the
-        # report reads like a plain install, and "why is it reading Roaming
-        # when I have Claude-Data?" has no answer in it.
-        print("            Store build marker ignored, Roaming is newer")
+    elif folder.in_package:
+        # Windows only, the Store build that keeps its data in the package's
+        # own virtualised Roaming with no marker (a friend's PC, 2026-11-04:
+        # no %APPDATA%\\Claude at all, and this row used to say "not
+        # installed" and name Roaming alone). Same reason as the line above:
+        # a report has to name the folder actually read.
+        print(f"            data found in the Store package folder:"
+              f" {folder.path}")
+    for older in folder.not_read:
+        # A folder that holds a usage cache and lost to a newer one (or
+        # tied with it: a copy-then-delete migration whose delete failed). Said by
+        # path, so a report never reads like the only copy was the one used.
+        # Folders with no cache are not here: they are only places looked
+        # at (_print_other_places_looked).
+        print(f"            other copy not read: {older}")
+    for newer in folder.newer_without_cache:
+        # The cache read is older than app files elsewhere: a Store build
+        # that is running but has not written its cache yet, or never does.
+        # Reading the old cache is the rule; without this line the panel
+        # just stops moving and the report says nothing about why.
+        print(f"            newer app files, no usage cache yet: {newer}")
+    for refused in folder.unreadable:
+        # There, and refused (a permission error): it
+        # ranked on what could be read, so a stale folder may have won.
+        # Said apart from "looked at", which means looked and found nothing.
+        print(f"            could not be read: {refused}")
+    if folder.resolve_failed:
+        why = f" ({folder.error})" if folder.error else ""
+        print(f"            folder lookup failed{why}, Roaming used as a"
+              f" fallback")
+
+
+def _print_other_places_looked(folder):
+    """The Desktop row's "nothing found" lines for every place beyond the
+    one `looked at` already named.
+
+    The friend's output on 2026-11-04 named Roaming and nothing else, and
+    that sent us looking at Roaming. Every data folder the resolver tried is
+    listed, as the usage-cache path it wanted, and when no Store package
+    folder exists at all that is said too, with where it looked. Off Windows
+    `folder.looked` is empty and nothing prints. A folder holding a cache is
+    not "looked at" with nothing found: it is `not_read`, and the status row
+    says so on its own line.
+    """
+    from pc import desktop_paths
+    cache = desktop_paths.USAGE_CACHE_NAME
+    first = os.path.normcase(os.path.normpath(folder.path))
+    seen = {first} | {os.path.normcase(os.path.normpath(p))
+                      for p in folder.not_read}
+    for where in folder.looked:
+        key = os.path.normcase(os.path.normpath(where))
+        if key in seen:
+            continue
+        seen.add(key)
+        print(f"            also looked at {os.path.join(where, cache)}")
+    if (folder.packages_root and not folder.packages
+            and folder.packages_root not in folder.unreadable):
+        # A Packages folder that could not be listed is named on its own
+        # line ("could not be read") and is not "no Store package folder".
+        print(f"            no Store package folder under"
+              f" {folder.packages_root} (looked for Claude_*)")
 
 
 def _source_lines_codex(now):
