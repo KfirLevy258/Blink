@@ -10,6 +10,7 @@ request id: never a password, never a key. The token is generated here with
 from __future__ import annotations
 
 import json
+import os
 import secrets
 
 from pc import private_file
@@ -31,10 +32,21 @@ def take_request(home: str) -> dict | None:
     is not one of ours (unknown panel, wrong shape). A file that is not
     provably owner-only raises NotPrivate, as open_private does: the daemon
     must not act on something another account could have written."""
-    raw = private_file.open_private(home, REQUEST_FILE)
+    # Renamed to a name of our own first, so two takers cannot both read it
+    # and a refused file is gone either way (it used to be refused on every
+    # serial-loop pass).
+    here = os.path.join(private_file.private_dir(home), REQUEST_FILE)
+    mine = f"settings_request.{secrets.token_hex(4)}.taken"
+    try:
+        os.rename(here, os.path.join(os.path.dirname(here), mine))
+    except FileNotFoundError:
+        return None
+    try:
+        raw = private_file.open_private(home, mine)
+    finally:
+        private_file.remove_private(home, mine)
     if raw is None:
         return None
-    private_file.remove_private(home, REQUEST_FILE)
     try:
         obj = json.loads(raw.decode("utf-8"))
     except ValueError:

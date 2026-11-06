@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import threading
+import time
 
 import pytest
 
@@ -178,3 +179,80 @@ def test_theme_edit_opens_look():
     finally:
         del Fake.new_link
     assert opened == ["http://127.0.0.1:6000/open?k=1&panel=look"]
+
+
+def test_settings_succeeds_while_launch_is_stuck_in_the_opener():
+    gate = threading.Event()
+    entered = threading.Event()
+
+    def stuck(url):
+        entered.set()
+        gate.wait(20)
+        return True
+    lau = theme_server.Launcher(home(), opener=stuck, make_server=Fake)
+    Fake.new_link = lambda self: "http://127.0.0.1:6000/open?k=1"
+    t = threading.Thread(target=lau.launch, daemon=True)
+    try:
+        t.start()
+        assert entered.wait(5)
+        opened = []
+        t0 = time.monotonic()
+
+        def daemon_sleep(_):
+            req = settings_request.take_request(home())
+            if req:
+                lau.serve_headless(req["panel"], req["k"], req["id"])
+        rc = cli.cmd_settings(type("A", (), {"panel": None})(),
+                              opener=lambda u: opened.append(u) or True,
+                              clock=Clock(), sleep=daemon_sleep)
+        assert rc == 0 and len(opened) == 1
+        assert not gate.is_set() and time.monotonic() - t0 < 5
+    finally:
+        gate.set()
+        t.join(5)
+        del Fake.new_link
+
+
+def test_a_consumed_request_with_no_answer_does_not_say_not_running(capsys):
+    def eat(_):
+        settings_request.take_request(home())
+    rc = cli.cmd_settings(type("A", (), {"panel": None})(), opener=lambda u: 1,
+                          clock=Clock(), sleep=eat)
+    out = capsys.readouterr().out
+    assert rc == 1 and "not running" not in out and "did not answer" in out
+
+
+def test_a_refused_request_file_is_gone_after_one_pass(monkeypatch):
+    import claude_usage_bridge as b
+    settings_request.write_request(home(), "connect")
+
+    def refuse(*a):
+        raise private_file.NotPrivate("x")
+    monkeypatch.setattr(private_file, "open_private", refuse)
+    import io
+    log = io.StringIO()
+    b.settings_pickup(home(), None, log)
+    b.settings_pickup(home(), None, log)
+    assert log.getvalue().count("refused") == 1
+    assert not os.path.exists(req_path())
+
+
+def test_pickup_hands_the_request_to_the_launcher_and_logs_failure():
+    import io
+    import claude_usage_bridge as b
+    got = []
+
+    class L:
+        def serve_headless(self, *a):
+            got.append(a)
+            if len(got) == 2:
+                raise ValueError("short")
+    log = io.StringIO()
+    tok, rid = settings_request.write_request(home(), "board")
+    b.settings_pickup(home(), L(), log).join(5)
+    settings_request.write_request(home(), "look")
+    b.settings_pickup(home(), L(), log).join(5)
+    assert got[0] == ("board", tok, rid) and len(got) == 2
+    assert "request served" in log.getvalue()
+    assert "request failed" in log.getvalue()
+    assert tok not in log.getvalue()

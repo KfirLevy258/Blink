@@ -4576,11 +4576,17 @@ def cmd_settings(args, opener=None, clock=time.monotonic,
                 break
         if clock() - start >= SETTINGS_WAIT_S:
             try:
-                private_file.remove_private(home, settings_request.REQUEST_FILE)
+                untouched = private_file.remove_private(
+                    home, settings_request.REQUEST_FILE)
             except OSError:
-                pass
-            print("The app is not running. Run blink install, or blink run"
-                  " in another terminal.")
+                untouched = True
+            if untouched:
+                print("The app is not running. Run blink install, or blink"
+                      " run in another terminal.")
+            else:
+                # Taken but never answered: a running app that is busy.
+                print("The app did not answer. Try blink settings again in"
+                      " a moment.")
             return 1
         sleep(0.2)
     url = f"http://127.0.0.1:{port}/open?k={token}&panel={panel}"

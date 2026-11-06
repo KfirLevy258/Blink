@@ -1120,6 +1120,16 @@ class Launcher:
         registered, then record its port with the request id (D37, D50).
         Never calls the opener: the CLI opens the browser, and launch()
         holds this lock across an opener measured stuck for 28.7 s."""
+        # A running server needs no Launcher lock: launch() holds it across a
+        # hung opener (28.7 s measured), and the request file is already
+        # consumed, so waiting here made the CLI say "not running" of a
+        # healthy daemon.
+        server = self._server
+        if server is not None and not server.done:
+            server.add_token(token)
+            server.touch()
+            theme.write_builder(self._home, server.port, ack=request_id)
+            return
         with self._lock:
             server = self._server
             if server is not None and not server.done:

@@ -26,6 +26,30 @@ from pc import (ingest, install_statusline, interval, logbook, protocol,
 from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
+def settings_pickup(home, launcher, log=None):
+    """`blink settings` (D37), called from _upkeep. The page server starts on
+    its own thread so a slow start never holds the serial loop; the opener is
+    never called here. Names only in the log."""
+    log = log or sys.stderr
+    try:
+        req = settings_request.take_request(home)
+    except (OSError, private_file.NotPrivate):
+        print("[settings] request file refused", file=log)
+        return None
+    if req is None:
+        return None
+
+    def serve():
+        try:
+            launcher.serve_headless(req["panel"], req["k"], req["id"])
+            print("[settings] request served", file=log)
+        except (OSError, ValueError):
+            print("[settings] request failed", file=log)
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    return t
+
+
 POLL_INTERVAL_S = 60
 # How often to LOOK at the local state files. Whether anything is SENT is a
 # separate decision, made in Bridge.poll_if_changed.
@@ -1058,29 +1082,8 @@ def main(argv=None):
     # print on a timer.
     _log_file = os.path.join(blink_home, "bridge.log")
 
-    def _settings_pickup():
-        # `blink settings` (D37). The page server starts on its own thread
-        # because Launcher's lock is held across a browser opener that has
-        # been stuck for 28.7 s, and this runs on the serial loop. The
-        # opener is never called here. Names only in the log.
-        try:
-            req = settings_request.take_request(blink_home)
-        except (OSError, private_file.NotPrivate):
-            print("[settings] request file refused", file=sys.stderr)
-            return
-        if req is None:
-            return
-
-        def serve():
-            try:
-                theme_builder.serve_headless(req["panel"], req["k"], req["id"])
-                print("[settings] request served", file=sys.stderr)
-            except (OSError, ValueError):
-                print("[settings] request failed", file=sys.stderr)
-        threading.Thread(target=serve, daemon=True).start()
-
     def _upkeep():
-        _settings_pickup()
+        settings_pickup(blink_home, theme_builder)
         drifted = watchdog.tick()
         if drifted:
             print(f"[watchdog] {drifted}", file=sys.stderr)
