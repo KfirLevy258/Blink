@@ -173,8 +173,10 @@ blink_zephyr_build_ready || exit 1
 BIN="$ROOT/firmware/build-sb/firmware/zephyr/zephyr.signed.bin"
 
 # A release must not carry the on-device network path. The code and its
-# CONFIG_BLINK_WIFI_MODE switch were deleted on 2026-10-27, so on this tree
-# neither check below can fire. They stay as tripwires: the path could
+# CONFIG_BLINK_WIFI_MODE switch were deleted on 2026-10-27; the radio that
+# returns with the WiFi link is the daemon's transport only, and
+# blink_refuse_standalone_net below holds it to that. These two checks stay
+# as tripwires: the path could
 # return through an old build directory, an undone commit or a merge from
 # a fork, and the first anyone would hear of it is a customer's board
 # signing in to Anthropic as Claude Code.
@@ -217,6 +219,14 @@ blink_refuse_inject "$CFG" "$BIN" || exit 1
 # Both get into build-sb the same way, one EXTRA_CONF_FILE kept in the cache.
 blink_refuse_trace "$CFG" "$BIN" || exit 1
 blink_refuse_pilot "$CFG" "$BIN" || exit 1
+# An image with a radio carries the daemon link and nothing else, and no
+# bench test knob (each would revert or hang every desk that took it).
+blink_refuse_standalone_net "$CFG" "$BIN" || exit 1
+blink_refuse_test_knobs "$CFG" "$BIN" || exit 1
+# Keep equal to OTA_IMAGE_MAX in firmware/src/ota_parse.h (slot 1 minus the
+# swap-move sector minus the aligned trailer, spec section 9).
+OTA_IMAGE_MAX=1318912
+blink_refuse_oversize "$BIN" "$OTA_IMAGE_MAX" || exit 1
 
 SIZE=$(stat -f%z "$BIN")
 SHA=$(shasum -a 256 "$BIN" | cut -d' ' -f1)
@@ -234,7 +244,9 @@ SLOT=$((0x150000))
 # on 2026-10-27; what an unconfirmed image does at boot now is
 # firmware/src/main.c, ota_boot_begin(). The size check above already
 # catches --pad, which pads to the full slot -- this names the reason, so
-# nobody "fixes" it by padding here too.
+# nobody "fixes" it by padding here too. Over WiFi the board writes its own
+# slot 1 and MCUboot swaps and test-boots it; the image still ships
+# unconfirmed and unpadded, and must fit OTA_IMAGE_MAX (checked above).
 [ "$SIZE" -lt "$SLOT" ] || {
 	echo "FATAL: $BIN is exactly the slot size -- it looks padded, and a"
 	echo "       padded image carries a trailer. The OTA artifact must be"

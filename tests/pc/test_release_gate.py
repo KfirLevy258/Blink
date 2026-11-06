@@ -596,3 +596,103 @@ def test_the_shipped_vm_inventory_reads_as_vm():
     assert kind == "vm" and names == sorted(VM_DESKS)
     assert fleet_gate._inventory(ROOT / "tools" / "fleet"
                                  / "fleet.toml")[1] == "desks"
+
+
+# ---- the image guards in tools/lib_selftest.sh (Task 5.3) -------------------
+# Configs and images are written here, never taken from a build.
+import re  # noqa: E402
+import shutil  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_ROOT = Path(__file__).resolve().parents[2]
+_LIB = _ROOT / "tools" / "lib_selftest.sh"
+_need_sh = pytest.mark.skipif(shutil.which("sh") is None, reason="needs POSIX sh")
+
+_CLEAN = "CONFIG_WIFI=y\nCONFIG_BLINK_WIFI_LINK=y\n# CONFIG_DNS_RESOLVER is not set\n"
+_OTA_IMAGE_MAX = 1318912
+
+
+def _sh(tmp_path, fn, cfg=None, image=b"\x00MCUB blink\x00", *extra):
+    c, i = tmp_path / ".config", tmp_path / "zephyr.signed.bin"
+    if cfg is not None:
+        c.write_text(cfg, encoding="utf-8")
+    if image is not None:
+        i.write_bytes(image)
+    args = list(extra) if fn == "blink_refuse_oversize" else [str(c), str(i)]
+    if fn == "blink_refuse_oversize":
+        args = [str(i)] + args
+    return subprocess.run(
+        ["sh", "-c", '. "$0"; fn=$1; shift; "$fn" "$@"', str(_LIB), fn, *args],
+        capture_output=True, text=True, timeout=30)
+
+
+@_need_sh
+def test_clean_pair_passes_every_guard(tmp_path):
+    for fn in ("blink_refuse_standalone_net", "blink_refuse_test_knobs"):
+        r = _sh(tmp_path, fn, _CLEAN)
+        assert r.returncode == 0 and r.stderr == "", (fn, r.stderr)
+
+
+@_need_sh
+@pytest.mark.parametrize("cfg", [
+    "CONFIG_WIFI=y\n",
+    _CLEAN + "CONFIG_DNS_RESOLVER=y\n",
+    _CLEAN + "CONFIG_HTTP_CLIENT=y\n",
+    _CLEAN + "CONFIG_SNTP=y\n",
+    _CLEAN + "CONFIG_NET_SOCKETS_SOCKOPT_TLS=y\n",
+    _CLEAN + "CONFIG_ESP32_WIFI_AP_STA_MODE=y\n",
+])
+def test_standalone_net_config_refused(tmp_path, cfg):
+    r = _sh(tmp_path, "blink_refuse_standalone_net", cfg)
+    assert r.returncode == 1 and "FATAL" in r.stderr
+
+
+@_need_sh
+@pytest.mark.parametrize("s", [b"api.anthropic.com", b"console.anthropic.com",
+                               b"claude.ai", b"/releases/latest/download/"])
+def test_standalone_net_string_refused(tmp_path, s):
+    r = _sh(tmp_path, "blink_refuse_standalone_net", _CLEAN, b"\x00" + s + b"\x00")
+    assert r.returncode == 1 and "FATAL" in r.stderr
+
+
+@_need_sh
+def test_missing_inputs_refuse(tmp_path):
+    for fn in ("blink_refuse_standalone_net", "blink_refuse_test_knobs"):
+        assert _sh(tmp_path / "x", fn, None, None).returncode == 1
+
+
+@_need_sh
+@pytest.mark.parametrize("knob", ["NEVER_HEALTHY", "CONFIRM_FAILS", "HANG_AFTER_BOOT"])
+def test_test_knob_config_refused(tmp_path, knob):
+    r = _sh(tmp_path, "blink_refuse_test_knobs", _CLEAN + f"CONFIG_BLINK_TEST_{knob}=y\n")
+    assert r.returncode == 1 and "FATAL" in r.stderr
+
+
+@_need_sh
+def test_test_marker_in_image_refused_though_config_is_clean(tmp_path):
+    r = _sh(tmp_path, "blink_refuse_test_knobs", _CLEAN, b"\x00[test] never healthy\n")
+    assert r.returncode == 1
+
+
+@_need_sh
+def test_oversize_boundary(tmp_path):
+    ok = _sh(tmp_path, "blink_refuse_oversize", None, b"\0" * _OTA_IMAGE_MAX,
+             str(_OTA_IMAGE_MAX))
+    assert ok.returncode == 0, ok.stderr
+    big = _sh(tmp_path, "blink_refuse_oversize", None, b"\0" * (_OTA_IMAGE_MAX + 1),
+              str(_OTA_IMAGE_MAX))
+    assert big.returncode == 1 and "FATAL" in big.stderr
+
+
+def test_release_sh_wires_the_guards_and_keeps_the_old_one():
+    text = (_ROOT / "tools" / "release.sh").read_text(encoding="utf-8")
+    for call in ("blink_refuse_standalone_net", "blink_refuse_test_knobs",
+                 "blink_refuse_oversize", "CONFIG_BLINK_WIFI_MODE=y"):
+        assert call in text
+    assert f"OTA_IMAGE_MAX={_OTA_IMAGE_MAX}" in text
+    # Drift check once 5.1's header is on the tree.
+    hdr = _ROOT / "firmware" / "src" / "ota_parse.h"
+    if hdr.exists():
+        m = re.search(r"define\s+OTA_IMAGE_MAX\s+(\d+)u?", hdr.read_text())
+        if m:
+            assert int(m.group(1)) == _OTA_IMAGE_MAX
