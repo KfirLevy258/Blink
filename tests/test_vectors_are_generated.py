@@ -32,3 +32,17 @@ def test_the_generator_covers_what_the_host_test_counts_on():
     assert gen.PT_MAX == 517            # WL_PT_MAX, spec S6.3
     assert gen.COUNTERS == (0, 1, 1 << 32, (1 << 64) - 2)
     assert len(gen.BAD_LENGTHS) * gen.BAD_PER_LENGTH == 60
+
+
+def test_the_wire_header_is_what_its_generator_writes():
+    # tests/wl_wire_real holds wl_hs.c and wl_frame.c to the PC's session
+    # bytes; a header that drifted from pc/wifi_session.py would hold them
+    # to bytes the PC no longer sends.
+    spec = importlib.util.spec_from_file_location(
+        "gen_wire_vectors", ROOT / "tools" / "gen_wire_vectors.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    header = ROOT / "tests" / "wl_wire_real" / "vectors.h"
+    assert header.read_text(encoding="utf-8") == mod.source(), (
+        "tests/wl_wire_real/vectors.h differs from pc/wifi_session.py:"
+        " run tools/gen_wire_vectors.py")

@@ -133,6 +133,11 @@ run_one usage_layout ""                ""
 run_one usage_state  "usage_state.c"   ""
 run_one svc_state    "svc_state.c fmt.c" ""
 
+# The handshake and the frame, on the toy cipher in tests/support (an
+# absolute path is a source outside firmware/src, as run_one allows).
+run_one wl_hs    "wl_hs.c $ROOT/tests/support/wl_crypto_fake.c"    ""
+run_one wl_frame "wl_frame.c $ROOT/tests/support/wl_crypto_fake.c" ""
+
 # The board's cipher (wl_crypto_mbedtls.c, unchanged) against the PC's
 # (pc/wifi_crypto.py, through tests/wl_crypto_real/vectors.h) at every
 # plaintext length, on mbedTLS's own sources: the library files the wrapper
@@ -165,6 +170,10 @@ if MBEDTLS=$(mbedtls_src); then
 		mbed_objs="$mbed_objs $MBEDTLS/library/$f"
 	done
 	run_one wl_crypto_real "$mbed_objs" \
+		"-I$MBEDTLS/include -I$ROOT -I$ROOT/tests/wl_crypto_real/stub -DMBEDTLS_CONFIG_FILE=\"tests/wl_crypto_real/mbedtls_config.h\""
+	# The handshake and frame code on that same real cipher, against the
+	# PC's session bytes (tools/gen_wire_vectors.py).
+	run_one wl_wire_real "wl_hs.c wl_frame.c $mbed_objs" \
 		"-I$MBEDTLS/include -I$ROOT -I$ROOT/tests/wl_crypto_real/stub -DMBEDTLS_CONFIG_FILE=\"tests/wl_crypto_real/mbedtls_config.h\""
 elif [ "${BLINK_REQUIRE_MBEDTLS:-}" = 1 ]; then
 	printf '  %-14s NO MBEDTLS SOURCE (BLINK_REQUIRE_MBEDTLS=1)\n' wl_crypto_real
