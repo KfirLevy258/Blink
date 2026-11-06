@@ -7,6 +7,8 @@ $314.12 used, 62.8% of it.
 import json
 import types
 
+import pytest
+
 from pc import ingest, protocol
 from pc.bridge import Bridge
 from pc.providers import base
@@ -970,7 +972,8 @@ def test_a_restart_with_nothing_to_show_clears_the_old_page():
     f = _Fetch(None, None)
     b = Bridge(write_msg=sent.append, fetch_usage=f, now=lambda: 1000.0,
                wall=lambda: (1752444000, 0),
-               board_caps_hint=[protocol.BOARD_CAP_PLAN], **_NO_FEED)
+               board_caps_hint=[protocol.BOARD_CAP_PLAN],
+               idle=lambda: None, **_NO_FEED)
     b.greet()
     (u,) = [m for m in sent if m["t"] == "usage"]
     assert u["provider"] == "claude" and u["session_pct"] == -1
@@ -999,12 +1002,13 @@ def test_a_restart_on_a_board_without_plans_sends_no_blank():
 
 # ---------------------- /code-review max of the fix wave (277b81a..4003b0b)
 
-def _blank_greet(fetch, caps=(protocol.BOARD_CAP_PLAN,), clock=None):
+def _blank_greet(fetch, caps=(protocol.BOARD_CAP_PLAN,), clock=None,
+                 idle=lambda: None):
     sent = []
     clock = clock or {"t": 1000.0}
     b = Bridge(write_msg=sent.append, fetch_usage=fetch,
                now=lambda: clock["t"], wall=lambda: (1752444000, 0),
-               board_caps_hint=list(caps), **_NO_FEED)
+               board_caps_hint=list(caps), idle=idle, **_NO_FEED)
     b.greet()
     return b, sent, clock
 
@@ -1026,6 +1030,44 @@ def test_the_greeting_blank_never_wakes_a_dozed_board():
         (u,) = _usages_after(sent, n)
         assert u["active_age_s"] == protocol.SECS_MAX
         assert protocol.encode_checked(u)[1] is None
+
+
+@pytest.mark.parametrize("idle_s, want", [
+    (42.0, 42), (29 * 60, 29 * 60), (30 * 60, protocol.SECS_MAX),
+    (None, protocol.SECS_MAX)])
+def test_the_greeting_blank_with_no_earlier_line_asks_the_idle_probe(
+        idle_s, want):
+    """The scoped review of feat/spend-wsl-refresh, item 4: a fresh
+    process with no earlier line sent SECS_MAX for both ages, so a person
+    at the desk on a spend seat watched the board doze after a restart.
+    The active age is the idle probe's when someone is there (under the
+    30 minutes usage_refresh calls present); absent or unknown is still
+    SECS_MAX. age_s, the reading's own age, stays SECS_MAX. The probe is
+    asked once, at the greeting, never by the restatements after it."""
+    asked = []
+    b, sent, clock = _blank_greet(
+        _Fetch(None, None), idle=lambda: asked.append(1) or idle_s)
+    (u,) = [m for m in sent if m["t"] == "usage"]
+    assert u["age_s"] == protocol.SECS_MAX
+    assert u["active_age_s"] == want
+    clock["t"] += 60
+    n = len(sent)
+    b.poll_once()
+    (u,) = _usages_after(sent, n)
+    assert u["active_age_s"] == min(want + 60, protocol.SECS_MAX)
+    assert asked == [1]
+
+
+def test_the_greeting_blank_after_a_line_does_not_ask_the_idle_probe():
+    f = _Fetch(protocol.frame_to_usage(windows(), NOW), None)
+    sent, asked = [], []
+    b = Bridge(write_msg=sent.append, fetch_usage=f, now=lambda: 1000.0,
+               wall=lambda: (1752444000, 0),
+               idle=lambda: asked.append(1) or 5.0, **_NO_FEED)
+    _hello(b, "1.4.0")
+    f.usage = None
+    _hello(b, "1.4.0")
+    assert asked == []
 
 
 def test_a_held_line_never_ages_past_what_the_board_accepts():

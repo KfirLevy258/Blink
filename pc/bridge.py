@@ -12,6 +12,10 @@ from pc import protocol
 from pc import status_page
 from pc.version import PROTO_VERSION, RELEASE_VERSION
 
+# Under this much idle the person is at the computer: usage_refresh's
+# IDLE_LIMIT_S, the line its "someone is here" rule draws.
+_PRESENT_S = 30 * 60
+
 LIVENESS_WINDOW_S = 30.0
 
 # How long after a greeting no theme line is sent: one fast tick
@@ -105,8 +109,12 @@ class Bridge:
                  status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
                  edit_answers=None, builder_ended=None, builder_open=None,
-                 sleep=time.sleep, refresh_ask=None):
+                 sleep=time.sleep, refresh_ask=None, idle=None):
         self._write = write_msg          # callable(dict)
+        # Seconds since the last keyboard or mouse input, or None: asked
+        # only by greet's blank with no earlier line (_send_blank). None
+        # here is pc/idle.seconds_idle, looked up when asked.
+        self._idle = idle
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
         # None on a daemon wired without a bus (the tests do this).
@@ -1307,6 +1315,15 @@ class Bridge:
         if greeting and last is not None and self._last_usage_at is not None:
             last = protocol.aged_usage(last, now - self._last_usage_at)
         blank = protocol.blank_page(last, page)
+        if greeting and last is None:
+            # No earlier line: SECS_MAX for both ages dozed the board under
+            # a person sitting at it (the scoped review of
+            # feat/spend-wsl-refresh, item 4). Whether someone is here is the
+            # idle probe's, asked once, here: it starts ioreg on macOS, and
+            # the restatements after this only age what it said.
+            idle_s = self._idle_seconds()
+            if idle_s is not None and 0 <= idle_s < _PRESENT_S:
+                blank["active_age_s"] = int(idle_s)
         if greeting:
             for k in ("age_s", "active_age_s"):
                 v = blank.get(k)
@@ -1319,6 +1336,16 @@ class Bridge:
         self._last_pushed = protocol.meaningful_usage(blank)
         self._last_usage = blank
         self._last_usage_at = now
+
+    def _idle_seconds(self):
+        """The idle probe's answer, or None for any failure."""
+        try:
+            if self._idle is None:
+                from pc import idle
+                return idle.seconds_idle()
+            return self._idle()
+        except Exception:
+            return None
 
     def _spend_maybe_shown(self):
         """Whether a spend page can be on the board: the bus has seen a
