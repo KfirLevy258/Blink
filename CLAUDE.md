@@ -96,11 +96,21 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**3858 passing, 1 skipped** (os.startfile, Windows only) as of 2026-11-01, on
-macOS. The same tree on the other two platforms the same day, each its own
-count: Ubuntu (Docker, x86_64) 3661 passed and 198 skipped, Windows (ARM64 VM)
-3445 passed and 408 skipped, none failing. Two one-off failures were seen that
-day on earlier trees and passed on every re-run:
+**4003 passing, 1 skipped** (os.startfile, Windows only) as of 2026-11-06,
+on macOS, on PR #3's tree after its review fixes (4004 collected). The same
+tree the same day, each its own count: Ubuntu (Docker, x86_64) 3806 passed
+and 198 skipped; Windows (ARM64 VM, a git-archive zip) 3583 passed and 409
+skipped, with two failures. One was a new test that assumed it ran off
+Windows, fixed, after which `test_desktop_paths.py`, `test_ingest.py` and
+`test_theme_server.py` ran there at 346 passed and 3 skipped; the other was
+`test_theme_server.py::test_no_write_is_taken_without_the_token[/api/closed]`,
+a loopback WinError 10053 reset, which passed in that re-run. Windows
+collects 10 fewer tests (3994), all in `tests/pc/test_desktop_paths.py`, by
+design: parametrize lists filter at collection on what that filesystem lets
+a fixture create (6 unsafe marker names, 4 glob-hostile profile names). The
+VM full run took 470 s against 161 s on the Mac and 370 s on Ubuntu.
+Two one-off failures were seen on 2026-11-01 on earlier trees
+and passed on every re-run:
 `test_sandbox.py::test_ordinary_commands_are_untouched` on Ubuntu (the child
 Python printed nothing) and `test_theme_server.py::test_an_oversize_body_is_refused`
 on Windows (a connection reset). The skips are platform tests and,
