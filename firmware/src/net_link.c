@@ -534,7 +534,10 @@ void net_link_work(void)
 		rejoin_at = 0;
 	}
 	want = atomic_clear(&rejoin_want);
-	if (want != 0 && cfg_paired()) {
+	/* A requested join in the same wake-up supersedes a boot or lost-network
+	 * rejoin: applying it would leave a rejoin_at that overwrites a failed
+	 * user join with the stored pairing. */
+	if (want != 0 && !(o & OP_JOIN) && cfg_paired()) {
 		/* 1: boot, at once. 2: a lost network, the router a moment
 		 * first. */
 		rejoin_n = want == 2 ? 1 : 0;
