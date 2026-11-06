@@ -400,10 +400,10 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[time] manual time",                                      # net_time.c:67
     # [wifi] -- firmware/src/net_link.c (spec S5.8). The join's reason is one
     # of net_link_why_text's fixed sentences, and is cut like any value.
-    "[wifi] radio up",                                         # :160
-    "[wifi] joined",                                           # :351
-    "[wifi] join failed",                                      # :270
-    "[wifi] lost the network",                                 # :136
+    "[wifi] radio up",                                         # :171
+    "[wifi] joined",                                           # :368
+    "[wifi] join failed",                                      # :281
+    "[wifi] lost the network",                                 # :142
 ), key=len, reverse=True))
 
 # "[ota] update %s: wanted %s, running %s (from %s)" (main.c:233) is the line

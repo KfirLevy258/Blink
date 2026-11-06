@@ -8,6 +8,15 @@
 /* Task 2.5. Returns -ENOSPC when the TX ring is full. Declared only when the
  * WiFi link is built, so an image without it still links. */
 int wl_server_tx_line(const char *line, int timeout_ms);
+
+/* Until Task 2.5's definition replaces it: no session, so nothing to send.
+ * Without it an image with BLINK_WIFI_LINK on (the default) did not link. */
+__weak int wl_server_tx_line(const char *line, int timeout_ms)
+{
+	ARG_UNUSED(line);
+	ARG_UNUSED(timeout_ms);
+	return -ENOTCONN;
+}
 #endif
 #endif
 

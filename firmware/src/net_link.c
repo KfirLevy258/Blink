@@ -62,6 +62,7 @@ BUILD_ASSERT(IS_ENABLED(CONFIG_ESP32_WIFI_STA_AUTO_DHCPV4),
 #define CONNECT_TRIES 10
 #define CONNECT_RETRY_MS 300
 
+#define RSSI_EVERY_S 10
 #define OP_DOWN BIT(0)
 #define OP_JOIN BIT(1)
 #define OP_SCAN BIT(2)
@@ -73,6 +74,8 @@ static K_SEM_DEFINE(sem_disc, 0, 1);
 static K_SEM_DEFINE(sem_scan, 0, 1);
 
 static atomic_t ops;
+static atomic_t rssi_cache = ATOMIC_INIT(-127);
+static void kick(void);
 static atomic_t scanning;
 static volatile enum net_link_state state = NL_OFF;
 static volatile enum net_link_why why = NL_WHY_NONE;
@@ -92,8 +95,11 @@ static char req_psk[65];
 
 /* The driver's scan security (esp_wifi_drv.c:255) as S6.1's four kinds, or
  * -1 for a network nothing here can join: WEP, WAPI and 802.1X (D16). The
- * driver has no type for WPA2/WPA3 transition or WPA/WPA2 and reports both
- * as UNKNOWN; each takes a WPA2 passphrase, so UNKNOWN is "mixed". */
+ * driver's default branch (esp_wifi_drv.c:277) reports everything else as
+ * UNKNOWN: WPA/WPA2, WPA2/WPA3 transition, OWE and WPA3-Enterprise-192
+ * alike. The first two take a WPA2 passphrase and are most of what a home
+ * router broadcasts, so UNKNOWN is "mixed"; an OWE or WPA3-Enterprise
+ * network listed that way fails its join as a wrong password. */
 static int sec_of(enum wifi_security_type s)
 {
 	switch (s) {
@@ -134,6 +140,11 @@ static void wifi_evt(struct net_mgmt_event_callback *cb, uint64_t ev,
 			 * router's doing. */
 			state = NL_OFF;
 			printk("[wifi] lost the network\n");
+			/* Without this the interface stayed admin-up with the
+			 * RF on while net_link_state() said off. The rejoin,
+			 * with its backoff, is Task 2.5's (cfg_get_pairing). */
+			atomic_or(&ops, OP_DOWN);
+			kick();
 		}
 	} else if (ev == NET_EVENT_WIFI_SCAN_RESULT) {
 		const struct wifi_scan_result *r = cb->info;
@@ -334,14 +345,20 @@ static void join_run(const uint8_t *ssid, size_t ssid_len, const char *psk)
 	dropped = false;
 	conn_status = 0;
 	joining = true;
+	k_sem_reset(&sem_conn);
 	for (int i = 0; i < CONNECT_TRIES; i++) {
-		/* A refused request raises a connect result of its own. */
-		k_sem_reset(&sem_conn);
 		rc = net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &p, sizeof(p));
 		if (rc != -EIO && rc != -EAGAIN) {
 			break;
 		}
-		k_msleep(CONNECT_RETRY_MS);
+		/* The -EIO refusal raises a -1 connect result of its own
+		 * (esp_wifi_drv.c:525), delivered later by the event thread.
+		 * Waiting on the semaphore instead of sleeping consumes it, so
+		 * it is never read as the next attempt's verdict; an -EAGAIN,
+		 * which raises nothing, just waits out the delay. A reset
+		 * alone was not enough: the event can land after it. */
+		(void)k_sem_take(&sem_conn, K_MSEC(CONNECT_RETRY_MS));
+		k_sem_reset(&sem_conn);
 	}
 	got = rc == 0 && k_sem_take(&sem_conn, K_SECONDS(JOIN_WAIT_S)) == 0;
 	joining = false;
@@ -381,6 +398,20 @@ static void do_join(void)
 	mbedtls_platform_zeroize(psk, sizeof(psk));
 }
 
+/* On the work thread, for net_link_rssi(). */
+static void rssi_refresh(void)
+{
+	struct wifi_iface_status st = { 0 };
+
+	if (state == NL_UP &&
+	    net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &st, sizeof(st)) == 0 &&
+	    st.state == WIFI_STATE_COMPLETED) {
+		atomic_set(&rssi_cache, st.rssi);
+	} else {
+		atomic_set(&rssi_cache, -127);
+	}
+}
+
 void net_link_work(void)
 {
 	atomic_val_t o;
@@ -402,6 +433,7 @@ void net_link_work(void)
 	    state != NL_UP && state != NL_JOINING) {
 		do_down(true);
 	}
+	rssi_refresh();
 }
 
 /* --- until Task 2.5's thread: a work queue of its own ------------------ */
@@ -421,7 +453,10 @@ static void nl_handler(struct k_work *w)
 {
 	ARG_UNUSED(w);
 	net_link_work();
-	if (idle_at != 0) {
+	if (state == NL_UP) {
+		/* Keeps the cached RSSI fresh for the panel's Signal row. */
+		(void)k_work_schedule_for_queue(&nl_q, &nl_dw, K_SECONDS(RSSI_EVERY_S));
+	} else if (idle_at != 0) {
 		int64_t left = idle_at - k_uptime_get();
 
 		(void)k_work_schedule_for_queue(&nl_q, &nl_dw,
@@ -573,14 +608,10 @@ bool net_link_ip(char *buf, size_t len)
 	return a != NULL && net_addr_ntop(AF_INET, a, buf, len) != NULL;
 }
 
+/* Main thread: the cached reading only. The status request takes ESP-IDF's
+ * API lock, which a join or scan on the work thread can hold for seconds,
+ * and LVGL would stall behind it. */
 int8_t net_link_rssi(void)
 {
-	struct wifi_iface_status st = { 0 };
-
-	if (iface == NULL || state != NL_UP ||
-	    net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &st, sizeof(st)) != 0 ||
-	    st.state != WIFI_STATE_COMPLETED) {
-		return -127;
-	}
-	return (int8_t)st.rssi;
+	return state == NL_UP ? (int8_t)atomic_get(&rssi_cache) : -127;
 }
