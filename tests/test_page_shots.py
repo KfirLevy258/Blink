@@ -62,7 +62,13 @@ def shots(tmp_path, monkeypatch):
 # higher), example data, the system font, and the page's extra Customise
 # content. Measured 2026-11-06: closed .055, Look .142, Connect .072,
 # Board .076 (light); a layout that is off blows through them.
-CEILING = {"closed": .10, "look": .20, "connect": .12, "board": .12}
+#
+# Owner change 2026-11-07: the cards and the board start under the header
+# (the mock centres them in the window), Save sits under the tabs, and the
+# drawn screen has no dot. That moves more pixels away from the mock; the
+# ceilings follow the new light-scheme measurements (closed .110, Look .232,
+# Connect .144, Board .134) with about .015 of room, not further.
+CEILING = {"closed": .125, "look": .25, "connect": .16, "board": .15}
 
 
 def _box_close(a, b, tol=2):

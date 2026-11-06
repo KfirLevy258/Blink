@@ -451,3 +451,23 @@ marks a capability the board or app does not have yet.
 - **Scroll width at 400px:** `scrollbar-gutter: stable` holds 15 px back on a
   classic-scrollbar desktop, so the document is narrower than the viewport,
   never wider.
+
+
+## 9. Owner changes, 2026-11-07
+
+Dated notes from the product owner after seeing the built page. Where they
+differ from the sections above, they win.
+
+1. **Cards sit under the header.** The three columns start just under the top
+   bar (`align-content: start`), not centred in the leftover height. At
+   1440x900 that removes a band of about 150 px above the side cards. The side
+   cards and the board share the row's top, so they stay level.
+2. **Save sits under the tabs.** "Save theme to board" is a full-width primary
+   button directly under the Look / Connect / Board control in the middle
+   column, not at the foot of Customise. Cancel stays in Customise.
+3. **The board's link icon shows the status.** The top-right status dot is
+   gone, on the real board and in the drawn screen. A USB trident or WiFi fan
+   alone shows the link, and its colour is the status: green live, amber
+   connecting or stale, grey no link. These colours are the page's own; the
+   firmware branch for the icon (wifi/fw-linkicon) did not exist when this was
+   built, so check them against it.

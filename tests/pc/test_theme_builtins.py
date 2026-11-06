@@ -366,7 +366,11 @@ def test_the_builders_status_dot_follows_the_boards_rule(tmp_path):
     assert by_name["Dark"] == "0da243 ba8107"
 
 
-def test_the_builder_draws_the_dot_through_the_rule():
+def test_the_builder_draws_no_header_dot_and_colours_the_link_icon():
+    """Owner change 2026-11-07: the board's top-right dot is gone and the
+    link icon alone shows the link, its colour the status. dotColours stays
+    (parity with theme.c above) but the drawn screen no longer paints it."""
     html = PAGE.read_text(encoding="utf-8")
-    assert "fill: '#' + dotColours(st.low, st.mid, st.bg)[0]" in html
-    assert "fill: '#' + st.low }" not in html
+    assert "dotColours(st.low, st.mid, st.bg)[0]" not in html
+    assert "linkMark(svg, 297, 14)" in html
+    assert "LINK_COL" in html

@@ -75,7 +75,10 @@ h1 span { font-weight: 400; letter-spacing: 0; color: var(--muted); margin-left:
 /* ---------- three columns, the board in the middle one ---------- */
 .page { flex: 1; width: 100%; max-width: 1720px; margin: 0 auto; display: grid; column-gap: 28px;
   grid-template-columns: minmax(320px, 1fr) minmax(460px, 600px) minmax(320px, 1fr); grid-template-areas: "left hub right";
-  align-content: center; align-items: stretch; }
+  /* Owner, 2026-11-07: start under the header, not centred in the leftover
+     height, which left a 150 px empty band at 1440x900. The side cards and
+     the board share the row's top, so they stay level with each other. */
+  align-content: start; align-items: stretch; padding-top: 4px; }
 .hub { grid-area: hub; display: flex; flex-direction: column; align-items: center; min-width: 0; position: relative; }
 /* A panel is out of flow with its top edge on the case's top edge, so its
    height never changes the row and the board never moves. */
@@ -272,6 +275,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
 .paste .btn { width: auto; }
 .keep { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .keep .btn.primary { width: auto; flex: 1 1 160px; }
+.savebtn { width: 100%; max-width: 320px; margin-top: 10px; }
 
 /* the theme message: how a preview or a save went, in words and an icon */
 .say { display: flex; gap: 8px; align-items: flex-start; color: var(--muted); font-size: 13px; min-width: 0; transition: color .2s ease; }
@@ -493,6 +497,8 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       <button type="button" data-panel="connect" aria-controls="pConn" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M2 6.2a8.5 8.5 0 0 1 12 0M4.4 8.8a5 5 0 0 1 7.2 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="8" cy="12" r="1.5" fill="currentColor"/></svg>Connect</button>
       <button type="button" data-panel="board" aria-controls="pBoard" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="1.8" y="3" width="12.4" height="9.4" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 14.5v-2M11 14.5v-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Board</button>
     </div>
+    <!-- Owner, 2026-11-07: Save sits directly under the Look / Connect / Board tabs -->
+    <button type="button" class="btn primary savebtn" id="save" disabled>Save theme to board</button>
   </section>
 
   <div class="side" id="sideL">
@@ -555,7 +561,6 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
         </div>
         <div class="sec">
           <div class="keep">
-            <button type="button" class="btn primary" id="save" disabled>Save to board</button>
             <button type="button" class="btn" id="cancel">Cancel</button>
           </div>
         </div>
@@ -832,20 +837,30 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
     g.appendChild(el('text', a, s));
   }
   function txt(g, x, y, size, col, s, extra) { txtF(g, x, y, size, '#' + col, s, extra); }
-  // The status-bar link mark, about 19 px wide. USB is a USB-C cable end
-  // lying flat: the classic trident read as a fork at this size, and a plug
-  // standing up read as a padlock, which is the "Encrypted" mark.
-  function linkMark(g, x, y, col) {
-    var c = '#' + col;
+  // The status-bar link mark, about 21 px wide, alone in the top right: the
+  // status dot is gone (owner, 2026-11-07) and the mark's COLOUR is the
+  // status. USB is the classic trident (circle, arrow and square on a stem),
+  // WiFi three fan arcs and a point. Green is live, amber connecting or
+  // stale, grey no link. No firmware branch (wifi/fw-linkicon) existed when
+  // this was written, so these three are the page's own choice.
+  var LINK_COL = { live: 'rgb(60,200,110)', connecting: 'rgb(240,180,40)', none: GREY };
+  function linkMark(g, x, y) {
+    var c = LINK_COL[st.linkState] || LINK_COL.live;
+    var line = { fill: 'none', stroke: c, 'stroke-width': 1.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
+    function P(d, extra) { g.appendChild(el('path', Object.assign({ d: d }, extra || line))); }
     if (st.link === 'wifi') {
-      var s = { fill: 'none', stroke: c, 'stroke-width': 1.6, 'stroke-linecap': 'round' };
-      g.appendChild(el('path', Object.assign({ d: 'M' + (x - 7) + ' ' + (y - 1) + ' a10 10 0 0 1 14 0' }, s)));
-      g.appendChild(el('path', Object.assign({ d: 'M' + (x - 4) + ' ' + (y + 2) + ' a5.5 5.5 0 0 1 8 0' }, s)));
-      g.appendChild(el('circle', { cx: x, cy: y + 5, r: 1.6, fill: c }));
+      P('M' + (x - 9) + ' ' + (y - 2) + ' a13 13 0 0 1 18 0');
+      P('M' + (x - 6) + ' ' + (y + 1) + ' a8.5 8.5 0 0 1 12 0');
+      P('M' + (x - 3) + ' ' + (y + 4) + ' a4 4 0 0 1 6 0');
+      g.appendChild(el('circle', { cx: x, cy: y + 7, r: 1.5, fill: c }));
     } else {
-      g.appendChild(el('path', { d: 'M' + (x - 9.5) + ' ' + y + ' H' + (x - 6), stroke: c, 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
-      g.appendChild(el('rect', { x: x - 6.5, y: y - 3.6, width: 7, height: 7.2, rx: 1.6, fill: c }));
-      g.appendChild(el('rect', { x: x + .9, y: y - 2.5, width: 8, height: 5, rx: 2.5, fill: 'none', stroke: c, 'stroke-width': 1.4 }));
+      P('M' + (x - 7) + ' ' + y + ' H' + (x + 6));
+      g.appendChild(el('circle', { cx: x - 8.5, cy: y, r: 2.2, fill: c }));
+      P('M' + (x + 11) + ' ' + y + ' L' + (x + 6.5) + ' ' + (y - 2.8) + ' V' + (y + 2.8) + ' Z', { fill: c, stroke: c, 'stroke-width': 1 });
+      P('M' + (x - 3.5) + ' ' + y + ' L' + (x - 2) + ' ' + (y - 4.5) + ' H' + (x + .5));
+      g.appendChild(el('circle', { cx: x + 2.3, cy: y - 4.5, r: 1.6, fill: c }));
+      P('M' + (x - 1.5) + ' ' + y + ' L' + (x) + ' ' + (y + 4.5) + ' H' + (x + .5));
+      g.appendChild(el('rect', { x: x + .5, y: y + 3, width: 3, height: 3, fill: c }));
     }
   }
   function tileIcon(g, kind, cx, cy, c) {
@@ -938,6 +953,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       if ('session_pct' in s) st.p1 = +s.session_pct;
       if ('weekly_pct' in s) st.p2 = +s.weekly_pct;
       if ('link' in s) { st.link = s.link; paintLink(); }
+      if ('linkState' in s) st.linkState = s.linkState;
       if ('screen' in s) st.screen = s.screen;
       if ('logo' in s) st.logo = s.logo;
       render();
@@ -973,8 +989,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       svg.appendChild(el('text', { x: 160, y: 18, 'text-anchor': 'middle', 'font-family': F, 'font-size': 11.5, 'letter-spacing': 3, fill: '#' + dim }, 'BLINK'));
       var warn = Math.max(st.p1, st.p2) >= 95;
       svg.appendChild(el('text', { x: 160, y: 34, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (warn ? st.high : dim) }, warn ? (st.p1 >= st.p2 ? 'Session almost used up' : 'Weekly almost used up') : '14:05'));
-      if (st.link) linkMark(svg, 284, 14, dim);
-      svg.appendChild(el('circle', { cx: 302, cy: 14, r: 5, fill: '#' + dotColours(st.low, st.mid, st.bg)[0] }));
+      if (st.link) linkMark(svg, 297, 14);
       gauge(svg, 80, 104, 120, st.w, st.p1, arcCol(1, st.p1), track, st.text, 20);
       gauge(svg, 240, 104, 120, st.w, st.p2, arcCol(2, st.p2), track, st.text, 20);
       [['SESSION 5h', '3h 40m', 80], ['WEEKLY 7d', '1d 1h', 240]].forEach(function (g) {
@@ -1712,6 +1727,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
     say: function (text, kind) {
       var p = document.getElementById('board-status'), t = document.getElementById('board-status-text'), d = document.getElementById('board-dot');
       if (t.textContent !== text) t.textContent = text;
+      if (kind) board.show({ linkState: kind === 'danger' ? 'none' : kind === 'busy' ? 'connecting' : 'live' });
       d.className = 'dot' + (kind === 'danger' ? ' danger' : kind === 'busy' ? ' busy' : '');
       if (document.getElementById('hs').getAttribute('hidden') === null) return;   // the handshake is showing
       if (text) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
