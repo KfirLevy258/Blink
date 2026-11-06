@@ -435,7 +435,7 @@ enum proto_src { PROTO_SRC_USB, PROTO_SRC_WIFI };
  * up (D21), so a wrong password leaves the old pairing exactly as it was. */
 static struct {
 	bool active;
-	bool seen_joining;	/* net_link may still show the PREVIOUS result */
+	uint32_t gen;		/* net_link_join_gen() when the join was asked for */
 	int64_t deadline;
 	uint8_t ssid[32];
 	size_t ssid_len;
@@ -443,11 +443,20 @@ static struct {
 	uint8_t key[CFG_PAIR_KEY_LEN];
 } cand;
 
+/* True once net_link has STARTED a join after ours was asked for. Until
+ * then its state and result belong to an earlier join (the boot join, a
+ * previous wifi_set) and must not be credited to the candidate (D21). */
+static bool cand_started(void)
+{
+	return cand.active && (int32_t)(net_link_join_gen() - cand.gen) > 0;
+}
+
 static int scan_sent = -1;	/* -1 none pending, else next line index */
 static int scan_n;
 static struct net_link_ap scan_tab[NET_LINK_SCAN_MAX];
 
 /* What the last wifi_state said, so a change is noticed once. */
+/* -2: an override was just sent, so the real state is still owed. */
 static int last_st = -1, last_why = -1, last_link = -1;
 
 /* A plain memset of a buffer that is never read again can be optimised
@@ -487,7 +496,7 @@ static const char *wifi_st_name(int *code)
 	enum net_link_state s = net_link_state();
 	int c = 0;
 
-	if (cand.active && !cand.seen_joining) {
+	if (cand.active && !cand_started()) {
 		c = 1;
 	} else if (cand.active || cfg_paired()) {
 		c = s == NL_JOINING ? 1 : s == NL_UP ? 2 : s == NL_FAILED ? 3 : 0;
@@ -498,9 +507,10 @@ static const char *wifi_st_name(int *code)
 
 /* One wifi_state line. `why` overrides the radio's own reason (a request
  * refused before it reached the radio). */
-static void wifi_send_state(const char *st_override, const char *why_override)
+static void wifi_send_state(const char *st_override, const char *why_override,
+			    bool bare)
 {
-	static char buf[384];
+	static char buf[WIFI_STATE_BUF];
 	uint8_t ssid[32];
 	size_t ssid_len = 0;
 	char psk[CFG_PSK_MAX];
@@ -512,7 +522,9 @@ static void wifi_send_state(const char *st_override, const char *why_override)
 
 	v.st = wifi_st_name(&code);
 	v.rssi = -127;
-	if (cand.active) {
+	if (bare) {
+		/* a refused set: it names nothing of its own */
+	} else if (cand.active) {
 		memcpy(ssid, cand.ssid, cand.ssid_len);
 		ssid_len = cand.ssid_len;
 		wifi_kid(cand.key, kid);
@@ -540,51 +552,88 @@ static void wifi_send_state(const char *st_override, const char *why_override)
 	if (wifi_fmt_state(buf, sizeof(buf), &v) > 0) {
 		emit(buf);
 	}
-	last_st = code;
+	last_st = (st_override || why_override) ? -2 : code;
 	last_why = (int)net_link_why();
 	last_link = v.link[0];
 }
 
 static void wifi_do_set(const char *json)
 {
-	char s[65], p[129], k[65];
-	uint8_t pw[64];
-	int sl, pl, kl;
+	char s[WIFI_S_BUF], p[WIFI_P_BUF], k[WIFI_K_BUF];
+	uint8_t ssid[32], key[CFG_PAIR_KEY_LEN], pw[64];
+	char psk[CFG_PSK_MAX] = "";
+	int sl = -1, pl = -1, kl = -1;
 	bool ok = false;
 
-	/* The first reply to every set is `joining`, even one refused below:
-	 * the PC counts a `fail` only after it (pc/bridge.py). */
-	wifi_cand_drop();
-	wifi_send_state("joining", "");
+	/* Parsed into locals: a malformed set must not cancel a good one
+	 * already in flight. */
 	if (msg_get_str(json, "s", s, sizeof(s)) &&
 	    msg_get_str(json, "p", p, sizeof(p)) &&
 	    msg_get_str(json, "k", k, sizeof(k))) {
-		sl = wifi_hex_decode(s, cand.ssid, sizeof(cand.ssid));
+		sl = wifi_hex_decode(s, ssid, sizeof(ssid));
 		pl = wifi_hex_decode(p, pw, sizeof(pw));
-		kl = wifi_hex_decode(k, cand.key, sizeof(cand.key));
+		kl = wifi_hex_decode(k, key, sizeof(key));
 		if (pl > 0) {
-			memcpy(cand.psk, pw, (size_t)pl);
+			memcpy(psk, pw, (size_t)pl);
 		}
 		/* cfg_set_pairing refuses a 0x00 in the name, and by then the
 		 * join has run: refuse it now. */
 		ok = sl > 0 && kl == CFG_PAIR_KEY_LEN && pl > 0 &&
-		     memchr(cand.ssid, 0, (size_t)sl) == NULL &&
-		     wifi_psk_valid(cand.psk, (size_t)pl);
-		cand.ssid_len = sl > 0 ? (size_t)sl : 0;
+		     memchr(ssid, 0, (size_t)sl) == NULL &&
+		     wifi_psk_valid(psk, (size_t)pl);
 	}
 	wipe(s, sizeof(s));
 	wipe(p, sizeof(p));
 	wipe(k, sizeof(k));
 	wipe(pw, sizeof(pw));
+	/* The first reply to every set is `joining`, even one refused below:
+	 * the PC counts a `fail` only after it (pc/bridge.py). */
 	if (!ok) {
-		wifi_cand_drop();
-		wifi_send_state("fail", WIFI_WHY_BAD_INPUT);
-		return;
+		wifi_send_state("joining", "", true);
+		wifi_send_state("fail", WIFI_WHY_BAD_INPUT, false);
+		goto out;
 	}
+	wifi_cand_drop();	/* a newer set replaces an older one */
+	memcpy(cand.ssid, ssid, (size_t)sl);
+	cand.ssid_len = (size_t)sl;
+	memcpy(cand.psk, psk, (size_t)pl);
+	memcpy(cand.key, key, sizeof(key));
 	cand.active = true;
+	cand.gen = net_link_join_gen();
 	cand.deadline = k_uptime_get() + WIFI_JOIN_DEADLINE_MS;
-	last_st = 1;	/* the `joining` above already said it */
+	wifi_send_state("joining", "", false);	/* the candidate's name and kid */
 	net_link_request_join(cand.ssid, cand.ssid_len, cand.psk);
+out:
+	wipe(ssid, sizeof(ssid));
+	wipe(key, sizeof(key));
+	wipe(psk, sizeof(psk));
+}
+
+/* A failed candidate on a paired board: the old network was taken down for
+ * the attempt, so go back to it rather than sit off until a reboot. */
+static void wifi_rejoin_stored(void)
+{
+	uint8_t ssid[32];
+	size_t ssid_len = 0;
+	char psk[CFG_PSK_MAX];
+	uint8_t key[CFG_PAIR_KEY_LEN];
+
+	if (cfg_get_pairing(ssid, &ssid_len, psk, sizeof(psk), key)) {
+		net_link_request_join(ssid, ssid_len, psk);
+	}
+	wipe(psk, sizeof(psk));
+	wipe(key, sizeof(key));
+}
+
+void proto_wifi_cancel(void)
+{
+	/* The candidate first: a join still running must never persist. */
+	bool had = cand.active;
+
+	wifi_cand_drop();
+	if (had || net_link_state() != NL_OFF) {
+		net_link_request_down();
+	}
 }
 
 static void wifi_do_forget(void)
@@ -595,21 +644,22 @@ static void wifi_do_forget(void)
 
 	wipe(ssid, sizeof(ssid));
 	wipe(psk, sizeof(psk));
-	wifi_cand_drop();	/* a join still running must not persist later */
+	/* A join still running must not persist later, and must not leave the
+	 * radio associated: the down is queued even when nothing was stored. */
+	proto_wifi_cancel();
 	if (!any) {
-		wifi_send_state(NULL, NULL);
+		wifi_send_state(NULL, NULL, false);
 		return;
 	}
-	/* Flash first: the secrets are the urgent part. The radio's down is
+	/* Flash next: the secrets are the urgent part. The radio's down is
 	 * queued behind a running join (up to 30 s) and reports on its own. */
+	net_link_request_down();
 	if (cfg_clear_pairing() == 0) {
-		net_link_request_down();
 		printk("[wifi] forgotten\n");
-		wifi_send_state("off", "");
+		wifi_send_state("off", "", false);
 	} else {
-		net_link_request_down();
 		printk("[wifi] forget failed\n");
-		wifi_send_state("fail", net_link_why_text(NL_WHY_FORGET));
+		wifi_send_state("fail", net_link_why_text(NL_WHY_FORGET), false);
 	}
 }
 
@@ -630,7 +680,7 @@ static void wifi_handle(const char *type, const char *json)
  * report any change of state. */
 static void wifi_poll(void)
 {
-	char buf[160];
+	char buf[WIFI_NET_BUF];
 
 	if (scan_sent == -2) {
 		scan_n = net_link_scan_results(scan_tab, NET_LINK_SCAN_MAX);
@@ -652,31 +702,39 @@ static void wifi_poll(void)
 		}
 	}
 
-	if (cand.active) {
-		enum net_link_state s = net_link_state();
+	if (cand_started()) {
+		enum net_link_state st = net_link_state();
 
-		if (s == NL_JOINING) {
-			cand.seen_joining = true;
-		} else if (cand.seen_joining && s == NL_UP) {
+		if (st == NL_UP) {
 			int rc = cfg_set_pairing(cand.ssid, cand.ssid_len,
 						 cand.psk, cand.key);
 
+			wifi_cand_drop();
 			if (rc == 0) {
 				printk("[wifi] paired\n");
 				link_verify_window(k_uptime_get());	/* D65 */
-				wifi_cand_drop();
-				wifi_send_state(NULL, NULL);
+				wifi_send_state(NULL, NULL, false);
 			} else {
-				wifi_cand_drop();
 				net_link_request_down();
-				wifi_send_state("fail", WIFI_WHY_SAVE);
+				wifi_send_state("fail", WIFI_WHY_SAVE, false);
 			}
-		} else if (cand.seen_joining && s == NL_FAILED) {
+		} else if (st == NL_FAILED) {
+			/* Explicit: with no candidate and nothing paired the
+			 * derived state would read "off", and the PC would
+			 * never see the fail it is waiting for. */
 			wifi_cand_drop();
-			wifi_send_state(NULL, NULL);
-		} else if (k_uptime_get() > cand.deadline) {
-			wifi_cand_drop();
-			wifi_send_state("fail", net_link_why_text(NL_WHY_NOT_FOUND));
+			wifi_send_state("fail", net_link_why_text(net_link_why()),
+					false);
+			if (cfg_paired()) {
+				wifi_rejoin_stored();
+			}
+		}
+	}
+	if (cand.active && k_uptime_get() > cand.deadline) {
+		wifi_cand_drop();
+		wifi_send_state("fail", net_link_why_text(NL_WHY_NOT_FOUND), false);
+		if (cfg_paired()) {
+			wifi_rejoin_stored();
 		}
 	}
 
@@ -689,7 +747,7 @@ static void wifi_poll(void)
 		if (last_st >= 0 && (code != last_st ||
 				     (int)net_link_why() != last_why ||
 				     l != last_link)) {
-			wifi_send_state(NULL, NULL);
+			wifi_send_state(NULL, NULL, false);
 		}
 	}
 }
@@ -1054,7 +1112,7 @@ static void dispatch(const char *json, enum proto_src src)
 		 * daemon that restarted without resetting the board heard
 		 * the hello that carried it in a previous life. */
 		proto_send_theme_now("boot");
-		wifi_send_state(NULL, NULL);
+		wifi_send_state(NULL, NULL, false);
 	} else if (strncmp(type, "wifi_", 5) == 0) {
 		if (src == PROTO_SRC_USB) {	/* dropped without a reply otherwise */
 			wifi_handle(type, json);
@@ -1272,6 +1330,7 @@ static void drain_rx(void)
 		} else if (line_len < LINE_MAX - 1) {
 			line[line_len++] = (char)c;
 		} else {
+			wipe(line, sizeof(line));	/* may hold a wifi_set */
 			line_len = 0;
 			discarding = true; /* overflow: drop the WHOLE line */
 		}

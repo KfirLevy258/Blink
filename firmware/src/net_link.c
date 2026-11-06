@@ -77,6 +77,7 @@ static atomic_t ops;
 static atomic_t rssi_cache = ATOMIC_INIT(-127);
 static void kick(void);
 static atomic_t scanning;
+static atomic_t join_gen;
 static volatile enum net_link_state state = NL_OFF;
 static volatile enum net_link_why why = NL_WHY_NONE;
 /* Set once at boot by net_link_refuse_selftest(), never cleared: a board
@@ -304,6 +305,7 @@ static void join_run(const uint8_t *ssid, size_t ssid_len, const char *psk)
 	state = NL_JOINING;
 	why = NL_WHY_NONE;
 	idle_at = 0;
+	(void)atomic_inc(&join_gen);	/* after the state: see net_link_join_gen() */
 	radio_up();
 
 	/* The security type comes from the scan: PSK on a WPA3-only network
@@ -576,6 +578,11 @@ void net_link_refuse_selftest(void)
 	refused = true;
 	why = NL_WHY_SELFTEST;
 	state = NL_FAILED;
+}
+
+uint32_t net_link_join_gen(void)
+{
+	return (uint32_t)atomic_get(&join_gen);
 }
 
 enum net_link_state net_link_state(void)

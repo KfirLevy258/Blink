@@ -12,6 +12,17 @@
 
 #include "net_link.h"
 
+/* The buffers wifi_set reads its fields into, one byte past the widest
+ * legal field (64, 128, 64 hex digits). msg_get_str cuts a longer value to
+ * fit and says nothing, and a cut at an even length would look valid: with
+ * the spare byte the cut value is ODD, which wifi_hex_decode refuses. */
+#define WIFI_S_BUF 66
+#define WIFI_P_BUF 130
+#define WIFI_K_BUF 66
+/* Production line buffers (proto.c); the host test measures against them. */
+#define WIFI_NET_BUF 160
+#define WIFI_STATE_BUF 384
+
 /* Hex (either case) to bytes: the count, or -1 on an odd length, a
  * non-hex digit, or more than out_max bytes. */
 int wifi_hex_decode(const char *hex, uint8_t *out, size_t out_max);

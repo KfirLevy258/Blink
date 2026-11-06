@@ -12,6 +12,10 @@ void proto_init(void);
  * periodic ping. Call repeatedly from the main loop. */
 void proto_service(void);
 
+/* Drops a wifi_set in flight and queues the radio down. For the panel's
+ * Forget and the network thread: nothing may persist a candidate after it. */
+void proto_wifi_cancel(void);
+
 /* True once any protocol message has arrived from a PC daemon -- read at boot
  * to know whether a daemon spoke during the splash. */
 bool proto_host_seen(void);

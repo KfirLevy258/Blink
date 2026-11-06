@@ -54,6 +54,16 @@ void net_link_request_down(void);
  * Connection screen. Until reboot. */
 void net_link_refuse_selftest(void);
 void net_link_work(void);
+
+/*
+ * Counts joins as they START (bumped in join_run, after the state reads
+ * JOINING). A caller that asks for a join records this first and trusts
+ * UP/FAILED only once the count has passed that value: until then a join
+ * already running (the boot join, an earlier wifi_set) is not its own, and
+ * crediting its UP to a new candidate would persist credentials nobody
+ * verified (D21).
+ */
+uint32_t net_link_join_gen(void);
 enum net_link_state net_link_state(void);
 enum net_link_why net_link_why(void);
 const char *net_link_why_text(enum net_link_why w);

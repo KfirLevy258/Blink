@@ -280,6 +280,16 @@ def test_scan_collects_nets_until_the_last(tmp_path):
     assert len(box["r"]) == 2 and sent[0]["t"] == "wifi_scan"
 
 
+def test_an_empty_scan_ends_on_the_n_zero_marker(tmp_path):
+    # The board's end marker for no networks: i=0, n=0, and no s/r/sec.
+    b, ops, sent, home, verified, th = make(tmp_path)
+    t, box = call(ops.scan, 5.0)
+    pump_until(b, lambda: sent)
+    b.on_message({"t": "wifi_net", "v": 1, "i": 0, "n": 0})
+    t.join(3)
+    assert box["r"] == []
+
+
 def test_forget_removes_the_file_and_returns_the_state(tmp_path):
     b, ops, sent, home, verified, th = make(tmp_path)
     wifi_pair.save(home, "abcd", b"k" * 32, "10.0.0.5", 49731)

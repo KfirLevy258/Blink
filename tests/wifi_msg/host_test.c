@@ -21,7 +21,8 @@ static void check(const char *name, int ok)
 int main(void)
 {
 	uint8_t b[8];
-	char line[512];
+	char line[WIFI_STATE_BUF];
+	char nline[WIFI_NET_BUF];
 	char t[24], s[80];
 
 	/* An SSID that is not UTF-8 (review focus 4). */
@@ -57,18 +58,18 @@ int main(void)
 		int n;
 
 		memset(ap.ssid, 0xff, 32);
-		n = wifi_fmt_net(line, sizeof(line), 19, 20, &ap);
-		check("net_line_fits", n > 0 && n < 511 && (int)strlen(line) == n &&
-		      msg_get_str(line, "t", t, sizeof(t)) &&
+		n = wifi_fmt_net(nline, sizeof(nline), 19, 20, &ap);
+		check("net_line_fits", n > 0 && n < 511 && (int)strlen(nline) == n &&
+		      msg_get_str(nline, "t", t, sizeof(t)) &&
 		      strcmp(t, "wifi_net") == 0 &&
-		      msg_get_str(line, "s", s, sizeof(s)) && strlen(s) == 64 &&
-		      msg_get_str(line, "sec", t, sizeof(t)) &&
+		      msg_get_str(nline, "s", s, sizeof(s)) && strlen(s) == 64 &&
+		      msg_get_str(nline, "sec", t, sizeof(t)) &&
 		      strcmp(t, "mixed") == 0);
 		check("net_line_too_small_refused",
-		      wifi_fmt_net(line, 20, 19, 20, &ap) == -1);
-		n = wifi_fmt_net(line, sizeof(line), 0, 0, NULL);
+		      wifi_fmt_net(nline, 20, 19, 20, &ap) == -1);
+		n = wifi_fmt_net(nline, sizeof(nline), 0, 0, NULL);
 		check("net_empty_scan_marker", n > 0 &&
-		      strcmp(line, "{\"t\":\"wifi_net\",\"i\":0,\"n\":0}") == 0);
+		      strcmp(nline, "{\"t\":\"wifi_net\",\"i\":0,\"n\":0}") == 0);
 	}
 
 	{
@@ -93,6 +94,36 @@ int main(void)
 		check("state_omits_absent_fields", n > 0 &&
 		      strcmp(line, "{\"t\":\"wifi_state\",\"st\":\"off\","
 			     "\"link\":\"usb\"}") == 0);
+	}
+	/* wifi_set fields are read at proto.c's buffer sizes; an over-long
+	 * value is cut by msg_get_str and must then be refused, not accepted
+	 * at a length that happens to be legal. */
+	{
+		char in[400], f[WIFI_S_BUF], g[WIFI_P_BUF], h[WIFI_K_BUF];
+		uint8_t o[64];
+		int i;
+
+		memset(in, 0, sizeof(in));
+		strcpy(in, "{\"t\":\"wifi_set\",\"s\":\"");
+		for (i = 0; i < 66; i++) strcat(in, "a");
+		strcat(in, "\"}");
+		check("ssid_33_bytes_refused", msg_get_str(in, "s", f, sizeof(f)) &&
+		      wifi_hex_decode(f, o, 32) == -1);
+		strcpy(in, "{\"t\":\"wifi_set\",\"p\":\"");
+		for (i = 0; i < 130; i++) strcat(in, "b");
+		strcat(in, "\"}");
+		check("psk_130_hex_refused", msg_get_str(in, "p", g, sizeof(g)) &&
+		      wifi_hex_decode(g, o, 64) == -1);
+		strcpy(in, "{\"t\":\"wifi_set\",\"k\":\"");
+		for (i = 0; i < 66; i++) strcat(in, "c");
+		strcat(in, "\"}");
+		check("key_over_long_refused", msg_get_str(in, "k", h, sizeof(h)) &&
+		      wifi_hex_decode(h, o, 32) == -1);
+		strcpy(in, "{\"t\":\"wifi_set\",\"s\":\"");
+		for (i = 0; i < 64; i++) strcat(in, "a");
+		strcat(in, "\"}");
+		check("ssid_32_bytes_ok", msg_get_str(in, "s", f, sizeof(f)) &&
+		      wifi_hex_decode(f, o, 32) == 32);
 	}
 	return fails != 0;
 }

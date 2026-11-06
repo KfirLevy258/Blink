@@ -871,8 +871,12 @@ class Bridge:
         if op is None or op.kind != "scan":
             return
         try:
-            self._scan.append({"s": msg["s"], "r": msg["r"], "sec": msg["sec"]})
-            last = int(msg["i"]) + 1 >= int(msg["n"])
+            # The board ends an empty scan with i=0, n=0 and no network.
+            n = int(msg["n"])
+            last = int(msg["i"]) + 1 >= n
+            if n > 0:
+                self._scan.append({"s": msg["s"], "r": msg["r"],
+                                   "sec": msg["sec"]})
         except (KeyError, TypeError, ValueError):
             return
         if last:
