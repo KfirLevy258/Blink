@@ -276,3 +276,55 @@ CONFIG_THREAD_ANALYZER=y                    # measurement only
   many cycles, not one.
 - Not measured here: the 30-minute charger run (pending the owner), and a
   second network for the re-pair join.
+
+## Verdict: pass with levers, provisional on the charger run
+
+Decided 2026-11-06 for Task 0.3. One image: WiFi code goes in every build.
+Section 11's remaining outcomes (a separate WiFi image) are not needed. The
+two levers are stack sizes, which section 11 now names as admissible for the
+stack criterion (its 2026-11-06 note). The verdict stays provisional until the
+30-minute charger run, which the owner deferred to a check before
+`feat/wifi-transport` merges.
+
+| Criterion | Number and source row | Verdict |
+|---|---|---|
+| Links with the LVGL pool at 32768 | every spike build linked at 32768 (link map table) | pass |
+| popups_touch leaves >= 2320 B | 3400 B left, "Spike paired" and both lever rows (LVGL pool table); session_touch 3960, the stream 7904 | pass |
+| dram1 >= 4096 B free, dram0 links | 12276 B free with both levers; dram0 30520 free at the last build (link map table) | pass |
+| heap low-water >= 8192 B, largest >= 4096 B at the low-water point, no driver allocation failure | worst low-water 38120 (lever 2 run, **not instrumented**, so its largest chunk is only bounded: at most 38120). Instrumented low-water points: 40336 free / largest 40252, and 38528 / 38508. No Zephyr error or warning line in any capture (system heap table) | pass |
+| every thread's stack < 75 % | as built: logging 94 %, sysworkq 78 %. With both levers: highest is rx_q[0] 65 % (thread stacks table) | pass with levers |
+| no brownout or watchdog reset in 30 min on a charger at 11 dBm | not run | **pending: owner's charger run before the merge** |
+| signed image <= 1318912 | 1169602 injector, about 1164655 plain (link map table) | pass |
+
+The 38120 run is the worst low-water but the only one whose largest chunk was
+not read at the instant. Both instrumented runs found the heap unfragmented at
+their low-water (largest within 100 B of free), so the bound is expected to be
+tight, but it is a bound, not a measurement.
+
+D46 Step 5 (down and up) is not a section 11 criterion and does not fail the
+gate. Its result (free back within 256 B, largest chunk 2376 B short of the
+512 B allowance, 40 B retained per join, no second network tried) became a
+requirement on the `net_link` task in section 5.1: re-measure on production
+firmware over at least 20 down/up cycles and fail if the retained amount keeps
+growing; prove the disconnect-first join against a second network there.
+
+### Values carried forward
+
+For Task 1.2 (`prj.conf`):
+
+- `CONFIG_LOG_PROCESS_THREAD_STACK_SIZE=1536` (lever 1)
+- `CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE=1536` (lever 2)
+- `CONFIG_NET_MAX_CONN=6` and `CONFIG_ZVFS_POLL_MAX=4`: not levers; the
+  replacement session is refused at connect with Zephyr's defaults (4 and 3)
+
+For Task 2.5 (network thread), as built in the spike (`spike/wifi-ram`,
+`firmware/src/spike_net.c`: `WL_RX_FRAMES` and `WL_TX_LINES` at lines 69-70,
+`K_THREAD_DEFINE(spike_net, 4096, ..., 7, 0, 0)` at line 667; the first two
+are not stated elsewhere in this record):
+
+- `WL_RX_FRAMES` = 4
+- `WL_TX_LINES` = 8
+- network thread stack 4096 B at priority 7 (40 % high-water, 1668 B; thread
+  stacks table)
+
+For Task 5.1: `OTA_IMAGE_MAX` = 1318912 (the swap-move usable size above).
