@@ -47,7 +47,7 @@ import time
 import urllib.parse
 import webbrowser
 
-from pc import theme
+from pc import settings_ops, status_page, theme, update, user_config, wifi_pair
 
 IDLE_S = 600            # 10 minutes with no edit (plan, revision 2026-10-25)
 # A reload fires pagehide too, then loads the page again, and the builder
@@ -79,6 +79,8 @@ TICK_S = 0.25
 # limit: a link older than that belongs to a builder that would have
 # stopped anyway.
 LINK_LIFE_S = 600
+# Routes that need the board; with no board_ops they answer 409.
+BOARD_PATHS = ("/api/wifi", "/api/device", "/api/logo", "/api/pref")
 MAX_BODY = 4096         # the widest theme is about 200 bytes of JSON
 # The page's tab id on a preview, save or cancel. A header and not a body
 # field because those bodies are the theme itself, which theme.validate
@@ -334,9 +336,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         return False
 
     def _origin_ok(self):
+        # Required, not merely checked when present: a cross-site form post
+        # can carry no Origin at all in some browsers, and `null` (a sandboxed
+        # frame) is not ours either (spec 8.3, D35).
         origin = self.headers.get("Origin")
-        if origin is None:
-            return True
         port = self.builder.port
         return origin in (f"http://127.0.0.1:{port}",
                           f"http://localhost:{port}")
@@ -396,7 +399,92 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 "idle_s": self.builder.idle_s,
                 "board": {"themes": takes},
                 "waiting_s": theme.preview_waiting_s(self.builder.home)})
+        if self._theme_only(url.path):
+            return
+        ops = self.builder.board_ops
+        if url.path == "/api/wifi":
+            return self._json(200, ops.state())
+        if url.path == "/api/wifi/nets":
+            return self._json(200, {"nets": self.builder.nets})
+        if url.path == "/api/device":
+            return self._json(200, ops.device())
+        if url.path == "/api/computer":
+            return self._computer_state()
         return self._refuse(404)
+
+    # -- the settings endpoints
+
+    def _theme_only(self, path):
+        """True after answering 409 when this is a board-side route and the
+        server was started without a way to the board (`blink theme`)."""
+        if path.startswith(BOARD_PATHS) and self.builder.board_ops is None:
+            self._json(409, {"why": "Open this with blink settings while"
+                                    " the app is running."})
+            return True
+        return False
+
+    def _computer_state(self):
+        home = self.builder.home
+        try:
+            on = user_config.load(home).get(status_page.SETTING) is True
+        except (user_config.Unreadable, OSError):
+            return self._json(500, {"why": "This computer's settings file"
+                                           " could not be read."})
+        self._json(200, {"status_page": on,
+                         "auto_update": update.auto_update_allowed(home)})
+
+    def _post_computer(self, want):
+        home = self.builder.home
+        if not (isinstance(want, dict) and want and all(
+                k in ("status_page", "auto_update")
+                and isinstance(v, bool) for k, v in want.items())):
+            return self._json(400, {"why": "That was not a setting."})
+        try:
+            if "status_page" in want:
+                user_config.put(home, status_page.SETTING,
+                                want["status_page"])
+            if "auto_update" in want:
+                marker = os.path.join(home, "no-auto-update")
+                if want["auto_update"]:
+                    if os.path.exists(marker):
+                        os.remove(marker)
+                else:
+                    os.makedirs(home, exist_ok=True)
+                    open(marker, "ab").close()
+        except (user_config.Unreadable, OSError):
+            return self._json(500, {"why": "This computer could not save"
+                                           " that setting."})
+        self._computer_state()
+
+    def _post_wifi(self, path, want):
+        """`want` is the parsed body; the caller drops it on return. Nothing
+        here logs, keeps or echoes it."""
+        ops = self.builder.board_ops
+        try:
+            if path == "/api/wifi/scan":
+                self.builder.nets = ops.scan()
+                return self._json(200, {"nets": self.builder.nets})
+            if path == "/api/wifi/forget":
+                return self._json(200, ops.forget())
+            if path != "/api/wifi/join":
+                return self._refuse(404)
+            ssid = pw = None
+            if isinstance(want, dict):
+                ssid, pw = want.get("s"), want.get("p")
+            try:
+                ssid = bytes.fromhex(ssid)
+            except (TypeError, ValueError):
+                ssid = None
+            if ssid is None or not isinstance(pw, str):
+                return self._json(400, {"why": "That was not a network."})
+            # Before the board is touched, so a bad entry costs no wait.
+            bad = (wifi_pair.ssid_problem(ssid)
+                   or wifi_pair.password_problem(pw))
+            if bad:
+                return self._json(400, {"why": bad})
+            return self._json(200, ops.join(ssid, pw))
+        except settings_ops.BoardOpError as e:
+            self._json(409, {"why": str(e)})
 
     # -- POST
 
@@ -415,7 +503,21 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._refuse()
         path = urllib.parse.urlsplit(self.path).path
         self.builder.count(path)
+        want = None
+        settings = path.startswith(("/api/wifi/", "/api/computer"))
+        if self._theme_only(path):
+            return
+        if settings:
+            if self.headers.get("Content-Type", "").split(";")[0].strip() \
+                    .lower() != "application/json":
+                return self._json(415, {"why": "That was not JSON."})
         raw, err = self._body()
+        if settings and not err:
+            try:
+                want = json.loads(raw.decode("utf-8")) if raw else {}
+            except ValueError:
+                err = 400
+            raw = None
         if err:
             self.close_connection = True
             return self._refuse(err)
@@ -432,6 +534,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     self.headers.get(TAB_HEADER))):
             return self._json(409, {"newer": True, "error":
                                     "Continued in a newer tab."})
+        if path.startswith("/api/wifi/"):
+            return self._post_wifi(path, want)
+        if path == "/api/computer":
+            return self._post_computer(want)
         if path == "/api/cancel":
             self._json(200, {"ok": True})
             return self.builder.finish("cancelled")
@@ -548,13 +654,18 @@ class BuilderServer:
     """One builder session: a server, its tokens, and its deadlines."""
 
     def __init__(self, home, idle_s=IDLE_S, now=time.monotonic,
-                 tick_s=TICK_S):
+                 tick_s=TICK_S, board_ops=None, panel="look", token=None):
         self.home = home
+        self.board_ops = board_ops      # None: `blink theme`, no board routes
+        self.panel = panel
+        self.nets = []                  # the last scan, for GET /api/wifi/nets
         self.idle_s = idle_s
         self._now = now
         self._tick_s = tick_s
         self._lock = threading.Lock()
         self._links = {}            # unspent link -> when it was made
+        if token:
+            self._links[token] = now()
         # Links that no longer work and why, "replaced" or "used", newest
         # last and kept few: only so the page the browser lands on can say
         # which (see link_fate).
@@ -665,6 +776,11 @@ class BuilderServer:
                 self._retire_link(old, "replaced")
             self._links = {k: self._now()}
         return f"http://127.0.0.1:{self.port}/open?k={k}"
+
+    def add_token(self, token):
+        """Another one-time link token, beside any unspent one."""
+        with self._lock:
+            self._links[token] = self._now()
 
     def _retire_link(self, k, why):
         """Called with the lock held."""
@@ -996,7 +1112,8 @@ class Launcher:
         fresh = server is None
         if fresh:
             try:
-                server = self._make(self._home)
+                server = self._make(self._home) if self.board_ops is None \
+                    else self._make(self._home, board_ops=self.board_ops)
             except OSError as e:
                 # The page missing from a broken install, or no port to
                 # bind. One line, and the board's own fallback.

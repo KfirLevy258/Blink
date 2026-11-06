@@ -55,7 +55,10 @@ def request(server, method, path, body=None, cookie=None, host=None,
     headers.update(extra or {})
     if cookie:
         headers["Cookie"] = cookie
-    if origin:
+    # Every POST needs its own Origin now; origin="absent" sends none.
+    if origin is None and method == "POST":
+        origin = f"http://127.0.0.1:{server.port}"
+    if origin and origin != "absent":
         headers["Origin"] = origin
     data = None
     if body is not None:
