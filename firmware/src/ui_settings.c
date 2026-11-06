@@ -1808,6 +1808,10 @@ static void panel_empty(void)
 	upd_lbl = NULL;
 	pct_lbl = NULL;
 	focus_sub = NULL;
+	/* The Open settings tile's handle dies with the clean; a timer, a
+	 * theme_edit reply or a restatement arriving while Brightness is up
+	 * would paint through it (review of Task 6.1). */
+	theme_edit_lbl = NULL;
 	lv_obj_clean(panel);
 }
 
@@ -2640,7 +2644,8 @@ static void theme_page_cb(lv_event_t *e)
 	theme_fill();	/* the grid is a sibling of this button, not a parent */
 }
 
-/* `fresh`: a visit from the Theme row, as opposed to a repaint of one
+/* Reachable from tests only: no tile opens it (Task 6.1).
+ * `fresh`: a visit from the Theme row, as opposed to a repaint of one
  * already open (rebuild_cb). */
 static void show_theme(bool fresh)
 {
