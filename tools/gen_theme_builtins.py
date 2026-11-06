@@ -180,6 +180,9 @@ def builtins(h_src=None, c_src=None):
         out.append({
             "id": tid, "key": key.lower(), "name": names[key],
             "c": [p[r] for r in ROLES], "w": p["arc_w"],
+            # The board's COL_GREY, which the page's link icon draws when
+            # the link is down (owner, 2026-11-07).
+            "grey": p["grey"],
             # Omitted from a palette means false, as C initialisers do.
             "ends": "flat" if p.get("flat", False) else "round",
             "dot": 1 if p.get("dot", False) else 0,
@@ -220,7 +223,7 @@ def source():
             '     "c": [' + ", ".join(q(c) for c in r["c"]) + "],")
         lines.append(
             f'     "w": {r["w"]}, "ends": {q(r["ends"])}, "dot": {r["dot"]},'
-            f' "by": {q(r["by"])}}},')
+            f' "by": {q(r["by"])}, "grey": {q(r["grey"])}}},')
     lines += [
         ")",
         "",

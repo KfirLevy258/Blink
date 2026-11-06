@@ -464,10 +464,13 @@ differ from the sections above, they win.
    cards and the board share the row's top, so they stay level.
 2. **Save sits under the tabs.** "Save theme to board" is a full-width primary
    button directly under the Look / Connect / Board control in the middle
-   column, not at the foot of Customise. Cancel stays in Customise.
+   column, not at the foot of Customise. Cancel stays in Customise. It shows
+   only while Look is open: hidden on Connect, Board and with nothing open. It
+   is the last thing in the hub, so hiding it moves nothing above it.
 3. **The board's link icon shows the status.** The top-right status dot is
    gone, on the real board and in the drawn screen. A USB trident or WiFi fan
-   alone shows the link, and its colour is the status: green live, amber
-   connecting or stale, grey no link. These colours are the page's own; the
-   firmware branch for the icon (wifi/fw-linkicon) did not exist when this was
-   built, so check them against it.
+   alone shows the link, and its colour is the status, as the firmware
+   (wifi/fw-linkicon, `refresh_dots()`) colours it: live is the theme's live
+   colour, stale the theme's stale colour, error the theme's high (COL_RED),
+   no link or no data the theme's grey (COL_GREY). The glyph is WiFi on a WiFi
+   link and USB otherwise, unpaired included.

@@ -1980,3 +1980,21 @@ def test_picking_a_listed_network_closes_the_name_field():
     return [$('c-other-box').getAttribute('hidden'), $('c-other').getAttribute('hidden')];
     """, _wifi(nets=NETS), search="?panel=connect")
     assert r == ["", None]
+
+
+def test_save_shows_only_while_look_is_open():
+    """Owner change 2026-11-07: Save theme to board sits under the tabs and
+    is there only on Look; closed, Connect and Board hide it."""
+    r = builder_page.run(f"""
+    await advance(300);
+    const c = {_CHIPS}, vis = () => $('save').getAttribute('hidden') === null;
+    const out = [vis()];
+    c[0].click(); out.push(vis());
+    c[1].click(); out.push(vis());
+    c[2].click(); out.push(vis());
+    c[0].click(); out.push(vis());
+    c[0].click(); out.push(vis());
+    return {{ out, label: $('save').textContent }};
+    """, SAVED_DARK)
+    assert r["out"] == [False, True, False, False, True, False]
+    assert r["label"] == "Save theme to board"

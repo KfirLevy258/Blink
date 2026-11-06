@@ -497,8 +497,8 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
       <button type="button" data-panel="connect" aria-controls="pConn" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M2 6.2a8.5 8.5 0 0 1 12 0M4.4 8.8a5 5 0 0 1 7.2 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="8" cy="12" r="1.5" fill="currentColor"/></svg>Connect</button>
       <button type="button" data-panel="board" aria-controls="pBoard" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="1.8" y="3" width="12.4" height="9.4" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 14.5v-2M11 14.5v-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Board</button>
     </div>
-    <!-- Owner, 2026-11-07: Save sits directly under the Look / Connect / Board tabs -->
-    <button type="button" class="btn primary savebtn" id="save" disabled>Save theme to board</button>
+    <!-- Owner, 2026-11-07: Save sits directly under the Look / Connect / Board tabs, and only while Look is open. It is last in the hub, so hiding it moves nothing above it. -->
+    <button type="button" class="btn primary savebtn" id="save" disabled hidden>Save theme to board</button>
   </section>
 
   <div class="side" id="sideL">
@@ -707,7 +707,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
   var PRESETS = BUILTINS.map(function (b) {
     var c = b.c.map(function (h) { return h.toUpperCase(); });
     return [b.name, { bg: c[0], text: c[1], g1: c[2], g2: c[3], low: c[4], mid: c[5], high: c[6],
-                      w: b.w, e: b.ends, d: b.dot ? 'on' : 'off', mode: b.by }];
+                      w: b.w, e: b.ends, d: b.dot ? 'on' : 'off', mode: b.by, grey: b.grey.toUpperCase() }];
   });
   var CLI_NAMES = BUILTINS.map(function (b) { return b.cli; });
   // 3.05, the computer's floor (pc/theme.py MIN_CONTRAST): clear of the
@@ -839,13 +839,29 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
   function txt(g, x, y, size, col, s, extra) { txtF(g, x, y, size, '#' + col, s, extra); }
   // The status-bar link mark, about 21 px wide, alone in the top right: the
   // status dot is gone (owner, 2026-11-07) and the mark's COLOUR is the
-  // status. USB is the classic trident (circle, arrow and square on a stem),
-  // WiFi three fan arcs and a point. Green is live, amber connecting or
-  // stale, grey no link. No firmware branch (wifi/fw-linkicon) existed when
-  // this was written, so these three are the page's own choice.
-  var LINK_COL = { live: 'rgb(60,200,110)', connecting: 'rgb(240,180,40)', none: GREY };
+  // status, as usage_view.c refresh_dots() colours it (branch
+  // wifi/fw-linkicon): live is the theme's live colour (theme_dot_colours,
+  // so dotColours), stale the theme's stale colour, error COL_RED (the
+  // theme's high) and no link or no data COL_GREY (the theme's grey).
+  // A built-in's grey is theme.c's own table, served with it; a custom
+  // theme's is custom_grey(), ported below. Glyph: WiFi on a WiFi link,
+  // USB otherwise, unpaired included. tests/pc/test_theme_builtins.py runs
+  // customGrey beside the C.
+  function customGrey(tx, bg) {
+    var wantBg = Math.min(3, shown(tx, bg));
+    for (var pct = 45; pct > 0; pct--) {
+      var d = boardMix(tx, bg, pct / 100);
+      if (shown(d, bg) >= wantBg) return d;
+    }
+    return tx;
+  }
+  function linkColour() {
+    var dc = dotColours(st.low, st.mid, st.bg);
+    var grey = st.preset >= 0 && PRESETS[st.preset] ? PRESETS[st.preset][1].grey : customGrey(st.text, st.bg);
+    return '#' + { live: dc[0], stale: dc[1], error: st.high, none: grey }[st.linkState || 'live'];
+  }
   function linkMark(g, x, y) {
-    var c = LINK_COL[st.linkState] || LINK_COL.live;
+    var c = linkColour();
     var line = { fill: 'none', stroke: c, 'stroke-width': 1.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
     function P(d, extra) { g.appendChild(el('path', Object.assign({ d: d }, extra || line))); }
     if (st.link === 'wifi') {
@@ -1727,7 +1743,7 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
     say: function (text, kind) {
       var p = document.getElementById('board-status'), t = document.getElementById('board-status-text'), d = document.getElementById('board-dot');
       if (t.textContent !== text) t.textContent = text;
-      if (kind) board.show({ linkState: kind === 'danger' ? 'none' : kind === 'busy' ? 'connecting' : 'live' });
+      if (kind) board.show({ linkState: kind === 'danger' ? 'none' : kind === 'busy' ? 'stale' : 'live' });
       d.className = 'dot' + (kind === 'danger' ? ' danger' : kind === 'busy' ? ' busy' : '');
       if (document.getElementById('hs').getAttribute('hidden') === null) return;   // the handshake is showing
       if (text) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
@@ -1759,6 +1775,8 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
           if (k === name) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
         });
       });
+      var sv = document.getElementById('save');
+      if (name === 'look') sv.removeAttribute('hidden'); else sv.setAttribute('hidden', '');
       syncScreen(); render();
     },
     close: function () { panel.open(null); }

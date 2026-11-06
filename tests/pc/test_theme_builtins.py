@@ -373,4 +373,46 @@ def test_the_builder_draws_no_header_dot_and_colours_the_link_icon():
     html = PAGE.read_text(encoding="utf-8")
     assert "dotColours(st.low, st.mid, st.bg)[0]" not in html
     assert "linkMark(svg, 297, 14)" in html
-    assert "LINK_COL" in html
+    assert "linkColour()" in html and "LINK_COL" not in html
+
+
+def test_the_builders_link_grey_follows_the_boards_grey(tmp_path):
+    """Owner change 2026-11-07: the link icon is COL_GREY when the link is
+    down. A built-in's grey is theme.c's table, served with it; a custom
+    theme's is theme_derive() -> custom_grey(), ported as customGrey().
+    Both run here on the same colours, the C through a compiler and the
+    page's functions through node."""
+    cc, node = shutil.which("cc"), shutil.which("node")
+    if cc is None or node is None:
+        pytest.skip("needs a C compiler and node")
+    for b in _served():
+        assert b["grey"] == theme.theme_builtins.BUILTINS[b["id"]]["grey"]
+    cases = [(b["c"][0], b["c"][1]) for b in _served()]
+    cases += [("000000", "ffffff"), ("ffffff", "000000"), ("0e1116", "e6e8eb"),
+              ("101010", "202020"), ("ffffff", "eeeeee"), ("123456", "abcdef")]
+    body = "\n".join(
+        f"\tt.c[0] = 0x{bg}; t.c[1] = 0x{tx};\n"
+        "\ttheme_derive(&t, &p);\n"
+        '\tprintf("%06x\\n", (unsigned)p.grey);'
+        for bg, tx in cases)
+    src = tmp_path / "grey.c"
+    src.write_text('#include <stdio.h>\n#include "theme.h"\n'
+                   "int main(void)\n{\n\tstruct palette p = {0};\n"
+                   f"\tstruct theme_custom t = {{0}};\n\n{body}\n\treturn 0;\n}}\n",
+                   encoding="utf-8")
+    exe = tmp_path / "grey"
+    subprocess.run([cc, "-I", str(SRC), str(src), str(SRC / "theme.c"),
+                    str(SRC / "msg_parse.c"), "-lm", "-o", str(exe)],
+                   check=True)
+    c_out = subprocess.run([str(exe)], check=True, capture_output=True,
+                           text=True).stdout.splitlines()
+    js = _js_functions(PAGE.read_text(encoding="utf-8"),
+                       ("hex2rgb", "rgb2hex", "lum", "contrast", "q565", "shown",
+                        "boardMix", "customGrey"))
+    js += ("\nconst cases = " + json.dumps(cases) + ";\n"
+           "for (const [bg, tx] of cases) {"
+           " console.log(customGrey(tx.toUpperCase(), bg.toUpperCase()).toLowerCase()); }\n")
+    (tmp_path / "grey.js").write_text(js, encoding="utf-8")
+    js_out = subprocess.run([node, str(tmp_path / "grey.js")], check=True,
+                            capture_output=True, text=True).stdout.splitlines()
+    assert js_out == c_out
