@@ -32,7 +32,7 @@ from typing import NamedTuple
 
 from pc import (install_codex_hooks, install_hooks, install_statusline, ota,
                 protocol, status_page, statusline_source, update,
-                user_config, win_driver)
+                user_config, wifi_pair, win_driver)
 from pc import theme as theme_mod
 from pc import theme_server
 # Eagerly, unlike the other providers, which are imported inside the functions
@@ -3233,6 +3233,14 @@ def cmd_uninstall(_args) -> int:
     # above is the single-slot file this replaced; it is still on the list so
     # an install that predates the directory leaves nothing behind.
     _rm_state_dir()
+    # The WiFi pairing key: a reinstall starts unpaired, and an uninstalled
+    # Blink leaves no secret behind. Then the private directory, if that
+    # left it empty (it is the only thing in it today).
+    wifi_pair.remove(blink_home())
+    try:
+        os.rmdir(os.path.join(blink_home(), "private"))
+    except OSError:
+        pass
     done, message = _remove_bin_dir()
     print(message)
     if refused:

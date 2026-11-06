@@ -360,6 +360,16 @@ def test_the_sandbox_clears_every_variable_it_lists(tmp_path, monkeypatch):
     assert left == []
 
 
+def test_force_wifi_is_cleared_by_the_sandbox(tmp_path, monkeypatch):
+    """BLINK_FORCE_WIFI makes the daemon skip the USB link for WiFi
+    (spec 7.2). Exported in a developer's shell it would send every daemon
+    test down the WiFi path, which CI never takes."""
+    assert "BLINK_FORCE_WIFI" in conftest.CLEARED
+    monkeypatch.setenv("BLINK_FORCE_WIFI", "1")
+    conftest.sandbox_environment(monkeypatch, tmp_path)
+    assert "BLINK_FORCE_WIFI" not in os.environ
+
+
 def test_every_blink_variable_the_code_reads_is_in_the_sandbox():
     """A new BLINK_* environment variable in pc/ or the entry points has to
     be cleared for the tests (conftest.CLEARED) or set by a fixture, or a

@@ -45,13 +45,15 @@ SET_UNDER_HOME = ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA")
 # PR #4, 2026-10-31); BLINK_RELEASE_PUBKEY_FILE replaces the shipped release
 # key; BLINK_OTA_DIR replaces the release feed; BLINK_TAP and BLINK_SCENARIO
 # make the daemon write a transcript or play a script; the rest switch the
-# poll interval, the watchdog and auto-update. A test that wants one sets it
+# poll interval, the watchdog and auto-update; BLINK_FORCE_WIFI (spec D31)
+# skips the serial link for WiFi. A test that wants one sets it
 # itself, after this. tests/test_sandbox.py fails if the code reads a BLINK_*
 # variable that is in neither this list nor SET_BY_FIXTURE.
 CLEARED = ("CODEX_HOME", "BLINK_STATUS_DIR", "BLINK_STATUS_POLL_S",
            "BLINK_RELEASE_PUBKEY_FILE", "BLINK_OTA_DIR", "BLINK_TAP",
            "BLINK_SCENARIO", "BLINK_POLL_INTERVAL_S", "BLINK_NO_WATCHDOG",
-           "BLINK_NO_AUTO_UPDATE", "BLINK_ALLOW_FOREIGN_HOME")
+           "BLINK_NO_AUTO_UPDATE", "BLINK_ALLOW_FOREIGN_HOME",
+           "BLINK_FORCE_WIFI")
 # Set to a value for every test, by their own fixtures below.
 SET_BY_FIXTURE = ("BLINK_SKIP_SERVICE",)
 
@@ -125,6 +127,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "allow_browser: this test may start the real browser or"
                    " file opener (none does today)")
+    config.addinivalue_line(
+        "markers", "windows_real: runs the real Windows ACL calls; skipped"
+                   " off Windows, proved on the Windows VM")
 
 
 def _loopback(address):
