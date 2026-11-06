@@ -39,13 +39,15 @@ class FakeWifiBoard:
     def __init__(self, key: bytes, port: int = 0, *, wrong_key=False,
                  stall_m1=False, close_after_m1=False, garbage_frame=False,
                  ping_interval_s: float = 10.0, close_on_length=None,
-                 verify_window: bool = False, usb_active: bool = False):
+                 verify_window: bool = False, usb_active: bool = False,
+                 extra_lines=()):
         self.key, self.port = key, port
         self.wrong_key, self.stall_m1 = wrong_key, stall_m1
         self.close_after_m1, self.garbage_frame = close_after_m1, garbage_frame
         self.ping_interval_s, self.close_on_length = ping_interval_s, close_on_length
         self.verify_window = verify_window
         self.usb_active = usb_active or verify_window
+        self.extra_lines = list(extra_lines)    # sent after wifi_state
         self.lines, self.pongs = [], 0
         self.ota_sink, self.logo_sink = bytearray(), bytearray()
         self.address = None
@@ -189,6 +191,8 @@ class FakeWifiBoard:
                 if t == "welcome":
                     self._line(c, {"t": "wifi_state", "v": 1, "st": "up",
                                    "link": "wifi"})
+                    for extra in self.extra_lines:
+                        self._line(c, extra)
                 elif t == "pong":
                     self.pongs += 1
                 elif t in ("ota_begin", "logo_begin"):
