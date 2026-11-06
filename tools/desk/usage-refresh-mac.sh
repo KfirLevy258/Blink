@@ -57,7 +57,7 @@ set -u
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 PROBE="$ROOT/tools/desk/usage_refresh_probe.py"
 PY="${BLINK_PYTHON:-$ROOT/.venv-test/bin/python}"
-EXPECT_BRANCH="${BLINK_DESK_BRANCH:-feat/usage-refresh}"
+EXPECT_BRANCH="${BLINK_DESK_BRANCH:-feat/spend-wsl-refresh}"
 BLINK_DIR="$HOME/.blink"
 BLINK_BIN="$BLINK_DIR/bin/blink"
 LOG="$BLINK_DIR/bridge.log"

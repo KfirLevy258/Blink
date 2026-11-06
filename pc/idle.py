@@ -1,7 +1,9 @@
 """Seconds since the last keyboard or mouse input, where the OS will say.
 
-None means "this OS cannot say", and the caller (usage_refresh) treats None
-as in use: a refresh that cannot prove the person is away must not run.
+None means "this OS cannot say". The refresh runs only while someone is at
+the computer, so the caller (usage_refresh.at_computer) does not take None
+as present: it falls back to another Claude source having been active inside
+IDLE_LIMIT_S, and with neither, nothing runs.
 """
 import re
 import subprocess

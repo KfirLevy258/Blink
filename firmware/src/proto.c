@@ -351,7 +351,7 @@ void proto_send_theme_now(const char *why)
 
 void proto_send_answer(enum ask_answer a)
 {
-	/* 50 bytes at its widest ("later"); ask_prompt_line refuses rather
+	/* 47 bytes at its widest ("later"); ask_prompt_line refuses rather
 	 * than cut a line short. */
 	char buf[64];
 

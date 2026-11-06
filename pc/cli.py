@@ -3556,7 +3556,8 @@ def _stepper(total):
     while every platform had the same five. It stopped being fine the moment
     Windows earned a sixth: five literals would each have needed a
     conditional, and the failure mode of getting one wrong is an installer
-    that counts to 5 and then prints step 6 of 5.
+    that counts to 5 and then prints step 6 of 5. The usage refresh step
+    made it six and seven (_install_steps).
     """
     state = {"n": 0}
 

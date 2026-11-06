@@ -28,7 +28,8 @@ because JSON must be, and dropped with the document.
 HELD FROM RELEASE. pc/ingest consults this only after a spend reading has
 appeared on the bus -- a gateway's dollar cap on the status line, or the
 spend page claude_cli builds on a seat billed by usage. The config itself
-is looked at on every desk now, at every poll, for the plan
+is stat'ed on every desk at every poll, and read again only when it
+changed (claude_plan), for the plan
 and the seat (docs/plans/enterprise-spend.md, 1); until a spend reading
 appears no frame is filtered here. The organisation-type strings below are
 Claude Code's as documented; nobody has read them off an Enterprise profile.
