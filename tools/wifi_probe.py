@@ -96,13 +96,11 @@ class _Conn:
         return True
 
     def wait_for(self, t, timeout_s):
-        end, seen = time.monotonic() + timeout_s, len(self.lines)
-        while time.monotonic() < end:
-            if not self.pump(0.1):
+        end = time.monotonic() + timeout_s
+        while t not in self.lines:      # it may already have been pumped
+            if time.monotonic() >= end or not self.pump(0.1):
                 return False
-            if t in self.lines[seen:]:
-                return True
-        return False
+        return True
 
 
 def _lengths(c, out):
@@ -110,9 +108,10 @@ def _lengths(c, out):
         raw = b'{"t":"pong"' + b" " * (n - 14) + b"}\n"
         try:
             c.sock.sendall(c.sess.seal_line(raw))
-            # A hung-up board shows as EOF or a failed send; looking after
-            # every frame is what pins it to the length that did it.
-            if not c.pump(0.005):
+            # A hung-up board shows as EOF or a failed send. The length
+            # reported is the last one sent before the close was seen: the
+            # true one is that or up to 2 lower, the close can lag a frame.
+            if not c.pump(0.025):
                 raise OSError
         except OSError:
             print("fail: length %d" % n, file=out)
@@ -170,11 +169,19 @@ def main(argv, out=sys.stdout) -> int:
     a = ap.parse_args(argv)
 
     if a.new_key_file:
+        created = False
         try:
+            # 0o600 is POSIX-only; this is a bench tool.
             fd = os.open(a.new_key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
             with os.fdopen(fd, "w") as f:
                 f.write(os.urandom(32).hex() + "\n")
         except OSError:
+            if created:
+                try:
+                    os.unlink(a.new_key_file)
+                except OSError:
+                    pass
             print("fail: key file not written", file=out)
             return 2
         print("ok: key written", file=out)
@@ -209,13 +216,14 @@ def main(argv, out=sys.stdout) -> int:
         except ws.SessionError:
             print("handshake refused", file=out)
             return 1
+        sock.settimeout(5)      # the handshake left its remaining deadline
         c = _Conn(sock, sess)
         try:
-            ok = c.wait_for("hello", 5)
+            # A board says hello at boot only; wifi_state follows each welcome.
             raw, _ = protocol.encode_checked(protocol.welcome("wifi_probe", "0"))
             sock.sendall(sess.seal_line(raw))
             print("ok: session open", file=out)
-            if not (ok and c.wait_for("wifi_state", 5)):
+            if not c.wait_for("wifi_state", 5):
                 print("fail: no wifi_state", file=out)
                 return 1
             print("ok: state received", file=out)

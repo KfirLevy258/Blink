@@ -40,13 +40,15 @@ class FakeWifiBoard:
                  stall_m1=False, close_after_m1=False, garbage_frame=False,
                  ping_interval_s: float = 10.0, close_on_length=None,
                  verify_window: bool = False, usb_active: bool = False,
-                 extra_lines=()):
+                 extra_lines=(), hello_at_start: bool = False):
         self.key, self.port = key, port
         self.wrong_key, self.stall_m1 = wrong_key, stall_m1
         self.close_after_m1, self.garbage_frame = close_after_m1, garbage_frame
         self.ping_interval_s, self.close_on_length = ping_interval_s, close_on_length
         self.verify_window = verify_window
         self.usb_active = usb_active or verify_window
+        # A real board says hello once, at boot; a session starts silent.
+        self.hello_at_start = hello_at_start
         self.extra_lines = list(extra_lines)    # sent after wifi_state
         self.lines, self.pongs = [], 0
         self.ota_sink, self.logo_sink = bytearray(), bytearray()
@@ -136,7 +138,8 @@ class FakeWifiBoard:
         if self.verify_window:
             self._verify_only(c)
             return
-        self._line(c, {"t": "hello", "v": 1, "caps": ["wifi", "logo", "pref"]})
+        if self.hello_at_start:
+            self._line(c, {"t": "hello", "v": 1, "caps": ["wifi", "logo", "pref"]})
         self._session(c)
 
     def _send(self, c, typ, body):

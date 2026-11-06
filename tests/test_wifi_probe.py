@@ -85,3 +85,23 @@ def test_new_key_file_is_owner_only_and_never_overwrites(tmp_path):
     assert _load().main(["--new-key-file", str(p)], out=out) == 0
     assert (p.stat().st_mode & 0o777) == 0o600 and len(bytes.fromhex(p.read_text())) == 32
     assert _load().main(["--new-key-file", str(p)], out=io.StringIO()) == 2
+
+
+def test_a_board_that_says_no_hello_still_gets_a_session(run):
+    # The real board greets at boot only; the fake used to hello every session.
+    rc, text, _ = run("--hold", "--seconds", "0.3")
+    assert rc == 0 and text.splitlines()[:2] == ["ok: session open", "ok: state received"]
+
+
+def test_ctrl_c_in_hold_prints_the_frame_count():
+    mod, out = _load(), io.StringIO()
+
+    class C:
+        frames = 7
+        lines = []
+
+        def pump(self, _):
+            raise KeyboardInterrupt
+
+    assert mod._hold(C(), out, None) == 0
+    assert out.getvalue().strip() == "ok: 7 board frames"

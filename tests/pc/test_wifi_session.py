@@ -50,7 +50,7 @@ def read_until(s, sess, want, n=1):
 
 
 def test_handshake_with_the_fake_board(board):
-    b = board(ping_interval_s=0.1)
+    b = board(ping_interval_s=0.1, hello_at_start=True)
     s = connect(b)
     sess = ws.client_handshake(s, KEY)
     got = read_until(s, sess, "L", 2)
