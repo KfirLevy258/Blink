@@ -4,8 +4,11 @@
 #include <errno.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
-/* Task 2.5. Returns -ENOSPC when the TX ring is full. */
+#if defined(CONFIG_BLINK_WIFI_LINK)
+/* Task 2.5. Returns -ENOSPC when the TX ring is full. Declared only when the
+ * WiFi link is built, so an image without it still links. */
 int wl_server_tx_line(const char *line, int timeout_ms);
+#endif
 #endif
 
 #define VERIFY_WINDOW_MS 60000
@@ -111,12 +114,16 @@ bool link_replace_session(bool newcomer_authenticated)
  */
 void link_emit(const char *line)
 {
+#if defined(CONFIG_BLINK_WIFI_LINK)
 	if (link_active(k_uptime_get()) == LINK_WIFI) {
 		if (wl_server_tx_line(line, 200) == -ENOSPC) {
+			/* Task 2.5's link_wifi_up(false) path must close the
+			 * socket (spec 5.4); this only stops routing to it. */
 			link_wifi_up(false);
 		}
 		return;
 	}
+#endif
 	printk("%s\n", line);
 }
 #endif

@@ -4,6 +4,11 @@
  * proto.c, the network thread and the UI cannot disagree. The decision is a
  * pure function of a few timestamps; callers pass the clock in, which is what
  * lets tests/link/host_test.c run it on a laptop.
+ *
+ * Threading: the state is written by two threads (main via link_usb_heard,
+ * link_verify_window; the network thread via the rest). Nothing here locks,
+ * and the int64_t fields tear on Xtensa (32-bit), so Task 2.5 must serialise
+ * calls (one mutex around them).
  */
 #include <stdbool.h>
 #include <stdint.h>

@@ -71,6 +71,12 @@ int main(void)
 	   "replace_only_on_auth");
 
 	next_test();
+	link_usb_heard(T(0));
+	link_auth_failed(T(0));
+	link_verify_window(T(0));
+	CK(link_wifi_may_accept(T(500)) == LINK_ACCEPT_NO, "backoff_beats_verify_only");
+
+	next_test();
 	link_wifi_up(true);
 	link_auth_failed(T(0));
 	CK(link_active(T(1)) == LINK_WIFI && !link_wifi_must_close(T(1)),
