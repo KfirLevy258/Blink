@@ -344,9 +344,6 @@ jobs:
       - run: npm install -g @anthropic-ai/claude-code@${{ matrix.version }}
       - run: claude --version
       - run: sh tests/ci/check_claude_version.sh
-        env:
-          # The /usage check tolerates a missing flag on the floor only.
-          BLINK_CLAUDE_LABEL: ${{ matrix.label }}
 
   # The Codex side of the same watch. Codex is open source, so instead of
   # installing it (which could not produce a rollout without an account) this

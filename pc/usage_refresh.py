@@ -191,6 +191,73 @@ def locate_claude(blink_home, home):
     return find_claude(home)
 
 
+# The first Claude Code whose `claude -p /usage` answers with no turn and no
+# cost. Measured logged out in the throwaway Ubuntu VM on 2026-11-06, by
+# bisecting the published releases: 2.1.100 says "Unknown skill: usage",
+# 2.1.113 "/usage isn't available in this environment", and 2.1.119 shows
+# the figures but counts two turns. All at zero cost and zero tokens, and
+# each read by judge() as COST, which turned the refresh off "for using the
+# model" on a desk that had spent nothing. judge() stays strict; the refresh
+# is simply not run, asked or offered below this version. 2.1.120, .122,
+# .126, .150, .200, .250, .300 and .318 all answered with 0 turns, $0.
+USAGE_SINCE = (2, 1, 120)
+VERSION_TIMEOUT_S = 30
+
+# exe -> ((mtime_ns, size), version or None). An update replaces the file,
+# so a desk that updates Claude Code is let in at the next look.
+_versions = {}
+
+
+def parse_version(text):
+    """(major, minor, patch) from `claude --version` output such as
+    "2.1.318 (Claude Code)", or None when it is not a version. Every piece
+    must be a number: mapping an odd one to 0 once reported a good install
+    as too old (see cli.claude_version)."""
+    head = text.split()[0] if text and text.split() else ""
+    pieces = head.split(".")[:3]
+    if not pieces or not all(x.isdigit() for x in pieces):
+        return None
+    parts = [int(x) for x in pieces]
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
+
+
+def version_of(exe, runner=wsl._bounded_run):
+    """The version of the Claude Code at `exe`, or None when it cannot be
+    told. Asked once per file: `--version` is a process, and the daemon may
+    look every minute. Never raises."""
+    try:
+        st = os.stat(exe)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+    hit = _versions.get(exe)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    extra = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
+    try:
+        r = runner([exe, "--version"], timeout=VERSION_TIMEOUT_S,
+                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                   stderr=subprocess.DEVNULL, **extra)
+        v = parse_version((r.stdout or b"").decode(errors="replace"))
+    except Exception:
+        v = None
+    _versions[exe] = (key, v)
+    return v
+
+
+def version_too_old(v):
+    """For a version already in hand (cli.claude_version's tuple). One that
+    could not be told is not "too old": judge() still guards that run."""
+    return v is not None and tuple(v) < USAGE_SINCE
+
+
+def too_old(exe, runner=wsl._bounded_run):
+    """True when `exe` is a Claude Code that predates USAGE_SINCE."""
+    return version_too_old(version_of(exe, runner))
+
+
 def command(exe):
     return [exe, "-p", "/usage", "--output-format", "json",
             "--no-session-persistence", "--strict-mcp-config",
@@ -598,9 +665,10 @@ class BoardAsk:
             # cannot be read (claude_home.known).
             return False
         view = self._view(now)
+        exe = locate_claude(self._blink_home, h.user_dir())
         ask.update(native=True,
-                   claude_found=locate_claude(self._blink_home,
-                                              h.user_dir()) is not None,
+                   # One too old for /usage is not offered it (USAGE_SINCE).
+                   claude_found=exe is not None and not too_old(exe),
                    # A config that could not be read is taken for a work
                    # login, which the board never asks: a torn read gave
                    # "consumer" until V2 of the /code-review max, and an
@@ -881,6 +949,15 @@ class RefreshWatch:
                 print("usage refresh skipped", file=sys.stderr)
                 if unsaved:
                     self._say_failure(unsaved)
+            return
+        if too_old(exe):
+            # Not run: its answer would read as COST and turn the refresh off
+            # for a cost nobody paid (USAGE_SINCE). Said once; `blink status`
+            # names it, and an updated Claude Code is run at the next tick.
+            if self._said != "too old":
+                self._said = "too old"
+                print("usage refresh skipped (Claude Code too old for"
+                      " /usage)", file=sys.stderr)
             return
         # Presence is proven only by a reading: the Linux rule (another
         # source's activity) lets a run happen, but is not a person at the

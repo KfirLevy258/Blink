@@ -507,18 +507,11 @@ def claude_version(home=None):
                              timeout=30).stdout.strip()
     except Exception:
         return None, None
-    head = out.split()[0] if out else ""
-    pieces = head.split(".")[:3]
     # Every component has to be a number, or we did not parse a version.
     # Mapping the odd ones to 0 meant "claude version unknown" came back as
     # (0, 0, 0) -- below every floor, so a perfectly good install was reported
     # as TOO OLD, and callers testing `ver is None` never saw it coming.
-    if not pieces or not all(x.isdigit() for x in pieces):
-        return (out or None), None
-    parts = [int(x) for x in pieces]
-    while len(parts) < 3:
-        parts.append(0)
-    return (out or None), tuple(parts)
+    return (out or None), usage_refresh.parse_version(out)
 
 
 def desktop_reading():
@@ -3917,7 +3910,7 @@ def _remember_claude() -> None:
         pass
 
 
-def _install_refresh_step(home) -> str:
+def _install_refresh_step(home, got=None) -> str:
     """The text after "[n/N] Usage refresh ... ": asks, once, whether to run
     the person's own `claude -p /usage` to keep the figures fresh.
 
@@ -3939,10 +3932,26 @@ def _install_refresh_step(home) -> str:
     if not usage_refresh.find_claude(_home()):
         return ("off (Claude Code isn't installed; see"
                 " docs/README-full.md#keeping-figures-fresh)")
+    interactive = bool(sys.stdin is not None
+                       and getattr(sys.stdin, "isatty", None)
+                       and sys.stdin.isatty())
+    if interactive:
+        # Only when someone is about to be asked: a non-interactive install
+        # asks nothing and starts no process here, the scratch-HOME refusal
+        # included (test_service_foreign_home). Handed back through `got`
+        # for read_desk, so it runs once: a hanging claude cost its 30 s
+        # timeout per run (review, 2026-10-19).
+        got = {} if got is None else got
+        if "version" not in got:
+            got["version"] = claude_version(home)
+        if usage_refresh.version_too_old(got["version"][1]):
+            # Not asked: its /usage would turn the refresh off as a cost.
+            # Left absent, so the install after a Claude Code update asks.
+            return ("off (this Claude Code has no /usage yet; update Claude"
+                    " Code, then: blink config usage-refresh on)")
     view = _refresh_view(home)
     default = not (view is not None and usage_refresh.is_work_login(view))
-    if sys.stdin is not None and getattr(sys.stdin, "isatty", None) \
-            and sys.stdin.isatty():
+    if interactive:
         print()
     answer = _ask_yes(REFRESH_QUESTION, default)
     if answer is None:
@@ -4237,7 +4246,8 @@ def _install_steps_run(home, rec, named, kept_wsl, step, down):
         refresh_home = rec
     else:
         refresh_home = home
-    print(_install_refresh_step(refresh_home))
+    got = {}
+    print(_install_refresh_step(refresh_home, got))
 
     if _home_refusal():
         _say_home_refused(
@@ -4288,7 +4298,7 @@ def _install_steps_run(home, rec, named, kept_wsl, step, down):
         # The notes below are about Claude Code on Windows, which this desk
         # does not read; the WSL step said its own.
         return 0
-    desk = read_desk(home=home)
+    desk = read_desk(home=home, version=got.get("version"))
     _note_if_no_claude_code(desk)
     _warn_if_claude_too_old(desk)
     _hint_wsl(desk)
@@ -5940,7 +5950,8 @@ def cmd_status(args) -> int:
     else:
         print("Usage data  none yet -- open Claude Code once so it renders "
               "its status line")
-    print("Usage refresh " + _refresh_status(home.kind == claude_home.WSL))
+    print("Usage refresh " + _refresh_status(home.kind == claude_home.WSL,
+                                             desk.claude_ver))
     codex = _source_lines(desk)
     # The Local Storage read in _claude_page and the bus poll behind --wire
     # each resolve the Desktop folder on their own; pinning read_desk's answer
@@ -5967,7 +5978,7 @@ def cmd_status(args) -> int:
     return 0
 
 
-def _refresh_status(wsl_home) -> str:
+def _refresh_status(wsl_home, claude_ver=None) -> str:
     """The value of status's Usage refresh row. Says nothing about a figure:
     only whether it is on, and when it last ran or why it is not."""
     if wsl_home:
@@ -5989,6 +6000,9 @@ def _refresh_status(wsl_home) -> str:
         return "off"
     if state.missing:
         return "on, but Claude Code wasn't found"
+    if usage_refresh.version_too_old(claude_ver):
+        # The `claude --version` status already ran, not another process.
+        return "on, but this Claude Code has no /usage yet; update Claude Code"
     if state.fails:
         # A streak said as one: "on, last ran 4 min ago" read as working
         # through a day of failures (/code-review max, cut list).

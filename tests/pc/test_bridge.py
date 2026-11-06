@@ -1324,6 +1324,9 @@ def test_an_answer_writes_the_setting_end_to_end(tmp_path, monkeypatch):
     os.makedirs(blink)
     rec = claude_home.from_environ({})
     monkeypatch.setenv("PATH", "")
+    # An empty file stands in for claude; its version cannot be told, which
+    # is "not too old" (usage_refresh.USAGE_SINCE).
+    monkeypatch.setattr(ur, "version_of", lambda *a, **k: None)
     exe = os.path.join(os.environ["HOME"], ".local", "bin",
                        "claude.exe" if sys.platform == "win32" else "claude")
     os.makedirs(os.path.dirname(exe))

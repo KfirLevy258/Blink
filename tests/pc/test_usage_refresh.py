@@ -12,6 +12,17 @@ from pc.usage_refresh import (State, Verdict, command, find_claude, judge,
                               load_state, record, run_once, save_state,
                               spacing)
 
+# The real one, for the tests of the version floor itself; every other test
+# runs a fake claude that cannot answer --version (or none at all), which the
+# autouse fixture below makes "cannot be told", i.e. not too old.
+REAL_VERSION_OF = ur.version_of
+
+
+@pytest.fixture(autouse=True)
+def _version_untold(monkeypatch):
+    monkeypatch.setattr(ur, "version_of", lambda *a, **k: None)
+
+
 @pytest.fixture(autouse=True)
 def _no_system_claude(monkeypatch, tmp_path):
     """find_claude also looks in /opt/homebrew/bin and /usr/local/bin, which
@@ -2098,3 +2109,90 @@ def test_a_cost_guard_whose_setting_write_fails_says_so(tmp_path,
     assert capsys.readouterr().err.splitlines() == [
         "usage refresh off (cost)",
         "usage refresh failed (PermissionError)"]
+
+
+# --- the /usage version floor (USAGE_SINCE), 2026-11-06 ---------------------
+
+@pytest.mark.parametrize("text, want", [
+    ("2.1.318 (Claude Code)", (2, 1, 318)),
+    ("2.1.120", (2, 1, 120)),
+    ("3", (3, 0, 0)),
+    ("claude version unknown", None),
+    ("2.x.1 (Claude Code)", None),
+    ("", None),
+])
+def test_parse_version(text, want):
+    assert ur.parse_version(text) == want
+
+
+@pytest.mark.parametrize("v, old", [
+    ((2, 1, 100), True), ((2, 1, 113), True), ((2, 1, 119), True),
+    ((2, 1, 120), False), ((2, 1, 318), False), ((3, 0, 0), False),
+    (None, False),                     # cannot be told: judge() guards it
+])
+def test_version_too_old(v, old):
+    assert ur.version_too_old(v) is old
+
+
+def test_version_of_asks_once_per_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(ur, "_versions", {})
+    exe = tmp_path / "claude"
+    exe.write_text("v1")
+    calls = []
+
+    def runner(argv, **kw):
+        calls.append(argv)
+        assert argv == [str(exe), "--version"] and kw["timeout"]
+        return subprocess.CompletedProcess(argv, 0, b"2.1.119 (Claude Code)\n",
+                                           None)
+    assert REAL_VERSION_OF(str(exe), runner) == (2, 1, 119)
+    assert REAL_VERSION_OF(str(exe), runner) == (2, 1, 119)
+    assert len(calls) == 1
+    exe.write_text("v2, a longer file")        # updated in place
+    assert REAL_VERSION_OF(str(exe), runner) == (2, 1, 119)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("fault", [OSError, subprocess.TimeoutExpired])
+def test_version_of_never_raises(tmp_path, monkeypatch, fault):
+    monkeypatch.setattr(ur, "_versions", {})
+    exe = tmp_path / "claude"
+    exe.write_text("")
+
+    def runner(argv, **kw):
+        raise (fault("x") if fault is OSError else fault(argv, 1))
+    assert REAL_VERSION_OF(str(exe), runner) is None
+    assert REAL_VERSION_OF(str(tmp_path / "gone"), runner) is None
+
+
+def test_a_claude_too_old_for_usage_is_never_run(tmp_path, monkeypatch,
+                                                 capsys):
+    # 2.1.119 answers /usage with two turns at no cost, which judge() reads
+    # as COST: run, it turned the refresh off for a cost nobody paid.
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    monkeypatch.setattr(ur, "version_of", lambda *a, **k: (2, 1, 119))
+    ran = []
+    t = _Watch(tmp_path, monkeypatch,
+               runner=lambda *a, **k: ran.append(a) or 1 / 0)
+    t.w.tick_once()
+    t.clock[0] += 3600
+    t.w.tick_once()
+    assert ran == [] and t.state().off_reason == ""
+    assert capsys.readouterr().err.splitlines() == [
+        "usage refresh skipped (Claude Code too old for /usage)"]
+    # Updated: run at the next tick, nothing to turn back on.
+    monkeypatch.setattr(ur, "version_of", lambda *a, **k: (2, 1, 318))
+    t.clock[0] += 3600
+    t.w.tick_once()
+    assert ran
+
+
+def test_the_board_never_asks_with_a_claude_too_old_for_usage(tmp_path,
+                                                              monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    k = _Asker(tmp_path)
+    monkeypatch.setattr(ur, "version_of", lambda *a, **k: (2, 1, 100))
+    assert k.a.due(CAPS) is False
+    monkeypatch.setattr(ur, "version_of", lambda *a, **k: (2, 1, 120))
+    assert k.a.due(CAPS) is True

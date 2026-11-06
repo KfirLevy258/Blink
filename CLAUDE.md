@@ -40,7 +40,11 @@ The one exception is the opt-in refresh, which runs the person's own
 on 2026-11-04 (Claude Code 2.1.318) it measured zero turns and zero cost, so
 it moves no quota. `pc/usage_refresh.py` checks every answer and turns the
 refresh off if that ever stops being true. Any change to its command needs
-that measurement again. `--bare` is never used: it reads auth only from an API
+that measurement again. Below Claude Code 2.1.120 the same command answers
+with one or two turns at no cost, which that check reads as model use, so
+nothing below `usage_refresh.USAGE_SINCE` is run, asked or offered
+(bisected 2026-11-06; `tests/ci/check_claude_version.sh` holds the floor to
+it on every claude-versions cell). `--bare` is never used: it reads auth only from an API
 key, so it drops the subscription login. A logged-out Claude Code also answers
 a zero-cost "success" without writing the cache, so a run counts only when
 `fetchedAtMs` lands at or after its start (less `MOVED_SLACK_S`, 5 s, for

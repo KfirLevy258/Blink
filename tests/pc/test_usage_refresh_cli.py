@@ -388,3 +388,46 @@ def test_update_says_nothing_without_claude_code(monkeypatch, capsys):
     asked = _tty(monkeypatch, [""])
     assert cli.main(["update"]) == 0
     assert asked == [] and "Usage refresh" not in capsys.readouterr().out
+
+
+# --- the /usage version floor (usage_refresh.USAGE_SINCE) -------------------
+
+TOO_OLD = ("2.1.119 (Claude Code)", (2, 1, 119))
+
+
+def test_install_does_not_offer_it_to_a_claude_too_old_for_usage(
+        monkeypatch, capsys, claude_found):
+    asked = _tty(monkeypatch, [""])
+    _work(monkeypatch, False)
+    monkeypatch.setattr(cli, "claude_version", lambda *a, **k: TOO_OLD)
+    got = {}
+    row = cli._install_refresh_step(_native(), got)
+    assert row == ("off (this Claude Code has no /usage yet; update Claude"
+                   " Code, then: blink config usage-refresh on)")
+    assert asked == [] and QUESTION not in capsys.readouterr().out
+    # Left absent, so the install after an update asks; and the reading is
+    # handed back for read_desk, so `claude --version` runs once.
+    assert ur.SETTING not in user_config.load(_bh())
+    assert got["version"] == TOO_OLD
+
+
+def test_a_non_interactive_install_runs_no_version_for_the_step(
+        monkeypatch, claude_found):
+    _tty(monkeypatch, [], tty=False)
+    calls = []
+    monkeypatch.setattr(cli, "claude_version",
+                        lambda *a, **k: calls.append(1) or TOO_OLD)
+    got = {}
+    assert cli._install_refresh_step(_native(), got) == cli.REFRESH_OFF_HINT
+    assert calls == [] and got == {}
+
+
+@pytest.mark.parametrize("ver, row", [
+    ((2, 1, 119), "on, but this Claude Code has no /usage yet; update"
+                  " Claude Code"),
+    ((2, 1, 120), "on"),
+    (None, "on"),
+])
+def test_status_names_a_claude_too_old_for_usage(ver, row):
+    user_config.put(_bh(), ur.SETTING, True)
+    assert cli._refresh_status(False, ver) == row
