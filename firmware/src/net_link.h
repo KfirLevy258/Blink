@@ -44,7 +44,10 @@ void net_link_request_scan(void);
 /* -EAGAIN while scanning. */
 int net_link_scan_results(struct net_link_ap *out, int max);
 /* Disconnect-and-wait first if associated (esp_wifi_drv.c:495). */
-void net_link_request_join(const uint8_t *ssid, size_t ssid_len, const char *psk);
+/* Returns a ticket (never 0) naming THIS request, or 0 if it was refused.
+ * Asking again replaces a request that has not started; the ticket of the
+ * one that wins is the one net_link_run_ticket() later reports. */
+uint32_t net_link_request_join(const uint8_t *ssid, size_t ssid_len, const char *psk);
 /* Sockets closed, NET_REQUEST_WIFI_DISCONNECT (wait <= 2 s), net_if_down(),
  * esp_wifi_stop(): D46. */
 void net_link_request_down(void);
@@ -56,14 +59,16 @@ void net_link_refuse_selftest(void);
 void net_link_work(void);
 
 /*
- * Counts joins as they START (bumped in join_run, after the state reads
- * JOINING). A caller that asks for a join records this first and trusts
- * UP/FAILED only once the count has passed that value: until then a join
- * already running (the boot join, an earlier wifi_set) is not its own, and
- * crediting its UP to a new candidate would persist credentials nobody
- * verified (D21).
+ * The ticket of the join now running or last run, published in join_run
+ * after the state reads JOINING. A caller trusts UP/FAILED as its own only
+ * when this equals the ticket its request returned: a join already running
+ * (the boot join, an earlier wifi_set) or a later one (a rejoin) has another
+ * ticket, and crediting its result to a candidate would persist credentials
+ * nobody verified (D21). The ticket travels with the parameters, under the
+ * same lock, so no preemption can pair one request's ticket with another's
+ * credentials.
  */
-uint32_t net_link_join_gen(void);
+uint32_t net_link_run_ticket(void);
 enum net_link_state net_link_state(void);
 enum net_link_why net_link_why(void);
 const char *net_link_why_text(enum net_link_why w);

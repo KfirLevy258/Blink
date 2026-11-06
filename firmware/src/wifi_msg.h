@@ -52,4 +52,13 @@ struct wifi_view {
 
 int wifi_fmt_state(char *buf, size_t n, const struct wifi_view *v);
 
+/* Whether a wifi_state is owed: the last one sent is (st, why, link), or
+ * st == WIFI_LAST_NONE (nothing yet: the welcome says it first, so stay
+ * quiet) or WIFI_LAST_OWED (an override went out and the real state has not
+ * been said since). */
+#define WIFI_LAST_NONE (-1)
+#define WIFI_LAST_OWED (-2)
+bool wifi_state_changed(int last_st, int last_why, int last_link,
+			int st, int why, int link);
+
 #endif /* WIFI_MSG_H */

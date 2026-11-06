@@ -139,3 +139,13 @@ int wifi_fmt_state(char *buf, size_t n, const struct wifi_view *v)
 	}
 	return ok && put(buf, n, &pos, "}") ? (int)pos : -1;
 }
+
+bool wifi_state_changed(int last_st, int last_why, int last_link,
+			int st, int why, int link)
+{
+	if (last_st == WIFI_LAST_NONE) {
+		return false;
+	}
+	return last_st == WIFI_LAST_OWED || st != last_st ||
+	       why != last_why || link != last_link;
+}

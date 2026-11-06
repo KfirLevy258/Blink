@@ -427,7 +427,8 @@ bool proto_ota_install(void)
 enum proto_src { PROTO_SRC_USB, PROTO_SRC_WIFI };
 
 #define WIFI_PORT 49731			/* D18 */
-#define WIFI_JOIN_DEADLINE_MS 60000	/* scan 10 s + join 30 s, with room */
+#define WIFI_JOIN_DEADLINE_MS 60000
+#define WIFI_REQ_DEADLINE_MS 150000	/* queued behind a 30 s join, with room */
 #define WIFI_WHY_BAD_INPUT "Invalid WiFi settings"
 #define WIFI_WHY_SAVE "Could not save the pairing"
 
@@ -435,20 +436,27 @@ enum proto_src { PROTO_SRC_USB, PROTO_SRC_WIFI };
  * up (D21), so a wrong password leaves the old pairing exactly as it was. */
 static struct {
 	bool active;
-	uint32_t gen;		/* net_link_join_gen() when the join was asked for */
-	int64_t deadline;
+	uint32_t ticket;	/* what net_link_request_join returned */
+	bool started;
+	int64_t req_deadline;	/* the request never started (queued, refused) */
+	int64_t deadline;	/* once started: scan 10 s + join 30 s, with room */
 	uint8_t ssid[32];
 	size_t ssid_len;
 	char psk[CFG_PSK_MAX];
 	uint8_t key[CFG_PAIR_KEY_LEN];
 } cand;
 
-/* True once net_link has STARTED a join after ours was asked for. Until
- * then its state and result belong to an earlier join (the boot join, a
- * previous wifi_set) and must not be credited to the candidate (D21). */
+/* True once net_link is running OUR ticket. Before that its state and
+ * result belong to another join (the boot join, a previous wifi_set), and
+ * after it to a later one; neither may be credited to the candidate (D21). */
 static bool cand_started(void)
 {
-	return cand.active && (int32_t)(net_link_join_gen() - cand.gen) > 0;
+	if (cand.active && !cand.started && cand.ticket != 0 &&
+	    net_link_run_ticket() == cand.ticket) {
+		cand.started = true;
+		cand.deadline = k_uptime_get() + WIFI_JOIN_DEADLINE_MS;
+	}
+	return cand.active && cand.started;
 }
 
 static int scan_sent = -1;	/* -1 none pending, else next line index */
@@ -590,7 +598,7 @@ static void wifi_do_set(const char *json)
 	 * the PC counts a `fail` only after it (pc/bridge.py). */
 	if (!ok) {
 		wifi_send_state("joining", "", true);
-		wifi_send_state("fail", WIFI_WHY_BAD_INPUT, false);
+		wifi_send_state("fail", WIFI_WHY_BAD_INPUT, true);
 		goto out;
 	}
 	wifi_cand_drop();	/* a newer set replaces an older one */
@@ -599,10 +607,13 @@ static void wifi_do_set(const char *json)
 	memcpy(cand.psk, psk, (size_t)pl);
 	memcpy(cand.key, key, sizeof(key));
 	cand.active = true;
-	cand.gen = net_link_join_gen();
-	cand.deadline = k_uptime_get() + WIFI_JOIN_DEADLINE_MS;
+	cand.req_deadline = k_uptime_get() + WIFI_REQ_DEADLINE_MS;
 	wifi_send_state("joining", "", false);	/* the candidate's name and kid */
-	net_link_request_join(cand.ssid, cand.ssid_len, cand.psk);
+	cand.ticket = net_link_request_join(cand.ssid, cand.ssid_len, cand.psk);
+	if (cand.ticket == 0) {		/* no radio, or refused: say so now */
+		wifi_cand_drop();
+		wifi_send_state("fail", net_link_why_text(NL_WHY_NOT_FOUND), false);
+	}
 out:
 	wipe(ssid, sizeof(ssid));
 	wipe(key, sizeof(key));
@@ -625,15 +636,13 @@ static void wifi_rejoin_stored(void)
 	wipe(key, sizeof(key));
 }
 
+/* Main thread only: cand has no lock. Task 2.5's network thread must not
+ * call this; it asks main (or net_link_request_down) instead. */
 void proto_wifi_cancel(void)
 {
 	/* The candidate first: a join still running must never persist. */
-	bool had = cand.active;
-
 	wifi_cand_drop();
-	if (had || net_link_state() != NL_OFF) {
-		net_link_request_down();
-	}
+	net_link_request_down();	/* cheap, and cannot bring the radio up */
 }
 
 static void wifi_do_forget(void)
@@ -715,8 +724,12 @@ static void wifi_poll(void)
 				link_verify_window(k_uptime_get());	/* D65 */
 				wifi_send_state(NULL, NULL, false);
 			} else {
-				net_link_request_down();
 				wifi_send_state("fail", WIFI_WHY_SAVE, false);
+				if (cfg_paired()) {
+					wifi_rejoin_stored();
+				} else {
+					net_link_request_down();
+				}
 			}
 		} else if (st == NL_FAILED) {
 			/* Explicit: with no candidate and nothing paired the
@@ -730,7 +743,8 @@ static void wifi_poll(void)
 			}
 		}
 	}
-	if (cand.active && k_uptime_get() > cand.deadline) {
+	if (cand.active && k_uptime_get() >
+	    (cand.started ? cand.deadline : cand.req_deadline)) {
 		wifi_cand_drop();
 		wifi_send_state("fail", net_link_why_text(NL_WHY_NOT_FOUND), false);
 		if (cfg_paired()) {
@@ -744,9 +758,8 @@ static void wifi_poll(void)
 
 		(void)wifi_st_name(&code);
 		l = link_active(k_uptime_get()) == LINK_WIFI ? 'w' : 'u';
-		if (last_st >= 0 && (code != last_st ||
-				     (int)net_link_why() != last_why ||
-				     l != last_link)) {
+		if (wifi_state_changed(last_st, last_why, last_link, code,
+				       (int)net_link_why(), l)) {
 			wifi_send_state(NULL, NULL, false);
 		}
 	}

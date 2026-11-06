@@ -95,6 +95,18 @@ int main(void)
 		      strcmp(line, "{\"t\":\"wifi_state\",\"st\":\"off\","
 			     "\"link\":\"usb\"}") == 0);
 	}
+	/* The detector must stay armed after an override (round 2, N1). */
+	check("changed_quiet_before_first_state",
+	      !wifi_state_changed(WIFI_LAST_NONE, 0, 'u', 2, 0, 'u'));
+	check("changed_quiet_when_same",
+	      !wifi_state_changed(2, 0, 'u', 2, 0, 'u'));
+	check("changed_on_state_why_or_link",
+	      wifi_state_changed(1, 0, 'u', 2, 0, 'u') &&
+	      wifi_state_changed(3, 1, 'u', 3, 2, 'u') &&
+	      wifi_state_changed(2, 0, 'u', 2, 0, 'w'));
+	check("changed_owed_after_override_even_if_equal",
+	      wifi_state_changed(WIFI_LAST_OWED, 0, 'u', 0, 0, 'u'));
+
 	/* wifi_set fields are read at proto.c's buffer sizes; an over-long
 	 * value is cut by msg_get_str and must then be refused, not accepted
 	 * at a length that happens to be legal. */

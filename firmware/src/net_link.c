@@ -77,7 +77,9 @@ static atomic_t ops;
 static atomic_t rssi_cache = ATOMIC_INIT(-127);
 static void kick(void);
 static atomic_t scanning;
-static atomic_t join_gen;
+static atomic_t run_ticket;
+static uint32_t req_seq;	/* under lock */
+static uint32_t req_ticket;	/* under lock */
 static volatile enum net_link_state state = NL_OFF;
 static volatile enum net_link_why why = NL_WHY_NONE;
 /* Set once at boot by net_link_refuse_selftest(), never cleared: a board
@@ -289,12 +291,14 @@ static void say_failed(enum net_link_why w)
 /* The radio stays up for the usual 60 s, then goes down showing why. */
 static void join_failed(enum net_link_why w)
 {
-	state = NL_FAILED;
-	idle_at = k_uptime_get() + IDLE_DOWN_MS;
+	/* The reason first: main reads FAILED and then the reason. */
 	say_failed(w);
+	idle_at = k_uptime_get() + IDLE_DOWN_MS;
+	state = NL_FAILED;
 }
 
-static void join_run(const uint8_t *ssid, size_t ssid_len, const char *psk)
+static void join_run(const uint8_t *ssid, size_t ssid_len, const char *psk,
+		     uint32_t ticket)
 {
 	struct wifi_connect_req_params p = { 0 };
 	enum wifi_iface_state s;
@@ -305,7 +309,7 @@ static void join_run(const uint8_t *ssid, size_t ssid_len, const char *psk)
 	state = NL_JOINING;
 	why = NL_WHY_NONE;
 	idle_at = 0;
-	(void)atomic_inc(&join_gen);	/* after the state: see net_link_join_gen() */
+	atomic_set(&run_ticket, (atomic_val_t)ticket);	/* after the state */
 	radio_up();
 
 	/* The security type comes from the scan: PSK on a WPA3-only network
@@ -391,16 +395,18 @@ static void do_join(void)
 {
 	uint8_t ssid[32];
 	size_t len;
+	uint32_t ticket;
 	char psk[sizeof(req_psk)];
 	k_spinlock_key_t key = k_spin_lock(&lock);
 
 	len = req_ssid_len;
+	ticket = req_ticket;
 	memcpy(ssid, req_ssid, len);
 	memcpy(psk, req_psk, sizeof(psk));
 	mbedtls_platform_zeroize(req_psk, sizeof(req_psk));
 	k_spin_unlock(&lock, key);
 
-	join_run(ssid, len, psk);
+	join_run(ssid, len, psk, ticket);
 	mbedtls_platform_zeroize(psk, sizeof(psk));
 }
 
@@ -531,33 +537,39 @@ int net_link_scan_results(struct net_link_ap *out, int max)
 	return n;
 }
 
-void net_link_request_join(const uint8_t *ssid, size_t ssid_len, const char *psk)
+uint32_t net_link_request_join(const uint8_t *ssid, size_t ssid_len, const char *psk)
 {
+	uint32_t ticket;
 	size_t plen = strnlen(psk, sizeof(req_psk));
 	k_spinlock_key_t key;
 
 	if (iface == NULL || refused) {
-		return;
+		return 0;
 	}
 	/* The PC validated both (S6.1); this is the board validating again.
 	 * WPA2's rule: 8 to 63 characters, or 64 hex digits. Refused here,
 	 * the link is left as it was: a bad request does not end a good one. */
 	if (ssid_len == 0 || ssid_len > sizeof(req_ssid)) {
 		say_failed(NL_WHY_NOT_FOUND);
-		return;
+		return 0;
 	}
 	if (plen < 8 || plen > 64) {
 		say_failed(NL_WHY_WRONG_PSK);
-		return;
+		return 0;
 	}
 	key = k_spin_lock(&lock);
 	memcpy(req_ssid, ssid, ssid_len);
 	req_ssid_len = ssid_len;
 	memcpy(req_psk, psk, plen);
 	req_psk[plen] = '\0';
+	if (++req_seq == 0) {
+		req_seq = 1;
+	}
+	ticket = req_ticket = req_seq;
 	k_spin_unlock(&lock, key);
 	atomic_or(&ops, OP_JOIN);
 	kick();
+	return ticket;
 }
 
 void net_link_request_down(void)
@@ -580,9 +592,9 @@ void net_link_refuse_selftest(void)
 	state = NL_FAILED;
 }
 
-uint32_t net_link_join_gen(void)
+uint32_t net_link_run_ticket(void)
 {
-	return (uint32_t)atomic_get(&join_gen);
+	return (uint32_t)atomic_get(&run_ticket);
 }
 
 enum net_link_state net_link_state(void)
