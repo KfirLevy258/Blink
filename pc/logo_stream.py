@@ -28,11 +28,18 @@ CHUNK_WIFI = 512
 CHUNK_USB = 256
 # Over WiFi the board acks every 16 KiB and TCP carries the window. Over USB
 # every byte lands in the board's UART RX ring, 2 KB (proto.c), and a chunk
-# line is ~390 bytes, so the board acks EVERY chunk over USB and the daemon
-# keeps four chunks (~1.5 KB) in flight: a 32 KiB window overflows the ring
-# and the board drops lines silently.
+# line is ~390 bytes: a 32 KiB window overflows the ring and the board drops
+# lines silently. So the board acks EVERY chunk over USB, after its flash
+# write returns, and the daemon keeps ONE chunk in flight. Not four: on a
+# fused chip each 256-byte write is a read, erase and rewrite of a 4 KB
+# sector with interrupts off for 45 ms or more (Zephyr 4.3.1 flash_esp32.c
+# aligned_flash_write, the hal's cache_utils.c), and at 115200 baud the
+# chunks behind it would overrun the UART's 128-byte hardware FIFO before
+# the ISR could move them to the ring -- a corrupt logo_chunk, every time
+# (review of Task 6.3, 2026-11-07). Stop-and-wait means nothing arrives
+# while the sector is erased. The cost is a slower logo over the cable.
 WINDOW_WIFI = 32 * 1024
-WINDOW_USB = 4 * CHUNK_USB
+WINDOW_USB = CHUNK_USB
 WINDOW = WINDOW_WIFI
 STALLED = "The logo update stalled"
 REFUSED = "The board refused the logo"

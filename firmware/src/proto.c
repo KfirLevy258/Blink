@@ -222,6 +222,8 @@ static const char *board_id_hex(void)
 	return idhex;
 }
 
+static bool pref_refused;	/* set only while pref_set_line answers a refusal */
+
 void proto_send_pref(void)
 {
 	/*
@@ -231,34 +233,38 @@ void proto_send_pref(void)
 	 * had nothing but board.json's memory to say which board it was --
 	 * and a remembered id must never decide whose theme wins.
 	 *
-	 * 176 bytes at its widest ("claude", a 32-digit id, bright 100 and
-	 * the six caps), measured by tests/pc/test_board_caps.py, which fails
-	 * if it outgrows this. It was 119 in 128 before Task 6.3 added focus,
-	 * bright, view and the logo and pref caps. A cap costs its name's
+	 * 185 bytes at its widest ("claude", a 32-digit id, bright 100, ok
+	 * and the six caps), measured by tests/pc/test_board_caps.py, which
+	 * fails if it outgrows this. It was 119 in 128 before Task 6.3 added
+	 * focus, bright, view, ok and the logo and pref caps. A cap costs its name's
 	 * length plus 3 B (the comma and two quotes). Far under the daemon's
 	 * 512.
 	 *
 	 * focus, bright and view are what pref_set sets (spec S15.3), so the
 	 * page renders what the board holds and sees a pref_set land. view is
-	 * 0, the gauges: the only view until feat/ultra-burn merges.
+	 * 0, the gauges: the only view until feat/ultra-burn merges. ok is 0
+	 * only on the pref that answers a refused pref_set, so the page hears
+	 * the refusal at once instead of waiting out its timeout.
 	 */
-	char buf[192];
+	char buf[224];
 
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"pref\",\"v\":%d,\"provider\":\"%s\","
 		 "\"board_id\":\"%s\",\"focus\":%d,\"bright\":%d,\"view\":0,"
-		 BOARD_CAPS "}",
+		 "\"ok\":%d," BOARD_CAPS "}",
 		 PROTO_VERSION,
 		 cfg_get_main_src() == CFG_MAIN_SRC_CODEX ? "codex" : "claude",
 		 board_id_hex(), cfg_get_focus_on() ? 1 : 0,
-		 (int)cfg_get_bright_pct());
+		 (int)cfg_get_bright_pct(), pref_refused ? 0 : 1);
 	emit(buf);
 }
 
 static void send_logo_state(void);
+static void logo_usb_drop(void);
 
 static void send_hello(void)
 {
+	logo_usb_drop();
 	const char *idhex = board_id_hex();
 
 	uint32_t cause = 0;
@@ -712,11 +718,22 @@ static void logo_begin_line(const char *json, enum proto_src src)
 {
 	uint32_t size, crc;
 
-	if (!get_u32(json, "size", &size) || !get_u32(json, "crc", &crc) ||
-	    logo_write_begin(size, crc) != 0) {
-		/* Whatever was open is not continued by a begin that failed. */
+	int rc = -EINVAL;
+
+	if (get_u32(json, "size", &size) && get_u32(json, "crc", &crc)) {
+		rc = logo_write_begin(size, crc);
+	}
+	if (rc != 0) {
+		/* Whatever was open is not continued by a begin that failed;
+		 * dropping it, or an erase that failed (-EIO), changed what
+		 * the partition holds. */
+		bool was = logo_write_active();
+
 		logo_write_abort();
 		logo_ack(0, "refused");
+		if (was || rc == -EIO) {
+			send_logo_state();
+		}
 		return;
 	}
 	logo_via_wifi = src == PROTO_SRC_WIFI;
@@ -726,6 +743,18 @@ static void logo_begin_line(const char *json, enum proto_src src)
 	logo_gen = wl_server_session_gen();
 #endif
 	logo_ack(0, NULL);	/* erased: the window opens */
+	send_logo_state();	/* the old logo is gone: a change */
+}
+
+/* The cable's daemon is gone or restarting (welcome, host went away, our
+ * own hello): a USB stream it began will never be finished, so it is
+ * dropped and erased as a WiFi one is when its session goes. */
+static void logo_usb_drop(void)
+{
+	if (logo_write_active() && !logo_via_wifi) {
+		logo_write_abort();
+		send_logo_state();
+	}
 }
 
 /* USB only: over WiFi the bytes are G frames. A chunk with no stream open
@@ -741,11 +770,12 @@ static void logo_chunk_line(const char *json, enum proto_src src)
 	size_t n = 0;
 	uint32_t off;
 
-	if (!logo_write_active()) {
+	/* Also dropped, the stream left alone: a chunk off the link that did
+	 * not begin it. It is not that stream's to end. */
+	if (!logo_write_active() || src != PROTO_SRC_USB || logo_via_wifi) {
 		return;
 	}
-	if (src != PROTO_SRC_USB || logo_via_wifi ||
-	    !get_u32(json, "off", &off) ||
+	if (!get_u32(json, "off", &off) ||
 	    !msg_get_str(json, "d", d, sizeof(d)) ||
 	    base64_decode(bin, sizeof(bin), &n, (const uint8_t *)d,
 			  strlen(d)) != 0 || n == 0) {
@@ -780,6 +810,10 @@ static void logo_line(const char *type, const char *json, enum proto_src src)
 	} else if (strcmp(type, "logo_end") == 0) {
 		logo_end_line(src);
 	} else if (strcmp(type, "logo_remove") == 0) {
+		if (logo_write_active()) {
+			/* The streaming side hears that its stream is over. */
+			logo_ack(0, "removed");
+		}
 		if (logo_write_remove() == 0) {
 			printk("[logo] removed\n");
 		}
@@ -858,8 +892,14 @@ static void pref_set_line(const char *json)
 		}
 		bright = (int)v;
 	}
-	/* view: accepted and ignored until feat/ultra-burn, which adds the
-	 * view enum, merges here (S15.3). */
+	/* view: a non-negative integer, then ignored until feat/ultra-burn,
+	 * which adds the view enum, merges here (S15.3). */
+	if (msg_find_value(json, "view")) {
+		if (!msg_get_double(json, "view", &v) || v != v || v < 0 ||
+		    v > 255 || v != (double)(int)v) {
+			goto bad;
+		}
+	}
 
 	if (src >= 0 && src != cfg_get_main_src()) {
 		(void)cfg_set_main_src((uint8_t)src);
@@ -879,6 +919,9 @@ static void pref_set_line(const char *json)
 	return;
 bad:
 	printk("[proto] pref_set refused\n");
+	pref_refused = true;
+	proto_send_pref();
+	pref_refused = false;
 }
 
 /* ---- WiFi pairing over the cable (spec S5.3, S6.1) ---------------------- */
@@ -1516,6 +1559,11 @@ static void dispatch(const char *json, enum proto_src src)
 	} else if (strcmp(type, "welcome") == 0) {
 		double hv = 0;
 
+		/* A new daemon on the cable: the old one's stream is over. */
+		if (src == PROTO_SRC_USB) {
+			logo_usb_drop();
+		}
+
 		/*
 		 * Both of these used to be dropped on the floor. The board had
 		 * no way to tell a customer that the half of the product on
@@ -1960,6 +2008,7 @@ void proto_service(void)
 	 * daemon polls every 60 s, so the window must be comfortably longer.
 	 */
 	if (host_seen && (now - last_host_ms) > HOST_TIMEOUT_MS) {
+		logo_usb_drop();
 		printk("[proto] host went away%s\n",
 		       host_bye ? " (said bye)" : "");
 		usage_view_set_status(USAGE_STATUS_DISCONNECTED);

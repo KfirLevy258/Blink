@@ -383,3 +383,14 @@ def test_a_refused_logo_is_a_sentence(tmp_path):
     b.on_message({"t": "logo_ack", "v": 1, "off": 0, "err": "refused"})
     pump_until(b, lambda: not t.is_alive())
     assert str(box["e"]) == "The board refused the logo"
+
+
+def test_a_refused_pref_set_answers_the_page_at_once(tmp_path):
+    b, ops, sent, *_ = make(tmp_path, caps=("pref",))
+    t, box = call(lambda: ops.pref_set(bright=20))
+    pump_until(b, lambda: any(m["t"] == "pref_set" for m in sent))
+    b.on_message({"t": "pref", "v": 1, "provider": "claude", "focus": 0,
+                  "bright": 100, "view": 0, "ok": 0, "caps": ["pref"]})
+    t.join(1)
+    assert not t.is_alive()
+    assert isinstance(box["e"], settings_ops.BoardOpError)

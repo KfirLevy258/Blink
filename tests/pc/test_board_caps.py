@@ -301,10 +301,11 @@ def test_the_boards_pref_carries_both_caps_and_fits_its_buffer():
                                         "logo", "pref"}
     # snprintf truncates silently, and a truncated pref is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
-    # focus, bright and view are what pref_set sets (spec S15.3).
-    assert {"focus", "bright", "view"} <= set(msg)
-    # Measured 176 B in the 192 B buffer (hello: 171 in 192), after the
-    # logo and pref caps and the three preferences. A cap costs its name's
+    # focus, bright and view are what pref_set sets (spec S15.3); ok says
+    # whether the pref_set it answers was refused.
+    assert {"focus", "bright", "view", "ok"} <= set(msg)
+    # Measured 185 B in the 224 B buffer (hello: 171 in 192), after the
+    # logo and pref caps, the three preferences and ok. A cap costs its name's
     # length plus 3 B. The daemon reads 512 and the board itself drops a
     # longer inbound line whole; a pref anywhere near that is a mistake.
     assert len(line) <= 200, len(line)

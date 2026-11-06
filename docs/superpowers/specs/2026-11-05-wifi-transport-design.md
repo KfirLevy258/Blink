@@ -1682,10 +1682,15 @@ same boundary the OTA image has.
   replacement. Over USB the same bytes travel as `logo_chunk` NDJSON lines
   (`off`, `d` base64 of at most 256 bytes, so the line stays under 512 B).
   Every USB byte lands in the board's 2 KB UART RX ring, so over USB the
-  board acks EVERY chunk (`logo_ack off:<n>`, not at 16 KiB boundaries) and
-  the daemon keeps four chunks (about 1.5 KB) in flight; a 32 KiB window
-  would overflow the ring and the board would drop lines silently
-  (2026-11-07). The stream is done only when the board's `logo_state`
+  board acks EVERY chunk (`logo_ack off:<n>`, not at 16 KiB boundaries),
+  after its flash write returns, and the daemon keeps one chunk in flight,
+  so nothing arrives while an encrypted chip erases a sector with
+  interrupts off (a 256-byte write there is a read, erase and rewrite of a
+  4 KB sector, 45 ms or more with `irq_lock` held, and chunks behind it
+  would overrun the UART's 128-byte hardware FIFO; review of Task 6.3,
+  2026-11-07). A 32 KiB window would also overflow the ring and the board
+  would drop lines silently (2026-11-07). The cost is a slower logo over
+  the cable. The stream is done only when the board's `logo_state`
   arrives after `logo_end` (`present` 1). `logo_chunk` is the one place
   the OTA path has no USB equivalent (OTA over USB is esptool). The control lines are shared by both links: `logo_begin`
   (`size`, `crc`), the chunks, `logo_end`; `logo_remove`; and the board's

@@ -132,6 +132,28 @@ def test_logo_stream_over_fake_board_usb(size):
     assert max(len(m["d"]) for m in usb.lines if m["t"] == "logo_chunk") == 344
 
 
+def test_usb_keeps_one_chunk_in_flight():
+    """Stop-and-wait over the cable: nothing reaches a fused board while it
+    erases a sector with interrupts off (pc/logo_stream.py WINDOW_USB)."""
+    sent = []
+
+    class L:
+        kind = "usb"
+
+        def write(self, raw):
+            sent.append(json.loads(raw))
+
+    s = logo_stream.LogoStream(_blob(4000), "usb")
+    s.pump(L())
+    s.ack(0)
+    for _ in range(3):
+        s.pump(L())
+    assert [m["t"] for m in sent].count("logo_chunk") == 1
+    s.ack(256)
+    s.pump(L())
+    assert [m["t"] for m in sent].count("logo_chunk") == 2
+
+
 def test_a_32k_window_over_usb_overflows_the_ring(monkeypatch):
     """The fake ring is real: with the WiFi window the stream floods it, lines
     are dropped and the image never arrives."""
@@ -156,6 +178,7 @@ def test_the_stream_is_not_done_until_the_board_says_present():
         for m in [{"t": "logo_ack", "off": 0}]:
             b.on_message(m)
     b.on_message({"t": "logo_ack", "off": 256})
+    b.pump()                            # one chunk in flight: the second now
     b.on_message({"t": "logo_ack", "off": 300})
     b.pump()
     assert any(json.loads(r)["t"] == "logo_end" for r in usb.ring)

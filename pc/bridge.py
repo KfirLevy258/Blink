@@ -353,10 +353,18 @@ class Bridge:
             if self._set_preferred and isinstance(want, str):
                 if self._set_preferred(want):
                     print(f"[bridge] main source: {want}", file=sys.stderr)
+            # The next pref answers the pref_set in flight: the protocol
+            # carries no request id, so a pref crossing it (a welcome's
+            # answer) can be taken for it. Harmless: it holds the board's
+            # values all the same. ok 0 is the board refusing a field.
             if self._op is not None and self._op.kind == "pref":
-                self._finish(self._op, result={
-                    k: msg.get(k) for k in ("provider", "focus", "bright",
-                                            "view")})
+                if msg.get("ok") == 0:
+                    self._finish(self._op, error=(
+                        "The board did not accept that setting."))
+                else:
+                    self._finish(self._op, result={
+                        k: msg.get(k) for k in ("provider", "focus",
+                                                "bright", "view")})
             return
         if t == "hello":
             self._note_board(msg)
