@@ -1636,3 +1636,272 @@ def test_every_target_in_the_markup_is_named():
         if n["tag"] == "button":
             text = "".join(c if isinstance(c, str) else "x" for c in n["children"])
             assert text.strip() or n["attrs"].get("aria-label"), n["attrs"]
+
+
+# ---------------------------------------------------------------- Connect (Task 4.4)
+# The page as `blink settings` serves it: persistent, so it asks /api/wifi.
+
+def _hex(s):
+    return s.encode().hex()
+
+
+EVIL = "<img src=x onerror=alert(1)>"
+
+
+def _wifi(state=None, nets=None, join=None, scan=None):
+    a = {"/api/state": {"status": 200, "body": {
+             "saved": {"id": 0}, "draft": None, "persistent": True}},
+         "/api/wifi": {"status": 200, "body": state or {
+             "link": "usb", "usb": True}}}
+    if nets is not None:
+        a["/api/wifi/scan"] = {"status": 200, "body": {"nets": nets}}
+    if scan is not None:
+        a["/api/wifi/scan"] = scan
+    if join is not None:
+        a["/api/wifi/join"] = join
+    return a
+
+
+NETS = [{"s": _hex("Home-2G"), "r": -50, "sec": "wpa2"},
+        {"s": _hex(EVIL), "r": -70, "sec": "mixed"},
+        {"s": _hex("Office"), "r": -60, "sec": "eap"}]
+
+OPEN_PICKER = """
+await advance(300);
+$('c-move').click(); await advance(10);
+"""
+
+
+def _enter(pw, ssid="Home-2G"):
+    return f"""
+    document.querySelectorAll('#c-nets input').find(i => i.getAttribute('value') === '{_hex(ssid)}').click();
+    $('c-pw').value = {pw!r}; $('c-go').click(); await advance(10);
+    """
+
+
+def test_connect_disabled_without_usb():
+    r = builder_page.run("""
+    await advance(300);
+    return [$('c-move').disabled, $('c-need').getAttribute('hidden'), $('c-need').textContent,
+            $('c-title').textContent, $('c-state').textContent];
+    """, _wifi({"link": "wifi", "s": _hex("Home-2G"), "usb": False}),
+        search="?panel=connect")
+    assert r == [True, None, "Plug the board in with its USB cable to set up WiFi.",
+                 "Over WiFi", "Encrypted"]
+
+
+def test_scan_list_renders_hex_ssids_as_text_safely():
+    r = builder_page.run(OPEN_PICKER + """
+    const rows = document.querySelectorAll('#c-nets label');
+    const names = document.querySelectorAll('#c-nets b').map(b => b.textContent);
+    const subs = document.querySelectorAll('#c-nets small').map(b => [b.textContent, b.className]);
+    const ins = document.querySelectorAll('#c-nets input');
+    return { names, subs, disabled: ins.map(i => i.disabled), types: ins.map(i => i.getAttribute('type')),
+             imgs: document.querySelectorAll('#c-nets img').length, rows: rows.length,
+             label: $('c-pwl').textContent };
+    """, _wifi(nets=NETS), search="?panel=connect")
+    # Strongest first; the 802.1X row is last of the listed, disabled, in danger text.
+    assert r["names"] == ["Home-2G", "Office", EVIL]
+    assert r["subs"][0] == ["WPA2, strong signal", ""]
+    assert r["subs"][1] == ["802.1X, not supported", "no"]
+    assert r["subs"][2] == ["WPA2/WPA3, fair signal", ""]
+    assert r["disabled"] == [False, True, False] and set(r["types"]) == {"radio"}
+    assert r["imgs"] == 0 and r["rows"] == 3
+    assert r["label"] == "Password for Home-2G"
+
+
+def test_a_name_that_is_not_utf8_is_shown_as_bytes_and_posted_as_hex():
+    r = builder_page.run(OPEN_PICKER + """
+    const b = document.querySelectorAll('#c-nets b').map(x => x.textContent);
+    answer('/api/wifi/join', () => ({ status: 200, body: { state: {}, steps: [] , problem: 'x'} }));
+    $('c-pw').value = 'longenough'; $('c-go').click(); await advance(10);
+    return { b, body: requests.find(q => q.path === '/api/wifi/join').body };
+    """, _wifi(nets=[{"s": "41ff42", "r": -40, "sec": "wpa2"}]),
+        search="?panel=connect")
+    assert r["b"] == ["A\\xff" + "B"]
+    assert r["body"] == {"s": "41ff42", "p": "longenough"}
+
+
+def test_an_empty_scan_says_so():
+    r = builder_page.run(OPEN_PICKER + "return [$('c-nets').children.length, $('c-msg').textContent];",
+                         _wifi(nets=[]), search="?panel=connect")
+    assert r == [0, "The board heard no networks. Move it closer to the router and scan again."]
+
+
+def test_password_field_is_mono_with_show_hide_and_not_autocompleted():
+    markup, _ = builder_page.page_parts()
+
+    def find(n, id):
+        if isinstance(n, str):
+            return None
+        if n["attrs"].get("id") == id:
+            return n
+        for c in n["children"]:
+            f = find(c, id)
+            if f:
+                return f
+    pw = find(markup, "c-pw")
+    assert pw["attrs"]["type"] == "password"
+    assert pw["attrs"]["autocomplete"] == "off"
+    assert pw["attrs"]["spellcheck"] == "false"
+    assert re.search(r"\.pw input \{[^}]*font:[^}]*var\(--mono\)", _css())
+    r = builder_page.run(OPEN_PICKER + """
+    const t = $('c-show'); const a = [t.textContent, t.getAttribute('aria-pressed'), t.getAttribute('aria-label'), $('c-pw').getAttribute('type')];
+    t.click();
+    return [a, [t.textContent, t.getAttribute('aria-pressed'), t.getAttribute('aria-label'), $('c-pw').getAttribute('type')]];
+    """, _wifi(nets=NETS), search="?panel=connect")
+    assert r[0][:3] == ["Show", "false", "Show password"]
+    assert r[1] == ["Hide", "true", "Hide password", "text"]
+
+
+def test_password_validation_sentences():
+    r = builder_page.run(OPEN_PICKER + """
+    $('c-go').click(); const a = [$('c-msg').textContent, $('c-pwbox').getAttribute('aria-invalid')];
+    $('c-pw').value = 'short'; $('c-go').click(); const b = $('c-msg').textContent;
+    $('c-pw').fire('input'); const cleared = $('c-pwbox').getAttribute('aria-invalid');
+    return { a, b, cleared, joins: requests.filter(q => q.path === '/api/wifi/join').length };
+    """, _wifi(nets=NETS), search="?panel=connect")
+    assert r["a"] == ["Enter the password for Home-2G.", "true"]
+    assert r["b"] == "A WiFi password has at least 8 characters."
+    assert r["cleared"] is None and r["joins"] == 0
+
+
+def test_password_cleared_after_connect():
+    ok = {"status": 200, "body": {"state": {"link": "usb"}, "steps": ["sent", "joined", "proved", "encrypted"]}}
+    bad = {"status": 200, "body": {"state": {"link": "usb", "why": "Wrong WiFi password"}, "steps": ["sent"]}}
+    scen = OPEN_PICKER + """
+    $('c-pw').value = 'correct horse'; $('c-go').click();
+    const during = $('c-pw').value; await advance(10);
+    return [during, $('c-pw').value, JSON.stringify(window.localStorage || null)];
+    """
+    for join in (ok, bad, {"status": 409, "body": {"why": "The board did not answer."}}):
+        r = builder_page.run(scen, _wifi(nets=NETS, join=join), search="?panel=connect")
+        assert r[0] == "" and r[1] == ""
+
+
+def test_the_password_is_in_the_one_join_body_only():
+    r = builder_page.run(OPEN_PICKER + """
+    $('c-pw').value = 'correct horse'; $('c-go').click(); await advance(10);
+    const seen = JSON.stringify(requests.filter(q => q.path !== '/api/wifi/join'));
+    return [seen.includes('correct horse'), requests.filter(q => JSON.stringify(q).includes('correct horse')).length,
+            document.querySelectorAll('input').filter(i => i.value.includes('correct')).length];
+    """, _wifi(nets=NETS, join={"status": 200, "body": {"state": {}, "steps": ["sent"]}}),
+        search="?panel=connect")
+    assert r == [False, 1, 0]
+    _, script = builder_page.page_parts()
+    assert not re.search(r"(localStorage|sessionStorage|console\.)", script)
+
+
+FOUR = ["Pairing over the cable", "Board joins the network",
+        "Both prove their keys over WiFi", "Encrypting the link"]
+
+
+def test_handshake_steps_replace_the_status_line():
+    full = {"status": 200, "body": {"state": {"link": "usb", "s": _hex("Home-2G")},
+                                    "steps": ["sent", "joined", "proved", "encrypted"]}}
+    r = builder_page.run(OPEN_PICKER + """
+    const ticks = () => document.querySelectorAll('#hs li').map(li => li.className);
+    const h = hold(); answer('/api/wifi/join', () => h.p);
+    $('c-pw').value = 'correct horse'; $('c-go').click(); await advance(10);
+    const during = [ticks(), $('hs-text').textContent, $('board-status').getAttribute('hidden'), $('c-go').textContent];
+    h.release(%s); await advance(10);
+    const after = [ticks(), $('hs-text').textContent, $('c-msg').textContent, $('heroTitle').textContent];
+    await advance(4300);
+    return { during, after, line: [$('hs').getAttribute('hidden'), $('board-status-text').textContent] };
+    """ % __import__("json").dumps(full), _wifi(nets=NETS), search="?panel=connect")
+    assert r["during"] == [["active", "", "", ""], FOUR[0], "", "Connecting…"]
+    assert r["after"][0] == ["done"] * 4
+    assert r["after"][1] == "Connected. You can unplug the cable."
+    assert r["after"][2] == "Connected. You can unplug the cable."
+    assert "connection screen" in r["after"][3]
+    assert r["line"] == ["", "Live over WiFi, Home-2G, encrypted"]
+
+
+@pytest.mark.parametrize("steps,ticks,text", [
+    (["sent", "joined"], ["done", "done", "fail", ""], FOUR[2]),
+    (["sent"], ["done", "fail", "", ""], FOUR[1])])
+def test_a_short_steps_list_stops_at_the_step_that_failed(steps, ticks, text):
+    body = {"state": {"link": "usb"}, "steps": steps}
+    if len(steps) == 2:
+        body["problem"] = "The board joined, but this computer could not reach it over WiFi."
+    r = builder_page.run(OPEN_PICKER + _enter("correct horse") + """
+    return [document.querySelectorAll('#hs li').map(li => li.className), $('hs-text').textContent, $('c-msg').textContent,
+            $('c-pwbox').getAttribute('aria-invalid')];
+    """, _wifi(nets=NETS, join={"status": 200, "body": body}), search="?panel=connect")
+    assert r[0] == ticks and r[1] == text
+    if len(steps) == 2:
+        assert r[2] == ("The board joined Home-2G but could not be reached over WiFi. "
+                        "Check that the network lets devices talk to each other.")
+    else:
+        assert r[2] == "The board could not join Home-2G. Check the password and try again."
+        assert r[3] == "true"
+
+
+def test_unreachable_card():
+    r = builder_page.run("""
+    await advance(300);
+    const a = [$('c-problem').getAttribute('hidden'), $('connect-body').getAttribute('hidden'), $('c-retry').textContent,
+               $('c-problem').textContent];
+    answer('/api/wifi', () => ({ status: 200, body: { link: 'usb', usb: true } }));
+    $('c-retry').click(); await advance(10);
+    return [a, $('c-problem').getAttribute('hidden'), $('connect-body').getAttribute('hidden')];
+    """, _wifi({"link": "none"}), search="?panel=connect")
+    assert r[0][0] is None and r[0][1] == "" and r[0][2] == "Try again"
+    assert "Can't reach the board" in r[0][3]
+    assert r[1:] == ["", None]
+
+
+def test_forget_uses_the_in_page_confirm():
+    r = builder_page.run("""
+    await advance(300);
+    const f = $('c-forget'); f.click();
+    const box = document.querySelector('.confirm');
+    const [yes, keep] = box.querySelectorAll('button');
+    const asked = [box.querySelector('p').textContent, yes.textContent, document.activeElement === keep,
+                   requests.filter(q => q.path === '/api/wifi/forget').length];
+    answer('/api/wifi/forget', () => ({ status: 200, body: { link: 'usb', usb: true } }));
+    yes.click(); await advance(10);
+    return [asked, requests.filter(q => q.path === '/api/wifi/forget').length, $('c-forget').getAttribute('hidden'),
+            $('board-status-text').textContent];
+    """, _wifi({"link": "usb", "usb": True, "s": _hex("Home-2G")}), search="?panel=connect")
+    assert r[0] == ["Forget Home-2G? The board deletes the password and its key, and goes back to USB only.",
+                    "Forget it", True, 0]
+    assert r[1] == 1 and r[2] == "" and r[3] == "Live over USB"
+    _, script = builder_page.page_parts()
+    assert "confirm(" not in re.sub(r"confirm\.ask\(|function confirm|var confirm", "", script)
+
+
+def test_status_line_sentences():
+    cases = [({"link": "usb", "usb": True}, "Live over USB"),
+             ({"link": "wifi", "s": _hex("Home-2G")}, "Live over WiFi, Home-2G, encrypted"),
+             ({"link": "none"}, "Board not found, check the USB cable")]
+    for state, want in cases:
+        r = builder_page.run("await advance(300); return $('board-status-text').textContent;",
+                             _wifi(state), search="?panel=connect")
+        assert r == want
+
+
+@pytest.mark.parametrize("join,want", [
+    ({"status": 409, "body": {"why": "The board did not answer."}},
+     "The board has not answered yet. If it joins the network late, the pairing is still saved. "
+     "Give it a minute, then check the status line."),
+    ({"status": 409, "body": {"why": "Plug the board in with the cable to change its WiFi."}},
+     "Plug the board in with the cable to change its WiFi."),
+    ({"status": 400, "body": {"why": "The password can only use ASCII characters."}},
+     "The password can only use ASCII characters.")])
+def test_refusals_are_said_in_the_boards_own_words(join, want):
+    r = builder_page.run(OPEN_PICKER + _enter("correct horse") + """
+    return [$('c-msg').textContent, $('hs').getAttribute('hidden'), $('c-go').disabled];
+    """, _wifi(nets=NETS, join=join), search="?panel=connect")
+    assert r == [want, "", False]
+
+
+def test_board_shows_connection_screen_after_join():
+    full = {"status": 200, "body": {"state": {"link": "usb"}, "steps": ["sent", "joined", "proved", "encrypted"]}}
+    r = builder_page.run(OPEN_PICKER + _enter("correct horse") + """
+    const now = $('heroTitle').textContent; await advance(4100);
+    const still = $('heroTitle').textContent; await advance(200);
+    return [now, still, $('heroTitle').textContent];
+    """, _wifi(nets=NETS, join=full), search="?panel=connect")
+    assert "connection screen" in r[0] and "connection screen" in r[1]
+    assert "connection screen" not in r[2] and "Claude, session" in r[2]
