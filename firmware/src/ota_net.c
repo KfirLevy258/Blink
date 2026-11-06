@@ -23,7 +23,7 @@
 static struct flash_img_context fictx;
 static bool open_;
 static uint32_t got, total;
-static char offered[16];
+static struct ota_manifest man;	/* begin's copy: the seal judges THIS, never a later ota_avail */
 
 bool ota_net_active(void)
 {
@@ -54,8 +54,7 @@ int ota_net_begin(const struct ota_manifest *m)
 	if (flash_img_init(&fictx) != 0 || wl_sha256_start() != 0) {
 		return -EIO;
 	}
-	memcpy(offered, m->version, sizeof(offered));
-	offered[sizeof(offered) - 1] = '\0';
+	man = *m;
 	total = m->size;
 	got = 0;
 	open_ = true;
@@ -69,7 +68,7 @@ int ota_net_chunk(uint32_t off, const uint8_t *b, size_t n)
 		return -1;
 	}
 	if (!ota_chunk_in_bounds(got, off, n) || n > total - got ||
-	    (got == 0 && ota_hdr_check(b, n, BLINK_FW_VERSION, offered) != OTA_HDR_OK)) {
+	    (got == 0 && ota_hdr_check(b, n, BLINK_FW_VERSION, man.version) != OTA_HDR_OK)) {
 		ota_net_abort();
 		return -1;
 	}
@@ -88,12 +87,12 @@ int ota_net_chunk(uint32_t off, const uint8_t *b, size_t n)
 	return (int)got;
 }
 
-enum ota_result ota_net_end(const struct ota_manifest *m)
+enum ota_result ota_net_end(void)
 {
 	if (!open_) {
 		return OTA_ERR_SIZE;
 	}
-	if (!ota_net_should_seal(got, m->size) || m->size != total) {
+	if (!ota_net_should_seal(got, man.size) || man.size != total) {
 		printk("[ota] truncated\n");
 		ota_net_abort();
 		return OTA_ERR_SIZE;
@@ -103,7 +102,7 @@ enum ota_result ota_net_end(const struct ota_manifest *m)
 		ota_net_abort();
 		return OTA_ERR_FLASH;
 	}
-	if (flash_img_bytes_written(&fictx) != m->size) {
+	if (flash_img_bytes_written(&fictx) != man.size) {
 		printk("[ota] truncated\n");
 		ota_net_abort();
 		return OTA_ERR_SIZE;
@@ -119,7 +118,7 @@ enum ota_result ota_net_end(const struct ota_manifest *m)
 	for (int i = 0; i < 32; i++) {
 		snprintf(&hex[i * 2], 3, "%02x", digest[i]);
 	}
-	if (strcmp(hex, m->sha256) != 0) {
+	if (strcmp(hex, man.sha256) != 0) {
 		printk("[ota] sha256 mismatch\n");
 		ota_net_abort();
 		return OTA_ERR_HASH;

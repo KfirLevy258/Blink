@@ -24,7 +24,7 @@
  * supplies its own. */
 bool ota_unconfirmed(void);
 
-/* -EBUSY while ota_unconfirmed(); -EINVAL if m->size is 0 or over
+/* Copies the manifest. -EBUSY while ota_unconfirmed(); -EINVAL if m->size is 0 or over
  * OTA_IMAGE_MAX; -EIO if the flash context or the hash cannot start; else 0,
  * with any stream already open dropped first. The caller then sends
  * ota_ack off:0. */
@@ -35,10 +35,10 @@ int ota_net_begin(const struct ota_manifest *m);
  * image, or a flash error. Every -1 has already dropped the stream. */
 int ota_net_chunk(uint32_t off, const uint8_t *b, size_t n);
 
-/* ota_end: flush, length, hash, then boot_request_upgrade(TEST). OTA_OK only
+/* ota_end, against the copy of the manifest begin took: flush, length, hash, then boot_request_upgrade(TEST). OTA_OK only
  * when all agree; anything else drops the stream, and slot 1 is garbage that
  * was never marked pending. */
-enum ota_result ota_net_end(const struct ota_manifest *m);
+enum ota_result ota_net_end(void);
 
 /* Drops the flash context and the hash. Seals and requests nothing. */
 void ota_net_abort(void);

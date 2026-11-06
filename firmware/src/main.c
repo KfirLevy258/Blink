@@ -380,8 +380,9 @@ static void run_usb(void)
 
 	/* The first panel is up. Spin with interrupts off and the watchdog fed
 	 * by nobody: the unconfirmed image must be reverted by the watchdog, the
-	 * one failure the 90 s deadline cannot reach (bench builds only). */
-	if (IS_ENABLED(CONFIG_BLINK_TEST_HANG_AFTER_BOOT)) {
+	 * one failure the 90 s deadline cannot reach (bench builds only, and only on
+	 * a test boot: on a confirmed image there is no watchdog to revert it). */
+	if (IS_ENABLED(CONFIG_BLINK_TEST_HANG_AFTER_BOOT) && ota_test_boot) {
 		(void)irq_lock();
 		for (;;) {
 		}
@@ -463,12 +464,13 @@ static void run_usb(void)
 		}
 
 		/*
-		 * OTA, via the daemon. The board has no network of its own, so
-		 * ota_check()/ota_install() cannot run and the update row used
-		 * to do nothing at all when tethered (user-reported
-		 * 2026-08-20). The daemon has both an
-		 * internet connection and this link, so it does the fetching and
-		 * pushes the image down; see the OTA block in proto.c.
+		 * OTA, via the daemon. The board never fetches anything itself
+		 * (the HTTPS updater is deleted), and the update row used to do
+		 * nothing at all when tethered (user-reported 2026-08-20). The
+		 * daemon has both an internet connection and this link, so it
+		 * does the fetching: over USB it writes slot 0 with esptool, over
+		 * WiFi it streams the image and ota_net.c writes slot 1; see the
+		 * OTA blocks in proto.c.
 		 *
 		 * Gated on the daemon TALKING, not on it having delivered
 		 * usage. Those are unrelated: the usage endpoint is

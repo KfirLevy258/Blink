@@ -84,7 +84,7 @@ int main(void)
 	fresh();
 	CK(ota_net_begin(&m) == 0 && ota_net_active(), "begin_opens");
 	CK(feed(0, n) == (int)n, "stream_accepts_every_byte");
-	CK(ota_net_end(&m) == OTA_OK, "end_seals");
+	CK(ota_net_end() == OTA_OK, "end_seals");
 	CK(fake_upgrade_requests == 1 && fake_upgrade_arg == BOOT_UPGRADE_TEST,
 	   "whole_stream_of_odd_size_seals");
 	CK(memcmp(fake_slot1, img, n) == 0 && fake_slot1[n] == 0xff,
@@ -154,7 +154,7 @@ int main(void)
 	CK(fake_erases > 0, "chunks_reach_flash");
 	ota_net_abort();
 	CK(!ota_net_active() && fake_upgrade_requests == 0, "abort_requests_nothing");
-	CK(ota_net_end(&m) != OTA_OK && fake_upgrade_requests == 0, "aborted_stream_cannot_end");
+	CK(ota_net_end() != OTA_OK && fake_upgrade_requests == 0, "aborted_stream_cannot_end");
 
 	fresh();
 	ota_net_begin(&m);
@@ -195,7 +195,7 @@ int main(void)
 	fresh();
 	ota_net_begin(&m);
 	feed(0, n - 512);
-	CK(ota_net_end(&m) == OTA_ERR_SIZE && fake_upgrade_requests == 0 && !ota_net_active(),
+	CK(ota_net_end() == OTA_ERR_SIZE && fake_upgrade_requests == 0 && !ota_net_active(),
 	   "partial_stream_not_sealed");
 
 	/* gap and rewind are refused and drop the stream. */
@@ -228,7 +228,7 @@ int main(void)
 	img[n / 2] ^= 1;
 	feed(0, n);
 	img[n / 2] ^= 1;
-	CK(ota_net_end(&m) == OTA_ERR_HASH && fake_upgrade_requests == 0, "hash_mismatch_not_sealed");
+	CK(ota_net_end() == OTA_ERR_HASH && fake_upgrade_requests == 0, "hash_mismatch_not_sealed");
 
 	/* A chunk past the manifest's size, though inside the image. */
 	fresh();
@@ -254,6 +254,33 @@ int main(void)
 	CK(ota_net_chunk(4096, img + 4096, 512) == -1, "new_begin_starts_from_zero");
 	ota_net_begin(&m);
 	CK(ota_net_chunk(0, img, 512) == 512, "and_the_first_chunk_is_accepted");
+
+	/* The seal judges begin's copy: a later change to the caller's manifest
+	 * (an ota_avail rewriting the global) cannot move what is compared. */
+	fresh();
+	{
+		struct ota_manifest live = m;
+
+		ota_net_begin(&live);
+		live.sha256[0] = live.sha256[0] == 'a' ? 'b' : 'a';
+		live.size += 512;
+		feed(0, n);
+		CK(ota_net_end() == OTA_OK && fake_upgrade_requests == 1,
+		   "seal_uses_the_manifest_copied_at_begin");
+	}
+
+	/* A writer that loses the buffered tail on flush: the length check, not
+	 * the hash, must refuse it (the hash already covers every byte fed). */
+	fresh();
+	{
+		extern int fake_drop_tail_on_flush;
+
+		ota_net_begin(&m);
+		feed(0, n);
+		fake_drop_tail_on_flush = 1;
+		CK(ota_net_end() == OTA_ERR_SIZE && fake_upgrade_requests == 0,
+		   "tail_lost_on_flush_not_sealed");
+	}
 
 	printf(failures ? "\n%d FAILED\n" : "\nALL PASSED\n", failures);
 	return failures ? 1 : 0;

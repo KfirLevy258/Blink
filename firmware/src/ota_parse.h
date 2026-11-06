@@ -44,5 +44,10 @@ bool ota_chunk_in_bounds(uint32_t got, uint32_t off, size_t n);
  * an image that is not a multiple of 16 KiB still gets its last ack). */
 bool ota_net_should_ack(uint32_t before, uint32_t after, uint32_t size);
 bool ota_net_should_seal(uint32_t got, uint32_t size);
+/* ota_resume over USB is always honoured (it only re-labels the screen). Over
+ * WiFi it is honoured only while the panel is already DOWNLOADING over WiFi,
+ * i.e. after a tap: otherwise ota_avail + ota_resume + ota_begin would install
+ * with no consent. */
+bool ota_resume_honoured(bool via_wifi, bool ui_downloading, bool ui_src_wifi);
 
 #endif /* OTA_PARSE_H */

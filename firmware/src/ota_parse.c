@@ -151,3 +151,8 @@ bool ota_net_should_seal(uint32_t got, uint32_t size)
 {
 	return size != 0 && got == size;
 }
+
+bool ota_resume_honoured(bool via_wifi, bool ui_downloading, bool ui_src_wifi)
+{
+	return !via_wifi || (ui_downloading && ui_src_wifi);
+}

@@ -462,15 +462,26 @@ static void ota_ack(uint32_t off, const char *err)
  * DOWNLOADING -> FAILED notice in ui_settings.c); this is the reason under it. */
 static void ota_wifi_failed(const char *why)
 {
+	/* The offer is spent with the stream: a new image needs a fresh
+	 * ota_avail and a fresh tap, never a replay of the old consent. */
+	ota_staged = false;
 	ota_ui_set(OTA_UI_FAILED, NULL, 0);
 	ota_ui_set_error(why);
 }
+
+static void ota_wifi_gone(void);
 
 static void ota_wifi_begin(const char *json)
 {
 	char v[16];
 	struct ota_ui snap;
 
+	if (ota_net_active() && wl_server_session_gen() != ota_gen) {
+		/* A stream of a session that is gone: not ours to restart. */
+		ota_wifi_gone();
+		ota_ack(0, "refused");
+		return;
+	}
 	ota_ui_get(&snap);
 	/* Only a stream the owner consented to, for the version on offer. Size
 	 * and sha256 are the ota_avail manifest's, never the daemon's here. */
@@ -546,12 +557,14 @@ static void ota_o_sink(const uint8_t *body, size_t n)
 
 static void ota_wifi_end(void)
 {
-	if (!ota_net_active() || wl_server_session_gen() != ota_gen) {
-		ota_net_abort();
-		ota_wifi_failed("connection lost");
+	if (!ota_net_active()) {
+		return;		/* nothing open: a stray or a late ota_end */
+	}
+	if (wl_server_session_gen() != ota_gen) {
+		ota_wifi_gone();
 		return;
 	}
-	if (ota_net_end(&ota_m) != OTA_OK) {
+	if (ota_net_end() != OTA_OK) {
 		ota_wifi_failed("image check failed");
 		ota_ack(0, "failed");
 		return;
@@ -582,6 +595,13 @@ static void ota_wifi_service(void)
 		ota_wifi_failed("connection lost");
 	}
 }
+
+/* A daemon line that rewrites the offer (ota_avail, ota_none, ota_resume)
+ * while a stream is open: the stream was begun against the old offer, so it
+ * ends here rather than seal against one it never saw. */
+#define OTA_STREAM_DROP() do { if (ota_net_active()) ota_wifi_gone(); } while (0)
+#else
+#define OTA_STREAM_DROP() do { } while (0)
 #endif /* CONFIG_BLINK_WIFI_LINK */
 
 /* ---- WiFi pairing over the cable (spec S5.3, S6.1) ---------------------- */
@@ -1331,6 +1351,7 @@ static void dispatch(const char *json, enum proto_src src)
 	} else if (strcmp(type, "ota_avail") == 0) {
 		double sz = 0;
 
+		OTA_STREAM_DROP();
 		if (msg_get_str(json, "version", ota_m.version,
 				sizeof(ota_m.version)) &&
 		    msg_get_str(json, "sha256", ota_m.sha256,
@@ -1388,15 +1409,27 @@ static void dispatch(const char *json, enum proto_src src)
 		 * would come back to an "Install?" prompt for something
 		 * already under way, and the user would answer it twice.
 		 */
-		if (msg_get_str(json, "version", ota_m.version,
-				sizeof(ota_m.version))) {
-			printk("[proto] daemon resuming install of %s\n",
-			       ota_m.version);
-			ota_ui_set_source(src == PROTO_SRC_WIFI ? OTA_SRC_WIFI :
-					  OTA_SRC_USB);
-			ota_ui_set(OTA_UI_DOWNLOADING, &ota_m, 0);
+		struct ota_ui rs;
+
+		OTA_STREAM_DROP();
+		ota_ui_get(&rs);
+		if (ota_resume_honoured(src == PROTO_SRC_WIFI,
+					rs.st == OTA_UI_DOWNLOADING,
+					ota_ui_source() == OTA_SRC_WIFI)) {
+			if (src == PROTO_SRC_WIFI) {
+				/* Already DOWNLOADING after a tap: nothing to
+				 * restate, and the consented offer in ota_m
+				 * stays the daemon's to leave alone. */
+			} else if (msg_get_str(json, "version", ota_m.version,
+					       sizeof(ota_m.version))) {
+				printk("[proto] daemon resuming install of %s\n",
+				       ota_m.version);
+				ota_ui_set_source(OTA_SRC_USB);
+				ota_ui_set(OTA_UI_DOWNLOADING, &ota_m, 0);
+			}
 		}
 	} else if (strcmp(type, "ota_none") == 0) {
+		OTA_STREAM_DROP();
 		ota_staged = false;
 		/*
 		 * Nothing for the BOARD, which says nothing about the app --

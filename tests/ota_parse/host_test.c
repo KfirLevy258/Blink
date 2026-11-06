@@ -74,6 +74,10 @@ int main(void)
 	CK(!ota_net_should_seal(size - 1, size) && ota_net_should_seal(size, size) &&
 	   !ota_net_should_seal(0, 0), "partial_stream_not_sealed");
 
+	CK(ota_resume_honoured(false, false, false) && ota_resume_honoured(true, true, true) &&
+	   !ota_resume_honoured(true, false, true) && !ota_resume_honoured(true, true, false) &&
+	   !ota_resume_honoured(true, false, false), "resume_over_wifi_only_after_a_tap");
+
 	printf(failures ? "\n%d FAILED\n" : "\nALL PASSED\n", failures);
 	return failures ? 1 : 0;
 }

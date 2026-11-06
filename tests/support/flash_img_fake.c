@@ -16,6 +16,7 @@ uint8_t fake_slot1[SLOT1_SIZE];
 int fake_erases;		/* sectors erased */
 int fake_upgrade_requests;
 int fake_upgrade_arg = -1;
+int fake_drop_tail_on_flush;	/* flush discards the buffered tail, as a writer that lost it would */
 int fake_fail_write;		/* next buffered write returns -5 and clears */
 bool fake_flash_inited;
 static uint32_t erased_to;	/* sectors below this are erased (progressive) */
@@ -27,6 +28,7 @@ void fake_flash_reset(void)
 	fake_upgrade_requests = 0;
 	fake_upgrade_arg = -1;
 	fake_fail_write = 0;
+	fake_drop_tail_on_flush = 0;
 	erased_to = 0;
 }
 
@@ -70,7 +72,9 @@ int flash_img_buffered_write(struct flash_img_context *ctx, const uint8_t *data,
 		}
 	}
 	if (flush && ctx->buffered > 0) {
-		put(ctx, ctx->buf, ctx->buffered);
+		if (!fake_drop_tail_on_flush) {
+			put(ctx, ctx->buf, ctx->buffered);
+		}
 		ctx->buffered = 0;
 	}
 	return 0;
