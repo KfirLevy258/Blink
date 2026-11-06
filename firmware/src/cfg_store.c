@@ -83,8 +83,28 @@ struct rec {
 	uint8_t theme_by;
 	uint8_t focus_on;		/* Focus mode; see cfg_get_focus_on */
 	uint8_t focus_win;
+	/*
+	 * 1.4.x's seal, kept where 1.4.x looks for it -- the same move crc_134
+	 * made, one layout later (spec section 5.2).
+	 *
+	 * Everything above this line is the 1.4.x record, and this is its CRC
+	 * over exactly those bytes. Without it a downgrade from a WiFi build
+	 * found `crc` in the wrong place, fell back to the crc_134 reader and
+	 * zeroed the theme and Focus; with it, 1.4.x keeps them and loses only
+	 * the pairing, which it cannot use anyway. Nothing after this line is
+	 * ever copied from the other slot (D44, see cfg_init): a pairing comes
+	 * from one whole write or not at all.
+	 */
+	uint32_t crc_143;
+	uint8_t pair_set;		/* 1 = WiFi paired; anything else = not (D28) */
+	uint8_t pair_key[CFG_PAIR_KEY_LEN];	/* secret, never logged */
 	uint32_t crc;		/* over everything above, always last */
 } __packed;
+
+/* Which seal slot_load() read a record through: decides what cfg_init may
+ * take from the other slot. The layouts older than 1.3.4 count as 1.3.4 --
+ * they hold no theme either. */
+enum rec_layout { LAYOUT_134, LAYOUT_143, LAYOUT_WIFI };
 
 /* The layout before the edition latch. Everything else is identical, so the
  * only question a migration has to answer is whether the record it found had
@@ -184,16 +204,39 @@ static uint32_t rec_crc(const struct rec *r)
 	return crc32_ieee((const uint8_t *)r, offsetof(struct rec, crc));
 }
 
-static bool slot_load(int off, struct rec *out)
+static bool slot_load(int off, struct rec *out, enum rec_layout *layout)
 {
 	uint8_t buf[REC_WIRE];
 
+	*layout = LAYOUT_134;
 	if (flash_area_read(fa, off, buf, sizeof(buf)) != 0) {
 		return false;
 	}
 	memcpy(out, buf, sizeof(*out));
 	if (out->magic == REC_MAGIC && out->crc == rec_crc(out)) {
+		*layout = LAYOUT_WIFI;
 		return true;
+	}
+
+	/*
+	 * The 1.4.x layout, sealed by crc_143: written by 1.4.x after a
+	 * downgrade, or ours torn inside the pairing tail. The theme and Focus
+	 * are sealed and kept; the tail is not, so the board is unpaired --
+	 * the safe side (D21), whichever of the two it was.
+	 */
+	{
+		uint32_t seal;
+
+		memcpy(&seal, buf + offsetof(struct rec, crc_143), sizeof(seal));
+		if (out->magic == REC_MAGIC &&
+		    seal == crc32_ieee(buf, offsetof(struct rec, crc_143))) {
+			memset((uint8_t *)out + offsetof(struct rec, pair_set), 0,
+			       sizeof(*out) - offsetof(struct rec, pair_set));
+			out->crc = rec_crc(out);
+			*layout = LAYOUT_143;
+			printk("[cfg] migrated 1.4.x record (seq %u)\n", out->seq);
+			return true;
+		}
 	}
 
 	/*
@@ -364,9 +407,11 @@ static int persist(void)
 
 	cfg.magic = REC_MAGIC;
 	cfg.seq++;
-	/* Both seals, inner first: the outer CRC covers the inner one. */
+	/* Every seal, inner first: each outer CRC covers the inner ones. */
 	cfg.crc_134 = crc32_ieee((const uint8_t *)&cfg,
 				 offsetof(struct rec, crc_134));
+	cfg.crc_143 = crc32_ieee((const uint8_t *)&cfg,
+				 offsetof(struct rec, crc_143));
 	cfg.crc = rec_crc(&cfg);
 
 	memset(buf, 0, sizeof(buf));
@@ -385,25 +430,6 @@ static int persist(void)
 	return rc;
 }
 
-/* Is this slot a whole record of THIS layout, outer seal and all -- not one
- * slot_load() could only read by migrating it? */
-static bool slot_whole(int off)
-{
-	/* On the stack, not static: this runs once, at boot, after
-	 * slot_load()'s larger frames have returned, so it reuses their room
-	 * instead of holding 507 bytes of RAM for the life of the board. */
-	uint8_t buf[sizeof(struct rec)];
-	uint32_t magic, crc;
-
-	if (flash_area_read(fa, off, buf, sizeof(buf)) != 0) {
-		return false;
-	}
-	memcpy(&magic, buf + offsetof(struct rec, magic), sizeof(magic));
-	memcpy(&crc, buf + offsetof(struct rec, crc), sizeof(crc));
-	return magic == REC_MAGIC &&
-	       crc == crc32_ieee(buf, offsetof(struct rec, crc));
-}
-
 int cfg_init(void)
 {
 	int rc = flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa);
@@ -414,18 +440,23 @@ int cfg_init(void)
 	}
 
 	struct rec a, b;
-	bool va = slot_load(SLOT_A, &a);
-	bool vb = slot_load(SLOT_B, &b);
+	enum rec_layout la, lb, cur_layout = LAYOUT_134, other_layout = LAYOUT_134;
+	bool va = slot_load(SLOT_A, &a, &la);
+	bool vb = slot_load(SLOT_B, &b, &lb);
 	const struct rec *other = NULL;
 
 	if (va && (!vb || a.seq >= b.seq)) {
 		cfg = a;
 		cur_slot = SLOT_A;
+		cur_layout = la;
 		other = vb ? &b : NULL;
+		other_layout = lb;
 	} else if (vb) {
 		cfg = b;
 		cur_slot = SLOT_B;
+		cur_layout = lb;
 		other = va ? &a : NULL;
+		other_layout = la;
 	} else {
 		memset(&cfg, 0, sizeof(cfg));
 		cur_slot = -1;	/* first persist() lands in slot A */
@@ -434,15 +465,15 @@ int cfg_init(void)
 	/*
 	 * The newer slot can be whole as 1.3.4 reads it and torn after that.
 	 *
-	 * A record is written front to back, and 1.3.4's seal sits 32 bytes
-	 * before the end. Power lost inside those 32 bytes leaves a slot that
+	 * A record is written front to back, and 1.3.4's seal sits 69 bytes
+	 * before the end. Power lost inside those 69 bytes leaves a slot that
 	 * passes the 1.3.4 check with the newer sequence -- so it wins, and on
 	 * its own it says Dark and Focus off. The same happens, by design,
 	 * after a downgrade: 1.3.4 writes its record and nothing after it.
 	 * Either way the other slot can still be a whole record of ours, and
 	 * the theme the owner had is sealed in it. Take the appended fields
 	 * from there; everything 1.3.4 knows about stays the newer slot's.
-	 * tests/cfg_store cuts a write at every one of its 513 byte counts.
+	 * tests/cfg_store cuts a write at every one of its 545 byte counts.
 	 *
 	 * After a downgrade this rescue holds for ONE write by 1.3.4, not
 	 * two, and support should expect exactly that. 1.3.4 alternates slots
@@ -469,13 +500,25 @@ int cfg_init(void)
 	 * Found by the final review of the theme work (N4, 2026-10-27) and
 	 * corrected against the 1.3.4 source in its review; nothing 1.3.4
 	 * itself stores is lost in any of these.
+	 *
+	 * Layout-aware since the pairing tail (D44). Copying everything up to
+	 * `crc`, as this did, would have carried pair_set and pair_key too: a
+	 * board downgraded to 1.4.x, written there and updated again would
+	 * have had 1.4.x's newer theme overwritten by the older slot's and its
+	 * revoked pairing brought back; and a torn pairing write whose 1.3.4
+	 * prefix (the new SSID and password) survived would have been stitched
+	 * to the older slot's key. So only a record read through crc_134 takes
+	 * anything, only theme_id to focus_win, and only from a slot whose
+	 * seal covers them. A record read through crc_143 takes nothing: that
+	 * write was newer than the other slot, and a pairing a 1.4.x image
+	 * could not see is not brought back. The pairing tail never moves.
 	 */
-	if (other != NULL && cur_slot >= 0 && !slot_whole(cur_slot) &&
-	    slot_whole(cur_slot == SLOT_A ? SLOT_B : SLOT_A)) {
+	if (other != NULL && cur_layout == LAYOUT_134 &&
+	    other_layout != LAYOUT_134) {
 		size_t from = offsetof(struct rec, theme_id);
 
 		memcpy((uint8_t *)&cfg + from, (const uint8_t *)other + from,
-		       offsetof(struct rec, crc) - from);
+		       offsetof(struct rec, crc_143) - from);
 		cfg.crc = rec_crc(&cfg);	/* in RAM; resealed on next write */
 		printk("[cfg] theme and focus taken from the older slot\n");
 	}
@@ -593,6 +636,98 @@ int cfg_clear_wifi(void)
 
 	int rc = persist();
 
+	k_mutex_unlock(&cfg_lock);
+	return rc;
+}
+
+int cfg_set_pairing(const uint8_t *ssid, size_t ssid_len, const char *psk,
+		    const uint8_t key[CFG_PAIR_KEY_LEN])
+{
+	char was_ssid[CFG_SSID_MAX], was_psk[CFG_PSK_MAX];
+	uint8_t was_key[CFG_PAIR_KEY_LEN], was_set;
+	int rc;
+
+	if (ssid == NULL || ssid_len == 0 || ssid_len > CFG_SSID_MAX - 1 ||
+	    memchr(ssid, 0x00, ssid_len) != NULL || psk == NULL ||
+	    strnlen(psk, CFG_PSK_MAX) > CFG_PSK_MAX - 1 || key == NULL) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	memcpy(was_ssid, cfg.ssid, sizeof(was_ssid));
+	memcpy(was_psk, cfg.psk, sizeof(was_psk));
+	memcpy(was_key, cfg.pair_key, sizeof(was_key));
+	was_set = cfg.pair_set;
+
+	memset(cfg.ssid, 0, sizeof(cfg.ssid));
+	memcpy(cfg.ssid, ssid, ssid_len);
+	memset(cfg.psk, 0, sizeof(cfg.psk));
+	strcpy(cfg.psk, psk);	/* length checked above */
+	memcpy(cfg.pair_key, key, sizeof(cfg.pair_key));
+	cfg.pair_set = 1;
+	rc = persist();
+	if (rc != 0) {
+		/* Put back, as cfg_set_theme does: RAM is what the board acts
+		 * on, and it must not claim a pairing a reboot would drop. */
+		memcpy(cfg.ssid, was_ssid, sizeof(cfg.ssid));
+		memcpy(cfg.psk, was_psk, sizeof(cfg.psk));
+		memcpy(cfg.pair_key, was_key, sizeof(cfg.pair_key));
+		cfg.pair_set = was_set;
+	}
+	k_mutex_unlock(&cfg_lock);
+	/* The old secrets do not outlive this frame on the stack. */
+	memset(was_psk, 0, sizeof(was_psk));
+	memset(was_key, 0, sizeof(was_key));
+	return rc;
+}
+
+bool cfg_get_pairing(uint8_t ssid[32], size_t *ssid_len, char *psk,
+		     size_t psk_len, uint8_t key[CFG_PAIR_KEY_LEN])
+{
+	bool ok;
+
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	/* A password cut to fit the buffer would fail to join with no word
+	 * said; refusing it is the bug a caller can see. */
+	ok = cfg.pair_set == 1 && psk_len > strnlen(cfg.psk, CFG_PSK_MAX - 1);
+	if (ok) {
+		*ssid_len = strnlen(cfg.ssid, CFG_SSID_MAX - 1);
+		memcpy(ssid, cfg.ssid, *ssid_len);
+		strncpy(psk, cfg.psk, psk_len);
+		psk[psk_len - 1] = '\0';
+		memcpy(key, cfg.pair_key, CFG_PAIR_KEY_LEN);
+	}
+	k_mutex_unlock(&cfg_lock);
+	return ok;
+}
+
+bool cfg_paired(void)
+{
+	return cfg.pair_set == 1;
+}
+
+/*
+ * Forget WiFi (D33). persist() writes the next slot and leaves the previous
+ * one intact on purpose, so one cleared write would leave the password and
+ * key in the other sector for whoever reads the flash. Two persists, then:
+ * the first writes slot N, the second erases the other slot -- the one still
+ * holding them -- and writes it too, seq one higher. Only then is it 0. RAM
+ * is cleared first and stays cleared on any failure, so the board stops using
+ * the network either way. The edition latch is in the 1.3.4 prefix, carried
+ * by both writes.
+ */
+int cfg_clear_pairing(void)
+{
+	int rc;
+
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	memset(cfg.ssid, 0, sizeof(cfg.ssid));
+	memset(cfg.psk, 0, sizeof(cfg.psk));
+	memset(cfg.pair_key, 0, sizeof(cfg.pair_key));
+	cfg.pair_set = 0;
+	rc = persist();
+	if (rc == 0) {
+		rc = persist();
+	}
 	k_mutex_unlock(&cfg_lock);
 	return rc;
 }
@@ -797,6 +932,9 @@ int cfg_reset(void)
 	 *
 	 * Carried through the memset rather than written back after, so there
 	 * is no window where the record on flash is unstamped.
+	 *
+	 * The memset takes the WiFi pairing with it, and the two erases below
+	 * take it off both sectors, as cfg_clear_pairing does.
 	 */
 	uint8_t ed = cfg.edition;
 	uint8_t locked = cfg.edition_locked;

@@ -23,6 +23,9 @@
  * firmware/src/cfg_store.c). It is a copy on purpose and must never be
  * "kept in step": it describes firmware already on desks.
  */
+/* memmem(), which glibc hides without it; macOS has it regardless. */
+#define _GNU_SOURCE
+#include <errno.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -38,8 +41,10 @@ uint8_t fake_flash[FAKE_FLASH_SIZE];
 long fake_write_budget = -1;
 int fake_writes;
 int fake_erase_rc;
+int fake_erase_pass;
 
 static int failures;
+static char msg_buf[256];
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } \
 	else { printf("PASS: %s\n", m); } } while (0)
 
@@ -137,32 +142,111 @@ static bool boot_134(struct rec_134 *out)
 }
 
 /*
- * Write raw Focus bytes into every sealed record on the fake flash, and seal
- * it again -- what a newer firmware, or a flipped bit, would leave behind.
  * The offsets are the contract's, not cfg_store.c's: the 1.3.4 record, then
- * 26 theme bytes, then focus_on and focus_win, then the CRC over all of it.
+ * 26 theme bytes, then focus_on and focus_win, then 1.4.x's CRC over all of
+ * that (crc_143), then pair_set, the 32-byte pairing key, and the CRC over
+ * everything (spec section 5.2).
  */
 #define FOCUS_OFF (sizeof(struct rec_134) + 26)
-#define FULL_CRC_OFF (FOCUS_OFF + 2)
+#define CRC_143_OFF (FOCUS_OFF + 2)
+#define PAIR_SET_OFF (CRC_143_OFF + 4)
+#define PAIR_KEY_OFF (PAIR_SET_OFF + 1)
+#define WIFI_CRC_OFF (PAIR_KEY_OFF + 32)
+#define WIFI_WIRE ROUND_UP(WIFI_CRC_OFF + 4, 32)
 
+static bool sealed_at(int slot, size_t crc_off)
+{
+	const uint8_t *r = fake_flash + slot;
+	uint32_t magic, crc;
+
+	memcpy(&magic, r, sizeof(magic));
+	memcpy(&crc, r + crc_off, sizeof(crc));
+	return magic == REC_MAGIC && crc == crc32_ieee(r, crc_off);
+}
+
+/* Is this slot a whole record of the WiFi layout, outer seal and all? */
+static bool slot_whole_wifi(int slot)
+{
+	return sealed_at(slot, WIFI_CRC_OFF);
+}
+
+/*
+ * Write raw Focus bytes into every sealed record on the fake flash, and seal
+ * it again -- what a newer firmware, or a flipped bit, would leave behind.
+ * Both seals that cover them, so a whole record stays whole.
+ */
 static void plant_focus(uint8_t on, uint8_t win)
 {
 	const int slots[] = { SLOT_A, SLOT_B };
 
 	for (int i = 0; i < 2; i++) {
 		uint8_t *r = fake_flash + slots[i];
-		uint32_t magic, crc;
+		bool whole = slot_whole_wifi(slots[i]);
+		uint32_t crc;
 
-		memcpy(&magic, r, sizeof(magic));
-		memcpy(&crc, r + FULL_CRC_OFF, sizeof(crc));
-		if (magic != REC_MAGIC || crc != crc32_ieee(r, FULL_CRC_OFF)) {
+		if (!sealed_at(slots[i], CRC_143_OFF)) {
 			continue;
 		}
 		r[FOCUS_OFF] = on;
 		r[FOCUS_OFF + 1] = win;
-		crc = crc32_ieee(r, FULL_CRC_OFF);
-		memcpy(r + FULL_CRC_OFF, &crc, sizeof(crc));
+		crc = crc32_ieee(r, CRC_143_OFF);
+		memcpy(r + CRC_143_OFF, &crc, sizeof(crc));
+		if (whole) {
+			crc = crc32_ieee(r, WIFI_CRC_OFF);
+			memcpy(r + WIFI_CRC_OFF, &crc, sizeof(crc));
+		}
 	}
+}
+
+/*
+ * A frozen copy of the 1.4.x record (the layout this file tested before the
+ * pairing tail): 1.3.4's record, its CRC being crc_134, then the theme and
+ * Focus bytes and the CRC over all of it. Like rec_134 it describes firmware
+ * already on desks and must never be "kept in step".
+ */
+struct rec_143 {
+	struct rec_134 r;
+	uint8_t theme[26];	/* struct cfg_theme's bytes, in order */
+	uint8_t focus_on;
+	uint8_t focus_win;
+	uint32_t crc;
+} __packed;
+
+/* What 1.4.x's persist() does: both seals, padded with zeros to 512. */
+static void write_143(int slot, const struct rec_143 *x)
+{
+	uint8_t buf[ROUND_UP(sizeof(struct rec_143), 32)];
+	struct rec_143 c = *x;
+
+	c.r.magic = REC_MAGIC;
+	c.r.crc = crc32_ieee((const uint8_t *)&c.r,
+			     offsetof(struct rec_134, crc));
+	c.crc = crc32_ieee((const uint8_t *)&c, offsetof(struct rec_143, crc));
+	memset(buf, 0, sizeof(buf));
+	memcpy(buf, &c, sizeof(c));
+	memset(fake_flash + slot, 0xFF, 4096);
+	memcpy(fake_flash + slot, buf, sizeof(buf));
+}
+
+/* 1.4.x's cfg_init() on whole records of its own layout: the valid slot with
+ * the higher sequence. */
+static bool boot_143(struct rec_143 *out)
+{
+	struct rec_143 a, b;
+	bool va = sealed_at(SLOT_A, offsetof(struct rec_143, crc));
+	bool vb = sealed_at(SLOT_B, offsetof(struct rec_143, crc));
+
+	memcpy(&a, fake_flash + SLOT_A, sizeof(a));
+	memcpy(&b, fake_flash + SLOT_B, sizeof(b));
+	if (va && (!vb || a.r.seq >= b.r.seq)) {
+		*out = a;
+		return true;
+	}
+	if (vb) {
+		*out = b;
+		return true;
+	}
+	return false;
 }
 
 static struct rec_134 desk_record(void)
@@ -204,6 +288,409 @@ static void check_desk_settings(const char *when)
 	      strcmp(ssid, "desk-net") == 0 && strcmp(psk, "hunter22") == 0 &&
 	      cfg_get_ap_psk(ap, sizeof(ap)) && strcmp(ap, "apkey12345") == 0,
 	      m);
+}
+
+/* --- The WiFi pairing (spec section 5.2, D28, D33, D44) --- */
+
+/* A network name that is not UTF-8 (a bare 0xff, then a snowman), and a
+ * password with a quote and a backslash in it: Review Focus 4. */
+static const uint8_t P1_SSID[] = { 0xff, 'a', 0xe2, 0x98, 0x83 };
+static const char P1_PSK[] = "p\"q\\r";
+static uint8_t P1_KEY[CFG_PAIR_KEY_LEN];	/* 0..31, filled in main */
+static const uint8_t P2_SSID[] = { 'o', 't', 'h', 'e', 'r', '-', 'n', 'e', 't' };
+static const char P2_PSK[] = "second-pass-word";
+static uint8_t P2_KEY[CFG_PAIR_KEY_LEN];	/* 0x80.., filled in main */
+
+static int set_p1(void)
+{
+	return cfg_set_pairing(P1_SSID, sizeof(P1_SSID), P1_PSK, P1_KEY);
+}
+
+static int set_p2(void)
+{
+	return cfg_set_pairing(P2_SSID, sizeof(P2_SSID), P2_PSK, P2_KEY);
+}
+
+/* Does the store hand back exactly this pairing, every part of it? */
+static bool pairing_is(const uint8_t *ssid, size_t n, const char *psk,
+		       const uint8_t *key)
+{
+	uint8_t s[32], k[CFG_PAIR_KEY_LEN];
+	char p[CFG_PSK_MAX];
+	size_t len = 0;
+
+	if (!cfg_get_pairing(s, &len, p, sizeof(p), k)) {
+		return false;
+	}
+	return len == n && memcmp(s, ssid, n) == 0 && strcmp(p, psk) == 0 &&
+	       memcmp(k, key, sizeof(k)) == 0;
+}
+
+/* Any byte run of a secret anywhere on the flash, both sectors. */
+static bool on_flash(const void *p, size_t n)
+{
+	return memmem(fake_flash, sizeof(fake_flash), p, n) != NULL;
+}
+
+static bool p1_on_flash(void)
+{
+	return on_flash(P1_SSID, sizeof(P1_SSID)) ||
+	       on_flash(P1_PSK, strlen(P1_PSK)) ||
+	       on_flash(P1_KEY, sizeof(P1_KEY));
+}
+
+/* A desk on 1.3.4, updated: the store mounted on its record in `slot`. */
+static void desk_in(int slot)
+{
+	struct rec_134 r = desk_record();
+
+	memset(fake_flash, 0xFF, sizeof(fake_flash));
+	write_134(slot, &r);
+	cfg_init();
+}
+
+static void named(const char *name, int before)
+{
+	printf(failures == before ? "PASS %s\n" : "FAIL %s\n", name);
+}
+
+static void pairing_round_trip(void)
+{
+	int f = failures, before;
+	uint8_t nul[] = { 'a', 0x00, 'b' }, long_ssid[33];
+	char long_psk[66];
+
+	desk_in(SLOT_A);
+	CHECK(!cfg_paired(), "round trip: not paired to start");
+	CHECK(set_p1() == 0, "round trip: stored");
+	CHECK(cfg_paired() && pairing_is(P1_SSID, sizeof(P1_SSID), P1_PSK, P1_KEY),
+	      "round trip: read back byte for byte");
+	CHECK(cfg_init() == 0 && cfg_paired() &&
+	      pairing_is(P1_SSID, sizeof(P1_SSID), P1_PSK, P1_KEY),
+	      "round trip: survives a reboot");
+	CHECK(cfg_get_bright_pct() == 60 && cfg_edition_locked(),
+	      "round trip: the other settings kept");
+
+	memset(long_ssid, 'x', sizeof(long_ssid));
+	memset(long_psk, 'y', sizeof(long_psk) - 1);
+	long_psk[sizeof(long_psk) - 1] = '\0';	/* 65 characters */
+	before = fake_writes;
+	CHECK(cfg_set_pairing(nul, sizeof(nul), "pw", P2_KEY) == -EINVAL &&
+	      cfg_set_pairing(long_ssid, 33, "pw", P2_KEY) == -EINVAL &&
+	      cfg_set_pairing(long_ssid, 0, "pw", P2_KEY) == -EINVAL &&
+	      cfg_set_pairing(long_ssid, 32, long_psk, P2_KEY) == -EINVAL &&
+	      fake_writes == before,
+	      "round trip: a 0x00 byte, 0 or 33 bytes of SSID, a 65-char"
+	      " password are refused, nothing written");
+	CHECK(cfg_set_pairing(long_ssid, 32, long_psk + 1, P2_KEY) == 0 &&
+	      pairing_is(long_ssid, 32, long_psk + 1, P2_KEY),
+	      "round trip: 32 bytes of SSID and 64 of password fit");
+	CHECK(pairing_is(long_ssid, 32, long_psk + 1, P2_KEY) &&
+	      !cfg_get_pairing(long_ssid, &(size_t){ 0 }, long_psk, 64, P2_KEY),
+	      "round trip: a password buffer too small is refused, not cut");
+	named("pairing_round_trip", f);
+}
+
+static void old_wifi_build_creds_not_paired(void)
+{
+	int f = failures;
+	uint8_t s[32], k[CFG_PAIR_KEY_LEN];
+	char p[CFG_PSK_MAX];
+	size_t n;
+
+	/* desk_record() holds "desk-net" and "hunter22", as a board that ran
+	 * the deleted WiFi build does, and no pair_set: there was none. */
+	desk_in(SLOT_A);
+	CHECK(!cfg_paired() && !cfg_get_pairing(s, &n, p, sizeof(p), k),
+	      "old WiFi build: its SSID and password do not make it paired");
+	check_desk_settings("old WiFi build");
+	named("old_wifi_build_creds_not_paired", f);
+}
+
+static void clear_pairing_wipes_both_sectors(void)
+{
+	int f = failures;
+
+	desk_in(SLOT_A);
+	CHECK(set_p1() == 0 && cfg_set_focus(1, 0) == 0,
+	      "forget: paired, and written again so both sectors hold it");
+	CHECK(slot_whole_wifi(SLOT_A) && slot_whole_wifi(SLOT_B) &&
+	      on_flash(P1_KEY, sizeof(P1_KEY)),
+	      "forget: (the key is on flash to start with)");
+	CHECK(cfg_clear_pairing() == 0, "forget: succeeds");
+	CHECK(!on_flash(P1_SSID, sizeof(P1_SSID)) &&
+	      !on_flash(P1_PSK, strlen(P1_PSK)) &&
+	      !on_flash(P1_KEY, sizeof(P1_KEY)),
+	      "forget: no byte run of the SSID, password or key in either"
+	      " sector");
+	CHECK(slot_whole_wifi(SLOT_A) && slot_whole_wifi(SLOT_B),
+	      "forget: both sectors hold a whole record");
+	CHECK(!cfg_paired() && cfg_init() == 0 && !cfg_paired(),
+	      "forget: unpaired, and still after a reboot");
+	CHECK(cfg_get_edition() == CFG_EDITION_CODEX && cfg_edition_locked() &&
+	      cfg_get_bright_pct() == 60 && cfg_get_focus_on() == 1,
+	      "forget: the edition and every other setting kept");
+	named("clear_pairing_wipes_both_sectors", f);
+}
+
+static void clear_pairing_reports_erase_failure(void)
+{
+	int f = failures;
+
+	desk_in(SLOT_A);
+	set_p1();
+	cfg_set_focus(1, 0);
+	fake_erase_pass = 1;	/* the first sector clears, the second will not */
+	fake_erase_rc = -EIO;
+	CHECK(cfg_clear_pairing() != 0,
+	      "forget, second erase fails: reported as a failure");
+	fake_erase_rc = 0;
+	fake_erase_pass = 0;
+	CHECK(!cfg_paired(), "forget, second erase fails: unpaired in RAM");
+	CHECK(cfg_init() == 0 && !cfg_paired(),
+	      "forget, second erase fails: the cleared record wins the reboot");
+	CHECK(cfg_clear_pairing() == 0 && !p1_on_flash(),
+	      "forget, second erase fails: a retry clears both sectors");
+	named("clear_pairing_reports_erase_failure", f);
+}
+
+static struct rec_143 desk_143(uint8_t theme_id)
+{
+	struct rec_143 x;
+
+	memset(&x, 0, sizeof(x));
+	x.r = desk_record();
+	x.theme[0] = theme_id;
+	x.theme[22] = 12;	/* w: a custom theme is stored */
+	x.focus_on = 1;
+	x.focus_win = 1;
+	return x;
+}
+
+static void theme_survives_upgrade_from_143(void)
+{
+	int f = failures;
+	struct rec_143 x = desk_143(7);
+	struct cfg_theme th;
+
+	memset(fake_flash, 0xFF, sizeof(fake_flash));
+	write_143(SLOT_A, &x);
+	logged_len = 0;
+	logged[0] = '\0';
+	CHECK(cfg_init() == 0, "from 1.4.x: the store mounts");
+	cfg_get_theme(&th);
+	CHECK(th.id == 7 && th.w == 12 && cfg_get_focus_on() == 1 &&
+	      cfg_get_focus_win() == 1, "from 1.4.x: theme and Focus kept");
+	check_desk_settings("from 1.4.x");
+	CHECK(!cfg_paired(), "from 1.4.x: not paired");
+	CHECK(strstr(logged, "taken from the older slot") == NULL,
+	      "from 1.4.x: nothing taken from the other slot");
+	named("theme_survives_upgrade_from_143", f);
+}
+
+static void theme_survives_downgrade_to_143(void)
+{
+	int f = failures;
+	struct rec_143 seen;
+	struct cfg_theme th;
+
+	desk_in(SLOT_A);
+	memset(&th, 0, sizeof(th));
+	th.id = 5;
+	CHECK(cfg_set_theme(&th) == 0 && set_p1() == 0,
+	      "to 1.4.x: a theme and a pairing stored");
+	CHECK(boot_143(&seen), "to 1.4.x: 1.4.x finds a whole record");
+	CHECK(seen.theme[0] == 5 && seen.r.bright_pct == 60 &&
+	      seen.r.edition == CFG_EDITION_CODEX && seen.r.edition_locked == 1,
+	      "to 1.4.x: it reads the theme, the settings and the latch");
+	CHECK(slot_whole_wifi(SLOT_A) || slot_whole_wifi(SLOT_B),
+	      "to 1.4.x: (the record is ours, with the pairing tail)");
+	named("theme_survives_downgrade_to_143", f);
+}
+
+static void downgrade_write_then_upgrade(void)
+{
+	int f = failures;
+	struct rec_143 seen;
+	struct cfg_theme th;
+
+	/* A: ours, theme 5, paired -- the last write. */
+	memset(fake_flash, 0xFF, sizeof(fake_flash));
+	cfg_init();
+	memset(&th, 0, sizeof(th));
+	th.id = 5;
+	cfg_set_theme(&th);	/* A */
+	set_p1();		/* B */
+	cfg_set_focus(1, 0);	/* A */
+	CHECK(slot_whole_wifi(SLOT_A) && cfg_paired(),
+	      "downgrade write: A is ours and paired");
+	/* 1.4.x boots it and writes theme 2 to B, with a newer sequence. */
+	CHECK(boot_143(&seen), "downgrade write: 1.4.x boots");
+	seen.r.seq++;
+	seen.theme[0] = 2;
+	write_143(SLOT_B, &seen);
+
+	logged_len = 0;
+	logged[0] = '\0';
+	CHECK(cfg_init() == 0, "downgrade write, upgrade: the store mounts");
+	cfg_get_theme(&th);
+	CHECK(th.id == 2, "downgrade write, upgrade: 1.4.x's newer theme wins");
+	CHECK(!cfg_paired(),
+	      "downgrade write, upgrade: the pairing 1.4.x could not see is"
+	      " not brought back");
+	CHECK(strstr(logged, "taken from the older slot") == NULL,
+	      "downgrade write, upgrade: nothing taken from the older slot");
+	named("downgrade_write_then_upgrade_keeps_newer_theme_and_drops_pairing",
+	      f);
+}
+
+static void torn_tail_never_pairs_with_old_key(void)
+{
+	int f = failures;
+	struct cfg_theme th;
+	char ssid[CFG_SSID_MAX], psk[CFG_PSK_MAX];
+
+	memset(fake_flash, 0xFF, sizeof(fake_flash));
+	cfg_init();
+	memset(&th, 0, sizeof(th));
+	th.id = 5;
+	cfg_set_theme(&th);	/* A */
+	set_p1();		/* B */
+	cfg_set_focus(1, 0);	/* A: theme 5, P1 */
+	/* A new pairing to B, the power gone right after 1.3.4's seal: the new
+	 * SSID and password are sealed, the new key never reached flash. */
+	fake_write_budget = (long)sizeof(struct rec_134);
+	set_p2();
+	fake_write_budget = -1;
+	CHECK(fake_flash[SLOT_B + sizeof(struct rec_134)] == 0xFF &&
+	      fake_flash[SLOT_B + WIFI_WIRE - 1] == 0xFF,
+	      "torn tail: (B's tail is erased flash)");
+	CHECK(cfg_init() == 0, "torn tail: the store mounts");
+	CHECK(cfg_get_wifi(ssid, sizeof(ssid), psk, sizeof(psk)) &&
+	      strcmp(ssid, "other-net") == 0,
+	      "torn tail: B's newer prefix wins");
+	CHECK(!cfg_paired(),
+	      "torn tail: the new SSID is never paired with A's old key");
+	cfg_get_theme(&th);
+	CHECK(th.id == 5 && cfg_get_focus_on() == 1,
+	      "torn tail: theme and Focus taken from A");
+	named("torn_tail_never_pairs_with_old_key", f);
+}
+
+/*
+ * A power cut at every byte of a pairing write, and at every byte of a
+ * Forget across both of its writes, landing first in A and then in B. One
+ * record always loads whole, the settings stand, and the board is paired
+ * only with a pairing whose every byte reached flash.
+ */
+static void power_cut_every_byte_both_slots(void)
+{
+	int f = failures;
+	const int slots[] = { SLOT_A, SLOT_B };
+
+	for (int i = 0; i < 2; i++) {
+		int bad = 0, p1 = 0, p2 = 0, none = 0;
+
+		for (long cut = 0; cut <= (long)WIFI_WIRE; cut++) {
+			desk_in(slots[i]);	/* lives in slots[i] */
+			set_p1();		/* to the other */
+			cfg_init();
+			fake_write_budget = cut;
+			set_p2();		/* to slots[i], cut */
+			fake_write_budget = -1;
+			cfg_init();
+			if (!cfg_paired()) {
+				none++;
+			} else if (pairing_is(P1_SSID, sizeof(P1_SSID), P1_PSK,
+					      P1_KEY)) {
+				p1++;
+			} else if (pairing_is(P2_SSID, sizeof(P2_SSID), P2_PSK,
+					      P2_KEY) && cut >= (long)WIFI_WIRE) {
+				p2++;
+			} else {
+				bad++;
+			}
+			if (cfg_get_bright_pct() != 60 || !cfg_edition_locked() ||
+			    !(slot_whole_wifi(SLOT_A) || slot_whole_wifi(SLOT_B))) {
+				bad++;
+			}
+		}
+		snprintf(msg_buf, sizeof(msg_buf),
+			 "power cut, pairing write to slot %c: every cut leaves the old"
+			 " pairing, the whole new one or none (old %d, new %d,"
+			 " none %d, bad %d)", i ? 'B' : 'A', p1, p2, none, bad);
+		CHECK(bad == 0 && p1 > 0 && p2 > 0 && none > 0, msg_buf);
+	}
+
+	for (int i = 0; i < 2; i++) {
+		int bad = 0, p1 = 0, none = 0, clean = 0;
+
+		for (long cut = 0; cut <= 2 * (long)WIFI_WIRE; cut++) {
+			desk_in(slots[i]);
+			set_p1();
+			cfg_set_focus(1, 0);	/* both sectors hold P1 */
+			cfg_init();
+			fake_write_budget = cut;
+			cfg_clear_pairing();
+			fake_write_budget = -1;
+			cfg_init();
+			if (!cfg_paired()) {
+				none++;
+			} else if (pairing_is(P1_SSID, sizeof(P1_SSID), P1_PSK,
+					      P1_KEY)) {
+				p1++;
+			} else {
+				bad++;
+			}
+			if (cut == 2 * (long)WIFI_WIRE) {
+				clean = !p1_on_flash();
+			}
+			if (cfg_get_bright_pct() != 60 || !cfg_edition_locked() ||
+			    cfg_get_focus_on() != 1) {
+				bad++;
+			}
+		}
+		snprintf(msg_buf, sizeof(msg_buf),
+			 "power cut, forget from slot %c: every cut leaves the old"
+			 " pairing or none, settings kept, a whole forget leaves"
+			 " nothing (old %d, none %d, bad %d, clean %d)",
+			 i ? 'B' : 'A', p1, none, bad, clean);
+		CHECK(bad == 0 && p1 > 0 && none > 0 && clean, msg_buf);
+	}
+	named("power_cut_every_byte_both_slots", f);
+}
+
+static void factory_reset_clears_pairing(void)
+{
+	int f = failures;
+
+	desk_in(SLOT_A);
+	set_p1();
+	cfg_set_focus(1, 0);
+	CHECK(cfg_reset() == 0 && !cfg_paired(), "reset: unpaired");
+	CHECK(!p1_on_flash(), "reset: no byte run of the pairing on flash");
+	CHECK(cfg_init() == 0 && !cfg_paired() && cfg_edition_locked() &&
+	      cfg_get_edition() == CFG_EDITION_CODEX,
+	      "reset: still unpaired after a reboot, the latch kept");
+	named("factory_reset_clears_pairing", f);
+}
+
+static void edition_latch_untouched_by_clear_pairing(void)
+{
+	int f = failures;
+	struct rec_134 a, b;
+
+	desk_in(SLOT_A);	/* stamped Codex, latched */
+	set_p1();
+	CHECK(cfg_clear_pairing() == 0 && cfg_get_edition() == CFG_EDITION_CODEX &&
+	      cfg_edition_locked(), "forget: the edition and latch kept in RAM");
+	CHECK(read_134(SLOT_A, &a) && read_134(SLOT_B, &b) &&
+	      a.edition == CFG_EDITION_CODEX && a.edition_locked == 1 &&
+	      b.edition == CFG_EDITION_CODEX && b.edition_locked == 1,
+	      "forget: both sectors carry the latch, as even 1.3.4 reads them");
+	CHECK(cfg_set_edition(CFG_EDITION_CLAUDE) == -EPERM,
+	      "forget: a stamp is still refused");
+	named("edition_latch_untouched_by_clear_pairing", f);
 }
 
 int main(void)
@@ -374,7 +861,7 @@ int main(void)
 		memset(&t1, 0, sizeof(t1));
 		t1.id = 4;			/* Ocean */
 		t2 = chosen;			/* the custom one */
-		for (long cut = 0; cut <= 512; cut++) {
+		for (long cut = 0; cut <= (long)WIFI_WIRE; cut++) {
 			struct rec_134 r = desk_record();
 
 			memset(fake_flash, 0xFF, sizeof(fake_flash));
@@ -398,9 +885,9 @@ int main(void)
 				bad++;
 			}
 		}
-		snprintf(msg, sizeof(msg), "power cut: all 513 cut points leave the"
+		snprintf(msg, sizeof(msg), "power cut: all %d cut points leave the"
 			 " old theme or the new one (old %d, new %d, bad %d)",
-			 old_seen, new_seen, bad);
+			 (int)WIFI_WIRE + 1, old_seen, new_seen, bad);
 		CHECK(bad == 0 && old_seen > 0 && new_seen > 0, msg);
 	}
 
@@ -525,6 +1012,22 @@ int main(void)
 		CHECK(boot_134(&seen) && seen.edition_locked == 1,
 		      "reset: the record 1.3.4 would read is still latched");
 	}
+
+	for (int i = 0; i < CFG_PAIR_KEY_LEN; i++) {
+		P1_KEY[i] = (uint8_t)i;
+		P2_KEY[i] = (uint8_t)(0x80 + i);
+	}
+	pairing_round_trip();
+	old_wifi_build_creds_not_paired();
+	clear_pairing_wipes_both_sectors();
+	clear_pairing_reports_erase_failure();
+	theme_survives_upgrade_from_143();
+	theme_survives_downgrade_to_143();
+	downgrade_write_then_upgrade();
+	torn_tail_never_pairs_with_old_key();
+	power_cut_every_byte_both_slots();
+	factory_reset_clears_pairing();
+	edition_latch_untouched_by_clear_pairing();
 
 	printf(failures ? "\n%d FAILED\n" : "\nall cfg_store checks passed\n",
 	       failures);

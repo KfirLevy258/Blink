@@ -99,6 +99,38 @@ int cfg_set_bright_pct(uint8_t pct);
 bool cfg_get_tz(int32_t *offset_min);
 int cfg_set_tz(int32_t offset_min);
 
+/*
+ * The WiFi pairing: the network, its password and the key the laptop and the
+ * board share (spec section 5.2).
+ *
+ * The SSID and password reuse the deleted mode's `ssid` and `psk` fields; the
+ * key and `pair_set` are appended behind a seal of their own. They count only
+ * when `pair_set` is 1 (D28): a board that once ran the deleted WiFi build
+ * still holds that build's SSID and password, and must not start joining an
+ * old network because a new image can read them.
+ *
+ * The SSID is bytes, not text: 1 to 32 of them, any value but 0x00, because
+ * a network name need not be UTF-8 and is stored NUL-terminated. The password
+ * is at most 64 characters; whether it is a valid WPA2 one is the page's
+ * question, not the store's. The key is secret: nothing here logs it, or the
+ * password, or the SSID.
+ *
+ * cfg_clear_pairing() ("Forget WiFi") returns 0 only once BOTH config sectors
+ * hold the cleared record (D33): persist() leaves the previous sector intact
+ * on purpose, so one cleared write would leave the password and key on flash
+ * for whoever reads it. On any failure the pairing is already gone from RAM,
+ * so the board stops using the network either way. The edition latch is not
+ * touched. cfg_reset() clears the pairing too.
+ */
+#define CFG_PAIR_KEY_LEN 32
+
+int cfg_set_pairing(const uint8_t *ssid, size_t ssid_len, const char *psk,
+		    const uint8_t key[CFG_PAIR_KEY_LEN]);	/* -EINVAL on a 0x00 byte or len > 32 */
+bool cfg_get_pairing(uint8_t ssid[32], size_t *ssid_len, char *psk,
+		     size_t psk_len, uint8_t key[CFG_PAIR_KEY_LEN]);	/* false unless pair_set == 1 */
+bool cfg_paired(void);
+int cfg_clear_pairing(void);
+
 #define CFG_OTA_VER_MAX 16	/* "MAJOR.MINOR.PATCH" + NUL, with headroom */
 
 /* OTA handshake across the update reboot: state 1 + target version are
