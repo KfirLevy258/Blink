@@ -103,3 +103,24 @@ def test_uninstall_removes_the_pairing(tmp_path):
     cli.main(["uninstall"])
     assert not os.path.exists(wifi_pair.pair_path(home))
     assert not os.path.exists(os.path.join(home, "private"))
+
+
+def test_uninstall_finishes_when_the_pairing_will_not_go(tmp_path, capsys,
+                                                         monkeypatch):
+    """Every other uninstall removal swallows OSError; this one aborting
+    would skip _remove_bin_dir and leave the binary behind."""
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text("{}")
+    cli.main(["install"])
+    home = cli.blink_home()
+    wifi_pair.save(home, "20500d342b68", KEY, "192.168.1.23", 49731)
+
+    def denied(*a, **kw):
+        raise PermissionError(13, "denied", wifi_pair.pair_path(home))
+
+    monkeypatch.setattr(wifi_pair.private_file, "remove_private", denied)
+    cli.main(["uninstall"])
+    out = capsys.readouterr()
+    assert not os.path.exists(cli.bin_dir()), "uninstall stopped early"
+    assert "pairing" in out.err and wifi_pair.pair_path(home) not in (
+        out.out + out.err)

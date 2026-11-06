@@ -82,6 +82,49 @@ def open_private(home: str, name: str, win=None) -> bytes | None:
     return _posix_open(home, name)
 
 
+def remove_private(home: str, name: str) -> bool:
+    """Delete <home>/private/<name> and the <name>.*.tmp a write interrupted
+    mid-way left. True if <name> was there. Never through a `private` that
+    is a symlink or a reparse point: the reviewer of 3.1 had a by-name
+    remove() follow one out of ~/.blink and delete another directory's
+    files. OSError from a removal propagates; the caller decides."""
+    path = _join(home, PRIVATE_DIR)
+    temp = re.compile(re.escape(name) + r"\.[^.]+\.tmp$")
+    if os.name == "nt":
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        attrs = getattr(st, "st_file_attributes", 0)
+        if (attrs & FILE_ATTRIBUTE_REPARSE_POINT
+                or not attrs & FILE_ATTRIBUTE_DIRECTORY):
+            raise NotPrivate("private directory not owner-only")
+        names = os.listdir(path)
+        unlink = lambda n: os.remove(_join(path, n))  # noqa: E731
+        done = lambda: None                           # noqa: E731
+    else:
+        try:
+            dfd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                          | getattr(os, "O_CLOEXEC", 0))
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise NotPrivate("private directory not owner-only") from None
+        names = os.listdir(dfd)
+        unlink = lambda n: os.unlink(n, dir_fd=dfd)   # noqa: E731
+        done = lambda: os.close(dfd)                  # noqa: E731
+    try:
+        for n in names:
+            if temp.match(n):
+                unlink(n)
+        if name not in names:
+            return False
+        unlink(name)
+        return True
+    finally:
+        done()
+
+
 # ---------------------------------------------------------------- POSIX
 
 
@@ -255,7 +298,13 @@ def _win_write(home, name, data, win):
         except BaseException:
             _quietly(win.delete_by_handle, h)
             raise
-        win.write(h, data)
+        try:
+            win.write(h, data)
+        except BaseException:
+            # A WriteFile or flush that failed part-way leaves some of the
+            # secret in the temp: gone by this handle, before the close.
+            _quietly(win.delete_by_handle, h)
+            raise
         try:
             win.rename_by_handle(h, _join(d, name))
         except OSError:

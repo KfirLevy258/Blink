@@ -7,7 +7,6 @@ throughout is the ~/.blink directory, resolved by the caller at call time.
 """
 from __future__ import annotations
 
-import glob
 import hashlib
 import json
 import os
@@ -114,15 +113,13 @@ def update_ip(home: str, ip: str, port: int) -> None:
 
 def remove(home: str) -> bool:
     """Forget the pairing, and any temp a write interrupted mid-way left.
-    True if there was a pairing file to remove."""
-    path = pair_path(home)
-    for tmp in glob.glob(glob.escape(path) + ".*.tmp"):
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+    True if there was a pairing file to remove. Never raises: `blink
+    uninstall` calls it before removing the binary, and every other removal
+    there swallows OSError too (update._rm). A refusal or failure is said in
+    a fixed sentence, without the path."""
     try:
-        os.remove(path)
-    except FileNotFoundError:
+        return private_file.remove_private(home, PAIR_FILE)
+    except (private_file.NotPrivate, OSError):
+        print("[wifi] could not remove the pairing file; delete the private"
+              " folder in .blink by hand", file=sys.stderr)
         return False
-    return True

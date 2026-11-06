@@ -463,3 +463,67 @@ def test_real_swapped_directory_between_calls_fails_closed(tmp_path):
         private_file.write_private(home, "f.json", b"secret")
     with pytest.raises(NotPrivate):
         private_file.open_private(home, "f.json")
+
+
+def test_windows_write_failure_deletes_the_temp_by_handle(win):
+    """WriteFile or FlushFileBuffers failing part-way leaves bytes of the
+    secret in the temp; it goes by the same handle, before the close."""
+    def broken(h, data):
+        win.log.append(("write", h))
+        win.files[win.handles[h]["path"]] = data[:3]
+        raise OSError(112, "disk full")
+
+    win.write = broken
+    with pytest.raises(OSError):
+        private_file.write_private(HOME, "f.json", b"secret", win=win)
+    log = _file_calls(win)
+    assert [c[0] for c in log] == ["create_new", "validate_handle", "write",
+                                   "delete_by_handle", "close"]
+    assert len({c[1] for c in log[1:]}) == 1
+    assert win.files == {}
+
+
+@posix_only
+def test_remove_refuses_a_symlinked_private_dir(tmp_path):
+    home = _home(tmp_path)
+    os.makedirs(home)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "f.json").write_bytes(b"theirs")
+    (outside / "f.json.abcd.tmp").write_bytes(b"theirs")
+    os.symlink(str(outside), os.path.join(home, "private"))
+    with pytest.raises(NotPrivate):
+        private_file.remove_private(home, "f.json")
+    assert sorted(os.listdir(outside)) == ["f.json", "f.json.abcd.tmp"]
+
+
+def test_remove_refuses_a_reparse_point_private_dir(tmp_path, monkeypatch):
+    """Windows: a junction is not a symlink to os.path.islink, so the
+    attribute is what counts."""
+    home = _home(tmp_path)
+    os.makedirs(os.path.join(home, "private"))
+    real = os.lstat
+
+    def junction(p, *a, **kw):
+        st = real(p, *a, **kw)
+        if str(p).endswith("private"):
+            class S:
+                st_mode = st.st_mode
+                st_file_attributes = 0x10 | 0x400
+            return S()
+        return st
+
+    monkeypatch.setattr(private_file.os, "name", "nt")
+    monkeypatch.setattr(private_file.os, "lstat", junction)
+    with pytest.raises(NotPrivate):
+        private_file.remove_private(home, "f.json")
+
+
+def test_remove_takes_the_file_and_its_temps_only(tmp_path):
+    home = _home(tmp_path)
+    assert private_file.remove_private(home, "f.json") is False
+    d = private_file.private_dir(home)
+    for n in ("f.json", "f.json.1a.tmp", "g.json", "f.jsonx"):
+        open(os.path.join(d, n), "wb").close()
+    assert private_file.remove_private(home, "f.json") is True
+    assert sorted(os.listdir(d)) == ["f.jsonx", "g.json"]
