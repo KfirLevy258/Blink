@@ -897,7 +897,8 @@ def shown_where(where):
 # reply with anything outside this is not printed and not believed.
 _STATE_WORDS = {
     "scr": ("gauges", "settings", "connecting", "eyes"),
-    "ov": ("none", "brightness", "theme", "focus", "confirm"),
+    # The Connection screen arrives with Task 1.5; the spike tile reports it now.
+    "ov": ("none", "brightness", "theme", "focus", "confirm", "connection"),
     "modal": ("none", "notice", "whatsnew", "prompt", "download"),
     "focus": FOCUS_NAMES,
     "edit": ("name", "waiting", "opened", "run", "held"),

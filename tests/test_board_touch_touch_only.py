@@ -86,6 +86,15 @@ def test_expect_alternation():
     assert len(b.failures) == 1
 
 
+def test_expect_ui_state_accepts_the_connection_overlay():
+    # Found on the bench during the RAM spike: session_touch.txt expects it.
+    bt.parse_script("expect ui_state ov=connection\n")
+    obj = {k: (w[0] if k in bt._STATE_WORDS else bt._STATE_INTS[k][0])
+           for k, w in {**bt._STATE_WORDS, **bt._STATE_INTS}.items()
+           if k in bt.STATE_KEYS}
+    assert bt.parse_ui_state({**obj, "ov": "connection"}) is not None
+
+
 def test_skip_missing_skips_an_absent_widget_and_nothing_else():
     script = bt.parse_script('click "Forget WiFi"\n'
                              'expect-widget "Link: WiFi"\n'
