@@ -283,8 +283,34 @@ def merge(frames):
     # So `no_window` on the merged frame is True exactly when the session
     # below is unknown because of this rule, and pc/ingest's burn view keys
     # on that.
-    no_window = any(f.no_session_window for f in frames)
-    session_frames = [] if no_window else frames
+    #
+    # Of the frames that are not a spend page's. A spend share is not a
+    # five-hour figure, and pc/session_verdict never marks one; a spend
+    # frame that came here marked (a merged frame merged again, a scenario)
+    # must not take the share off its own page, nor turn on the burn view.
+    #
+    # And never on a group that holds a spend page with a figure, whatever
+    # the other frames say. A seat billed by usage has no five-hour window
+    # to lack. The status line of a real usage-billed seat carries no
+    # rate_limits at all, and the hook's frames carry no figure, so both
+    # pass pc/ingest's spend-page filter. A verdict saved by an earlier
+    # Ultra login marked them, and until the final review of 2026-11-04
+    # the merged spend page came out with no_session_window=True and the
+    # token burn view on (tests/pc/test_spend_page.py).
+    #
+    # Nor on a page that says its login reports nothing (PLAN_UNREPORTED,
+    # an Enterprise or Team login, pc/claude_account.select). The hook's
+    # frames beside it carry whatever mark a verdict saved by an earlier
+    # Ultra login puts on them, and until the /code-review max of
+    # 2026-11-04 (U38) the "Not reported" page came out marked: the token
+    # burn view drawn on it, and the transcripts read for it.
+    no_window = (not any(f.plan == base.PLAN_SPEND and f.has_usage()
+                         for f in frames)
+                 and not any(f.plan == base.PLAN_UNREPORTED for f in frames)
+                 and any(f.no_session_window for f in frames
+                         if f.plan != base.PLAN_SPEND))
+    session_frames = ([f for f in frames if f.plan == base.PLAN_SPEND]
+                      if no_window else frames)
 
     session_pct, session_src, session_dated = _pick_pct(
         session_frames,
@@ -301,7 +327,21 @@ def merge(frames):
     # provider then goes out as unknown rather than not at all, dated and
     # judged by the newest frame that saw a window end.
     ended_evidence = None
-    if session_src is None and weekly_src is None:
+    # "This account reports nothing" (pc/claude_account.select). It may
+    # stand in for a reading but never displace one, so it is consulted only
+    # when nothing carries a number -- and select() only makes it then.
+    stand_in = next((f for f in frames
+                       if f.plan == base.PLAN_UNREPORTED), None)
+    # A spend page with dollars and no share: a seat billed by usage whose
+    # cap is not known (no /usage this month). Its dollars are the reading,
+    # so it names the page where a share would have; the newest, if there
+    # are several.
+    spend_stand_in = max((f for f in frames
+                          if f.plan == base.PLAN_SPEND
+                          and f.spend_usd is not None),
+                         key=lambda f: f.observed_at, default=None)
+    if (session_src is None and weekly_src is None and stand_in is None
+            and spend_stand_in is None):
         # Nothing here carries a usage percentage. A frame with only a model
         # name would render as two blank dials, which is worse than the
         # board keeping the last reading it already has.
@@ -375,7 +415,8 @@ def merge(frames):
     # the number drawn to within HOLD_BAND (_pick_pct, rule 3). Still a
     # source that vouches for the figure next to it, which is the point of
     # the paragraph above, and never a stale one while a fresh one agrees.
-    primary = session_dated or weekly_dated or ended_evidence
+    primary = (session_dated or weekly_dated or spend_stand_in or stand_in
+               or ended_evidence)
 
     # And the fact `primary` cannot carry: when this provider last said
     # anything at all.
@@ -419,6 +460,20 @@ def merge(frames):
         n_idle=state_src.n_idle if state_src else 0,
         n_agents=state_src.n_agents if state_src else 0,
         label=state_src.label if state_src else "",
+        # Copied whole from `primary`, unlike the percentages above. A
+        # share, a cap and the dollars spent are three numbers from one
+        # response; picking each from whichever source is newest could
+        # print 63% next to a $500 cap that the 63% was not taken against.
+        # Mixing plans is not a risk here: by the time frames reach merge(),
+        # claude_account.select has dropped every reading whose plan differs
+        # from the newest one's.
+        plan=primary.plan,
+        spend_usd=primary.spend_usd,
+        spend_limit_usd=primary.spend_limit_usd,
+        spend_period=primary.spend_period,
+        account=primary.account,
+        spend_exact=primary.spend_exact,
+        spend_hint=primary.spend_hint,
     )
 
 

@@ -12,6 +12,10 @@ from pc import protocol
 from pc import status_page
 from pc.version import PROTO_VERSION, RELEASE_VERSION
 
+# Under this much idle the person is at the computer: usage_refresh's
+# IDLE_LIMIT_S, the line its "someone is here" rule draws.
+_PRESENT_S = 30 * 60
+
 LIVENESS_WINDOW_S = 30.0
 
 # How long after a greeting no theme line is sent: one fast tick
@@ -105,8 +109,12 @@ class Bridge:
                  status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
                  edit_answers=None, builder_ended=None, builder_open=None,
-                 sleep=time.sleep):
+                 sleep=time.sleep, refresh_ask=None, idle=None):
         self._write = write_msg          # callable(dict)
+        # Seconds since the last keyboard or mouse input, or None: asked
+        # only by greet's blank with no earlier line (_send_blank). None
+        # here is pc/idle.seconds_idle, looked up when asked.
+        self._idle = idle
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
         # None on a daemon wired without a bus (the tests do this).
@@ -152,6 +160,10 @@ class Bridge:
         self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
         self._last_session = None        # (label, n) last sent; see poll_once
+        self._last_plan = None           # plan message last sent; see _send_plan_if_changed
+        # True from the start of a heartbeat until its plan has gone out:
+        # see _heartbeat.
+        self._restate_plan = False
         # The status-page watch (pc/status_page.StatusWatch), or None on a
         # Bridge wired without one -- every test fake -- which then sends no
         # svc message at all, exactly as a daemon from before it did.
@@ -176,6 +188,23 @@ class Bridge:
         # poll_if_changed decides against: "sent", not "read", because the
         # capping on the way out is part of what the board received.
         self._last_pushed = None
+        # And the line itself, whole: what _outgoing blanks a page
+        # out of, so the other page keeps what the board was last told.
+        self._last_usage = None
+        # The page a spend plan left with no reading to replace its share,
+        # sent blank and restated blank until a line comes: see _outgoing.
+        self._blanked = None
+        # self._now() when that blank was made: a restatement is aged by
+        # the time since (protocol.aged_usage).
+        self._blanked_at = None
+        # self._now() when _last_usage went out: the greeting's blank is
+        # aged from it (greet).
+        self._last_usage_at = None
+        # Whether a status error went out since the greeting began: its
+        # blank must not follow one (greet).
+        self._said_error = False
+        # Whether the last heartbeat had a usage line to send (greet).
+        self._had_usage = False
         # Themes (pc/theme.py). theme_sync owns the files and what the
         # board is believed to hold; open_builder starts the builder and a
         # browser on it, returning whether one opened, and is rate-limited
@@ -220,6 +249,10 @@ class Bridge:
         # was always "a change" and always within 15 s of the first's, so
         # it would never have gone out.
         self._burn_sent = {}
+        # The dollar burn line (`sburn`): (key, at) of the last one sent,
+        # key = (q, tuple(b)); and whether its failure has been said.
+        self._sburn_sent = None
+        self._sburn_failed = False
         # Pages whose last ask raised (see _burn_trouble).
         self._burn_failed = set()
         # Passes of the serial loop (begin_pass). A page is asked at most
@@ -237,6 +270,16 @@ class Bridge:
         self._loop_passes = False
         self._burn_pass = None
         self._burn_asked = set()
+        # "Keep figures fresh?" on the board (usage_refresh.BoardAsk), or
+        # None on a Bridge wired without it -- every older test -- which
+        # then never asks. Whether to ask is worked out on run_async's
+        # thread, because it reads Claude Code's config and starts the idle
+        # probe, and the answer comes back through _ask_ready for pump() to
+        # write: only the serial thread writes to the port. _ask_busy keeps
+        # one look in flight at a time.
+        self._ask = refresh_ask
+        self._ask_ready = queue.SimpleQueue()
+        self._ask_busy = False
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -277,6 +320,8 @@ class Bridge:
         # to the last connection is forgotten and the first tick after the
         # window sends one, unchanged or not.
         self._burn_sent = {}
+        self._sburn_sent = None
+        self._sburn_failed = False
         if self._report_failure:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None
@@ -286,9 +331,39 @@ class Bridge:
         # the same shape as offer_if_newer on every connect rather than once
         # per daemon lifetime.
         self._last_session = None
+        # The plan, for the same reason: a board that just booted assumes
+        # windows, and on-change alone would leave a spend page unsaid.
+        self._last_plan = None
         # The status level needs no reset here: poll_once re-states it on
         # every heartbeat, and this is one (see protocol.svc's contract).
+        self._said_error = False
         self.poll_once()                 # push current data immediately
+        # A new process has seen no spend reading, so it has no plan to
+        # send, and with no reading it sends no usage line either: a
+        # restart (an update, an install, a crash) between a /login away
+        # from a spend seat and the new login's first render left the old
+        # seat's dollars on a board that was already running, for as long
+        # as nobody rendered (the review of the WSL work, 2026-11-05). The
+        # first usage line after a welcome is what tells the board there is
+        # no plan (proto.c, plan_unconfirmed), so the blank line goes, and
+        # is held and restated as the in-process switch's is. Not with a
+        # spend plan on the bus, which is the page and was just sent, and
+        # not to a board that cannot draw plans, which has no spend page.
+        #
+        # The /code-review max of 277b81a..4003b0b (item 9) found the line
+        # woke a dozed board and hid an error. It went with no ages, which
+        # the board reads as "cannot say" and never as "nobody is here"
+        # (firmware sleep_gate.c), and after a status error, which any usage
+        # line sets back to OK. So it carries the last line's ages, grown
+        # since, or SECS_MAX when there was none; it goes only where a spend
+        # page can have been shown (IngestionBus.spend_seen); and never
+        # after an error in this greeting.
+        plan = self._plan_msg()
+        if (not self._had_usage and self._blanked is None
+                and not self._said_error and self._spend_maybe_shown()
+                and self._board_can(protocol.BOARD_CAP_PLAN)
+                and (plan is None or plan.get("plan") != protocol.PLAN_SPEND)):
+            self._send_blank(protocol.PLAN_PROVIDER, greeting=True)
         # Only once the board has been heard. On the no-reset connect path
         # greet() runs before any message has reached on_message, so
         # _board_proto is still None -- and _board_ahead() reads None as
@@ -384,6 +459,8 @@ class Bridge:
                 self._theme.board_now(msg, board_id=self._board_id)
         elif t == "theme_edit":
             self._on_theme_edit()
+        elif t == "answer":
+            self._on_answer(msg)
         # unknown types ignored
 
     # --- OTA, for a board with no network of its own -------------------
@@ -830,7 +907,8 @@ class Bridge:
         self.pump()
 
     def pump(self):
-        """Write any theme_edit answers that are ready. Called by the daemon
+        """Write any theme_edit answers that are ready, and an ask a look
+        on run_async's thread found due. Called by the daemon
         on every pass of its serial loop, so an answer goes out within one
         read timeout of the browser opening -- well inside the board's 5 s."""
         while True:
@@ -857,6 +935,8 @@ class Bridge:
             print("[theme] the builder ended; told the board",
                   file=sys.stderr)
         self._restate_edit()
+        # "Keep figures fresh?", once _consider_ask's look has said yes.
+        self._send_ask_if_ready()
 
     def _edit_after_silence(self):
         """On every ping, before it is counted: if the board was silent long
@@ -926,6 +1006,71 @@ class Bridge:
         self._write(protocol.edit_state(editing))
         self._edit_said_at = now
 
+    # --- "Keep figures fresh?" (docs/plans/usage-refresh.md, 1b) ---------
+
+    def _ask_caps(self):
+        """The board's OWN caps, never board_caps_hint. The hint is
+        board.json's, which names the last board that spoke, and an ask
+        sent starts a day's wait: one sent to an older board on the same
+        port is dropped there, and the person is asked a day later than
+        they need be. (It is counted only on an answer; BoardAsk.)"""
+        caps = self._board_caps
+        if caps is None or protocol.BOARD_CAP_ASK not in caps:
+            return None
+        return caps
+
+    def _consider_ask(self):
+        """Once a heartbeat: work out, off this thread, whether to ask."""
+        caps = self._ask_caps()
+        if self._ask is None or caps is None or self._ask_busy:
+            return
+        self._ask_busy = True
+
+        def work():
+            try:
+                if self._ask.due(caps):
+                    self._ask_ready.put(True)
+            except Exception:
+                pass            # BoardAsk never raises; a fake might
+            finally:
+                self._ask_busy = False
+
+        try:
+            self._run_async(work)
+        except Exception:
+            self._ask_busy = False
+
+    def _send_ask_if_ready(self):
+        ready = False
+        while True:
+            try:
+                self._ask_ready.get_nowait()
+            except queue.Empty:
+                break
+            ready = True
+        # Asked again here: the board may have said otherwise since the
+        # look began (a pref from a different board on the same port).
+        if not ready or self._ask_caps() is None:
+            return
+        self._write(protocol.ask("refresh"))
+        try:
+            self._ask.asked()
+        except Exception:
+            pass
+
+    def _on_answer(self, msg):
+        """The board's answer to "Keep figures fresh?". Logged by the read
+        loop as `<- answer` and nowhere else: which way the person went is
+        theirs (CLAUDE.md, serial buffers)."""
+        a = msg.get("a")
+        if (self._ask is None or msg.get("id") != "refresh"
+                or a not in protocol.ASK_ANSWERS):
+            return
+        try:
+            self._ask.answer(a)
+        except Exception:
+            pass
+
     def board_alive(self) -> bool:
         return (self._last_ping is not None
                 and self._now() - self._last_ping <= LIVENESS_WINDOW_S)
@@ -961,6 +1106,7 @@ class Bridge:
         self._store_until = None
         self._heartbeat()
         self._send_theme()
+        self._consider_ask()
 
     def _heartbeat(self):
         # Time rides along with every heartbeat so the board's clock re-anchors
@@ -978,6 +1124,14 @@ class Bridge:
         # quarantine lasted. Pages are the last ones usage named.
         self._last_svc = {}
         self._send_svc_if_changed()
+        # The plan likewise, once a heartbeat. It went out on change only,
+        # so one plan line lost on the wire -- dropped whole, as any line
+        # can be -- was repaired only when the dollars next moved: hours
+        # on an idle desk, with the board drawing the spend share under
+        # "SESSION 5h" all that time (/code-review max of 2026-11-04, U16).
+        # A flag and not a cleared _last_plan: _outgoing needs to
+        # know which plan the board held before this one.
+        self._restate_plan = True
 
         try:
             usage = self._read_usage()
@@ -986,9 +1140,22 @@ class Bridge:
             # returns None. Anything that reaches here is a bug worth putting
             # on the panel rather than only in a log nobody opens.
             self._write(protocol.status("error", str(e)[:80]))
+            self._said_error = True
             return
 
         if usage is None:
+            # Nothing to draw, but perhaps something to take down: straight
+            # after a switch back from a spend login there may be no reading
+            # at all, and the board still holds the old account's plan --
+            # and its share (_outgoing). Taken down on an earlier tick, the
+            # blank line is restated, as every heartbeat restates the line:
+            # one lost on the wire, or a board that just connected, would
+            # otherwise be left with the old login's share.
+            self._had_usage = False
+            held = self._blanked
+            self._outgoing(None)
+            if held is not None and self._last_usage is not None:
+                self._write(self._restated_blank())
             # No statusline payload yet. The board keeps its last values and
             # its own dot, which is right -- but the daemon used to say nothing
             # at all, so a machine where Claude Code has simply never rendered
@@ -999,11 +1166,12 @@ class Bridge:
                 self._said_no_source = True
             return
         self._said_no_source = False
+        self._had_usage = True
 
         # Unconditional. The heartbeat is what re-states everything to a board
         # that may have missed a message, and what keeps a panel that has been
         # sitting on the same numbers all afternoon provably connected.
-        self._send_usage(usage)
+        self._send_usage(self._outgoing(usage))
 
     def poll_if_changed(self):
         """Send only when something a reader could act on has moved.
@@ -1049,9 +1217,14 @@ class Bridge:
             usage = None
         if usage is None:
             # Nothing to say about usage, but the status pages still have
-            # their own news, and want() still has to be renewed.
+            # their own news, and want() still has to be renewed. And a
+            # spend page that has just gone takes its share with it.
+            self._outgoing(None)
             self._send_svc_if_changed()
             return
+        # The plan first, and the take-down of a spend page it ends, once
+        # for the tick: _outgoing.
+        usage = self._outgoing(usage)
         if protocol.meaningful_usage(usage) != self._last_pushed:
             self._send_usage(usage)
             return
@@ -1070,6 +1243,11 @@ class Bridge:
         # Only the name goes out in that case. Re-sending an identical usage
         # line to carry it would spend the budget this comparison exists to
         # protect.
+        #
+        # Likewise the plan: the dollar figures arrive from Claude Code on a
+        # timer of their own, several minutes after the share they belong
+        # to, so the cost can move with every usage field standing still.
+        # It went out above, in _outgoing, with any take-down it brings.
         self._send_session_if_changed()
         # And the status level, which changes on the watch's own thread and
         # would otherwise wait for the next usage change to be noticed.
@@ -1077,6 +1255,7 @@ class Bridge:
         # And the burn view, whose numbers move while the usage line holds
         # still: an Ultra desk's session dial says "--%" all day.
         self._send_burn_if_due()
+        self._send_sburn_if_due()
 
     def _read_usage(self):
         """The usage message as it would go out right now, or None if there is
@@ -1091,15 +1270,122 @@ class Bridge:
         # Percentages above 100 are real -- extra usage puts them there -- but
         # firmware older than protocol.FW_ACCEPTS_OVERAGE turns them into 0 on
         # the panel rather than clamping. Hold them at 100 for those boards.
-        return protocol.cap_overage_for_fw(usage, self._board_fw)
+        usage = protocol.cap_overage_for_fw(usage, self._board_fw)
+        # And a spend share is withheld from firmware that would draw it as
+        # "SESSION 5h" -- see protocol.BOARD_CAP_PLAN.
+        return protocol.hide_plan_for_board(
+            usage, self._plan_msg(), self._board_can(protocol.BOARD_CAP_PLAN))
+
+    def _outgoing(self, usage):
+        """Send the plan, and take a spend page's share down when the plan
+        leaves it with nothing to replace it; returns `usage`. Once a tick,
+        before anything is compared or sent.
+
+        /login back to Max before Max has rendered leaves the bus with no
+        claude reading, and the plan alone took the caption down but not
+        the figure: the board repainted its share of dollars under
+        "SESSION 5h" with the month's countdown -- red "Session almost
+        used up" near the cap -- until the new login rendered, hours on an
+        idle desk (U15 of the final review of 2026-11-04). So the page is
+        blanked out of the last line sent, and that blank line is what the
+        heartbeat restates (poll_once) until the bus offers a line again.
+
+        Any line it offers is the new login's: the provider drops the old
+        login's renders when it sees the switch (claude_cli._note_login).
+        Four rounds of the review tried to tell the old reading from the
+        new one here instead -- by its figures, its age, the bus's
+        identity for it -- and each broke, keeping the old share under the
+        new captions or the new login's page blank (round 4)."""
+        replaced = self._send_plan_if_changed()
+        if usage is not None:
+            self._blanked = None
+            return usage
+        page = self._spend_page_gone(replaced)
+        if page is not None:
+            self._send_blank(page)
+        return None
+
+    def _send_blank(self, page, greeting=False):
+        """Take `page` down out of the last line sent, and hold that blank
+        for the heartbeat to restate (_outgoing). `greeting`: greet's, whose
+        last line may be hours old: its ages are grown to now, and an age
+        nothing knows is SECS_MAX, "very old", never absent (greet)."""
+        now = self._now()
+        last = self._last_usage
+        if greeting and last is not None and self._last_usage_at is not None:
+            last = protocol.aged_usage(last, now - self._last_usage_at)
+        blank = protocol.blank_page(last, page)
+        if greeting and last is None:
+            # No earlier line: SECS_MAX for both ages dozed the board under
+            # a person sitting at it (the scoped review of
+            # feat/spend-wsl-refresh, item 4). Whether someone is here is the
+            # idle probe's, asked once, here: it starts ioreg on macOS, and
+            # the restatements after this only age what it said.
+            idle_s = self._idle_seconds()
+            if idle_s is not None and 0 <= idle_s < _PRESENT_S:
+                blank["active_age_s"] = int(idle_s)
+        if greeting:
+            for k in ("age_s", "active_age_s"):
+                v = blank.get(k)
+                if not (isinstance(v, int) and not isinstance(v, bool)
+                        and v >= 0):
+                    blank[k] = protocol.SECS_MAX
+        self._blanked = page
+        self._blanked_at = now
+        self._write(blank)
+        self._last_pushed = protocol.meaningful_usage(blank)
+        self._last_usage = blank
+        self._last_usage_at = now
+
+    def _idle_seconds(self):
+        """The idle probe's answer, or None for any failure."""
+        try:
+            if self._idle is None:
+                from pc import idle
+                return idle.seconds_idle()
+            return self._idle()
+        except Exception:
+            return None
+
+    def _spend_maybe_shown(self):
+        """Whether a spend page can be on the board: the bus has seen a
+        seat billed by usage on this desk (IngestionBus.spend_seen). A
+        fetch that cannot say has never shown one."""
+        ask = getattr(self._fetch, "spend_seen", None)
+        try:
+            return bool(ask is not None and ask())
+        except Exception:
+            return False
+
+    def _restated_blank(self):
+        """The held blank as it reads now: its ages advanced and its
+        countdowns run down by the time since it was made, which is how
+        every line the bus builds reads (protocol.aged_usage)."""
+        if self._blanked_at is None:
+            return self._last_usage
+        return protocol.aged_usage(self._last_usage,
+                                   self._now() - self._blanked_at)
+
+    def _plan_msg(self):
+        """Asked of the fetch when it can answer; None otherwise. A plain
+        callable fetch -- the tests' fakes, the single-source daemon -- has
+        no notion of plans, and neither does a bus that has seen none."""
+        ask = getattr(self._fetch, "plan_msg", None)
+        return None if ask is None else ask()
 
     def _send_usage(self, usage):
         """Put a usage message on the wire and remember what was in it."""
+        # The plan went FIRST, in _outgoing, which every caller runs the
+        # line through: it says what the figures on the usage line are,
+        # and the other order would draw a spend share under the old
+        # captions until the next message.
         self._write(usage)
         # Recorded here, once, so that no path can push without moving the
         # baseline -- a push that forgot to would leave the fast tick
         # re-sending the same message every two seconds forever.
         self._last_pushed = protocol.meaningful_usage(usage)
+        self._last_usage = usage
+        self._last_usage_at = self._now()
 
         self._send_session_if_changed()
 
@@ -1127,6 +1413,7 @@ class Bridge:
         # poll, and the board draws the view only while that line says the
         # session is unknown.
         self._send_burn_if_due()
+        self._send_sburn_if_due()
 
         # No second message for staleness any more. The usage message carries
         # `stale` and the firmware reads it (proto.c, via msg_get_bool), so the
@@ -1223,6 +1510,50 @@ class Bridge:
         for p in marked:
             self._send_burn_for(burn, p)
 
+    def _send_sburn_if_due(self):
+        """The dollar burn line, on the token burn line's cadence.
+
+        Only to a board listing BOARD_CAP_SPENDBURN, and only when the fetch
+        has spend_burn() and says there is a line (a spend page is on the
+        claude page). Same quiet window, BURN_MIN_GAP_S and BURN_HEARTBEAT_S
+        as `burn`, from a clock of its own: the two lines are never on one
+        page, but neither should hold the other back across a switch of seat.
+        A raise costs this line and nothing else, said once by type.
+        """
+        ask = getattr(self._fetch, "spend_burn", None)
+        if ask is None:
+            return
+        if not self._board_can(protocol.BOARD_CAP_SPENDBURN):
+            self._sburn_sent = None
+            return
+        if self._in_quiet_window():
+            return
+        now = self._now()
+        sent = self._sburn_sent
+        if sent is not None and now - sent[1] < BURN_MIN_GAP_S:
+            return
+        try:
+            msg = ask()
+        except Exception as e:
+            if not self._sburn_failed:
+                self._sburn_failed = True
+                print(f"[bridge] spend burn not sent: {type(e).__name__}",
+                      file=sys.stderr)
+            return
+        if self._sburn_failed:
+            self._sburn_failed = False
+            print("[bridge] spend burn line working again", file=sys.stderr)
+        if msg is None:
+            if sent is not None:
+                self._sburn_sent = (None, sent[1])
+            return
+        key = (msg.get("q"), tuple(msg.get("b") or ()))
+        if (sent is not None and key == sent[0]
+                and now - sent[1] < BURN_HEARTBEAT_S):
+            return
+        self._write(msg)
+        self._sburn_sent = (key, now)
+
     def _burn_trouble(self, p, e):
         """Never worth the serial loop, and the only place a failure of the
         line, a reader's included, is caught. Said once per page (`p`; None
@@ -1277,6 +1608,45 @@ class Bridge:
             return
         self._write(msg)
         self._burn_sent[p] = (key, now)
+
+    def _send_plan_if_changed(self):
+        """Tell a board that draws plans what its pages are a share of.
+
+        A board that has not announced protocol.BOARD_CAP_PLAN is sent nothing:
+        it would drop the line unread, and its usage line is already
+        blanked where it would mislead. For one that has, the message goes
+        out when it differs from the last one sent -- a /login, the dollars
+        moving -- and greet() forgets the last one, so each connection
+        starts by stating it.
+        """
+        if not self._board_can(protocol.BOARD_CAP_PLAN):
+            return None
+        current = self._plan_msg()
+        restate, self._restate_plan = self._restate_plan, False
+        if current is None:
+            return None
+        if current != self._last_plan:
+            replaced, self._last_plan = self._last_plan, current
+            self._write(current)
+            return replaced
+        if restate:
+            self._write(current)
+        return None
+
+    def _spend_page_gone(self, replaced):
+        """The page `replaced` -- the plan _send_plan_if_changed just took
+        off the wire -- held as a spend page and the plan now on the wire
+        does not, or None."""
+        if not isinstance(replaced, dict):
+            return None
+        if replaced.get("plan") != protocol.PLAN_SPEND:
+            return None
+        page = replaced.get("p")
+        if self._last_plan is not None and \
+                self._last_plan.get("plan") == protocol.PLAN_SPEND and \
+                self._last_plan.get("p") == page:
+            return None                  # still a spend page: dollars moved
+        return page
 
     def _send_svc_if_changed(self):
         """Put each page's status-page level on the wire, on change only.

@@ -123,15 +123,29 @@ static bool focus_weekly;
 
 LV_FONT_DECLARE(font_focus_40);
 
-static struct gauge *focus_big(void)
-{
-	return focus_weekly ? &weekly : &session;
-}
+/*
+ * Which gauge Focus wants big: the owner's choice, except on a spend page,
+ * where it is always the share (docs/plans/enterprise-spend.md section 3) --
+ * the right gauge there is money, not a window -- and on an unreported one,
+ * whose right gauge is a caption too wide for the big ring. Defined with the
+ * plan record it asks.
+ */
+static struct gauge *focus_big(void);
+
+/*
+ * The gauge layout_gauges() last made big, NULL off Focus. Not focus_big():
+ * that is what the page in front WANTS, and a swipe between a spend page and
+ * a windows page changes it while the screen is still laid out for the page
+ * being left. Drawing asks what is laid out, so a figure never goes to a
+ * label that is hidden or a dim line to the big gauge's slot; render_gauges()
+ * and a page change's midpoint lay it out again when the two disagree.
+ */
+static struct gauge *focus_laid;
 
 /* The gauge whose countdown label is carrying the dim line. */
 static bool is_focus_line(const struct gauge *g)
 {
-	return focus_on && g != focus_big();
+	return focus_on && focus_laid != NULL && g != focus_laid;
 }
 /*
  * Two attention indicators -- but not the two 6540287 removed.
@@ -284,6 +298,66 @@ static int page_count(void)
 {
 	return provider2_tag[0] ? 2 : 1;
 }
+
+/*
+ * THE SPEND PAGE. A Claude Enterprise seat behind a Claude apps gateway has a
+ * dollar cap per day, week or month instead of a five-hour window, and an
+ * Enterprise login with nothing readable has neither. The daemon says which
+ * with a `plan` message (usage_view_set_plan), because the usage line has no
+ * room for dollars, and this is what it said.
+ *
+ * The record names a provider tag rather than a page number. Page order is a
+ * Settings choice that may flip between one message and the next, whereas a
+ * dollar cap is a fact about a Claude login -- so plan_of() asks "is the page
+ * at this index Claude's?" every time instead of remembering an index. There
+ * is a single record since Claude is the only provider metered by spend; if
+ * another ever is, the record becomes an array behind the same plan_of().
+ *
+ * Drawing the page changes words, never the gauges' geometry: the same two
+ * arcs, labels and countdowns as every other page, so the layout host test's
+ * boxes stay the boxes and nothing here allocates.
+ */
+enum plan_kind {
+	PLAN_KIND_WINDOWS,	/* SESSION 5h and WEEKLY 7d, as always */
+	PLAN_KIND_SPEND,	/* the share of a dollar cap, and the dollars */
+	PLAN_KIND_UNREPORTED,	/* an account with nothing to read */
+};
+
+struct plan_record {
+	char tag[USAGE_TAG_MAX];	/* whose page; "" for nobody's */
+	enum plan_kind kind;
+	char period[12];	/* "daily" / "weekly" / "monthly" / "" */
+	bool team;		/* unreported only: TEAM rather than ENTERPRISE */
+	double usd, lim;	/* -1 when not reported */
+	bool est;		/* spend only: the dollars are an estimate */
+	bool hint;		/* spend only: no /usage figure behind them */
+};
+
+static struct plan_record plan_rec = { .usd = -1, .lim = -1 };
+
+static enum plan_kind plan_of(int page)
+{
+	if (plan_rec.tag[0] == '\0' || strcmp(page_tag(page), plan_rec.tag) != 0) {
+		return PLAN_KIND_WINDOWS;
+	}
+	return plan_rec.kind;
+}
+
+static struct gauge *focus_big(void)
+{
+	/*
+	 * An unreported page too. Its right gauge is the kind of login,
+	 * "ENTERPRISE" at 89 px against the 85 the thick ring's hollow holds
+	 * at the caption's depth (Bold's stroke under its ends, review of
+	 * feat/enterprise-spend, 2026-11-04, FW2); the left one says "SPEND",
+	 * 51 px, and the dim line under the ring carries the rest.
+	 */
+	if (plan_of(cur_page) != PLAN_KIND_WINDOWS) {
+		return &session;
+	}
+	return focus_weekly ? &weekly : &session;
+}
+
 /* Defined below; set_provider2 has to call it, because whether a second
  * provider exists is what decides if the FIRST one is coloured at all. */
 static void refresh_provider1(void);
@@ -579,8 +653,62 @@ static void show_session_side(bool gauge)
 	show_obj(burn_obj, !gauge);
 }
 
+/*
+ * The two-gauge screen's figure in a gauge's hollow, at `f`, centred on the
+ * ring whatever the font's height: GAUGE_PCT_Y is worked out for
+ * montserrat_20's 22 px line, and montserrat_16's is 18. Only on a change,
+ * because a style write re-lays the label out and a page swipe draws every
+ * frame.
+ */
+static void set_pct_font(struct gauge *g, const lv_font_t *f)
+{
+	if (lv_obj_get_style_text_font(g->pct, 0) == f) {
+		return;
+	}
+	lv_obj_set_style_text_font(g->pct, f, 0);
+	lv_obj_align(g->pct, LV_ALIGN_TOP_MID, g == &weekly ? GAUGE_CX
+							     : -GAUGE_CX,
+		     GAUGE_PCT_Y + (GAUGE_PCT_FONT_H -
+				    lv_font_get_line_height(f)) / 2);
+}
+
+/*
+ * The dollars in the spend page's ring, in montserrat_20 when they fit the
+ * hollow at the thickest stroke any theme draws and montserrat_16 when they
+ * do not. Measured, not counted: "~$44.4M" is 88 px at 20 and the hollow
+ * 76, while "$44.4M" is exactly 76 (tests/usage_layout holds the widths).
+ * One rule for every theme, so a theme change never moves the font.
+ */
+static void fit_spent_pct(void)
+{
+	lv_point_t sz;
+
+	lv_text_get_size(&sz, lv_label_get_text(weekly.pct),
+			 &lv_font_montserrat_20, 0, 0, LV_COORD_MAX,
+			 LV_TEXT_FLAG_NONE);
+	set_pct_font(&weekly, sz.x <= GAUGE_ARC_SZ - 2 * THEME_ARC_W_MAX
+				      ? &lv_font_montserrat_20
+				      : &lv_font_montserrat_16);
+}
+
+/*
+ * The right countdown's box off Focus: wider on a spend page, where it
+ * carries the cap as well as the reset ("of $500 <b> 27d 5h", see
+ * SPEND_CD_MAX_W). Centred either way, so it grows to both sides of 240.
+ */
+static void size_right_countdown(void)
+{
+	lv_coord_t w = plan_of(cur_page) == PLAN_KIND_SPEND ? SPEND_CD_MAX_W
+							    : GAUGE_CD_MAX_W;
+
+	if (lv_obj_get_style_width(weekly.countdown, 0) != w) {
+		lv_obj_set_width(weekly.countdown, w);
+	}
+}
+
 /* A gauge where the two-gauge screen keeps it: the geometry build_gauge()
- * gave it, restated so leaving Focus puts back exactly that. */
+ * gave it, restated so leaving Focus puts back exactly that -- with the
+ * spend page's font and width where that page needs them. */
 static void place_side(struct gauge *g, lv_coord_t cx)
 {
 	lv_obj_set_size(g->arc, GAUGE_ARC_SZ, GAUGE_ARC_SZ);
@@ -592,6 +720,10 @@ static void place_side(struct gauge *g, lv_coord_t cx)
 	lv_obj_align(g->name, LV_ALIGN_TOP_MID, cx, GAUGE_NAME_Y);
 	lv_obj_set_width(g->countdown, GAUGE_CD_MAX_W);
 	lv_obj_align(g->countdown, LV_ALIGN_TOP_MID, cx, GAUGE_CD_Y);
+	if (g == &weekly && plan_of(cur_page) == PLAN_KIND_SPEND) {
+		fit_spent_pct();
+		size_right_countdown();
+	}
 	show_obj(g->arc, true);
 	show_obj(g->pct, true);
 	show_obj(g->name, true);
@@ -617,11 +749,13 @@ static void layout_gauges(void)
 	struct gauge *small = big == &session ? &weekly : &session;
 
 	if (!focus_on) {
+		focus_laid = NULL;
 		place_side(&session, -GAUGE_CX);
 		place_side(&weekly, GAUGE_CX);
 		show_session_side(!burn_on);
 		return;
 	}
+	focus_laid = big;
 	/*
 	 * Focus keeps exactly today's screen, burn view or not. The view is
 	 * laid out for the left half, and Focus has no left half -- its big
@@ -664,6 +798,88 @@ static lv_color_t arc_tint(const struct gauge *g, double pct)
 static void render_countdown(struct gauge *g)
 {
 	char buf[FMT_COUNTDOWN_MAX];
+
+	/*
+	 * Plan pages put other words under the gauges, and they are decided in
+	 * this function rather than in render_gauges(): usage_view_tick_1s()
+	 * calls straight here every second, and would overwrite anything set
+	 * elsewhere with a countdown at the next tick. Under SPENT goes the cap
+	 * ("of $500"); under the spend share its own reset still counts down,
+	 * via the ordinary path below. "Not reported" goes under the left
+	 * gauge of an unreported page and nothing under the right one.
+	 */
+	switch (plan_of(cur_page)) {
+	case PLAN_KIND_SPEND:
+		if (g == &weekly) {
+			char line[FMT_FOCUS_MAX];
+
+			/*
+			 * Focus: the dim line under the share, in words, since
+			 * the ring with the dollars is not on screen. Dim,
+			 * whatever the share: the big gauge above it already
+			 * wears the severity of the same figure.
+			 */
+			if (is_focus_line(g)) {
+				fmt_focus_spend_line(plan_rec.usd,
+						     plan_rec.est,
+						     plan_rec.lim, line,
+						     sizeof(line));
+				lv_label_set_text(g->countdown, line);
+				lv_obj_set_style_text_color(g->countdown,
+							    COL_DIM, 0);
+				return;
+			}
+			/*
+			 * Under the ring: the cap and the period's reset. The
+			 * reset is the share's own (the usage line's session
+			 * countdown); a spend page sends no weekly one.
+			 */
+			fmt_spend_under(plan_rec.lim, session.resets_in_s,
+					line, sizeof(line));
+			if (!focus_on) {
+				size_right_countdown();
+			}
+			lv_label_set_text(g->countdown, line);
+			return;
+		}
+		/*
+		 * The share as a gauge, while no dollar burn line holds the
+		 * left half: its reset is already under the ring beside it,
+		 * so it is not said twice. In Focus the share is the big
+		 * gauge and the right one is gone, so there it is said.
+		 */
+		if (!focus_on) {
+			lv_label_set_text(g->countdown, "");
+			return;
+		}
+		break;
+	case PLAN_KIND_UNREPORTED:
+		/*
+		 * In Focus, on the dim line under the ring, not in the big
+		 * gauge's open quarter: that holds 67 px ("999d 23h") and
+		 * "Not reported" is 95, which ran into the ring's ends and
+		 * its ball -- 314 px of Bold's stroke, 36 of the default's
+		 * (review of feat/enterprise-spend, 2026-11-04, FW2).
+		 */
+		if (focus_on) {
+			lv_label_set_text(g->countdown, is_focus_line(g)
+								? "Not reported"
+								: "");
+			if (is_focus_line(g)) {
+				lv_obj_set_style_text_color(g->countdown,
+							    COL_DIM, 0);
+			}
+			return;
+		}
+		lv_label_set_text(g->countdown,
+				  g == &session ? "Not reported" : "");
+		return;
+	default:
+		if (g == &weekly && !focus_on) {
+			size_right_countdown();
+		}
+		break;
+	}
 
 	/*
 	 * The real countdown always wins. The rate is what goes here when the
@@ -718,7 +934,7 @@ static void paint_pct(struct gauge *g, double pct)
 	char buf[8];
 
 	g->shown = pct;
-	if (focus_on && g == focus_big()) {
+	if (focus_on && g == focus_laid) {
 		/*
 		 * The 40 px figure holds every reading up to 199% inside the
 		 * thickest ring ("100%" is the widest, 103 px of the 112 the
@@ -752,13 +968,114 @@ static void paint_pct(struct gauge *g, double pct)
 	}
 }
 
+/*
+ * SPENT: where the weekly window sits on other pages, a spend page puts the
+ * period (docs/plans/enterprise-spend.md section 3): the share of the cap as
+ * a ring, what it cost in the hollow -- "~$314" while it is an estimate --
+ * and the cap and the period's reset under it (render_countdown). Somebody
+ * planning a month thinks in dollars; somebody about to be cut off is warned
+ * by the ring, and by the status row's "Spend limit almost used up".
+ *
+ * The ring wears the theme's arc colour, as every ring does (arc_tint); the
+ * rail keeps severity. `shown` is -1 because this gauge's figure is money,
+ * not a percentage: Focus's dim line takes its colour from `shown`, and on
+ * this page the share it would repeat is already the big gauge's.
+ */
+static void draw_spent(void)
+{
+	char amount[FMT_USD_MAX + 1];
+	double share = pg[cur_page].s_pct;
+
+	fmt_spend_amount(plan_rec.usd, plan_rec.est, amount, sizeof(amount));
+	weekly.shown = -1;
+	lv_label_set_text(weekly.name, "SPENT");
+	lv_label_set_text(weekly.pct, amount);
+	if (!focus_on) {
+		fit_spent_pct();
+	}
+	lv_arc_set_value(weekly.arc, share < 0 ? 0 : arc_value(share));
+	if (share >= 0) {
+		lv_obj_set_style_arc_color(weekly.arc, arc_tint(&weekly, share),
+					   LV_PART_INDICATOR);
+	}
+	/* The dim line, or the line under the ring, follows the dollars. */
+	render_countdown(&weekly);
+}
+
+/*
+ * An account that reports nothing: the gauge names the kind of login, so the
+ * empty rings read as "this account does not say" and not as a broken panel.
+ * "--%" as on every other gauge with no figure, the left one beside it
+ * included. `shown` is -1 as on the spend page: Focus's dim line takes its
+ * colour from it, and without the reset "Not reported" wore the previous
+ * page's weekly severity -- red after a windows page at 96%, for good (the
+ * review of the WSL work, 2026-11-05).
+ */
+static void draw_unreported_account(void)
+{
+	weekly.shown = -1;
+	lv_label_set_text(weekly.name, plan_rec.team ? "TEAM" : "ENTERPRISE");
+	lv_label_set_text(weekly.pct, "--%");
+	if (!focus_on) {
+		set_pct_font(&weekly, &lv_font_montserrat_20);
+	}
+	lv_arc_set_value(weekly.arc, 0);
+}
+
+/* The right gauge of the page in front, when that page has a plan. */
+static void render_plan_right(void)
+{
+	if (plan_of(cur_page) == PLAN_KIND_SPEND) {
+		draw_spent();
+	} else {
+		draw_unreported_account();
+	}
+}
+
+/*
+ * The left gauge's caption, which a plan renames. build_gauge() writes
+ * "SESSION 5h" once, so anything that changes the page's words has to come
+ * back here: render_gauges(), and the midpoint of a page morph.
+ */
+static void render_captions(void)
+{
+	switch (plan_of(cur_page)) {
+	case PLAN_KIND_SPEND:
+		/*
+		 * In Focus the caption sits in the big ring's hollow, which
+		 * holds 85 px there (FOCUS_NAME_W, "SESSION 5h"), and every
+		 * spend caption with its period is wider -- "SPEND month" is
+		 * 105 and touched Bold's 22 px stroke in the renders. The
+		 * period is in the countdown under it, so Focus says "SPEND".
+		 */
+		lv_label_set_text(session.name,
+				  fmt_spend_caption(focus_on ? NULL
+							     : plan_rec.period));
+		break;
+	case PLAN_KIND_UNREPORTED:
+		lv_label_set_text(session.name, "SPEND");
+		break;
+	default:
+		lv_label_set_text(session.name, "SESSION 5h");
+		break;
+	}
+}
+
 /* The weekly arc and its countdown: the overall weekly window. */
 static void render_weekly(void)
 {
+	if (plan_of(cur_page) != PLAN_KIND_WINDOWS) {
+		render_plan_right();
+		return;
+	}
 	/* One window, so the gauge never needs to say which one it is showing
 	 * -- but it still says it, because "WEEKLY 7d" is the honest name for
 	 * the number under it. */
 	lv_label_set_text(weekly.name, "WEEKLY 7d");
+	/* Back from a spend page's dollars, which may have been at 16. */
+	if (!focus_on) {
+		set_pct_font(&weekly, &lv_font_montserrat_20);
+	}
 	paint_pct(&weekly, last_w_pct);
 }
 
@@ -1218,6 +1535,15 @@ static void render_gauges(void)
 	if (!built) {
 		return;
 	}
+	/*
+	 * Focus puts the share in the middle of a spend page whatever the
+	 * owner chose, so a plan arriving, or a page change landing, can move
+	 * which gauge is big. Laid out again before anything is painted into
+	 * the labels the new layout uses.
+	 */
+	if (focus_on && focus_laid != focus_big()) {
+		layout_gauges();
+	}
 
 	/* A negative percentage means "the daemon does not have this number" --
 	 * pc/statusline_source.py sends -1.0 when the window is absent from
@@ -1237,6 +1563,7 @@ static void render_gauges(void)
 
 	last_s_pct = p->s_pct;
 	last_w_pct = p->w_pct;
+	render_captions();
 	render_weekly();
 	refresh_provider1();	/* the name under the brand follows the page */
 	/*
@@ -1522,7 +1849,20 @@ static void morph_exec(void *unused, int32_t t)
 		 * interpolated changes here, in one go, behind the fade.
 		 */
 		morph.swapped = true;
+		/*
+		 * A swipe between a spend page and a windows page with Focus
+		 * on the weekly window moves which gauge is big. Here, behind
+		 * the fade, rather than at the end: from this frame on the
+		 * words are the arriving page's, and they go where its layout
+		 * puts them. Such a swipe is always a jump -- a spend page
+		 * sends its weekly figure as -1 -- so the rings snap here too.
+		 * morph_done's render_gauges() asks again.
+		 */
+		if (focus_on && focus_laid != focus_big()) {
+			layout_gauges();
+		}
 		refresh_provider1();
+		render_captions();
 		session.resets_in_s = pg[cur_page].s_in_s;
 		session.burn = pg[cur_page].burn;
 		weekly.resets_in_s = pg[cur_page].w_in_s;
@@ -1552,6 +1892,34 @@ static void morph_exec(void *unused, int32_t t)
 		if (morph.swapped) {
 			morph_arc(&session, morph.s_to);
 			morph_arc(&weekly, morph.w_to);
+			/*
+			 * Paging onto or off a plan page always lands here,
+			 * because such a page sends its weekly figure as -1
+			 * and that forces morph.jump. The two morph_arc() calls
+			 * above treat the right gauge as a weekly window, so a
+			 * plan page needs its own right gauge drawn again on
+			 * top, and a windows page reached from a plan page
+			 * needs its "WEEKLY 7d" caption back. render_weekly()
+			 * cannot do the second job yet: last_w_pct is only
+			 * moved to the new page in morph_done().
+			 */
+			if (plan_of(cur_page) != PLAN_KIND_WINDOWS) {
+				render_plan_right();
+			} else if (plan_rec.tag[0] != '\0') {
+				lv_label_set_text(weekly.name, "WEEKLY 7d");
+				/*
+				 * And its figure back at 20 px. Dollars too
+				 * wide for the hollow ("~$4444") put the
+				 * label at 16 (fit_spent_pct), and the
+				 * arriving page's "61%" was drawn small for
+				 * the 190 ms until morph_done (review of
+				 * feat/enterprise-spend, 2026-11-04, FW4).
+				 */
+				if (!focus_on) {
+					set_pct_font(&weekly,
+						     &lv_font_montserrat_20);
+				}
+			}
 		}
 		return;
 	}
@@ -1797,7 +2165,9 @@ void usage_view_page_step(int delta)
  * shown and hidden by layout_gauges(). The rule, from the contract: the
  * page's session reading is unknown (s_pct < 0), a burn line for that
  * page's provider arrived within the last 180 s, and the screen is the
- * two-gauge one. A session reading coming back takes the half back at
+ * two-gauge one. A spend page is the exception: its half is the DOLLAR
+ * view, from an `sburn` line under 180 s old, whatever its share says, and
+ * never the token one (docs/plans/enterprise-spend.md section 3). A session reading coming back takes the half back at
  * once -- render_gauges() asks on every usage line. Nothing is decided
  * while the eye clip or a wipe has the screen in its hands
  * (usage_view_hold_half), and the 180 s runs on LVGL's clock, so it holds
@@ -1826,6 +2196,14 @@ void usage_view_page_step(int delta)
 #define BURN_SLOTS		RAIL_PAGES_MAX
 
 static struct burn5h_slot burn_slot[BURN_SLOTS];
+/*
+ * The spend page's dollar burn view (docs/plans/enterprise-spend.md section
+ * 3): the same twenty quarter-hours in whole cents, from the `sburn` line,
+ * in slots of their own. Never the token slots: burn5h_line_of() says why a
+ * line goes to one and never the other, and burn_sync() reads these only on
+ * a spend page and those only off one.
+ */
+static struct burn5h_slot sburn_slot[BURN_SLOTS];
 
 /* The board clock's UTC offset, for the hour axis; see usage_view.h. */
 static bool burn_off_known;
@@ -1838,8 +2216,9 @@ static int32_t burn_off_min;
  * has to agree as well as the fields.
  */
 struct burn_drawn {
-	char total[BURN5H_TOKENS_MAX];
+	char total[FMT_USD_MAX];	/* "412k" or, for dollars, "$4.37" */
 	char rate[BURN5H_RATE_MAX];
+	const char *unit;		/* the line under the total */
 	const char *glyph;
 	bool accent;			/* the glyph in g1 rather than dim */
 	int16_t total_x, glyph_x;	/* the pair, centred as one group */
@@ -1950,7 +2329,7 @@ static void burn_draw_cb(lv_event_t *e)
 		  bd.accent ? lv_color_hex(p->g1) : COL_DIM,
 		  bd.glyph_x, BURN_GLYPH_CY - BURN_GLYPH_FONT_H / 2,
 		  BURN_GLYPH_FONT_H * 2, LV_TEXT_ALIGN_LEFT);
-	burn_text(layer, "tokens " FMT_BULLET " 5h", &lv_font_montserrat_14,
+	burn_text(layer, bd.unit, &lv_font_montserrat_14,
 		  COL_DIM, BURN_CX - BURN_TEXT_W / 2,
 		  BURN_UNIT_CY - FONT_LINE_H / 2, BURN_TEXT_W,
 		  LV_TEXT_ALIGN_CENTER);
@@ -2023,18 +2402,28 @@ static void burn_build(lv_obj_t *parent)
 	}
 }
 
-static int burn_slot_for(const char *tag)
+/* The slot in `slots` holding the page's line, if it is under 180 s old;
+ * else -1. */
+static int burn_fresh_slot(const struct burn5h_slot *slots, const char *tag)
 {
-	return burn5h_slot_find(burn_slot, BURN_SLOTS, tag);
+	int s = burn5h_slot_find(slots, BURN_SLOTS, tag);
+
+	if (s >= 0 && !burn5h_slot_fresh(&slots[s], k_uptime_get(),
+					 BURN_FRESH_MS)) {
+		return -1;
+	}
+	return s;
 }
 
-static bool burn_fresh(int s)
-{
-	return burn5h_slot_fresh(&burn_slot[s], k_uptime_get(),
-				 BURN_FRESH_MS);
-}
-
-static void burn_compose(const struct burn5h *m, struct burn_drawn *d)
+/*
+ * `dollars`: the line is the `sburn` one, in cents. The bars, the axis and
+ * the arrow are the same arithmetic either way -- a quarter-hour's cents
+ * against the largest, the last complete hour against the one before -- and
+ * only the words change: the total and the rate in dollars (fmt_usd), and
+ * "spent" where the token view says "tokens".
+ */
+static void burn_compose(const struct burn5h *m, bool dollars,
+			 struct burn_drawn *d)
 {
 	enum burn5h_dir dir = burn5h_direction(m);
 	uint32_t max = 0;
@@ -2042,8 +2431,17 @@ static void burn_compose(const struct burn5h *m, struct burn_drawn *d)
 	int32_t group;
 
 	memset(d, 0, sizeof(*d));
-	burn5h_fmt_tokens(burn5h_total(m), d->total, sizeof(d->total));
-	burn5h_fmt_rate(m, d->rate, sizeof(d->rate));
+	if (dollars) {
+		fmt_usd(burn5h_total(m) / 100.0, d->total, sizeof(d->total));
+		fmt_usd_burn_line(burn5h_last_hour(m), burn5h_word(dir),
+				  d->rate, sizeof(d->rate));
+		d->unit = "spent " FMT_BULLET " 5h";
+	} else {
+		burn5h_fmt_tokens(burn5h_total(m), d->total,
+				  sizeof(d->total));
+		burn5h_fmt_rate(m, d->rate, sizeof(d->rate));
+		d->unit = "tokens " FMT_BULLET " 5h";
+	}
 	d->glyph = dir == BURN5H_RISING   ? LV_SYMBOL_UP
 		 : dir == BURN5H_EASING   ? LV_SYMBOL_DOWN
 		 : dir == BURN5H_STEADY   ? LV_SYMBOL_RIGHT
@@ -2095,6 +2493,7 @@ static void burn_sync(void)
 {
 	struct burn_drawn d;
 	int s = -1;
+	bool dollars = false;
 
 	/* `built` is set after burn_build() and cleared before burn_obj is
 	 * nulled, so it alone says the object is there. */
@@ -2121,14 +2520,22 @@ static void burn_sync(void)
 		return;
 	}
 
-	if (!focus_on && pg[cur_page].have && pg[cur_page].s_pct < 0) {
-		s = burn_slot_for(page_tag(cur_page));
-		if (s >= 0 && !burn_fresh(s)) {
-			s = -1;
+	/*
+	 * A spend page shows the dollar view and never the token one, even
+	 * with its share unknown ("--%" with no cap): the half is money there.
+	 * Every other page, the token view where there is no session window.
+	 */
+	if (!focus_on && pg[cur_page].have) {
+		if (plan_of(cur_page) == PLAN_KIND_SPEND) {
+			dollars = true;
+			s = burn_fresh_slot(sburn_slot, page_tag(cur_page));
+		} else if (pg[cur_page].s_pct < 0) {
+			s = burn_fresh_slot(burn_slot, page_tag(cur_page));
 		}
 	}
 	if (s >= 0) {
-		burn_compose(&burn_slot[s].m, &d);
+		burn_compose(dollars ? &sburn_slot[s].m : &burn_slot[s].m,
+			     dollars, &d);
 		if (!burn_on || memcmp(&d, &bd, sizeof(d)) != 0) {
 			bd = d;
 			lv_obj_invalidate(burn_obj);
@@ -2190,6 +2597,16 @@ void usage_view_set_burn5h(const struct burn5h *m, int64_t at_ms)
 	burn_slot[s].m = *m;
 	burn_slot[s].at_ms = at_ms;
 	burn_slot[s].have = true;
+	burn_sync();
+}
+
+void usage_view_set_sburn(const struct burn5h *m, int64_t at_ms)
+{
+	int s = burn5h_slot_take(sburn_slot, BURN_SLOTS, m->p);
+
+	sburn_slot[s].m = *m;
+	sburn_slot[s].at_ms = at_ms;
+	sburn_slot[s].have = true;
 	burn_sync();
 }
 
@@ -2297,6 +2714,9 @@ static void expire_session(void)
 	last_s_pct = 0;
 	paint_pct(&session, 0);
 	render_countdown(&session);
+	if (plan_of(cur_page) == PLAN_KIND_SPEND) {
+		render_plan_right();	/* the ring and the dollars went too */
+	}
 }
 
 static void expire_weekly(void)
@@ -2347,6 +2767,16 @@ void usage_view_tick_1s(void)
 		if (pg[i].s_in_s > 0 && --pg[i].s_in_s == 0) {
 			pg[i].s_in_s = -1;
 			pg[i].s_pct = 0;
+			/*
+			 * On a spend page that was the period ending, and what
+			 * was spent in it went with it -- or "$314" would sit
+			 * in an empty ring until the daemon next spoke. An
+			 * unknown amount stays unknown: "$0.00" would be a
+			 * claim nobody made.
+			 */
+			if (plan_of(i) == PLAN_KIND_SPEND && plan_rec.usd >= 0) {
+				plan_rec.usd = 0;
+			}
 			if (i == cur_page) {
 				expire_session();
 			}
@@ -2961,16 +3391,47 @@ void usage_view_set_burn(double pph)
 
 void usage_view_set_provider1(const char *tag)
 {
+	char was[USAGE_TAG_MAX];
+
 	/* The outer ring is whichever provider the daemon made primary, which
 	 * on a codex-only machine is codex -- so the colour follows the NAME,
 	 * not the ring position. */
+	snprintf(was, sizeof(was), "%s", provider1_tag);
 	snprintf(provider1_tag, sizeof(provider1_tag), "%s", tag ? tag : "");
+	/*
+	 * A new name is a new page as far as the plan is concerned: plan_of()
+	 * matches the record against this tag, so the captions, the right
+	 * gauge, the countdown under it and the status row's words all depend
+	 * on it. Only the pill used to follow. A board that booted before the
+	 * daemon has "" here when the greet burst lands, and drew a spend page
+	 * as "SESSION 5h 63%" / "WEEKLY 7d --%" -- red "Session almost used
+	 * up" near the cap -- until the next usage line, up to a minute later;
+	 * making Codex the main source swapped the pill and left Claude's
+	 * spend captions over Codex's windows (review of feat/enterprise-spend,
+	 * 2026-11-04, FW1, seen on host LVGL). proto.c now names the page
+	 * before the figures land as well, but the page is drawn again here
+	 * whatever order a caller uses.
+	 *
+	 * The status row is asked again only once there are figures for its
+	 * words to be about. Before the first reading the status is
+	 * DISCONNECTED, and asking would raise the connecting overlay -- over
+	 * the boot clip, if one is playing -- for the usage line that names
+	 * the page to take straight back down.
+	 */
+	if (built && strcmp(was, provider1_tag) != 0) {
+		render_gauges();	/* the pill and burn_sync() with it */
+		if (have_data) {
+			usage_view_set_status(last_status);
+		}
+		return;
+	}
 	refresh_provider1();
 	/*
-	 * The burn view finds its page by this tag, and proto.c sets it AFTER
-	 * usage_view_update() has already rendered the page -- so on the
-	 * first usage line of a connection the page had no name yet when it
-	 * was asked whether a burn line was its own.
+	 * The burn view finds its page by this tag. proto.c used to set it
+	 * AFTER usage_view_update() had rendered the page, so on the first
+	 * usage line of a connection the page had no name yet when it was
+	 * asked whether a burn line was its own. The order is right now, and
+	 * a new name redraws above; this stays for a name that did not move.
 	 */
 	burn_sync();
 }
@@ -3099,6 +3560,26 @@ static void svc_take_row(const char **text, lv_color_t *tc, bool *urgent)
 	*urgent = true;
 }
 
+/*
+ * The spend page's last resort: no /usage figure behind the dollars this
+ * period (the plan's "hint"), so the row says where to get one. Below
+ * everything else that may hold the row -- the spend limit, the provider's
+ * status page, a prompt waiting -- because those want something now, and
+ * this is advice; above the clock, because the figure on screen is a guess
+ * until it is taken.
+ */
+static void spend_usage_take_row(const char **text, lv_color_t *tc,
+				 bool *urgent)
+{
+	if (plan_of(cur_page) != PLAN_KIND_SPEND || !plan_rec.hint ||
+	    (*urgent && (*text)[0])) {
+		return;
+	}
+	*text = FMT_SPEND_USAGE_HINT;
+	*tc = COL_DIM;
+	*urgent = true;
+}
+
 void usage_view_svc_changed(void)
 {
 	usage_view_set_status(last_status);
@@ -3125,6 +3606,7 @@ void usage_view_set_status(enum usage_status status)
 	 * host test can reach it.
 	 */
 	bool urgent = true;
+	const char *spend_hint;
 
 	svc_seen = svc_hint(page_tag(cur_page), k_uptime_get(),
 			    svc_buf, sizeof(svc_buf));
@@ -3136,8 +3618,22 @@ void usage_view_set_status(enum usage_status status)
 		 * (user request 2026-07-17). Session first -- it bites
 		 * sooner. At 100% (the display rounds >=99.5 up to "100%")
 		 * the limit is spent, not "almost" -- say so (user-reported
-		 * 2026-07-20). */
-		if (last_s_pct >= 99.5) {
+		 * 2026-07-20).
+		 *
+		 * On a spend page the left gauge is a dollar cap, and the
+		 * words say so: "Session almost used up" would name a window
+		 * that account does not have. fmt_spend_hint() keeps the same
+		 * thresholds, so once it has nothing to say the share is under
+		 * 95 and the session branches below cannot fire either; the
+		 * weekly ones cannot, because a spend page has no weekly
+		 * figure. */
+		spend_hint = plan_of(cur_page) == PLAN_KIND_SPEND
+				     ? fmt_spend_hint(last_s_pct)
+				     : NULL;
+		if (spend_hint != NULL) {
+			text = spend_hint;
+			tc = COL_RED;
+		} else if (last_s_pct >= 99.5) {
 			text = "Session used up";
 			tc = COL_RED;
 		} else if (last_s_pct >= 95.0) {
@@ -3162,6 +3658,7 @@ void usage_view_set_status(enum usage_status status)
 			tc = COL_DIM;
 			urgent = usage_activity_needs_row(activity);
 			svc_take_row(&text, &tc, &urgent);
+			spend_usage_take_row(&text, &tc, &urgent);
 		}
 		break;
 	case USAGE_STATUS_STALE:
@@ -3201,6 +3698,7 @@ void usage_view_set_status(enum usage_status status)
 			text = activity_hint();
 			urgent = usage_activity_needs_row(activity);
 			svc_take_row(&text, &tc, &urgent);
+			spend_usage_take_row(&text, &tc, &urgent);
 		}
 		break;
 	case USAGE_STATUS_ERROR:
@@ -3434,3 +3932,99 @@ const char *usage_view_bench_focus(void)
 	return !focus_on ? "off" : focus_weekly ? "weekly" : "session";
 }
 #endif
+
+static bool plan_same(const struct plan_record *a,
+		      const struct plan_record *b)
+{
+	return a->kind == b->kind && a->team == b->team &&
+	       a->usd == b->usd && a->lim == b->lim &&
+	       a->est == b->est && a->hint == b->hint &&
+	       strcmp(a->tag, b->tag) == 0 && strcmp(a->period, b->period) == 0;
+}
+
+void usage_view_set_plan(const char *prov, const char *plan,
+			 const char *period, const char *acct,
+			 double usd, double lim, bool est, bool hint)
+{
+	struct plan_record next = { .kind = PLAN_KIND_WINDOWS,
+				    .usd = -1, .lim = -1 };
+	enum plan_kind was[RAIL_PAGES_MAX];
+
+	if (plan != NULL && strcmp(plan, "spend") == 0) {
+		next.kind = PLAN_KIND_SPEND;
+		next.usd = usd;
+		next.lim = lim;
+		next.est = est;
+		next.hint = hint;
+		snprintf(next.period, sizeof(next.period), "%s",
+			 period != NULL ? period : "");
+	} else if (plan != NULL && strcmp(plan, "unreported") == 0) {
+		next.kind = PLAN_KIND_UNREPORTED;
+		next.team = acct != NULL && strcmp(acct, "team") == 0;
+	}
+	/* Windows, and any kind this firmware has no page for, name nobody:
+	 * every page then draws the gauges it always drew. */
+	if (next.kind != PLAN_KIND_WINDOWS && prov != NULL) {
+		snprintf(next.tag, sizeof(next.tag), "%s", prov);
+	}
+
+	/*
+	 * Nothing to do when nothing moved, and that is most calls. Since
+	 * FW3 (review of feat/enterprise-spend, 2026-11-04) a welcome no
+	 * longer resets the plan: it marks it unconfirmed (proto.c,
+	 * plan_unconfirmed), and the connection's first usage line resets it
+	 * to windows only if no plan line came first. So a board that has
+	 * never had a spend page, talking to a daemon that states no plan,
+	 * hears "windows" at the first usage line of each connect, the boot
+	 * clip's included, where a redraw and a status re-ask would raise the
+	 * connecting overlay over the animation; and a daemon that does state
+	 * one restates the same plan on every connect (greet() forgets the
+	 * last one sent).
+	 */
+	if (plan_same(&next, &plan_rec)) {
+		return;
+	}
+	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
+		was[i] = plan_of(i);
+	}
+	plan_rec = next;
+	/*
+	 * A page whose kind changed holds figures that meant something else:
+	 * a spend share is not a five-hour window, and a window is not a share
+	 * of a cap. They are dropped, so the page reads "--%" under its new
+	 * captions until the usage line that belongs to them arrives -- the
+	 * daemon sends that right behind a plan, when it has one.
+	 *
+	 * It does not always have one. After a /login away from a spend seat
+	 * the daemon states "windows" and has no reading for the new login
+	 * yet, so the plan came alone and the spend share 62.8 was redrawn as
+	 * "SESSION 5h 63%" over the month's 16d countdown, and at 96 as a red
+	 * "Session almost used up" (review of feat/enterprise-spend,
+	 * 2026-11-04, U15). New dollars on the same kind are not a change of
+	 * meaning, and keep the figures.
+	 */
+	for (int i = 0; i < RAIL_PAGES_MAX; i++) {
+		if (plan_of(i) == was[i]) {
+			continue;
+		}
+		pg[i].s_pct = -1;
+		pg[i].w_pct = -1;
+		pg[i].s_in_s = -1;
+		pg[i].w_in_s = -1;
+		pg[i].burn = 0;
+	}
+
+	/*
+	 * Kept while the screen is down as well (Settings frees it). The
+	 * daemon states a plan once, on change, so one arriving then would
+	 * otherwise be lost; the first render after the screen returns reads
+	 * it from here.
+	 */
+	if (built) {
+		render_gauges();
+		/* The captions moved, and with them whose near-limit words
+		 * apply -- spend or session -- so the status line is asked
+		 * again rather than left on the old page's sentence. */
+		usage_view_set_status(last_status);
+	}
+}

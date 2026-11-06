@@ -133,6 +133,20 @@ bool burn5h_parse(const char *json, struct burn5h *out)
 	return true;
 }
 
+enum burn5h_line burn5h_line_of(const char *type)
+{
+	if (type == NULL) {
+		return BURN5H_LINE_NONE;
+	}
+	if (strcmp(type, "burn") == 0) {
+		return BURN5H_LINE_TOKENS;
+	}
+	if (strcmp(type, "sburn") == 0) {
+		return BURN5H_LINE_DOLLARS;
+	}
+	return BURN5H_LINE_NONE;
+}
+
 static uint32_t sum(const struct burn5h *m, int from, int n)
 {
 	uint32_t s = 0;

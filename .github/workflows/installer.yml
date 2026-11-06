@@ -203,6 +203,7 @@ jobs:
           - install-uninstall-install  # came back: their bar chained again, not our stale shim
           - home-wiped-uninstall       # deleted ~/.blink by hand, then uninstalled
           - unreadable-settings        # settings.json does not parse: refuse, change nothing
+          - refresh-unasked            # a claude on PATH: install leaves /usage refresh off, never runs it
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -298,6 +299,9 @@ jobs:
   claude-versions:
     name: claude ${{ matrix.label }} (${{ matrix.version }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A stalled npm install or claude run fails here, not at GitHub's six
+    # hours. The cell takes about three minutes.
+    timeout-minutes: 20
     # The Linux binary is already built and uploaded by `build`. Compiling it
     # again in all four cells cost four PyInstaller runs to produce four
     # identical artifacts.
@@ -398,6 +402,11 @@ jobs:
       # -s sh: these must be POSIX. Checking them as bash would let a bashism
       # through that breaks the /bin/sh they actually run under.
       - run: shellcheck -s sh tools/blink-statusline.sh tools/blink-hook.sh tools/build_binary.sh tests/ci/*.sh
+      # The desk and panel scripts source tools/lib_zephyr.sh, or a Zephyr
+      # workspace this runner does not have, so SC1091 ("not following") is
+      # the one finding left out. They run on the owner's Mac against a real
+      # board, where a bashism is a failed desk check found at the bench.
+      - run: shellcheck -s sh -e SC1091 tools/desk/*.sh tools/panel_render/*.sh
 
       # The firmware and the daemon ship from one tag. A disagreement here is
       # invisible everywhere else -- it builds, it tests, it runs -- and only

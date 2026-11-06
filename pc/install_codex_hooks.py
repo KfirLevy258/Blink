@@ -175,7 +175,12 @@ def _ours(command: str, expected: set, marker: set) -> bool:
     the computed form survives a marker file lost with the rest of ~/.blink.
     Never a substring match on the command text -- a customer hook that merely
     mentions our filename would then be repointed or, in Task 9, deleted.
+
+    A "command" that is not a string is never ours, for the reason
+    install_hooks._ours gives: `in` on a list raised TypeError.
     """
+    if not isinstance(command, str):
+        return False
     return command in marker or command in expected
 
 

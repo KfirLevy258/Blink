@@ -64,6 +64,8 @@ import json
 import math
 import os
 
+from pc.providers import base
+
 KIND_STATUSLINE_WINDOW = "statusline_window"
 # The two no-window kinds were renamed when their rules were (the re-review
 # of 2026-11-01): "statusline_reply" was one reply, then two, and
@@ -204,6 +206,8 @@ class SessionVerdict:
         # None: verdict_path(), asked at first use, not here.
         self._path = path
         self._persist = persist
+        # False on the daemon's interim bus (ingest.IngestionBus.allow_writes).
+        self.writable = True
         self._current = None
         self._loaded = False
         # The state on disk as this process last knew it, (has_window,
@@ -253,7 +257,8 @@ class SessionVerdict:
         # step back of an hour held the retry off for that hour, and a
         # restart in it read the superseded verdict (the re-review of
         # 2026-11-01, finding 15).
-        if (self._persist and cur is not None and cur[:2] != self._on_disk
+        if (self._persist and self.writable and cur is not None
+                and cur[:2] != self._on_disk
                 and (self._failed_at is None
                      or not 0 <= now_epoch - self._failed_at < SAVE_RETRY_S)):
             if save(self.path(), cur):
@@ -270,5 +275,10 @@ class SessionVerdict:
         claude = [f for f in frames if f.provider == "claude"]
         if self.observe(claude, now_epoch):
             for f in claude:
-                f.no_session_window = True
+                # Never a spend page (docs/plans/enterprise-spend.md, 1): a
+                # seat billed by usage has no five-hour window to lack, and
+                # a verdict saved on a Max or Ultra login before /login
+                # must not turn its page into a burn view of tokens.
+                if f.plan != base.PLAN_SPEND:
+                    f.no_session_window = True
         return frames

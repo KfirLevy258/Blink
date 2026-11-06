@@ -11,11 +11,13 @@ reach the reconnect loop. The daemon's job is to keep a board fed; a parser
 for an app we do not control is exactly the kind of code that should never be
 able to stop it.
 """
+import dataclasses
 import sys
 import time
 
-from pc import (burn_reader, cowork_audit, desktop_idb, desktop_paths,
-                normalizer, protocol, session_verdict, weekly_anchor)
+from pc import (burn_reader, claude_account, claude_plan, cowork_audit,
+                desktop_idb, desktop_paths, normalizer, protocol,
+                session_verdict, spend_count, weekly_anchor)
 from pc.providers import base
 from pc.providers import claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
@@ -24,6 +26,7 @@ from pc.providers.claude_desktop_ls import ClaudeDesktopLocalStorageProvider
 from pc.providers.claude_state import ClaudeStateProvider
 from pc.providers.codex_cli import CodexCliProvider
 from pc.providers.weekly_anchor import DesktopHistoryProvider, WeeklyAnchorProvider
+from pc.providers.weekly_anchor import SRC_ID as WEEKLY_ANCHOR_SRC_ID
 
 
 # How long a provider that raised sits out before it is tried again, and how
@@ -47,16 +50,26 @@ FIRST_RETRY_AFTER_S = 60.0
 MAX_RETRY_AFTER_S = 900.0
 
 
-def default_providers():
+def default_providers(counter=None, plan=None, home=None, sweep=True):
     """Every provider shipped today, in preference order.
 
     Order is not the merge rule -- pc/normalizer merges by recency per field,
     not by position -- but it does decide which source is polled first and so
     which one a tie resolves toward.
+
+    `counter` is the bus's pc/spend_count.SpendCounter and `plan` its
+    claude_plan.PlanReader, both handed to the status-line provider: the
+    count is the bus's to keep, and one reader serves every user of the
+    config. None for either gives that provider its own (a count in memory
+    only, a reader of its own), which is what `blink status` wants.
+
+    `home` is IngestionBus's: whose drop folder the Claude Code providers
+    read.
     """
-    return [ClaudeCliProvider(), ClaudeDesktopProvider(),
+    return [ClaudeCliProvider(counter=counter, plan=plan, home=home),
+            ClaudeDesktopProvider(),
             ClaudeDesktopLocalStorageProvider(),
-            ClaudeStateProvider(), CodexCliProvider(),
+            ClaudeStateProvider(home=home, sweep=sweep), CodexCliProvider(),
             # LAST: it only ever offers a remembered projection, and every
             # source above it is polled first so any of them carrying a real
             # weekly reset is what observe() below learns from this cycle.
@@ -78,9 +91,74 @@ DEFAULT_VERDICT = object()
 
 class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
-                 now=time.time, burn=None, verdict=DEFAULT_VERDICT):
-        self._providers = (default_providers() if providers is None
-                           else list(providers))
+                 now=time.time, burn=None, verdict=DEFAULT_VERDICT,
+                 account=None, counter=None, plan_source=None, home=None,
+                 read_only=False):
+        """`plan_source`, when given, is where the bus's one reader of
+        Claude Code's config takes its view from instead of the file: a
+        WSL home's pc/wsl_watch.WslWatch.view, which answers from memory,
+        so the config -- a UNC path into the distribution -- is never
+        stat'ed or read on the serial loop (docs/plans/enterprise-spend.md,
+        section 4, "Reading"). None reads the file, as every native desk
+        does.
+
+        `home`, a callable returning a claude_home.ClaudeHome, pins whose
+        Claude Code the bus's own readers read: the config, the status
+        line payload and the hook state. The daemon's bus is built once
+        per process, and with None each of them asks
+        claude_home.current() on every poll, so a native bus followed a
+        record that turned WSL under it -- `install --wsl` saves before it
+        restarts, and a refused restart never comes -- and the serial loop
+        stat'ed UNC paths (final branch review, finding 5).
+
+        `counter` (a pc/spend_count.SpendCounter) is used only when the
+        bus builds its own providers (`providers` None): it is handed to
+        the status-line provider there. With `providers` given it feeds
+        nothing -- those providers were built by the caller, who gives a
+        ClaudeCliProvider its counter directly -- and is asked only for
+        spend_burn()'s buckets: a scenario's bus passes the scenario's
+        stand-in (scripted.ScriptedSpendCount) for exactly that."""
+        # The login watch (pc/claude_account), made here only for the
+        # shipped providers. A bus built from a scenario exists to replay the
+        # same timeline on any desk, and whoever happens to be signed in to
+        # Claude on that desk is exactly what it must not depend on.
+        #
+        # One reader of Claude Code's config for the whole bus: the login
+        # watch, the status-line provider (the Ultra plan, the spend seat
+        # and its saved /usage) and the spend-seat check in _collect_frames
+        # below all take their view from it, so the file is looked at once a
+        # poll (PlanReader.look) and all three agree on what it said. None on
+        # a scenario's bus, for the reason above: it never asks.
+        self._plan_reader = None
+        if providers is None:
+            self._plan_reader = claude_plan.PlanReader(source=plan_source,
+                                                       home=home)
+            if account is None:
+                account = claude_account.AccountWatch(self._plan_reader.look)
+        self._account = account
+        # False until a frame on this bus has had a plan other than windows
+        # -- in practice, until Claude Code's status line has carried a
+        # spend cap, or the config has named a seat billed by usage. Until
+        # then the login watch is never polled and no frame is filtered for
+        # it, so a desk that has never seen a spend reading merges exactly
+        # as it did before any of this existed (the config is still looked
+        # at once a poll, for the seat: _spend_seat). Once true it
+        # stays true for the life of the process: the guard matters most
+        # straight AFTER the spend page goes away, at the switch back.
+        self._plans_seen = False
+        # The running spend count (pc/spend_count), the bus's to own:
+        # persisted in ~/.blink/spend-count.json, and fed and saved only
+        # while the config names a spend seat. `counter` replaces it --
+        # `blink status --wire` passes one that writes nothing.
+        self._counter = counter
+        if providers is None:
+            if counter is None:
+                counter = spend_count.SpendCounter()
+            self._counter = counter
+            self._providers = default_providers(counter, self._plan_reader,
+                                                home, sweep=not read_only)
+        else:
+            self._providers = list(providers)
         self._preferred = preferred_provider
         self._now = now
         # Weighs what the claude sources prove about the account's
@@ -93,6 +171,18 @@ class IngestionBus:
         # it for them on a bench.
         self._verdict = (session_verdict.SessionVerdict()
                          if verdict is DEFAULT_VERDICT else verdict)
+        # `read_only`: the daemon's interim bus (claude_usage_bridge.
+        # build_bus), built while the record cannot be read, which may yet
+        # name a WSL home. Its spend count, verdict and weekly anchor are
+        # the same files that home's bus keeps, and its bind() to this
+        # computer's own login emptied the WSL seat's count (the scoped
+        # review of feat/spend-wsl-refresh, item 5). It reads them and
+        # writes nothing -- no save, no exit flush, no anchor, no sweep of
+        # the hook state -- until allow_writes(), once the record settles
+        # on this bus.
+        self._writes = True
+        if read_only:
+            self._set_writes(False)
         # What answers burn() below: anything with poll(now) -> (q, tokens)
         # or None -- pc/burn_reader.BurnReader on a desk, the scenario's
         # replay under BLINK_SCENARIO. None, the default, means no burn line
@@ -101,7 +191,10 @@ class IngestionBus:
         # transcripts: claude_usage_bridge.build_bus decides, the way it
         # decides the providers. One reader is the claude page's; a dict
         # gives each provider's page its own ({"claude": BurnReader(),
-        # "codex": CodexBurnReader()} on a desk).
+        # "codex": CodexBurnReader()} on a desk). A WSL home's claude page
+        # has its watch's burn_source() instead (pc/wsl_watch): answers
+        # from memory, read on the watch's thread, so it is not a
+        # BurnReader and burn() below asks it as it asks a scenario's.
         if burn is not None and not isinstance(burn, dict):
             burn = {claude_cli.PROVIDER_ID: burn}
         self._burn = burn or {}
@@ -111,6 +204,13 @@ class IngestionBus:
         # rather than copied into a flag of its own, so that it answers for
         # the same poll the usage line came from. See page().
         self._pages = {}
+        # The newest observed_at of a Claude figure from a source other
+        # than BLINK's own /usage refresh, or None: claude_fresh_at().
+        self._claude_fresh_at = None
+        # usage_refresh.RefreshWatch.activity_for, once wired: dates the
+        # saved /usage as activity when BLINK's own refresh, run with the
+        # person at the computer, wrote it.
+        self._refresh_activity = None
         # What is left of the read budget for this pass's burn lines, shared
         # by every reader (burn_reader.READ_BUDGET_BYTES, or a reader's own
         # when it was given less); None for a full one. Filled by
@@ -151,6 +251,9 @@ class IngestionBus:
         # second time could pick a different winner and name a project that
         # does not belong to the state on the panel.
         self._session_pair = ("", 0)
+        # The plan message for the pair the last poll() chose, or None while
+        # this bus has never seen a plan -- see plan_msg().
+        self._plan = None
         # Guards the one-shot anchor seeding below: see
         # _seed_anchor_once. False until the first poll_frames() call,
         # regardless of whether that call finds anything to seed.
@@ -231,7 +334,7 @@ class IngestionBus:
         and a V8 decode of the conversation store on the first poll of every
         process to learn something the next few lines were about to be told.
         """
-        if self._seeded:
+        if self._seeded or not self._writes:
             return
         self._seeded = True
         try:
@@ -279,6 +382,34 @@ class IngestionBus:
             self._note_desktop_folder(folder)
             return self._collect_frames()
 
+    def _spend_seat(self, now):
+        """Whether Claude Code's config names a seat billed by usage, from
+        the bus's one reader; False on a scenario's bus, which has none.
+        Contained like the rest of the spend path: a failure is said in
+        fixed words, once (claude_cli.spend_failed), and is "no"."""
+        if self._plan_reader is None:
+            return False
+        try:
+            return bool(self._plan_reader.look(now).spend_seat)
+        except Exception:
+            claude_cli.spend_failed()
+            return False
+
+    @staticmethod
+    def _off_the_spend_page(f):
+        """A claude frame a spend page does not show
+        (docs/plans/enterprise-spend.md, 1): any reading of windows -- the
+        status line's, Claude Desktop's, its Local Storage's, a remembered
+        payload -- and the weekly anchor's projection, which carries a
+        weekly reset and no figure. Frames that speak only for a terminal
+        (the hook's state and counts) stay."""
+        if f.provider != claude_cli.PROVIDER_ID:
+            return False
+        if f.src == WEEKLY_ANCHOR_SRC_ID:
+            return True
+        return (claude_account._speaks_for_account(f)
+                and f.plan != base.PLAN_SPEND)
+
     def _note_desktop_folder(self, folder):
         """Log which Desktop data folder is read, once per change.
 
@@ -324,8 +455,13 @@ class IngestionBus:
                 wait = (min(sitting_out["wait"] * 2, MAX_RETRY_AFTER_S)
                         if sitting_out is not None else FIRST_RETRY_AFTER_S)
                 if sitting_out is None:
-                    print(f"[ingest] {name} failed and will be skipped: {e}",
-                          file=sys.stderr)
+                    # By type, never the message: it can carry what the
+                    # provider was reading ("int too large to convert to
+                    # float" off a damaged status line, a path, a character
+                    # of Claude Code's config), into the file customers send
+                    # us (CLAUDE.md).
+                    print(f"[ingest] {name} failed and will be skipped"
+                          f" ({type(e).__name__})", file=sys.stderr)
                 self._broken[key] = {"since": now, "retry_at": now + wait,
                                      "wait": wait}
             else:
@@ -336,6 +472,16 @@ class IngestionBus:
                     del self._broken[key]
                     print(f"[ingest] {name} is working again",
                           file=sys.stderr)
+        # On a spend seat the config is authoritative for the Claude page,
+        # and windows readings are not shown on it. Dropped here, before the
+        # weekly anchor learns from them and before the verdict marks them:
+        # a seat billed by usage has no seven-day reset to remember and no
+        # five-hour window to lack, and a Max status line still in the file
+        # from before /login, or a Claude Desktop sample a minute newer than
+        # the spend frame, would otherwise take the page back to windows
+        # (claude_account._same_plan_as_newest keeps the newest plan).
+        if self._spend_seat(now):
+            frames = [f for f in frames if not self._off_the_spend_page(f)]
         try:
             # Bonus learning, never a poll cost: whatever just carried a real
             # weekly reset becomes tomorrow's WeeklyAnchorProvider projection.
@@ -352,8 +498,9 @@ class IngestionBus:
             # republishes with provider="claude" -- a different account's
             # reset, presented as this one's.
             claude_frames = [f for f in frames if f.provider == "claude"]
-            weekly_anchor.observe(
-                claude_frames, weekly_anchor.anchor_path(), now)
+            if self._writes:
+                weekly_anchor.observe(
+                    claude_frames, weekly_anchor.anchor_path(), now)
         except Exception:
             pass
 
@@ -366,7 +513,13 @@ class IngestionBus:
         # the first poll of every process, to learn a boundary the status line
         # was about to hand over for free.
         self._seed_anchor_once()
-        if self._verdict is not None:
+        # Not on a spend seat: the frames left there are the spend page and
+        # frames with no figure (a status line without rate_limits, the
+        # hook's), and a verdict that an earlier Ultra login saved would mark
+        # those, turning the token burn view on over a page of dollars.
+        # pc/normalizer.merge refuses the mark beside a spend figure as well;
+        # this keeps it off the frames in the first place.
+        if self._verdict is not None and not self._spend_seat(now):
             # Before any merge, so every claude frame -- the status line's,
             # or Claude Desktop's alone on a desk that runs no Claude Code --
             # carries the account's verdict into it. Contained like a
@@ -376,6 +529,19 @@ class IngestionBus:
             except Exception:
                 pass
         return frames
+
+    def _set_writes(self, on):
+        self._writes = on
+        for obj in (self._counter, self._verdict):
+            if hasattr(obj, "writable"):
+                obj.writable = on
+        for p in self._providers:
+            if isinstance(p, ClaudeStateProvider):
+                p._sweep = on
+
+    def allow_writes(self):
+        """The record settled on this bus: it keeps its files from now."""
+        self._set_writes(True)
 
     def verdict(self):
         """The bus's SessionVerdict, or None: for `blink status`, which says
@@ -396,24 +562,138 @@ class IngestionBus:
         """
         return now >= sitting_out["retry_at"] or now < sitting_out["since"]
 
+    def _login(self, now):
+        """(kind, since, touched_at) from the login watch, or blanks.
+
+        Blanks when there is no watch and when it raises: the profile is
+        another application's file, and failing to read it has to leave the
+        page as it would have been without the watch, not cost the poll.
+        """
+        watch = self._account
+        if watch is None:
+            return "", None, None
+        try:
+            watch.poll(now)
+            return watch.kind, watch.since, watch.touched_at
+        except Exception:
+            return "", None, None
+
+    def _guard_account(self, frames, now):
+        """Filter this poll's frames for the signed-in login, once armed.
+
+        Not armed, the frames come back as they went in and the profile is
+        never opened -- see _plans_seen.
+        """
+        if not self._plans_seen:
+            self._plans_seen = any(
+                f is not None and f.plan != base.PLAN_WINDOWS for f in frames)
+            if not self._plans_seen:
+                return frames
+        kind, since, touched = self._login(now)
+        return claude_account.select(frames, now, kind, since, touched)
+
     def poll(self):
         """The usage message for the board, or None when nothing is known."""
+        frames = self.poll_frames()
+        # Read after the providers have run, as it always was: a slow poll
+        # must not date the usage line by the moment it started.
+        now = self._now()
+        frames = self._guard_account(frames, now)
+        self._note_claude_fresh(frames)
+        frames = self._credit_refresh(frames)
         primary, secondary = normalizer.select_pair(
-            self.poll_frames(), preferred=self._preferred)
+            frames, preferred=self._preferred)
         # The claude page wherever it sits: the main one, or the second when
         # the owner made another provider main. A provider left off the
         # board's two pages has no page to draw a burn view on.
         self._pages = {f.provider: f for f in (primary, secondary)
                        if f is not None}
         self.prune_burn()
+        if self._plans_seen:
+            # Computed even when primary is None below. The moment that
+            # matters is /login back to Max: the guard has just thrown out
+            # every spend reading as pre-switch, Claude Code has not yet
+            # written a Max status line, and so there is nothing to draw --
+            # but the board is still captioning its Claude page SPEND. The
+            # "windows" this produces is what takes that caption down.
+            self._plan = protocol.plan_for(primary, secondary)
         if primary is None:
             return None
-        msg = protocol.frame_to_usage(primary, self._now(), secondary)
+        msg = protocol.frame_to_usage(primary, now, secondary)
         # Against the state the message actually carries, which is not always
         # the primary frame's own -- see _pair_from.
         self._session_pair = _pair_from(
             primary, secondary, msg.get("state", base.STATE_UNKNOWN))
         return msg
+
+    def credit_refresh(self, activity_for):
+        """Wire `activity_for(fetched_at)` (RefreshWatch's): the time to
+        date the saved /usage's activity at, or None. Unwired, and for
+        every cache the watch did not write after a proven presence, the
+        frame carries no activity (base.NO_CONTACT), so a refresh with
+        nobody there never keeps the board awake."""
+        self._refresh_activity = activity_for
+
+    def _credit_refresh(self, frames):
+        fn = self._refresh_activity
+        if fn is None:
+            return frames
+        out = []
+        for f in frames:
+            # The spend page too, dated by the same /usage when that is the
+            # newest thing it rests on (its observed_at): on a seat billed
+            # by usage a proven run kept nothing awake (the /code-review
+            # max of 277b81a..4003b0b, item 8). Never older than the
+            # frame's own activity, a render's.
+            if (f is not None and f.provider == claude_cli.PROVIDER_ID
+                    and f.src in (base.USAGE_SRC_ID, base.SPEND_SRC_ID)):
+                try:
+                    at = fn(f.observed_at)
+                except Exception:
+                    at = None
+                if at is not None:
+                    f = dataclasses.replace(f, active_at=max(
+                        f.active_at, min(at, f.observed_at)))
+            out.append(f)
+        return out
+
+    def _note_claude_fresh(self, frames):
+        # After the login guard, so a reading from another login does not
+        # count as this one's. USAGE_SRC_ID is the refresh's own cache: if
+        # it counted, every refresh would hold off the next. SPEND_SRC_ID is
+        # worked out from the config and dated by the last render or the
+        # /usage, or by .claude.json's mtime when it has neither, which
+        # Claude Code and Claude Desktop rewrite all day: on a spend seat
+        # it would hold the refresh off for good. A render already counts
+        # through the status line's own mtime (start_usage_refresh).
+        fresh = [f.observed_at for f in frames
+                 if f is not None and f.provider == claude_cli.PROVIDER_ID
+                 and f.src not in (base.USAGE_SRC_ID, base.SPEND_SRC_ID)
+                 and f.has_usage()]
+        if fresh:
+            self._claude_fresh_at = max(fresh)
+
+    def spend_seen(self):
+        """Whether a spend page can have been shown on this desk: this
+        process has seen a plan, or the count is bound to a seat billed by
+        usage, kept in ~/.blink/spend-count.json across restarts. For the
+        greeting's blank (Bridge.greet), which only takes such a page
+        down."""
+        if self._plans_seen:
+            return True
+        c = self._counter
+        return isinstance(c, spend_count.SpendCounter) and c.bound()
+
+    def claude_fresh_at(self):
+        """When another Claude source last gave a figure (the status line,
+        Claude Desktop's Code tab, chat or Cowork), as the last poll() that
+        had one saw it; None before any.
+
+        Written by poll() on the serial loop and read by
+        usage_refresh.RefreshWatch on its own thread, as a plain float with
+        no lock: a float read is atomic in CPython, and a value one poll old
+        moves the refresh's 15-minute rule by two seconds."""
+        return self._claude_fresh_at
 
     def claude_page(self):
         """The merged claude frame the last poll() put on a page, or None.
@@ -483,6 +763,17 @@ class IngestionBus:
             if prune is not None:
                 prune(now)
 
+    def plan_msg(self):
+        """What the last poll() says the pages are a share of.
+
+        Stays None for as long as every frame this bus has seen was a windows
+        frame. That None is how the feature keeps off the wire on today's
+        desks: the Bridge has nothing to send. Once a spend reading has been
+        seen it is always a message, and "windows" is one of them -- the
+        board learns that a spend page has gone only by being told.
+        """
+        return self._plan
+
     def session_pair(self):
         """(label, n) for the state the last poll() put on the panel.
 
@@ -535,6 +826,39 @@ class IngestionBus:
         q, tokens = got
         return protocol.burn(provider, q, tokens)
 
+    def spend_burn(self, provider=claude_cli.PROVIDER_ID):
+        """The dollar burn line for the board, or None when there is none.
+
+        None unless the last poll() put a spend page on `provider`'s page
+        (its primary frame's plan is PLAN_SPEND) and the bus holds a count,
+        so a Max desk never builds one. A scenario's bus holds the
+        scenario's stand-in (scripted.ScriptedSpendCount), whose buckets are
+        None until a step names some: that is no line too. Pure arithmetic
+        on the in-memory count: no file is read here.
+
+        And None unless the page is the one the count feeds: the config's
+        (base.SPEND_SRC_ID). A gateway's page (the status line's own
+        spend_limit, pc/statusline_source) is a spend page too, but nothing
+        feeds the count from it, so its buckets were twenty zeros, and new
+        firmware gives the left half of the burn view to any fresh sburn,
+        hiding the gateway's share behind an empty dollar line (final
+        review of 2026-11-04). A scenario's stand-in is not held to this:
+        its line is whatever its steps say, on whatever page they draw.
+        """
+        page = self._pages.get(provider)
+        if (self._counter is None or page is None
+                or getattr(page, "plan", base.PLAN_WINDOWS) != base.PLAN_SPEND):
+            return None
+        if (isinstance(self._counter, spend_count.SpendCounter)
+                and page.src != base.SPEND_SRC_ID):
+            return None
+        now = self._now()
+        cents = self._counter.buckets(now)
+        if cents is None:
+            return None
+        return protocol.spend_burn(provider, protocol.burn_quarter(now),
+                                   cents)
+
     def fetch(self):
         """The callable to hand Bridge(fetch_usage=...).
 
@@ -548,6 +872,79 @@ class IngestionBus:
         now one.
         """
         return _BusFetch(self)
+
+
+class DeferredBus:
+    """The daemon's bus while the record that decides it cannot be read:
+    `interim`, a native bus, until `decide()` names the bus to keep -- the
+    interim itself, or another (a WSL one) -- for the rest of the process.
+
+    For a daemon started while its config.json could not be read
+    (claude_usage_bridge.build_bus): the record decides between a native bus
+    and a WSL one, and a guess was pinned for the process. Until the
+    /code-review max of 277b81a..4003b0b this stood on a bus with no
+    providers at all, and a config.json that stayed unparseable left the
+    board with no usage, Codex and Claude Desktop included (item 2).
+    Reading is harmless, so the native readers read meanwhile; only the
+    writing (the watchdog, the /usage refresh) waits for the record.
+
+    Everything is the current bus's, through __getattr__; what is wired
+    before the decision -- the owner's choice of main provider, the usage
+    refresh's activity -- is handed to the bus decided on. fetch() goes
+    through this object, so a Bridge built first reads the real bus once
+    there is one. The interim's one-shot anchor seeder (a walk of Cowork's
+    session tree, a decode of Claude Desktop's conversation store) waits
+    until it is the bus kept: run from a bus about to be replaced, it was a
+    walk for nothing (verify/v4/c10_extra_walk.py)."""
+
+    def __init__(self, interim, decide):
+        self._decide = decide
+        self._bus = interim
+        interim._seeded = True
+        self._built = False
+        self._preferred = None
+        self._refresh = None
+
+    def _resolve(self):
+        if self._built:
+            return
+        bus = self._decide()
+        if bus is None:
+            return
+        self._built = True
+        if bus is self._bus:
+            bus._seeded = False
+            bus.allow_writes()
+            return
+        if self._preferred is not None:
+            bus.set_preferred(self._preferred)
+        if self._refresh is not None:
+            bus.credit_refresh(self._refresh)
+        self._bus = bus
+
+    def poll(self):
+        self._resolve()
+        return self._bus.poll()
+
+    def fetch(self):
+        return _BusFetch(self)
+
+    def set_preferred(self, provider):
+        # The current bus's known-name check, which keeps a raw name off the
+        # board out of the log: this said True for any non-empty string, and
+        # Bridge logged it as the main source (item 6). Kept for the handover
+        # only once that bus took it.
+        ok = self._bus.set_preferred(provider)
+        if ok:
+            self._preferred = provider
+        return ok
+
+    def credit_refresh(self, activity_for):
+        self._refresh = activity_for
+        self._bus.credit_refresh(activity_for)
+
+    def __getattr__(self, name):
+        return getattr(self.__dict__["_bus"], name)
 
 
 class _BusFetch:
@@ -580,6 +977,15 @@ class _BusFetch:
 
     def burn(self, provider=claude_cli.PROVIDER_ID):
         return self._bus.burn(provider)
+
+    def spend_burn(self, provider=claude_cli.PROVIDER_ID):
+        return self._bus.spend_burn(provider)
+
+    def plan_msg(self):
+        return self._bus.plan_msg()
+
+    def spend_seen(self):
+        return self._bus.spend_seen()
 
 
 # Which count describes which state. STATE_FAILED reads n_stuck because that

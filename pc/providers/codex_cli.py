@@ -96,7 +96,7 @@ def sessions_root() -> str:
     not know where to look. CODEX_HOME is honoured because Codex itself does.
 
     Joined from the home directory rather than expanded from "~/.codex", as
-    burn_reader.transcripts_root() is and for its reason: on Windows
+    claude_home.from_environ() joins ~/.claude, and for its reason: on Windows
     expanduser keeps the slash it was given, and the root came out with one
     forward slash among backslashes -- in the install note a customer reads
     and in a test on windows-latest (/code-review max, 2026-11-01).

@@ -19,8 +19,8 @@ from serial.tools import list_ports
 
 from pc import ota as ota_mod
 from pc import (ingest, install_statusline, interval, logbook, protocol,
-                status_page, statusline_source, theme, theme_server, update,
-                win_driver)
+                spend_count, status_page, statusline_source, theme,
+                theme_server, update, usage_refresh, win_driver)
 from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
@@ -261,6 +261,121 @@ def poll_interval():
                                      POLL_INTERVAL_S)
 
 
+def claude_activity_at(bus):
+    """The newest sign of another Claude source in use, or None: the
+    status line's mtime as well as the bus's frames. The bus is polled only
+    while a board answers and only every few seconds, and a render with no
+    figure in it still says a terminal is in use. BLINK's own /usage
+    refresh is never one (bus.claude_fresh_at leaves it out). The refresh's
+    15-minute rule and, where the OS gives no idle figure, its 30-minute
+    "someone is here" rule (usage_refresh.at_computer) both read this."""
+    from pc import claude_home
+    stamps = [bus.claude_fresh_at()]
+    try:
+        stamps.append(os.stat(statusline_source.payload_path(
+            claude_home.native())).st_mtime)
+    except OSError:
+        pass
+    stamps = [t for t in stamps if t is not None]
+    return max(stamps) if stamps else None
+
+
+def start_usage_refresh(blink_home, bus, board_alive):
+    """Start the /usage refresh's thread (pc/usage_refresh.RefreshWatch),
+    or start nothing and return None.
+
+    Nothing for a WSL Claude home, which this version never runs, and
+    nothing under BLINK_SCENARIO, whose bus replays a scenario: a real
+    Claude Code run on a fleet desk would mix this machine's login into
+    the replay. Started whatever the setting says, like the status-page
+    watch: it reads config.json each tick, so `blink config usage-refresh
+    on` takes effect within a minute without a restart.
+
+    `board_alive` is the Bridge's, which only compares a timestamp the
+    serial loop keeps, so asking it from the refresh's thread is safe and
+    never waits on the serial thread. The serial thread never calls into
+    the refresh at all."""
+    from pc import claude_home
+    if os.environ.get("BLINK_SCENARIO"):
+        return None
+    if claude_home.current().kind != claude_home.NATIVE:
+        return None
+
+    def enabled():
+        # None for a config.json that cannot be read, as
+        # usage_refresh.enabled says it: the watch keeps what it holds
+        # rather than taking a lock or a half-written file for "off".
+        return usage_refresh.enabled(blink_home)
+
+    other_at = lambda: claude_activity_at(bus)  # noqa: E731
+
+    # current, not native: a record that turns WSL under a running daemon
+    # stops the runs at the next tick, before the restart that follows.
+    # known, not current: a record that cannot be read runs nothing, where
+    # current() guessed the service's own environment and ran Claude Code
+    # against a folder the record does not name (item 2 of the review of
+    # 277b81a..4003b0b).
+    watch = usage_refresh.RefreshWatch(
+        blink_home, claude_home.known, enabled=enabled,
+        board_alive=board_alive,
+        view=usage_refresh.config_view(claude_home.known),
+        other_at=other_at)
+    # A refresh run with the person at the computer counts as activity at
+    # its time (RefreshWatch.activity_for); every other /usage cache none.
+    bus.credit_refresh(watch.activity_for)
+    return watch.start()
+
+
+def board_ask(blink_home, bus=None):
+    """The board's "Keep figures fresh?" (usage_refresh.BoardAsk), or None.
+
+    Built once for the life of the process and handed to each connection's
+    Bridge, so its memory of the last ask outlives a nudged cable. None
+    under BLINK_SCENARIO for the reason start_usage_refresh gives: a fleet
+    desk replays invented usage, and a tap there would turn the refresh on
+    for the desk's own login. A WSL home is refused by BoardAsk itself, on
+    each look, because the record can change under a running daemon."""
+    from pc import claude_home
+    if os.environ.get("BLINK_SCENARIO"):
+        return None
+    return usage_refresh.BoardAsk(
+        blink_home, claude_home.known,          # as start_usage_refresh
+        usage_refresh.config_view(claude_home.known),
+        other_at=None if bus is None else (lambda: claude_activity_at(bus)))
+
+
+def _bus_for(home, read_only=False):
+    """The real bus for `home`, a claude_home.ClaudeHome: see build_bus.
+    `read_only` for the interim native bus (ingest.IngestionBus)."""
+    from pc import claude_home
+    from pc.burn_reader import BurnReader, CodexBurnReader
+    if home.kind == claude_home.WSL:
+        # Claude Code inside a WSL distribution: its config and its
+        # transcripts are UNC paths, read by the watch on its own
+        # thread and only while the distribution is in use, and handed
+        # to the bus from memory (pc/wsl_watch). Built only here, so a
+        # native desk never has one, and once per process: `blink
+        # install --wsl` restarts the service, which rebuilds the bus
+        # with it. The status line and the hook state stay with the
+        # providers, read from the Windows drop folder.
+        from pc import wsl_watch
+        watch = wsl_watch.WslWatch(home)
+        watch.start()
+        return ingest.IngestionBus(
+            burn={"claude": watch.burn_source(),
+                  "codex": CodexBurnReader()},
+            plan_source=watch.view, home=lambda: home)
+    # Pinned to this computer's own Claude Code, which a record can
+    # move between folders but never into a distribution: the bus
+    # lives for the process, and asking current() on each poll
+    # followed `install --wsl`'s record onto UNC paths before the
+    # restart that rebuilds it (IngestionBus's `home`).
+    native = claude_home.native
+    return ingest.IngestionBus(burn={"claude": BurnReader(home=native),
+                                     "codex": CodexBurnReader()},
+                               home=native, read_only=read_only)
+
+
 def build_bus():
     """The daemon's usage source: scripted when BLINK_SCENARIO says so.
 
@@ -283,9 +398,35 @@ def build_bus():
     """
     scenario = os.environ.get("BLINK_SCENARIO")
     if not scenario:
-        from pc.burn_reader import BurnReader, CodexBurnReader
-        return ingest.IngestionBus(burn={"claude": BurnReader(),
-                                         "codex": CodexBurnReader()})
+        from pc import claude_home
+        if claude_home.record_state()[0] == claude_home.UNKNOWN:
+            # config.json is there and cannot be read (a lock at logon, a
+            # hand edit) or names a home this release does not know. Built
+            # as native, the bus was pinned so for the process, and a WSL
+            # desk read Windows' own Claude Code until the next restart
+            # (the review of the WSL work, 2026-11-05). Then it showed
+            # nothing at all until the record read, which for a file that
+            # stays unparseable was for good (the review of
+            # 277b81a..4003b0b, item 2). Reading is harmless: the native
+            # bus reads meanwhile, and a record that settles on a WSL home
+            # hands over to that one (claude_home.Settled: one read is not
+            # a move, and "no record" is never taken from this process).
+            print("[bridge] Blink's config.json could not be read; showing"
+                  " this computer's own readings until it can",
+                  file=sys.stderr)
+            settled = claude_home.Settled()
+            # Read-only until the record settles on it (item 5 of the
+            # scoped review of feat/spend-wsl-refresh): its files are the
+            # ones a WSL home's bus keeps.
+            interim = _bus_for(claude_home.native(), read_only=True)
+
+            def decide():
+                s = settled.read()
+                if s is None or s == claude_home.NO_RECORD:
+                    return None
+                return _bus_for(s) if s.kind == claude_home.WSL else interim
+            return ingest.DeferredBus(interim, decide)
+        return _bus_for(claude_home.current())
     from pc.providers.scripted import ScriptedProvider
     scripted = ScriptedProvider(scenario)
     # verdict=None: a step says itself whether the account has a five-hour
@@ -295,8 +436,11 @@ def build_bus():
     # account its window back.
     # One replay for both pages: a step marks whichever provider it names.
     replay = scripted.burn_source()
+    # The dollar burn view's count likewise: the scenario's `sburn` steps,
+    # never ~/.blink/spend-count.json, which is the desk's own.
     return ingest.IngestionBus(providers=[scripted],
                                burn={"claude": replay, "codex": replay},
+                               counter=scripted.spend_count(),
                                verdict=None)
 
 
@@ -388,6 +532,15 @@ PROBE_S = 1.5
 # reset to the first protocol message, and a ping every 10 s after that, so 11
 # seconds cannot miss a live board.
 PROBE_PATIENT_S = 11.0
+
+# What a `plan` line is compared on for the log (logbook.RepeatsBy below):
+# everything it says except the dollars. On a working spend desk the
+# dollars move with nearly every render, so a plan went out about every ten
+# seconds and each one was a line in bridge.log -- some 360 an hour, with the
+# board's "[plan]" echo of each beside it (/code-review max of 2026-11-04,
+# U5). A change of plan, period, cap or flag is still a line at once; the
+# dollars travel on the wire and are never in the log anyway.
+PLAN_LOGGED_FIELDS = ("plan", "period", "lim", "acct", "est", "hint")
 
 
 def hold_single_instance(home, on_wait=None, poll_s=5.0):
@@ -533,7 +686,43 @@ def learn_board(known, port, msg):
             "caps": caps}
 
 
-def probe_is_our_board(ser, timeout=PROBE_S, tap=None):
+# How long the probe goes on listening after the first message, for the
+# pref: see probe_is_our_board's `heard`. The board answers a welcome at
+# once, so this only covers a ping that happened to land first.
+PROBE_PREF_GRACE_S = 0.3
+
+
+def board_caps_hint(heard, known):
+    """What Bridge may take this board to draw before it speaks on the read
+    loop: its `board_caps_hint`.
+
+    The pref the probe heard (`heard`, from probe_is_our_board) when there
+    is one: that is the board on this port answering our welcome, so its
+    caps are its own. Until the /code-review max of 2026-11-04 (U17) the
+    hint was board.json's alone, which names the LAST board that spoke: an
+    older board swapped in on the same port, or this one reflashed down,
+    was taken to draw plans, and was handed the spend share for its
+    "SESSION 5h" dial until its own pref reached the bridge.
+
+    With no pref heard -- the reset path, whose hello says soon enough, or a
+    probe that heard only a ping -- board.json's caps stand, less the two
+    that decide what a spend page's figures mean on the wire. Every board
+    that draws plans answers a welcome with its pref (proto.c), and the two
+    wrong guesses are not alike: a plan-less board told it draws plans
+    shows dollars as a session percentage, a plan board told it does not
+    shows "--" for a moment, until it speaks.
+    """
+    for msg in reversed(heard or ()):
+        if isinstance(msg, dict) and msg.get("t") in ("hello", "pref"):
+            return sorted(protocol.board_caps(msg))
+    caps = known.get("caps") if isinstance(known, dict) else None
+    if not isinstance(caps, (list, tuple)):
+        return None
+    unsure = (protocol.BOARD_CAP_PLAN, protocol.BOARD_CAP_SPENDBURN)
+    return [c for c in caps if c not in unsure]
+
+
+def probe_is_our_board(ser, timeout=PROBE_S, tap=None, heard=None):
     """Ask the thing on this port whether it is a Blink board, without a reset.
 
     Why this exists: the reset below is not free, and it is not aimed at a
@@ -561,6 +750,12 @@ def probe_is_our_board(ser, timeout=PROBE_S, tap=None):
     only evidence that it ever slept was being consumed by the question that
     woke it. Unset BLINK_TAP means tap is None and this path is exactly what
     it always was.
+
+    `heard`, when a list, is given every message read here, and the probe
+    then listens on past the first one -- at most PROBE_PREF_GRACE_S, never
+    past `timeout` -- until the board's pref has come: board_caps_hint
+    takes this board's caps from it. None returns at the first message, as
+    the probe always did.
     """
     # encode_checked, as every production writer is (CLAUDE.md). This
     # welcome is the one that decides what the board offers when the daemon
@@ -574,6 +769,7 @@ def probe_is_our_board(ser, timeout=PROBE_S, tap=None):
                                                         RELEASE_VERSION))
     if raw is None:
         print(f"[bridge] probe not sent: {why}", file=sys.stderr)
+    ours = False            # heard from, while still listening for the pref
     try:
         ser.reset_input_buffer()
         if raw is not None:
@@ -595,12 +791,20 @@ def probe_is_our_board(ser, timeout=PROBE_S, tap=None):
                 # arrives first is timing, and identity is the only question
                 # being asked here.
                 if isinstance(msg, dict) and msg.get("t"):
-                    return True
+                    if heard is None:
+                        return True
+                    heard.append(msg)
+                    if msg.get("t") in ("pref", "hello"):
+                        return True
+                    if not ours:
+                        ours = True
+                        deadline = min(deadline,
+                                       time.time() + PROBE_PREF_GRACE_S)
     except Exception:
         # A probe that fails is not evidence of anything; fall through and let
-        # the usual path decide.
-        return False
-    return False
+        # the usual path decide. A board already heard stays heard.
+        return ours
+    return ours
 
 
 def wait_for_port(explicit=None, poll_s=3.0, on_wait=None):
@@ -723,7 +927,17 @@ def _self_update_tick(target):
 # that will not boot until somebody reflashes it by hand (review,
 # 2026-10-27). So inside no_exit_while() the handler only notes the signal,
 # and the exit happens the moment the guarded work returns.
+#
+# Either way the spend count's held-back rises are written first, before the
+# SystemExit unwinds main()'s frame and the counter with it: atexit came too
+# late for a counter only that frame held (the review of the WSL work,
+# 2026-11-05; spend_count.flush_all).
 _TERM = {"holding": None, "pending": False}
+
+
+def _exit_on_term():
+    spend_count.flush_all()
+    sys.exit(0)
 
 
 def _on_sigterm(signum, frame):
@@ -733,7 +947,7 @@ def _on_sigterm(signum, frame):
                   " finished", file=sys.stderr)
         _TERM["pending"] = True
         return
-    sys.exit(0)
+    _exit_on_term()
 
 
 def exit_on_sigterm():
@@ -752,7 +966,7 @@ def no_exit_while(what):
     finally:
         _TERM["holding"] = None
         if _TERM["pending"]:
-            sys.exit(0)
+            _exit_on_term()
 
 
 def main(argv=None):
@@ -783,8 +997,7 @@ def main(argv=None):
     # a path that does not exist -- and would go on doing so at every boot,
     # silently. This is the one moment that can notice.
     from pc.cli import (_frozen, _self_path, blink_home as _blink_home,
-                        hook_shim_path, installed_bin, settings_path,
-                        shim_path)
+                        daemon_watchdog, installed_bin)
     self_bin = installed_bin()
     # Decided once, and everything that replaces this program keys off it:
     # the daily check below and the board-tapped update the Bridge runs. The
@@ -876,12 +1089,22 @@ def main(argv=None):
     # quarter-hour, and the rest counted. Per page, like svc_frames: with a
     # claude and a codex line alternating, one Repeats would log them all.
     burn_frames = logbook.RepeatsBy("p", ("q",), "burn lines")
+    # The spend page's two lines, for the same reason (U5 of the
+    # /code-review max of 2026-11-04: about 1000 lines an hour on a spend
+    # desk). The plan on what it says, not the dollars (PLAN_LOGGED_FIELDS),
+    # and restated each heartbeat; sburn exactly as the token burn line.
+    plan_frames = logbook.RepeatsBy("p", PLAN_LOGGED_FIELDS, "plan lines")
+    sburn_frames = logbook.RepeatsBy("p", ("q",), "spend burn lines")
     _REPEATED = {"usage": usage_frames, "time": time_frames,
-                 "svc": svc_frames, "burn": burn_frames}
-    watchdog = install_statusline.DriftWatchdog(
-        settings_path(), shim_path(),
-        shims=((shim_path(), "blink-statusline.sh"),
-               (hook_shim_path(), "blink-hook.sh")))
+                 "svc": svc_frames, "burn": burn_frames,
+                 "plan": plan_frames, "sburn": sburn_frames}
+    # For this computer's own Claude Code, in the folder `blink install`
+    # recorded (pc/claude_home): a login service does not see the shell's
+    # CLAUDE_CONFIG_DIR, so the watchdog guards the file install wrote --
+    # the one the record names at each tick, never one it named at start.
+    # A WSL home's settings are checked by its pc/wsl_watch, off this
+    # thread; here only the native hook shim Codex runs (drift_watchdog).
+    watchdog = daemon_watchdog()
 
     # Before the port is touched. The lock lives for the life of the process --
     # the file object is bound here so it is not garbage collected, which would
@@ -935,7 +1158,8 @@ def main(argv=None):
         if drifted:
             print(f"[watchdog] {drifted}", file=sys.stderr)
         for line in (heartbeat.due(), usage_frames.due(), time_frames.due(),
-                     svc_frames.due(), burn_frames.due()):
+                     svc_frames.due(), burn_frames.due(), plan_frames.due(),
+                     sburn_frames.due()):
             if line:
                 print(line, file=sys.stderr)
         if logbook.rotate_if_full(_log_file, sys.stderr):
@@ -973,6 +1197,23 @@ def main(argv=None):
     svc_watch = status_page.StatusWatch(
         enabled=lambda: status_page.enabled(blink_home))
     svc_watch.start()
+
+    # The /usage refresh, once for the life of the process like the watch
+    # above: its spacing and its failure count describe this login, not
+    # this cable. It asks whether the board is answering through `live`,
+    # which holds the Bridge of the connection that is open now (set where
+    # the Bridge is built below); a Bridge from a connection that has gone
+    # stops answering by itself once its last ping is older than the
+    # liveness window.
+    live = {}
+
+    def _board_alive():
+        b = live.get("bridge")
+        return b is not None and b.board_alive()
+    start_usage_refresh(blink_home, bus, _board_alive)
+    # And the question the board asks people who never ran `blink install`
+    # since the refresh existed, for every connection's Bridge.
+    refresh_ask = board_ask(blink_home, bus)
 
     # Themes, for the life of the process like the watch above: what the
     # board is believed to hold outlives a reconnect, and the builder a
@@ -1076,8 +1317,12 @@ def main(argv=None):
             # VID:PID that got us here belongs to a chip used by a great deal
             # of hardware that is not ours, and a reset is not a question, it
             # is an action taken on someone's device.
+            # What the board said to the probe, for board_caps_hint: its pref
+            # names what THIS board draws, where board.json names the last.
+            heard = []
             already_running = probe_is_our_board(
-                ser, PROBE_PATIENT_S if patient else PROBE_S, tap)
+                ser, PROBE_PATIENT_S if patient else PROBE_S, tap,
+                heard=heard)
             asked.add(port)
 
             # May this port be reset if it stays silent?
@@ -1320,10 +1565,13 @@ def main(argv=None):
                         builder_ended=theme_builder.ended,
                         builder_open=theme_builder.editing,
                         edit_answers=theme_answers,
-                        # What the board can show, until it says again.
-                        board_caps_hint=known.get("caps"),
+                        # What the board can show, until it says again:
+                        # its own pref to the probe when it gave one.
+                        board_caps_hint=board_caps_hint(heard, known),
+                        refresh_ask=refresh_ask,
                         pending=update.PendingFirmware(
                             os.path.join(blink_home, "pending_fw.json")))
+        live["bridge"] = bridge  # for the /usage refresh's board_alive
         report_failure = None   # handed to the Bridge above; never repeated
         # No reset means no boot `hello`, so nothing would trigger the
         # greeting -- see Bridge.greet.

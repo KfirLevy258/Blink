@@ -188,6 +188,58 @@ static const char burn_idle[] =
 	"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
 	"[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}";
 
+
+/*
+ * The spend page (docs/plans/enterprise-spend.md section 3). One desk,
+ * driven in wire order -- plan, then usage, then the dollar burn line --
+ * at 11:20 local on a board told UTC+2, the month 16 days from rolling
+ * over. `share` is the usage line's session_pct; a spend page sends no
+ * weekly figure.
+ */
+static void spend_desk(double usd, double lim, bool est, bool hint,
+		       double share)
+{
+	usage_view_set_provider1("claude");
+	usage_view_set_plan("claude", "spend", "monthly", "", usd, lim, est,
+			    hint);
+	usage_view_update(share, 16 * 86400 + 9 * 3600, -1.0, -1);
+	usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+	usage_view_set_sessions(1, 0);
+	usage_view_set_counts(1, 1, 0, 0);
+	usage_view_set_clock(11, 20);
+	usage_view_set_utc_offset(120);
+}
+
+/* One sburn line through the real parser, as proto.c hands it over. */
+static void sburn_line(const char *json, int64_t age_ms)
+{
+	struct burn5h m;
+
+	if (burn5h_line_of("sburn") != BURN5H_LINE_DOLLARS ||
+	    !burn5h_parse(json, &m)) {
+		fprintf(stderr, "sburn line refused: the scene is wrong\n");
+		exit(1);
+	}
+	usage_view_set_sburn(&m, k_uptime_get() - age_ms);
+}
+
+/* Cents. The last complete hour $11.40 against $6.85 before it: rising,
+ * "+$11/h". $25.97 over the five hours, drawn "$26". */
+static const char sburn_rising[] =
+	"{\"t\":\"sburn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
+	"[0,0,45,120,80,0,0,60,95,140,110,150,160,190,185,240,310,280,310,"
+	"122]}";
+/* $1.20 in the last hour against $1.25: steady; $5.67 over five hours. */
+static const char sburn_steady[] =
+	"{\"t\":\"sburn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
+	"[10,25,30,35,20,30,40,25,30,35,30,35,30,30,30,30,30,30,30,12]}";
+/* Every bucket at SBURN_MAX_CENTS: the widest total and rate. */
+static const char sburn_ceiling[] =
+	"{\"t\":\"sburn\",\"v\":2,\"p\":\"claude\",\"q\":" BURN_Q ",\"b\":"
+	"[99999999,99999999,99999999,99999999,99999999,99999999,99999999,"
+	"99999999,99999999,99999999,99999999,99999999,99999999,99999999,"
+	"99999999,99999999,99999999,99999999,99999999,99999999]}";
+
 int main(int argc, char **argv)
 {
 	static uint8_t buf[SCR_W * 40 * 2];
@@ -506,6 +558,130 @@ int main(int argc, char **argv)
 			settle();
 			usage_view_page_step(-1);
 		}
+		break;
+	case 45: /* SPEND, monthly: the plan's own figures -- $314.12 of a
+		  * $500 cap, 62.8% -- with the month 16 days from rolling over.
+		  * The calls run in wire order: proto.c is handed the plan line
+		  * before the usage line, and that line's weekly fields are -1
+		  * because a spend account has no weekly window. */
+		usage_view_set_provider1("claude");
+		usage_view_set_plan("claude", "spend", "monthly", "", 314.12,
+				    500, false, false);
+		usage_view_update(62.8, 16 * 86400 + 9 * 3600, -1.0, -1);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(1, 0);
+		usage_view_set_clock(11, 20);
+		break;
+	case 46: /* SPEND, daily, 96.4% and red. No amounts on the wire yet
+		  * -- they trail the share by minutes -- so this is the page
+		  * as it first appears, and the hint above the gauges is the
+		  * cap's sentence, never the session's. */
+		usage_view_set_provider1("claude");
+		usage_view_set_plan("claude", "spend", "daily", "", -1, -1,
+				    false, false);
+		usage_view_update(96.4, 3 * 3600 + 20 * 60, -1.0, -1);
+		usage_view_set_activity(USAGE_ACTIVITY_WAITING);
+		usage_view_set_sessions(2, 1);
+		usage_view_set_clock(17, 52);
+		break;
+	case 47: /* UNREPORTED: signed in to Enterprise with no gateway, so
+		  * the status line carries no limits at all. Both gauges are
+		  * blank by necessity; the words say why. */
+		usage_view_set_provider1("claude");
+		usage_view_set_plan("claude", "unreported", "", "enterprise",
+				    -1, -1, false, false);
+		usage_view_update(-1.0, -1, -1.0, -1);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(1, 0);
+		usage_view_set_clock(8, 45);
+		break;
+	/*
+	 * The spend page, rev 3 of docs/plans/enterprise-spend.md. Run with a
+	 * Focus argument too: the share is the big gauge on this page whatever
+	 * the owner chose, and the dim line is in dollars.
+	 */
+	case 48: /* exact, straight after /usage: $314.12 of $500, 62.8%, and
+		  * no dollar burn line yet -- the share holds the left half */
+		spend_desk(314.12, 500, false, false, 62.8);
+		break;
+	case 49: /* estimated, with the dollar burn view: "~$314" */
+		spend_desk(314.12, 500, true, false, 62.8);
+		sburn_line(sburn_rising, 0);
+		break;
+	case 50: /* no /usage this month: the count alone, no cap, and the row
+		  * says where to get an exact figure */
+		spend_desk(12.40, -1, true, true, -1.0);
+		sburn_line(sburn_steady, 0);
+		break;
+	case 51: /* no cap known, but a /usage figure behind it: no hint */
+		spend_desk(12.40, -1, true, false, -1.0);
+		sburn_line(sburn_steady, 0);
+		break;
+	case 52: /* near the cap: 96.4%, the limit's sentence in red */
+		spend_desk(482.10, 500, true, false, 96.4);
+		sburn_line(sburn_rising, 0);
+		break;
+	case 53: /* the cap reached */
+		spend_desk(500.40, 500, false, false, 100.1);
+		sburn_line(sburn_rising, 0);
+		break;
+	case 54: /* the widest of everything: an estimate of "$44.4M" in the
+		  * ring (montserrat_16), "of $44.0M" on the last day, the
+		  * widest line under the ring (148 px), and the ceiling in
+		  * every quarter-hour */
+		usage_view_set_provider1("claude");
+		usage_view_set_plan("claude", "spend", "monthly", "", 44.44e6,
+				    44.0e6, true, false);
+		usage_view_update(91.0, 20 * 3600 + 48 * 60 + 30, -1.0, -1);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(1, 0);
+		usage_view_set_clock(23, 59);
+		usage_view_set_utc_offset(120);
+		sburn_line(sburn_ceiling, 0);
+		break;
+	case 55: /* the hint and an incident: the status page outranks it */
+		spend_desk(12.40, -1, true, true, -1.0);
+		sburn_line(sburn_steady, 0);
+		svc("claude", "major", "Claude Code");
+		break;
+	case 56: /* the hint and a prompt waiting: the person comes first */
+		spend_desk(12.40, -1, true, true, -1.0);
+		sburn_line(sburn_steady, 0);
+		usage_view_set_activity(USAGE_ACTIVITY_WAITING);
+		break;
+	case 57: /* a TOKEN burn line on a spend page with no share: never
+		  * drawn here -- the left half stays the share's "--%" */
+		spend_desk(12.40, -1, true, false, -1.0);
+		burn_line(burn_rising, 0);
+		break;
+	case 58: /* what a 1.4.1 board is sent for the same page: no plan, the
+		  * share blanked (pc/protocol.hide_plan_for_board), no sburn */
+		usage_view_set_provider1("claude");
+		usage_view_update(-1.0, -1, -1.0, -1);
+		usage_view_set_activity(USAGE_ACTIVITY_RUNNING);
+		usage_view_set_sessions(1, 0);
+		usage_view_set_clock(11, 20);
+		break;
+	case 59: case 60:
+		/* A swipe from the spend page to a Codex page (59) and back
+		 * (60), through the real morph. With Focus on the weekly
+		 * window, the big gauge moves from the share to Codex's weekly
+		 * one and back. */
+		spend_desk(314.12, 500, true, false, 62.8);
+		sburn_line(sburn_rising, 0);
+		usage_view_set_provider2("codex", 34.0, 61.0, 4320, 259200,
+					 false);
+		settle();
+		usage_view_page_step(1);
+		if (scene == 60) {
+			settle();
+			usage_view_page_step(-1);
+		}
+		break;
+	case 61: /* the dollar burn line goes quiet: past its 180 s, the share
+		  * takes the half back */
+		spend_desk(314.12, 500, true, false, 62.8);
+		sburn_line(sburn_rising, 181 * 1000);
 		break;
 	case 4:	/* nothing known: every optional field absent */
 		usage_view_set_provider1("");

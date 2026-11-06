@@ -479,7 +479,7 @@ def test_status_names_the_folder_desk_read(win, tmp_path, capsys,
     from, even if the tree changes before the row prints."""
     # shutil.which under a simulated win32 reaches for _winapi, which a
     # posix host does not have; PATH is not what this test is about.
-    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a, **k: False)
     target = _store_layout(tmp_path)
     desk = cli.read_desk(version=(None, None))
     assert desk.desktop_paths.path == target
@@ -495,7 +495,7 @@ def test_read_desk_resolves_the_folder_once(win, tmp_path, monkeypatch):
     """Every Desktop reader in read_desk under its one hold: the cache,
     Local Storage and the weekly sources. A reader moved outside the hold
     resolves again, and could describe a different folder."""
-    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a, **k: False)
     # No cache, so read_desk also asks desktop_app_installed (Local
     # Storage); a signed-in reading would skip that reader.
     _marker(tmp_path, _roaming(tmp_path))
@@ -513,7 +513,7 @@ def test_read_desk_resolves_the_folder_once(win, tmp_path, monkeypatch):
 def test_read_desk_resolves_once_with_a_reading(win, tmp_path, monkeypatch):
     """The signed-in path: the cache, then the weekly sources."""
     import time
-    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a, **k: False)
     _marker(tmp_path, _roaming(tmp_path))
     _cache(tmp_path, _target(tmp_path), content=_dc.doc(
         [_dc.sample(int(time.time() * 1000))]))
@@ -1652,7 +1652,7 @@ def test_a_package_admitted_on_indexeddb_alone_is_installed(win, tmp_path,
     """Review of PR #3, #8: the resolver admitted a package on its IndexedDB
     folder alone and read_desk said "not installed" beside "data found in
     the Store package folder"."""
-    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a: False)
     _mkdir(tmp_path, os.path.join(_pkg_roaming(tmp_path), "IndexedDB"))
     assert dp.resolve().source == PKG_SOURCE_A
     assert cli.desktop_app_installed()
@@ -1661,7 +1661,7 @@ def test_a_package_admitted_on_indexeddb_alone_is_installed(win, tmp_path,
 
 def test_status_does_not_say_not_installed_for_an_indexeddb_package(
         win, tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(cli, "claude_on_path", lambda: False)
+    monkeypatch.setattr(cli, "claude_on_path", lambda *a: False)
     _mkdir(tmp_path, os.path.join(_pkg_roaming(tmp_path), "IndexedDB"))
     desk = cli.read_desk(version=(None, None))
     row = _desktop_row_of(desk, capsys)
@@ -1704,7 +1704,7 @@ def test_status_reads_its_session_row_from_the_desktop_rows_folder(
         return (None, None)
 
     monkeypatch.setattr(cli, "_claude_page", page)
-    monkeypatch.setattr(cli, "_wire_line", lambda: page())
+    monkeypatch.setattr(cli, "_wire_line", lambda *a, **k: page())
     monkeypatch.setattr(cli, "_session_window_line", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_codex_session_line", lambda *a, **k: None)
     cli.cmd_status(argparse.Namespace(wire=wire))

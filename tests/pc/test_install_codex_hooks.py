@@ -578,3 +578,18 @@ def test_install_refuses_a_codex_home_it_cannot_write(tmp_path):
             ich.install(str(home / "hooks.json"), SHIM)
     finally:
         home.chmod(0o700)
+
+
+def test_a_command_that_is_not_a_string_is_someone_elses(tmp_path):
+    """As install_hooks: a list-valued "command" is never ours, and used to
+    raise TypeError out of install and uninstall."""
+    p = tmp_path / "hooks.json"
+    theirs = {"matcher": "*", "hooks": [
+        {"type": "command", "command": ["sh", "/usr/local/bin/audit.sh"]}]}
+    _write(p, {"PreToolUse": [theirs]})
+
+    ich.install(str(p), SHIM)
+    assert theirs in _read(p)["PreToolUse"]
+
+    ich.uninstall(str(p), SHIM)
+    assert _read(p)["PreToolUse"] == [theirs]

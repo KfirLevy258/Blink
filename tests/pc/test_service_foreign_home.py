@@ -50,7 +50,7 @@ def test_a_foreign_home_skips_every_service_entry_point(armed):
     assert cli._skip_service() is True
     for fn in ("_install_service", "restart_service", "_remove_service"):
         assert getattr(cli, fn)() == SKIPPED, fn
-    assert cli.halt_service() is None
+    assert cli.halt_service() is False
     assert cli.refresh_service_file() is None
 
 

@@ -287,6 +287,16 @@ struct burn5h;
 void usage_view_set_burn5h(const struct burn5h *m, int64_t at_ms);
 
 /*
+ * One `sburn` line (pc/protocol.spend_burn): the same shape in whole cents,
+ * for a spend page's dollar burn view (docs/plans/enterprise-spend.md
+ * section 3). Kept in a record of its own, never the token one above, and
+ * drawn in the left half of the page whose tag matches its `p` while that
+ * page is a spend page, Focus is off, and the line is under 180 s old. The
+ * token view never shows on a spend page.
+ */
+void usage_view_set_sburn(const struct burn5h *m, int64_t at_ms);
+
+/*
  * The board clock's offset from UTC, minutes east, as the `time` message
  * gave it. The burn view labels its hours in local time and draws no hour
  * axis at all until this has arrived: no labels beats wrong ones, the rule
@@ -346,5 +356,28 @@ void usage_view_svc_changed(void);
  * "off" | "session" | "weekly", from its own state rather than the store. */
 const char *usage_view_bench_focus(void);
 #endif
+
+/*
+ * What one provider's page is a share of -- the daemon's `plan` message
+ * (pc/protocol.plan). `prov` is the page, by provider tag, so the plan follows
+ * the provider to whichever slot it sits in.
+ *
+ *   "spend"       the right gauge is the share of a dollar cap as a ring, the
+ *                 dollars in it and the cap and the period's reset under it;
+ *                 the left half is the dollar burn view (usage_view_set_sburn)
+ *                 or, until a line arrives, the share as a gauge. `period` is
+ *                 "daily", "weekly", "monthly" or ""; `usd` and `lim` are -1
+ *                 when not reported. `est` marks the dollars as an estimate
+ *                 ("~$314"); `hint` says there is no /usage figure behind
+ *                 them, and the status row says where to get one.
+ *   "unreported"  an Enterprise or Team login with nothing on the computer to
+ *                 read; `acct` is "enterprise" or "team", the word shown.
+ *   anything else, NULL included: windows, the page as it always was. So a
+ *                 kind from a newer daemon falls back to gauges this firmware
+ *                 can draw, rather than captions it would have to guess.
+ */
+void usage_view_set_plan(const char *prov, const char *plan,
+			 const char *period, const char *acct,
+			 double usd, double lim, bool est, bool hint);
 
 #endif /* USAGE_VIEW_H */

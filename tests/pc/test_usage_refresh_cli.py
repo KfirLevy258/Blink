@@ -1,0 +1,433 @@
+"""The CLI half of the usage refresh: the install question, the setting,
+status and uninstall. HOME is sandboxed by tests/conftest.py."""
+import json
+import os
+import sys
+
+import pytest
+
+from pc import claude_home, cli, user_config
+from pc import usage_refresh as ur
+
+QUESTION = ("BLINK can keep your figures current when Claude Code isn't"
+            " running, by asking Claude Code's /usage now and then. It sends"
+            " no messages and uses no quota. Turn on? ")
+
+
+@pytest.fixture(autouse=True)
+def _no_system_claude(monkeypatch, tmp_path):
+    """Not this machine's /opt/homebrew/bin or /usr/local/bin."""
+    monkeypatch.setattr(ur, "SYSTEM_BIN_DIRS",
+                        (str(tmp_path / "no-system-bin"),))
+
+
+# Where the stand-in find_claude says claude is. Absolute on this OS, since
+# remember_claude keeps abspath(exe): a bare "/x/claude" is kept on Windows
+# as C:\x\claude, and four tests compared it with "/x/claude" there.
+CLAUDE = os.path.abspath(os.path.join(os.sep, "x", "claude"))
+
+
+def _bh():
+    return cli.blink_home()
+
+
+def _tty(monkeypatch, answers, tty=True):
+    asked = []
+    it = iter(answers)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: tty, raising=False)
+
+    def fake_input(*a):
+        asked.append(a)
+        return next(it)
+    monkeypatch.setattr("builtins.input", fake_input)
+    return asked
+
+
+def _native():
+    return claude_home.from_environ()
+
+
+@pytest.fixture
+def claude_found(monkeypatch):
+    monkeypatch.setattr(ur, "find_claude", lambda home: CLAUDE)
+
+
+def _work(monkeypatch, work):
+    class V:
+        spend_seat = work
+        org_kind = "consumer"
+    monkeypatch.setattr(cli, "_refresh_view", lambda home: V())
+
+
+@pytest.mark.parametrize("answer,default,want", [
+    ("", True, True), ("", False, False), ("Y", False, True),
+    ("yes", False, True), ("N", True, False), ("No", True, False)])
+def test_ask_yes_answers(monkeypatch, answer, default, want):
+    _tty(monkeypatch, [answer])
+    assert cli._ask_yes("Q? ", default) is want
+
+
+def test_ask_yes_prompt_tail_follows_default(monkeypatch, capsys):
+    _tty(monkeypatch, ["", ""])
+    cli._ask_yes("Q? ", True)
+    cli._ask_yes("Q? ", False)
+    out = capsys.readouterr().out
+    assert "Q? [Y/n] " in out and "Q? [y/N] " in out
+
+
+@pytest.mark.parametrize("default", [True, False])
+def test_ask_yes_gives_up_after_three_with_no_answer(monkeypatch, default):
+    # V10 of the /code-review max: three unrecognised replies took the
+    # default, so "no thanks", "nope", "nah" on a personal login saved yes.
+    # Only Enter takes the default; anything else unanswered is no answer.
+    asked = _tty(monkeypatch, ["no thanks", "nope", "nah", "y"])
+    assert cli._ask_yes("Q? ", default) is None
+    assert len(asked) == 3
+
+
+@pytest.mark.parametrize("raised", [EOFError, KeyboardInterrupt])
+def test_ask_yes_end_of_input_or_ctrl_c_is_no_answer(monkeypatch, capsys,
+                                                    raised):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+
+    def fake_input(*a):
+        raise raised
+    monkeypatch.setattr("builtins.input", fake_input)
+    assert cli._ask_yes("Q? ", True) is None
+    # The prompt's line is ended, so what follows starts on its own.
+    assert capsys.readouterr().out.endswith("\n")
+
+
+@pytest.mark.parametrize("answers", [["nah", "nope", "no thanks"], None])
+def test_install_left_unanswered_leaves_the_key_absent(monkeypatch, capsys,
+                                                       claude_found, answers):
+    if answers is None:
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+
+        def fake_input(*a):
+            raise KeyboardInterrupt
+        monkeypatch.setattr("builtins.input", fake_input)
+    else:
+        _tty(monkeypatch, answers)
+    _work(monkeypatch, False)
+    got = cli._install_refresh_step(_native())
+    assert got == "off (turn on with: blink config usage-refresh on)"
+    assert ur.SETTING not in user_config.load(_bh())
+
+
+def test_ask_yes_does_not_ask_without_a_terminal(monkeypatch):
+    asked = _tty(monkeypatch, ["y"], tty=False)
+    assert cli._ask_yes("Q? ", True) is None
+    assert asked == []
+
+
+def test_personal_login_defaults_yes(monkeypatch, capsys, claude_found):
+    _tty(monkeypatch, [""])
+    _work(monkeypatch, False)
+    got = cli._install_refresh_step(_native())
+    out = capsys.readouterr().out
+    assert QUESTION + "[Y/n] " in out
+    assert got == "on"
+    assert user_config.load(_bh())[ur.SETTING] is True
+
+
+def test_work_login_defaults_no(monkeypatch, capsys, claude_found):
+    _tty(monkeypatch, [""])
+    _work(monkeypatch, True)
+    got = cli._install_refresh_step(_native())
+    assert QUESTION + "[y/N] " in capsys.readouterr().out
+    assert got == "off (turn on with: blink config usage-refresh on)"
+    assert user_config.load(_bh())[ur.SETTING] is False
+
+
+def test_team_org_is_a_work_login(monkeypatch, capsys, claude_found):
+    class V:
+        spend_seat = False
+        org_kind = "team"
+    monkeypatch.setattr(cli, "_refresh_view", lambda home: V())
+    _tty(monkeypatch, [""])
+    cli._install_refresh_step(_native())
+    assert "[y/N] " in capsys.readouterr().out
+
+
+def test_non_interactive_leaves_the_key_absent(monkeypatch, claude_found):
+    _tty(monkeypatch, [], tty=False)
+    _work(monkeypatch, False)
+    got = cli._install_refresh_step(_native())
+    assert got == "off (turn on with: blink config usage-refresh on)"
+    assert ur.SETTING not in user_config.load(_bh())
+
+
+@pytest.mark.parametrize("value,line", [(True, "on"), (False, "off")])
+def test_reinstall_does_not_ask_twice(monkeypatch, value, line):
+    os.makedirs(_bh(), exist_ok=True)
+    user_config.put(_bh(), ur.SETTING, value)
+    asked = _tty(monkeypatch, ["y"])
+    assert cli._install_refresh_step(_native()) == line
+    assert asked == []
+
+
+def test_no_claude_code_says_so_and_does_not_ask(monkeypatch):
+    monkeypatch.setattr(ur, "find_claude", lambda home: None)
+    asked = _tty(monkeypatch, ["y"])
+    assert cli._install_refresh_step(_native()) == (
+        "off (Claude Code isn't installed; see"
+        " docs/README-full.md#keeping-figures-fresh)")
+    assert asked == []
+
+
+def test_wsl_home_is_never_asked(monkeypatch, claude_found):
+    asked = _tty(monkeypatch, ["y"])
+    wsl = claude_home.wsl("g", "Ubuntu", "u", "/home/u", "/home/u/.claude",
+                          False)
+    assert cli._install_refresh_step(wsl) == "not available for WSL yet"
+    assert asked == []
+    assert not os.path.exists(os.path.join(_bh(), "config.json"))
+
+
+def test_install_has_a_usage_refresh_step():
+    assert cli._install_steps() == (7 if sys.platform == "win32" else 6)
+
+
+def test_install_prints_the_step(monkeypatch, capsys):
+    monkeypatch.setattr(ur, "find_claude", lambda home: None)
+    cli.main(["install"])
+    out = capsys.readouterr().out
+    n = cli._install_steps()
+    # Last, after the service: the step counts to the total it was given.
+    assert f"[{n}/{n}] Usage refresh ... " in out
+
+
+def test_config_on_clears_the_reason_it_went_off(monkeypatch, capsys):
+    os.makedirs(_bh(), exist_ok=True)
+    ur.save_state(_bh(), ur.State(last_run_at=5.0, fails=2,
+                                  failing_since=3.0, off_reason="cost"))
+    user_config.put(_bh(), ur.SETTING, False)
+    assert cli.main(["config", "usage-refresh", "on"]) == 0
+    s = ur.load_state(_bh())
+    assert (s.off_reason, s.fails, s.failing_since) == ("", 0, None)
+    assert s.last_run_at == 5.0
+    assert user_config.load(_bh())[ur.SETTING] is True
+
+
+def test_config_off_keeps_state(monkeypatch):
+    os.makedirs(_bh(), exist_ok=True)
+    ur.save_state(_bh(), ur.State(fails=2))
+    cli.main(["config", "usage-refresh", "off"])
+    assert ur.load_state(_bh()).fails == 2
+
+
+@pytest.mark.parametrize("setup,row", [
+    ({}, "not set up (turn on with: blink config usage-refresh on)"),
+    ({"set": False}, "off"),
+    ({"set": True}, "on"),
+    ({"set": True, "ago": 12 * 60}, "on, last ran 12 min ago"),
+    ({"set": False, "reason": "cost"},
+     "off: Claude Code's /usage used the model"),
+    ({"set": False, "reason": "failing"},
+     "off: /usage kept failing; run claude and /login, then turn it on"
+     " again"),
+    # A failure streak is said as one, not as "on, last ran" (item 18 of the
+    # /code-review max's cut list).
+    ({"set": True, "ago": 5 * 60, "fails": 4},
+     "on, but the last 4 runs failed; run claude and /login if it keeps"
+     " failing"),
+    ({"set": True, "ago": 5 * 60, "fails": 1},
+     "on, but the last run failed; run claude and /login if it keeps"
+     " failing"),
+])
+def test_status_row(setup, row):
+    import time
+    os.makedirs(_bh(), exist_ok=True)
+    if "set" in setup:
+        user_config.put(_bh(), ur.SETTING, setup["set"])
+    if "ago" in setup or "reason" in setup:
+        ur.save_state(_bh(), ur.State(
+            last_run_at=time.time() - setup.get("ago", 0),
+            fails=setup.get("fails", 0),
+            off_reason=setup.get("reason", "")))
+    assert cli._refresh_status(False) == row
+
+
+def test_status_prints_the_row(capsys):
+    cli.main(["status"])
+    assert "Usage refresh not set up" in capsys.readouterr().out
+
+
+def test_uninstall_removes_state_temp_siblings_and_folder(tmp_path):
+    os.makedirs(os.path.join(_bh(), "refresh"))
+    state = os.path.join(_bh(), "usage-refresh.json")
+    ur.save_state(_bh(), ur.State(fails=1))
+    sib = state + ".tmp"
+    open(sib, "w").write("{}")
+    open(os.path.join(_bh(), "refresh", "x"), "w").write("")
+    assert cli.main(["uninstall"]) == 0
+    assert not os.path.exists(state)
+    assert not os.path.exists(sib)
+    assert not os.path.exists(os.path.join(_bh(), "refresh"))
+
+
+def _up_to_date(monkeypatch):
+    monkeypatch.setattr(cli, "_update_reaches_the_service", lambda: True)
+    monkeypatch.setattr(cli.update, "fetch_signed_manifest", lambda: {})
+    monkeypatch.setattr(cli.update, "available", lambda _m: None)
+    monkeypatch.setattr(cli.update, "platform_key", lambda: "k")
+
+
+def test_update_already_up_to_date_still_asks(monkeypatch, capsys,
+                                              claude_found):
+    # The /code-review max of feat/usage-refresh: the release that brings the question is the
+    # one `blink update` installs, and the old code doing the installing
+    # cannot ask it; the next `blink update` said "Already up to date" and
+    # returned before asking. It asks there too.
+    _up_to_date(monkeypatch)
+    _tty(monkeypatch, [""])
+    _work(monkeypatch, False)
+    assert cli.main(["update"]) == 0
+    out = capsys.readouterr().out
+    assert "Already up to date." in out
+    assert QUESTION + "[Y/n] " in out and "Usage refresh ... on" in out
+    assert user_config.load(_bh())[ur.SETTING] is True
+
+
+def test_update_already_up_to_date_asks_nothing_once_answered(
+        monkeypatch, capsys, claude_found):
+    _up_to_date(monkeypatch)
+    os.makedirs(_bh(), exist_ok=True)
+    user_config.put(_bh(), ur.SETTING, False)
+    asked = _tty(monkeypatch, [""])
+    assert cli.main(["update"]) == 0
+    assert asked == [] and "Usage refresh" not in capsys.readouterr().out
+
+
+def test_update_asks_only_when_interactive_and_absent(monkeypatch, capsys,
+                                                      claude_found):
+    asked = _tty(monkeypatch, [""], tty=False)
+    assert cli._update_refresh_question() == ""
+    assert asked == []
+    _tty(monkeypatch, [""])
+    _work(monkeypatch, False)
+    assert cli._update_refresh_question() == "on"
+    assert cli._update_refresh_question() == ""   # answered: not again
+
+
+# --- final review, Important 2: where claude is, recorded for the daemon ----
+
+def test_install_yes_records_where_claude_is(monkeypatch, claude_found):
+    _tty(monkeypatch, [""])
+    _work(monkeypatch, False)
+    assert cli._install_refresh_step(_native()) == "on"
+    assert ur.recorded_claude(_bh()) == CLAUDE
+
+
+@pytest.mark.parametrize("answers,tty", [(["n"], True), ([], False)])
+def test_install_records_nothing_without_a_yes(monkeypatch, claude_found,
+                                               answers, tty):
+    _tty(monkeypatch, answers, tty=tty)
+    _work(monkeypatch, False)
+    cli._install_refresh_step(_native())
+    assert ur.recorded_claude(_bh()) is None
+    assert not os.path.exists(os.path.join(_bh(), ur.STATE_FILE))
+
+
+def test_reinstall_already_on_records_it_again(monkeypatch, claude_found):
+    os.makedirs(_bh(), exist_ok=True)
+    user_config.put(_bh(), ur.SETTING, True)
+    _tty(monkeypatch, [])
+    assert cli._install_refresh_step(_native()) == "on"
+    assert ur.recorded_claude(_bh()) == CLAUDE
+
+
+def test_config_on_records_where_claude_is(monkeypatch, claude_found):
+    assert cli.main(["config", "usage-refresh", "on"]) == 0
+    assert ur.recorded_claude(_bh()) == CLAUDE
+
+
+def test_config_off_records_nothing(monkeypatch, claude_found):
+    assert cli.main(["config", "usage-refresh", "off"]) == 0
+    assert ur.recorded_claude(_bh()) is None
+
+
+def test_update_records_it_for_someone_already_on(monkeypatch, claude_found):
+    os.makedirs(_bh(), exist_ok=True)
+    user_config.put(_bh(), ur.SETTING, True)
+    _tty(monkeypatch, [], tty=False)
+    assert cli._update_refresh_question() == ""
+    assert ur.recorded_claude(_bh()) == CLAUDE
+
+
+def test_status_says_when_the_daemon_found_no_claude():
+    os.makedirs(_bh(), exist_ok=True)
+    user_config.put(_bh(), ur.SETTING, True)
+    ur.save_state(_bh(), ur.State(missing=True))
+    assert cli._refresh_status(False) == "on, but Claude Code wasn't found"
+
+
+def test_uninstall_removes_a_refresh_folder_with_subfolders():
+    # Whatever Claude Code leaves in its run folder, a folder of its own
+    # included, goes; the flat sweep left it, and ~/.blink with it.
+    deep = os.path.join(_bh(), "refresh", ".claude", "x")
+    os.makedirs(deep)
+    open(os.path.join(deep, "f"), "w").write("")
+    assert cli.main(["uninstall"]) == 0
+    assert not os.path.exists(os.path.join(_bh(), "refresh"))
+
+
+def test_config_on_clears_wasnt_found(monkeypatch, claude_found):
+    os.makedirs(_bh(), exist_ok=True)
+    user_config.put(_bh(), ur.SETTING, True)
+    ur.save_state(_bh(), ur.State(last_run_at=5.0, missing=True))
+    assert cli._refresh_status(False) == "on, but Claude Code wasn't found"
+    cli.main(["config", "usage-refresh", "on"])
+    assert cli._refresh_status(False) != "on, but Claude Code wasn't found"
+
+
+def test_update_says_nothing_without_claude_code(monkeypatch, capsys):
+    _up_to_date(monkeypatch)
+    monkeypatch.setattr(ur, "find_claude", lambda home: None)
+    asked = _tty(monkeypatch, [""])
+    assert cli.main(["update"]) == 0
+    assert asked == [] and "Usage refresh" not in capsys.readouterr().out
+
+
+# --- the /usage version floor (usage_refresh.USAGE_SINCE) -------------------
+
+TOO_OLD = ("2.1.119 (Claude Code)", (2, 1, 119))
+
+
+def test_install_does_not_offer_it_to_a_claude_too_old_for_usage(
+        monkeypatch, capsys, claude_found):
+    asked = _tty(monkeypatch, [""])
+    _work(monkeypatch, False)
+    monkeypatch.setattr(cli, "claude_version", lambda *a, **k: TOO_OLD)
+    got = {}
+    row = cli._install_refresh_step(_native(), got)
+    assert row == ("off (this Claude Code has no /usage yet; update Claude"
+                   " Code, then: blink config usage-refresh on)")
+    assert asked == [] and QUESTION not in capsys.readouterr().out
+    # Left absent, so the install after an update asks; and the reading is
+    # handed back for read_desk, so `claude --version` runs once.
+    assert ur.SETTING not in user_config.load(_bh())
+    assert got["version"] == TOO_OLD
+
+
+def test_a_non_interactive_install_runs_no_version_for_the_step(
+        monkeypatch, claude_found):
+    _tty(monkeypatch, [], tty=False)
+    calls = []
+    monkeypatch.setattr(cli, "claude_version",
+                        lambda *a, **k: calls.append(1) or TOO_OLD)
+    got = {}
+    assert cli._install_refresh_step(_native(), got) == cli.REFRESH_OFF_HINT
+    assert calls == [] and got == {}
+
+
+@pytest.mark.parametrize("ver, row", [
+    ((2, 1, 119), "on, but this Claude Code has no /usage yet; update"
+                  " Claude Code"),
+    ((2, 1, 120), "on"),
+    (None, "on"),
+])
+def test_status_names_a_claude_too_old_for_usage(ver, row):
+    user_config.put(_bh(), ur.SETTING, True)
+    assert cli._refresh_status(False, ver) == row

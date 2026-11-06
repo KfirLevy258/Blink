@@ -474,6 +474,45 @@ static void test_slots(void)
 	      "an empty slot is never fresh");
 }
 
+/*
+ * The dollar burn line (`sburn`, pc/protocol.spend_burn): the same shape in
+ * whole cents, read with the same parser. Its ceiling is the daemon's
+ * SBURN_MAX_CENTS, $999,999.99 a quarter-hour, which is BURN5H_BUCKET_MAX
+ * by design, so twenty of them still sum inside the 32 bits the total is
+ * kept in, and the panel never draws a wrapped total.
+ */
+static void test_dollar_line(void)
+{
+	struct burn5h m;
+	bool ok = burn5h_parse(
+		"{\"t\":\"sburn\",\"v\":2,\"p\":\"claude\",\"q\":" Q ",\"b\":"
+		"[99999999,99999999,99999999,99999999,99999999,99999999,"
+		"99999999,99999999,99999999,99999999,99999999,99999999,"
+		"99999999,99999999,99999999,99999999,99999999,99999999,"
+		"99999999,99999999]}", &m);
+
+	CHECK(ok, "a dollar line at the ceiling in every bucket parses");
+	CHECK(BURN5H_BUCKET_MAX == 99999999u,
+	      "the bucket ceiling is SBURN_MAX_CENTS (pc/protocol.py)");
+	CHECK(burn5h_total(&m) == 1999999980u,
+	      "twenty buckets at SBURN_MAX_CENTS sum without wrapping");
+	CHECK(burn5h_last_hour(&m) == 399999996u,
+	      "an hour of them sums without wrapping");
+	CHECK(burn5h_direction(&m) == BURN5H_STEADY,
+	      "and the direction's arithmetic does not overflow either");
+	CHECK(!parses("{\"t\":\"sburn\",\"p\":\"claude\",\"q\":" Q ",\"b\":"
+		      "[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,100000000]}"),
+	      "a cent past the ceiling refuses the line");
+	CHECK(!parses("{\"t\":\"sburn\",\"p\":\"claude\",\"q\":" Q ",\"b\":"
+		      "[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1.25]}"),
+	      "dollars with a fraction are refused: the wire is cents");
+
+	CHECK(burn5h_line_of("sburn") == BURN5H_LINE_DOLLARS,
+	      "an sburn line is the dollar record's");
+	CHECK(burn5h_line_of("burn") == BURN5H_LINE_TOKENS,
+	      "a burn line is the token record's, never the dollar one");
+}
+
 int main(void)
 {
 	test_parse_good();
@@ -485,6 +524,7 @@ int main(void)
 	test_bars();
 	test_hours();
 	test_slots();
+	test_dollar_line();
 	if (failures) {
 		printf("%d FAILED\n", failures);
 		return 1;

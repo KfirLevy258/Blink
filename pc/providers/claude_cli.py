@@ -78,14 +78,54 @@ restart.
 """
 import json
 import math
+import os
+import sys
 
+from pc import claude_home
 from pc import claude_plan
+from pc import protocol
 from pc import session_verdict
+from pc import spend_count
 from pc import statusline_source as ss
 from pc.providers import base
 
 PROVIDER_ID = ss.PROVIDER_ID
 SRC_ID = ss.SRC_ID
+# The spend page this provider builds on a seat billed by usage (_spend):
+# docs/plans/enterprise-spend.md, sections 1-2.
+SPEND_SRC_ID = base.SPEND_SRC_ID
+
+# How old Claude Code's saved /usage figure may be and still be drawn as
+# exact, when nothing has been counted since: fifteen minutes (the spec's
+# "The figure", 3). Past a day the board asks for a new /usage (the hint).
+SPEND_EXACT_S = 900
+SPEND_HINT_S = 86400
+# A saved /usage stamped later than this past the poll's clock is no
+# anchor. Claude Code and this daemon read one clock, so a fetch from the
+# future is a clock stepped back or a damaged file; believed, a stamp years
+# ahead would draw "exact" for good and date the page in the future. Taken
+# as no anchor, the page shows the count with the hint, which a /usage
+# puts right. The same fifteen minutes as SPEND_EXACT_S, so a small step
+# back costs nothing.
+SPEND_FUTURE_S = SPEND_EXACT_S
+
+# The one line the spend path says when it fails, and it says it once per
+# process. Fixed words and nothing else: the figures, the seat fields and
+# the account ids are all within reach of that code, and an exception's
+# text could carry any of them into bridge.log, which customers send us
+# (CLAUDE.md). A failure costs the spend frame for that poll, never the
+# provider: the bus benches a provider that raises, and prints its error.
+SPEND_FAILED_MSG = "[spend] reading failed"
+_spend_failed_said = False
+
+
+def spend_failed():
+    """Say SPEND_FAILED_MSG on stderr, the first time only."""
+    global _spend_failed_said
+    if _spend_failed_said:
+        return
+    _spend_failed_said = True
+    print(SPEND_FAILED_MSG, file=sys.stderr)
 
 # The cap on the fetch-time memory, in blocks.
 #
@@ -104,14 +144,15 @@ REPLY_MEMORY_LIMIT = 64
 
 # What proves no window, from the status line. See _reply_without_window for
 # the argument; these are its inputs. Replaced on 2026-11-01, after the
-# re-review of that day measured three premises of the two-reply rule
-# false in Claude Code 2.1.316's bundle (read, not run): the status line
+# re-review of that day found three premises of the two-reply rule
+# false for Claude Code 2.1.316: the status line
 # renders on events -- token usage, a mode change, a new assistant message,
 # the earliest reset, prompt-cache expiry at about an hour -- not every few
 # seconds; API_TIMEOUT_MS bounds only the wait for headers, so a body can
 # stream for half an hour and more; and five_hour leaves the line by the
-# LOCAL clock (resets_at > Date.now()/1000), so on a desk whose clock runs
-# fast it goes before the window does.
+# LOCAL clock (it goes once its resets_at is behind the local time), so on
+# a desk whose clock runs fast it goes before the window does. Found for
+# 2.1.316, not yet measured on a desk.
 #
 # CHAIN_SPAN_S: replies with no five_hour, the first and the latest more than
 # a window and a quarter of an hour apart at the least.
@@ -193,7 +234,8 @@ def _block_key(payload):
 
 
 class ClaudeCliProvider(base.ProviderParser):
-    def __init__(self, path=None, plan_path=None):
+    def __init__(self, path=None, plan_path=None, counter=None, plan=None,
+                 home=None):
         # None means "wherever ss.payload_path() says", asked on every poll
         # rather than once here. The default used to be a module constant in
         # statusline_source, expanduser'd at import before tests/conftest.py
@@ -205,6 +247,10 @@ class ClaudeCliProvider(base.ProviderParser):
         # long as the daemon, so its path was fixed by whatever HOME was when
         # it was made (found in review). CLAUDE.md names this hole.
         self._path = path
+        # Whose drop folder that is: a callable returning a
+        # claude_home.ClaudeHome, asked on every poll; None asks
+        # claude_home.current() (statusline_source.payload_path).
+        self._home = home
         # (payload, mtime) for the last reading whose frame put a figure on
         # the session dial when it was read, or None before the first one.
         # The frame's, not the payload's: a five_hour percentage the frame
@@ -246,7 +292,51 @@ class ClaudeCliProvider(base.ProviderParser):
         # path of _reply_without_window. `plan_path` None is
         # claude_plan.config_path(), asked at each look, for the reason
         # self._path is.
-        self._plan = claude_plan.PlanReader(path=plan_path)
+        #
+        # `plan`, when given, is that reader already made: pc/ingest hands
+        # every one of its users the same one (this provider, the login
+        # watch and the bus's own spend-seat check), so the file is looked
+        # at once a poll for all of them (PlanReader.look), and they cannot
+        # disagree about the seat within a poll.
+        self._plan = (plan if plan is not None
+                      else claude_plan.PlanReader(path=plan_path))
+        # The login the config named at the last look, as its fingerprint,
+        # and that view's mtime; "" and None before the first. See
+        # _note_login.
+        self._login_fp = ""
+        self._login_mtime = None
+        # A /usage fetched at or before this belongs to an earlier login
+        # (_note_login); None while no switch has been seen.
+        self._anchor_floor = None
+        # The fetch time of a saved /usage dated later than now could be,
+        # saved under a clock since put back: not seen, as anchor or as
+        # windows, until a /usage with another fetch time replaces it
+        # (_cache_trusted). None while there has been none.
+        self._future_fetch = None
+        # (mtime, first seen at) of a status-line render dated later than
+        # now could be: its time is the moment it was first seen (_dated).
+        self._future_render = None
+        # The status-line file's signature when a login switch was seen,
+        # while the file still holds that render: the old login's, neither
+        # offered nor counted (_note_login, _status_frames). None when the
+        # file has moved on since, or no switch has been seen.
+        self._old_render = None
+        # The running count of spend between /usage runs (pc/spend_count),
+        # fed and saved only while the config names a spend seat. The bus
+        # hands in the one it owns, persisted; built here, for `blink
+        # status`, it counts in memory and writes nothing.
+        self._counter = (counter if counter is not None
+                         else spend_count.SpendCounter(persist=False))
+        # The status-line payload the last poll read, as (payload, mtime);
+        # (None, None) when it read nothing. For _spend, which counts the
+        # render's cost.
+        self._read = (None, None)
+        # The mtime of the newest status-line render this process has read,
+        # or None: what a spend frame is dated by (_spend_frame).
+        self._render_at = None
+        # The frame the file in front of us mapped to this poll, or None:
+        # what decides whether a gateway figure is live (_spend_or_none).
+        self._live = None
         # The mtime of the newest five_hour this process has seen rendered,
         # from any session, or None. The fast path is refused within
         # base.SESSION_WINDOW_S of it (_reply_without_window). Never
@@ -311,7 +401,10 @@ class ClaudeCliProvider(base.ProviderParser):
         return PROVIDER_ID
 
     def path(self):
-        return self._path if self._path is not None else ss.payload_path()
+        if self._path is not None:
+            return self._path
+        return ss.payload_path(self._home() if self._home is not None
+                               else None)
 
     def parse_cli_event(self, raw_payload, now_epoch, observed_at):
         """A push from Claude Code, already read.
@@ -355,12 +448,14 @@ class ClaudeCliProvider(base.ProviderParser):
     def _reply_without_window(self, payload, mtime, now_epoch=None):
         """Evidence of no five-hour window, when this payload completes the
         proof; otherwise None. `now_epoch` (the poll's clock; the mtime when
-        None) only paces the plan's look (claude_plan.RECHECK_S).
+        None) is the time the plan's look is asked at, so it shares the
+        poll's (claude_plan.PlanReader.look).
 
         THE FAST PATH, on the Ultra plan (owner's request, 2026-11-01:
         Ultra desks switch on the first reply again). When Claude Code's
         config names the Ultra plan (pc/claude_plan: a rate-limit tier ending
-        in max_20x, and a planDisplayName of "Ultra" or none), ONE reply -- recognised exactly as below, cost risen
+        in max_20x, and a planDisplayName of "Ultra" or none), ONE reply --
+        recognised exactly as below, cost risen
         against a baseline at most BASELINE_MAX_S old -- that rendered a
         usable seven_day and no five_hour is proof, kind
         KIND_STATUSLINE_ULTRA. The sustained rule below exists because one
@@ -414,9 +509,9 @@ class ClaudeCliProvider(base.ProviderParser):
         mid-window shows one), but nothing above depends on seeing it, so a
         poll gap -- the board unplugged, the lid closed -- costs the safety
         nothing. On Ultra, where the fast path cannot read the plan, a desk
-        at work makes the chain in five and a quarter hours, breaks in its use of up to an hour included and poll
-        gaps of up to an hour less two reply intervals (above), and the
-        verdict is kept from then on.
+        at work makes the chain in five and a quarter hours, breaks in its
+        use of up to an hour included and poll gaps of up to an hour less
+        two reply intervals (above), and the verdict is kept from then on.
 
         THE RESIDUAL. A Pro or Max desk is still marked if its clock runs
         fast by five hours or more (it never renders five_hour at all), or
@@ -540,8 +635,10 @@ class ClaudeCliProvider(base.ProviderParser):
         if (self._five_seen is not None
                 and mtime - self._five_seen < base.SESSION_WINDOW_S):
             return None
-        # Asked last, only of a reply that already qualifies, so a desk
-        # with a window stats the file only around a reset.
+        # Asked last, only of a reply that already qualifies. The file is
+        # looked at once a poll on every desk all the same, for the spend
+        # seat and the login (_look); this look is the same reader's at
+        # the same poll, so it costs nothing more.
         if self._plan.ultra(mtime if now_epoch is None else now_epoch):
             return session_verdict.evidence(
                 False, session_verdict.KIND_STATUSLINE_ULTRA, mtime)
@@ -574,7 +671,12 @@ class ClaudeCliProvider(base.ProviderParser):
         if frame is None:
             return None
         frame.first_seen_at = self._note_fetch(payload, mtime, now_epoch)
+        # Not a spend share: a gateway's spend_limit carries the month's
+        # share in session_pct, and one without resets_at was blanked after
+        # 5h10m like a stampless window (/code-review max of 2026-11-04,
+        # U39). A monthly cap has no five-hour window to have ended.
         if (frame.session_pct >= 0 and frame.session_resets_at is None
+                and frame.plan != base.PLAN_SPEND
                 and frame.session_rolled_at is None
                 and base.session_outlived(frame.first_seen_at, now_epoch)):
             # A five_hour whose resets_at will not read (null, a string,
@@ -591,6 +693,241 @@ class ClaudeCliProvider(base.ProviderParser):
         return frame
 
     def poll(self, now_epoch):
+        """The status line's frames, and on a spend seat the spend page."""
+        # The config first: a /login it shows drops the old login's renders
+        # (_note_login) before this poll's frames are made from them.
+        view = self._look(now_epoch)
+        frames = self._status_frames(now_epoch)
+        spend = self._spend(now_epoch, frames, view)
+        if spend is not None:
+            # The config's page is built only when the live render carries
+            # no gateway figure (_spend_or_none), so any gateway spend frame
+            # left here is a remembered payload's: hours old, and offered
+            # for its session figure. Beside a config page with no share --
+            # no /usage this month -- it won the dial and named the page,
+            # $200 of $500 at 40% for as long as it was remembered
+            # (/code-review max of 2026-11-04, U14).
+            frames = [f for f in frames if f.plan != base.PLAN_SPEND]
+            frames.append(spend)
+        usage = self._usage(now_epoch, view)
+        if usage is not None:
+            frames.append(usage)
+        return frames
+
+    def _usage(self, now_epoch, view):
+        """The frame of the 5-hour and weekly figures in the saved /usage,
+        or None: no config, none saved, or a spend seat, whose page the
+        spend frame owns. A failure costs this frame only, said once."""
+        if view is None or view.windows is None or view.spend_seat:
+            return None
+        if not self._cache_trusted(view.windows.fetched_at, now_epoch):
+            # Dated ahead, it outranked every live render (item 7).
+            return None
+        try:
+            return _usage_frame(view.windows, now_epoch)
+        except Exception:
+            spend_failed()
+            return None
+
+    def _look(self, now_epoch):
+        """The config's view this poll, with its login noted, or None when
+        looking failed -- said once in fixed words (spend_failed), as a
+        failure of the spend page it is for, and costing this poll's spend
+        page only. The config is stat'ed on every poll and parsed when it
+        changed, at most once a claude_plan.FIRST_ANSWER_RETRY_S
+        (claude_plan.ConfigFile), so a /usage or a /login shows within
+        seconds."""
+        try:
+            view = self._plan.look(now_epoch)
+            # Whatever the seat: a login away and back is two switches, and
+            # the one away is seen on a Max view.
+            self._note_login(view)
+            return view
+        except Exception:
+            spend_failed()
+            return None
+
+    def _spend(self, now_epoch, frames, view):
+        """The spend frame for this poll, or None: not a spend seat, a
+        gateway figure already on the status line, or a failure, which is
+        said once in fixed words (spend_failed) and costs this frame only.
+        """
+        if view is None:
+            return None
+        try:
+            return self._spend_or_none(now_epoch, frames, view)
+        except Exception:
+            spend_failed()
+            return None
+
+    def _spend_or_none(self, now_epoch, frames, view):
+        """See _spend. On a seat that is not billed by usage nothing below
+        the look runs, and the count is neither touched nor saved."""
+        if not view.spend_seat:
+            return None
+        counter = self._counter
+        # Before the render is counted, so the 1st of the month or another
+        # login empties the count first and the render starts it again.
+        counter.bind(view.account_fp, claude_plan.month_start_utc(now_epoch))
+        payload, mtime = self._read
+        if isinstance(payload, dict) and mtime is not None:
+            sid = payload.get("session_id")
+            if isinstance(sid, str) and sid:
+                counter.observe(sid, _cost(payload), mtime, now=now_epoch)
+        counter.save()
+        # A gateway's own dollar figure (statusline_source._spend_frame) is
+        # the page when the status line carries one: it is the gateway's
+        # count, where this one is an estimate. The file in front of us
+        # only, never a remembered payload: a gateway figure from hours ago,
+        # offered as the last payload with a figure, would otherwise take
+        # the config's page off the bus for as long as it was remembered.
+        live = self._live
+        if live is not None and live.plan == base.PLAN_SPEND:
+            return None
+        anchor = view.anchor
+        # The floor is never lowered, not even with the clock put back past
+        # it. The fix wave moved it to now, so that a /usage the new login
+        # ran after the step counted; but the config keeps another
+        # organisation's /usage for the same person (U11), and the moved
+        # floor let the old org's figure back onto the new org's page,
+        # "exact", until someone ran /usage (the /code-review max of
+        # 277b81a..4003b0b, item 7). A /usage dated before the floor waits
+        # for real time; one dated ahead of now is not seen at all.
+        if (anchor is not None and self._anchor_floor is not None
+                and anchor.fetched_at <= self._anchor_floor):
+            anchor = None
+        if anchor is not None and not self._cache_trusted(
+                anchor.fetched_at, now_epoch):
+            anchor = None
+        return _spend_frame(anchor, counter, now_epoch, self._render_at,
+                            view.mtime, wsl=self._on_wsl())
+
+    def _cache_trusted(self, fetched_at, now_epoch):
+        """Whether a saved /usage fetched at `fetched_at` may be read: not
+        when it is dated later than now + SPEND_FUTURE_S, saved under a
+        clock that has since been put back, and not once real time passes
+        that stamp either -- it was fetched before it, so it would read as
+        newer than it is. Seen again only when a /usage with another fetch
+        time replaces it (item 7 of the review of 277b81a..4003b0b)."""
+        if fetched_at > now_epoch + SPEND_FUTURE_S:
+            self._future_fetch = fetched_at
+        return fetched_at != self._future_fetch
+
+    def _dated(self, mtime, now_epoch):
+        """The time to date a render by: its mtime, or for one dated later
+        than now + SKEW_S, the moment it was first seen. A render five
+        hours ahead (a fast clock, put right) dated the page active at
+        every poll, and the board never dozed (verify/v8/c22, item 13 of
+        the review of 277b81a..4003b0b); dated now at every poll, it would
+        do the same."""
+        if mtime is None or mtime <= now_epoch + spend_count.SKEW_S:
+            return mtime
+        seen = self._future_render
+        if seen is None or seen[0] != mtime:
+            seen = self._future_render = (mtime, now_epoch)
+        return seen[1]
+
+    def _on_wsl(self):
+        """Whether the Claude home read is a WSL distribution's: its
+        renders are dated by the Windows clock and its /usage by the
+        distribution's (spend_count.SKEW_S). Not knowing is native."""
+        try:
+            home = (self._home() if self._home is not None
+                    else claude_home.current())
+        except Exception:
+            return False
+        return getattr(home, "kind", None) == claude_home.WSL
+
+    def _note_login(self, view):
+        """Follow the config's login across switches, for the count and
+        the saved /usage.
+
+        The count: Claude Code keeps a session's id across /login and
+        starts its cost again from zero (2.1.318, not yet measured on a
+        desk). bind() empties the count only when the fingerprint
+        differs from the one it holds, so a login away and back to the same
+        seat kept the high-water marks, and every render under the old mark
+        counted nothing until the session passed it (/code-review max of
+        2026-11-04, U9: $14.34 shown for $16.84). A switch seen here drops
+        the marks (SpendCounter.forget_sessions), so each session's next
+        sighting is a first one; what was counted stays. The sighting that
+        takes the new baseline adds nothing, which loses what was spent
+        between /login and it: the safe direction, as for a resumed
+        session.
+
+        The /usage: the cache is matched to the login by accountUuid only,
+        so another organisation as the same person kept the old one's
+        figure (U11). /usage and /login both write the config, so a cache
+        fetched no later than the last view that carried the old
+        fingerprint is that login's, and is no anchor for this one. Held
+        in memory: a daemon restarted after the switch cannot tell.
+
+        A same-seat re-login without a switch in between (sign out, sign
+        in) leaves the fingerprint as it was, and is not seen here: the
+        count meets it as figures below the session's mark and counts
+        nothing until the session passes its old total, which the next
+        /usage corrects. Round 2 of the 2026-11-04 review counted them as
+        a ledger of their own and round 3 took that out again, for
+        counting too much across a /usage (pc/spend_count.py).
+
+        The renders, after a switch, are told apart by read order: the
+        file as it stands when the switch is seen is the old login's,
+        the first that differs the new login's. Two residuals, kept (round
+        6 of the review): a render of the new login that lands between
+        the /login write and the poll that notices it is marked old, and
+        the page is blank until the next render -- a window of up to
+        claude_plan.FIRST_ANSWER_RETRY_S natively, one wsl_watch tick on
+        WSL. And a repaint carrying the old account's cached figures, or
+        another terminal still on the old token, differs from the mark
+        and lifts it, so the old login's figures can show once: the
+        status line carries no account id to tell them by."""
+        fp = view.account_fp
+        if not fp:
+            return
+        if self._login_fp and fp != self._login_fp:
+            forget = getattr(self._counter, "forget_sessions", None)
+            if forget is not None:
+                forget()
+            if self._login_mtime is not None:
+                self._anchor_floor = self._login_mtime
+            # The renders. The one in the file now, and both memories,
+            # are the old login's; dropped here, at the source, so the bus
+            # has nothing of the old login to put under the new one's plan
+            # (round 4 of the 2026-11-04 review: four rounds of hiding the
+            # old reading in the Bridge each broke). Told by READ ORDER:
+            # the file as it stands is marked, and the first render that
+            # differs from it is the new login's, whatever it is dated.
+            # Round 5 found the first cut, which kept time floors for the
+            # life of the process, hiding a new login for an hour behind
+            # one render dated an hour ahead, and dropping new renders
+            # dated before an unrelated rewrite of the config. The switch
+            # is seen on the poll after /login (claude_plan.PlanReader
+            # .look), so a new render read before it is at most one poll's.
+            # A stat that fails here marks the file as the first one that
+            # succeeds finds it (_UNSTATED): unmarked, the old render was
+            # offered again (round 6 of the review, item 2).
+            sig = _file_sig(self.path())
+            self._old_render = (None if sig is _ABSENT
+                                else sig or _UNSTATED)
+            self._remembered = self._any = None
+            # And what the old login's renders taught: the newest render's
+            # time, the last five_hour seen, the reply baselines
+            # (_reply_without_window) and their chain, the fetch times of
+            # its blocks (_note_fetch) and the clock-back marks
+            # (_forget_replies) -- round 6 of the review, item 5, found
+            # the last two left behind.
+            self._render_at = None
+            self._five_seen = None
+            self._costs = {}
+            self._chain = None
+            self._fetch_times = {}
+            self._stale = None
+            self._stale_owed = False
+        self._login_fp, self._login_mtime = fp, (view.mtime or None)
+
+    def _status_frames(self, now_epoch):
+        """The frames the status line gives this poll; see the module
+        docstring."""
         # A clock gone back: every interval measured across the step is
         # short by it, the unsafe direction for CHAIN_MAX_GAP_S, so the
         # proof starts over. Seen here only when this poll is dated before
@@ -603,7 +940,31 @@ class ClaudeCliProvider(base.ProviderParser):
         # gap can hide is BASELINE_MAX_S's business.
         back = self._polled_at is not None and now_epoch < self._polled_at
         self._polled_at = now_epoch
-        payload, mtime = ss.read_payload(self.path())
+        self._live = None
+        if self._old_render is not None:
+            sig = _file_sig(self.path())
+            if self._old_render is _UNSTATED and sig is not None:
+                self._old_render = sig
+            if sig is None or sig == self._old_render:
+                # The old login's, or not known not to be: a failed stat
+                # leaves the mark standing (round 6, item 2).
+                payload, mtime = None, None     # see _note_login
+            else:
+                self._old_render = None
+        if self._old_render is None:
+            payload, mtime = ss.read_payload(self.path())
+            mtime = self._dated(mtime, now_epoch)
+        self._read = (payload, mtime)
+        if (self._render_at is not None
+                and self._render_at > now_epoch + spend_count.SKEW_S):
+            # Kept from a clock that has since gone back: the newest render
+            # only ever rose, so one dated hours ahead dated the spend page
+            # now at every poll and the board never dozed (the review of the
+            # WSL work, 2026-11-05). The file's own date starts it again.
+            self._render_at = None
+        if mtime is not None and (self._render_at is None
+                                  or mtime > self._render_at):
+            self._render_at = mtime
         if back:
             self._forget_replies(mtime)
         elif self._stale_owed and mtime is not None:
@@ -619,6 +980,7 @@ class ClaudeCliProvider(base.ProviderParser):
             # baseline it keeps is this file's history, not a memory's.
             reply = self._reply_without_window(payload, mtime, now_epoch)
             live = self._frame(payload, mtime, now_epoch)
+            self._live = live
             if live is not None:
                 if reply is not None:
                     live.window_evidence = reply
@@ -665,6 +1027,154 @@ class ClaudeCliProvider(base.ProviderParser):
             if last is not None:
                 frames.append(last)
         return frames
+
+
+# The mark _note_login sets when the status-line file could not be stat'ed
+# at the switch: whatever the first stat that succeeds finds is the old
+# login's.
+_UNSTATED = ("unstated",)
+
+
+# _file_sig's answer for a status-line file that is not there: no render
+# to mark, so whatever appears next is the new login's.
+_ABSENT = ("absent",)
+
+
+def _file_sig(path):
+    """The status-line file's identity as a stat gives it -- inode, mtime,
+    size, claude_plan.signature -- _ABSENT when there is no such file, or
+    None when it cannot be stat'ed (a lock, a share that dropped)."""
+    try:
+        return claude_plan.signature(os.stat(path))
+    except FileNotFoundError:
+        return _ABSENT
+    except (OSError, ValueError):
+        return None
+
+
+def _usage_frame(windows, now_epoch):
+    """The frame of the 5-hour and weekly figures Claude Code saved at the
+    last /usage (claude_plan.CacheWindows), dated by that fetch. Each window
+    goes through base.settle_window as the status line's do, so one whose
+    reset has passed reads 0% and not the figure from before it. A window
+    the cache lacked stays base.UNKNOWN: a null five_hour (a Max login,
+    2026-11-04) leaves the session dial unknown beside a good week.
+    Returns None when neither window has a figure. Active at
+    base.NO_CONTACT: the fetch may be BLINK's own refresh, which is not a
+    person at the desk."""
+    stale = (now_epoch - windows.fetched_at) > ss.STALE_AFTER_S
+
+    def settle(pct, resets_at):
+        if pct is None:
+            return base.UNKNOWN, None, None
+        w = base.settle_window(pct, resets_at, now_epoch, stale)
+        return w.pct, w.resets_at, w.ended_at
+
+    s_pct, s_reset, s_ended = settle(windows.five_pct, windows.five_resets_at)
+    w_pct, w_reset, w_ended = settle(windows.week_pct, windows.week_resets_at)
+    if s_pct == base.UNKNOWN and w_pct == base.UNKNOWN:
+        return None
+    return base.NormalizedUsageFrame(
+        provider=PROVIDER_ID, src=base.USAGE_SRC_ID,
+        observed_at=windows.fetched_at, active_at=base.NO_CONTACT,
+        session_rolled_at=s_ended, weekly_rolled_at=w_ended,
+        session_pct=s_pct, session_resets_at=s_reset,
+        weekly_pct=w_pct, weekly_resets_at=w_reset, stale=stale)
+
+
+def _spend_frame(anchor, counter, now_epoch, render_at, config_at=None,
+                 wsl=False):
+    """The spend page: the /usage figure plus what was counted since it.
+
+    docs/plans/enterprise-spend.md, "The figure". The anchor is the cents
+    Claude Code saved at the last /usage (claude_plan.SpendAnchor). One
+    fetched before this month began is no anchor, decided here at every
+    poll and not when the file was read, so a daemon running across 00:00
+    UTC on the 1st rolls over with the config untouched; so is one from
+    the future (SPEND_FUTURE_S). Without an anchor the page is the count
+    since the 1st, with no cap -- never "unlimited" -- and the hint.
+
+    The share is of the cap, and at least 100 when Claude Code says the
+    usage credits cannot pay for requests (is_enabled false) beside a cap:
+    the cap is reached, whatever the cents say. A cap of zero is reached
+    too, not a division. With no cap the share is UNKNOWN and the dollars
+    are the page (base.has_usage).
+
+    `wsl`: the Claude home is a WSL distribution's, whose render times and
+    /usage time come from two clocks (spend_count.SKEW_S).
+
+    Dated by the newer of the last status-line render and the /usage,
+    whichever Claude Code did last; by the config's mtime (`config_at`,
+    ConfigView.mtime) when there is neither, and now only when that is
+    unknown too. Never after now. A /usage run after the last render is the
+    newest word on the figure, and dating the page by the render would show
+    it older than it is. The fallback was now until the final review of
+    2026-11-04, and active_at with it, so a seat with no status line and no
+    /usage this month looked active at every poll and the board never
+    dozed; the config is the last thing Claude Code wrote that the page
+    rests on.
+    """
+    period = claude_plan.month_start_utc(now_epoch)
+    a = anchor
+    if a is not None and (a.fetched_at < period
+                          or a.fetched_at > now_epoch + SPEND_FUTURE_S):
+        a = None
+    if a is None:
+        added = counter.since(period)
+        cents, limit = added, None
+    else:
+        # On a WSL desk from SKEW_S after the /usage: its time is not the
+        # renders' clock, and how far the two disagree is an owed
+        # measurement (spend_count.SKEW_S). A native desk has one clock,
+        # and no margin (final review of round 7, F1).
+        added = (counter.since_usage(a.fetched_at, now_epoch) if wsl
+                 else counter.since(a.fetched_at, now_epoch))
+        cents, limit = a.used_cents + added, a.limit_cents
+    pct = base.UNKNOWN
+    if limit is not None:
+        pct = (100.0 if limit <= 0
+               else protocol._round_pct(100.0 * cents / limit))
+        if not a.enabled:
+            pct = max(pct, 100.0)
+    age = None if a is None else now_epoch - a.fetched_at
+    stamps = [t for t in (render_at, None if a is None else a.fetched_at)
+              if t is not None]
+    if not stamps and config_at is not None:
+        stamps = [config_at]
+    seen = min(max(stamps), now_epoch) if stamps else now_epoch
+    # Active at the last render, never at the /usage: BLINK's own refresh
+    # moves the cache's fetch time, and a page dated by it kept the board
+    # awake with nobody there (base.NO_CONTACT). Without a render, the
+    # config's mtime as before when there is no /usage either; with one,
+    # nobody heard.
+    if render_at is not None:
+        active = min(render_at, now_epoch)
+    elif a is None:
+        active = seen
+    else:
+        active = base.NO_CONTACT
+    return base.NormalizedUsageFrame(
+        provider=PROVIDER_ID, src=SPEND_SRC_ID, observed_at=seen,
+        active_at=active, plan=base.PLAN_SPEND, spend_period="monthly",
+        spend_usd=cents / 100.0,
+        spend_limit_usd=None if limit is None else limit / 100.0,
+        session_pct=pct,
+        session_resets_at=claude_plan.next_month_start_utc(now_epoch),
+        weekly_pct=base.UNKNOWN, weekly_resets_at=None,
+        # Exact only while no rise has been seen since the /usage at all,
+        # counted or not: one inside the margin, or one straddling the
+        # /usage, is spend the figure does not have (round 6, item 6). On
+        # a WSL desk "since" reaches SKEW_S further back: a Windows clock
+        # running behind the distribution's dates a rise made after the
+        # /usage before it (final review of round 7, F2). `added == 0` is
+        # kept: rose_after asks for a render strictly after its time, and
+        # a rise counted from a sighting at the very second of the /usage
+        # can be dated that second too.
+        spend_exact=(age is not None and age < SPEND_EXACT_S and added == 0
+                     and not counter.rose_after(
+                         a.fetched_at - (spend_count.SKEW_S if wsl
+                                         else 0))),
+        spend_hint=age is None or age > SPEND_HINT_S)
 
 
 def _limits(payload):

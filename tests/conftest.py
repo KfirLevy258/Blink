@@ -130,6 +130,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "allow_browser: this test may start the real browser or"
                    " file opener (none does today)")
+    config.addinivalue_line(
+        "markers", "allow_claude_launch: this test may start the real claude"
+                   " or wsl.exe (none does today); allow_browser does not"
+                   " cover it")
 
 
 def _loopback(address):
@@ -279,9 +283,19 @@ def browser_launcher(args):
     return None
 
 
-def _guard(fn):
+def _guard(fn, real=None):
     fn.blink_browser_guard = True       # tests/test_sandbox.py looks for it
+    _inherit(fn, real)
     return fn
+
+
+def _inherit(fn, real):
+    """Both guards wrap Popen.__init__ and os.system, and whichever is set up
+    second hides the first's marker attribute; carry them across so the tests
+    of each can tell it is installed whatever the fixture order."""
+    for flag in ("blink_browser_guard", "blink_claude_guard"):
+        if real is not None and getattr(real, flag, False):
+            setattr(fn, flag, True)
 
 
 class _RefusingBrowser:
@@ -349,7 +363,7 @@ def _no_real_browser(request, monkeypatch):
             refuse(f"os.system {name}")
         return real_system(command)
 
-    monkeypatch.setattr(os, "system", _guard(system))
+    monkeypatch.setattr(os, "system", _guard(system, real_system))
 
     real_init = subprocess.Popen.__init__
 
@@ -359,6 +373,171 @@ def _no_real_browser(request, monkeypatch):
             refuse(f"subprocess {name}")
         return real_init(self, args, *a, **k)
 
-    monkeypatch.setattr(subprocess.Popen, "__init__", _guard(popen_init))
+    monkeypatch.setattr(subprocess.Popen, "__init__",
+                        _guard(popen_init, real_init))
     yield
     fail_on_browser_attempts()
+
+
+# --- Claude Code and WSL ---------------------------------------------------
+#
+# The same shape as the browser guard, for the two programs a test must never
+# start. This Mac has a real `claude` on PATH, so cli.claude_version() ran it
+# (`claude --version`, up to 30 s, and the owner's real install answering);
+# on a Windows desk wsl.exe would boot a distro. A session started by mistake
+# spends the owner's real quota, which CLAUDE.md forbids outright. Its own
+# marker, because a test that may open a tab has no business starting Claude.
+
+_CLAUDE_PROGRAMS = frozenset({"claude", "wsl"})
+_CLAUDE_EXTENSIONS = (".exe", ".cmd", ".bat", ".ps1")
+_CLAUDE_ATTEMPTS = []
+
+
+class RealClaudeLaunchRefused(BaseException):
+    """See _no_real_claude. A BaseException for the reason given on
+    RealNetworkRefused: callers around claude_version catch Exception."""
+
+
+def claude_attempts():
+    return list(_CLAUDE_ATTEMPTS)
+
+
+def forget_claude_attempts():
+    del _CLAUDE_ATTEMPTS[:]
+
+
+def fail_on_claude_attempts():
+    if _CLAUDE_ATTEMPTS:
+        what = ", ".join(_CLAUDE_ATTEMPTS)
+        forget_claude_attempts()
+        pytest.fail(f"this test started claude or wsl ({what}); stub the"
+                    " caller, or mark it @pytest.mark.allow_claude_launch",
+                    pytrace=False)
+
+
+def _program_stem(word):
+    """`C:\\Windows\\System32\\WSL.EXE` and `claude.CMD` are `wsl`, `claude`."""
+    name = re.split(r"[\\/]", word)[-1].lower()
+    for ext in _CLAUDE_EXTENSIONS:
+        if name.endswith(ext):
+            return name[:-len(ext)]
+    return name
+
+
+_WORD = re.compile(r"\"[^\"]*\"|'[^']*'|\S+")
+
+
+def _words(text):
+    """Split a command string into words, a quoted word kept whole and its
+    quotes dropped, so `"C:\\Program Files\\x\\claude.exe" --version` and
+    `"claude" --version` are read as the program they start. Quoting must
+    not get a launch past a safety guard. Not shlex: it would eat the
+    backslashes of a Windows path."""
+    return [w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "\"'" else w
+            for w in _WORD.findall(text)]
+
+
+def _unquote(word):
+    w = word.strip()
+    if len(w) > 1 and w[0] == w[-1] and w[0] in "\"'":
+        return w[1:-1]
+    return w
+
+
+def claude_launcher(args, executable=None):
+    """`claude` or `wsl` if a command would start one, else None.
+
+    Looks at the program only (the first word, or `executable=`, or the
+    first non-switch word after `cmd /c`), never at the words after it:
+    `echo claude` and `python fake_wsl.py` start neither. Known gap:
+    `powershell -c claude` starts one and is not refused."""
+    names = []
+    if executable is not None:
+        names.append(_program_stem(_unquote(os.fsdecode(executable))))
+    if isinstance(args, os.PathLike):
+        args = os.fspath(args)
+    if isinstance(args, (str, bytes)):
+        words = _words(os.fsdecode(args))
+    else:
+        try:
+            words = [os.fsdecode(a) for a in args]
+        except TypeError:
+            words = []
+    if words:
+        prog = _program_stem(_unquote(words[0]))
+        names.append(prog)
+        # A list element that is itself a quoted command line.
+        names.extend(_program_stem(w) for w in _words(words[0])[:1])
+        if prog == "cmd":
+            rest = [w for w in _words(" ".join(words[1:]))
+                    if not w.startswith("/")]
+            if rest:
+                names.append(_program_stem(rest[0]))
+    for n in names:
+        if n in _CLAUDE_PROGRAMS:
+            return n
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _no_real_claude(request, monkeypatch):
+    """No test may start the real Claude Code or wsl.exe.
+
+    Refused at os.system and at every subprocess launch (Popen is what run,
+    check_output and os.popen come to), by program stem, so `claude`,
+    `claude.CMD` and an absolute `C:\\Windows\\System32\\wsl.exe` are all
+    caught, and `python fake_wsl.py` is not. Recorded as well as raised:
+    see _CLAUDE_ATTEMPTS.
+    """
+    if request.node.get_closest_marker("allow_claude_launch"):
+        yield
+        return
+
+    def refuse(what):
+        _CLAUDE_ATTEMPTS.append(what)
+        raise RealClaudeLaunchRefused(
+            f"a test tried to start {what}; stub the caller, or mark it"
+            " @pytest.mark.allow_claude_launch")
+
+    def mark(fn, real):
+        fn.blink_claude_guard = True
+        _inherit(fn, real)
+        return fn
+
+    real_system = os.system
+
+    def system(command):
+        name = claude_launcher(command)
+        if name:
+            refuse(f"os.system {name}")
+        return real_system(command)
+
+    monkeypatch.setattr(os, "system", mark(system, real_system))
+
+    real_init = subprocess.Popen.__init__
+
+    def popen_init(self, args, *a, **k):
+        # executable is the third positional (args, bufsize, executable).
+        exe = k.get("executable", a[1] if len(a) > 1 else None)
+        name = claude_launcher(args, exe)
+        if name:
+            refuse(f"subprocess {name}")
+        return real_init(self, args, *a, **k)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__",
+                        mark(popen_init, real_init))
+
+    yield
+    fail_on_claude_attempts()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_claude_version(request, monkeypatch):
+    """cli.claude_version() is the one helper that runs `claude --version`.
+    Stubbed to "no Claude Code" for every test; a test that wants an answer
+    patches it itself, after this. claude_on_path only searches PATH and
+    stays real."""
+    if request.node.get_closest_marker("allow_claude_launch"):
+        return
+    from pc import cli
+    monkeypatch.setattr(cli, "claude_version", lambda *a, **k: (None, None))

@@ -95,6 +95,25 @@ struct burn5h {
  */
 bool burn5h_parse(const char *json, struct burn5h *out);
 
+/*
+ * Which record a line of this type fills. Two lines share burn5h_parse():
+ * `burn`, output tokens for a page with no session window, and `sburn`
+ * (pc/protocol.spend_burn), whole cents for a spend page's dollar burn view
+ * (docs/plans/enterprise-spend.md section 3). Same shape, same ceiling --
+ * the daemon's SBURN_MAX_CENTS is BURN5H_BUCKET_MAX -- and different
+ * meanings, so each has its own record in usage_view.c and a line goes to
+ * the one its WHOLE type names: cents drawn as tokens would be a hundred
+ * times wrong, and tokens drawn as dollars a bill nobody ran up. Here, and
+ * not as a strcmp in proto.c, so a host test pins the routing.
+ */
+enum burn5h_line {
+	BURN5H_LINE_NONE,
+	BURN5H_LINE_TOKENS,		/* "burn" */
+	BURN5H_LINE_DOLLARS,		/* "sburn" */
+};
+
+enum burn5h_line burn5h_line_of(const char *type);
+
 /* All twenty buckets, and the last complete hour (BURN5H_LAST_FROM), in
  * tokens. */
 uint32_t burn5h_total(const struct burn5h *m);

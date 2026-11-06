@@ -98,7 +98,8 @@ def test_a_board_line_is_logged_as_its_constant_text(line, want, secrets):
         assert s not in out[0], s
 
 
-@pytest.mark.parametrize("line", ["[proto] burn line refused",   # proto.c:958
+@pytest.mark.parametrize("line", ["[proto] burn line refused",   # proto.c:995
+                                  "[proto] sburn line refused",  # proto.c:993
                                   "[theme] line refused"])       # proto.c:769
 def test_a_refused_line_is_named_in_the_log(line):
     """The board refusing a line the daemon sent is the one piece of

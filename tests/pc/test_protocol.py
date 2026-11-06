@@ -844,7 +844,10 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
     widest_src = max(widths, key=widths.get)
     # The measured width, asserted so the docstring cannot go stale again. A
     # new field or source id that moves it is a deliberate change: say the new
-    # figure here and above.
+    # figure here and above. Still 454 with the spend source in the set
+    # (2026-11-04): claude_spend frames send no weekly window, so the
+    # spend page's own widest line is 410 (tests/pc/test_spend_wire.py,
+    # test_widest_usage_line_with_spend) and does not move this.
     assert (widest_src, widths[widest_src]) == ("weekly_anchor", 454), widths
 
 

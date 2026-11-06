@@ -329,6 +329,7 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[ota] offer shown",                              # ui_settings.c:830
     "[ota] offer withdrawn: a different version is on offer",  # :1311
     "[ota] offer withdrawn: state is no longer available",     # :1326
+    "[ota] offer withdrawn: the board is dozing",     # ui_settings.c:1443
     "[ota] install confirm withdrawn: the offer it named is no longer"
     " available",                                     # ui_settings.c:1346
     "[ota] test boot of",                                      # main.c:126
@@ -343,7 +344,8 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[proto] daemon resuming install of",                      # :859
     "[proto] ota failed",                                      # :889
     "[proto] host status",                                     # :896
-    "[proto] burn line refused",                               # :958
+    "[proto] burn line refused",                               # :995
+    "[proto] sburn line refused",                              # :993
     "[proto] rx ring overflow, dropped",                       # :1000
     "[proto] host went away",                                  # :1078
     # [fatal] -- firmware/src/fatal.c. The three "reason" lines differ only
@@ -389,6 +391,14 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[boot] logo: none",                                       # logo.c:53
     "[boot] unknown edition",                                  # bootclip.c:64
     "[boot] edition",                                          # bootclip.c:68
+    # [ask] -- firmware/src/ui_settings.c: "Keep figures fresh?". Never
+    # which way it was answered; that is the person's.
+    "[ask] shown",
+    "[ask] answered",
+    "[ask] closed unanswered",
+    "[ask] withdrawn: the computer went away",
+    "[ask] withdrawn: the board is dozing",
+    "[ask] dropped: not shown in time",
     # the rest
     "[sleep] dozing",                                          # ui_sleep.c:183
     "[sleep] waking",                                          # ui_sleep.c:201
@@ -411,11 +421,21 @@ CONSOLE_RENDERED = ("[ota] update landed", "[ota] update REVERTED")
 # banners, the touch tracer's #TT rows -- is a fixed placeholder, because
 # its first word is the board's text too.
 CONSOLE_TAGS = frozenset({
-    "bl", "boot", "cfg", "fatal", "focus", "mem", "ota", "proto", "sleep",
-    "slide", "swipe", "theme", "time", "touch", "usage",
+    "ask", "bl", "boot", "cfg", "fatal", "focus", "mem", "ota", "plan",
+    "proto", "sleep", "slide", "swipe", "theme", "time", "touch", "usage",
 })
 
 BOARD_LINE = "(board line)"
+
+# Console lines the board prints for a message the daemon restates on a
+# timer, cut to their bare tag by console_line, so every one is the same
+# line. proto.c prints "[plan] <page> <kind>" for each plan it takes, and the
+# heartbeat restates the plan; with a plan per cent on a working spend desk
+# the echo was some 360 identical lines an hour (/code-review max of
+# 2026-11-04, U5). ConsoleEcho logs one per COLLAPSE_EVERY_S and counts the
+# rest.
+CONSOLE_COLLAPSED = frozenset({"[plan]"})
+COLLAPSE_EVERY_S = 600.0
 
 
 def console_line(line: str) -> str:
@@ -456,12 +476,29 @@ class ConsoleEcho:
     # Deliberately a shape test on the first character and not a parse. This
     # is not deciding what a message means -- the reader does that -- only
     # whether the bridge is about to log the same bytes twice.
-    def __init__(self, limit=4096):
+    def __init__(self, limit=4096, now=None, every_s=COLLAPSE_EVERY_S):
         self._buf = bytearray()
         # A board that emits a very long line without a newline must not grow
         # this without bound. Nothing does today; the cap is here because a
         # buffer fed from a wire is the wrong place to assume that.
         self._limit = limit
+        # CONSOLE_COLLAPSED: line -> [when last logged, how many held back].
+        self._now = now or time.monotonic
+        self._every = every_s
+        self._held = {}
+
+    def _collapsed(self, line):
+        """The text to log for a CONSOLE_COLLAPSED line, or None to hold it
+        back. The first is logged; then one per every_s, saying how many
+        were held back in between. The count is ours, never the board's."""
+        now = self._now()
+        held = self._held.get(line)
+        if held is None or not 0 <= now - held[0] < self._every:
+            n = 0 if held is None else held[1]
+            self._held[line] = [now, 0]
+            return f"{line} ({n} more not logged)" if n else line
+        held[1] += 1
+        return None
 
     def feed(self, data):
         """Returns the complete console lines in `data`, as text."""
@@ -478,7 +515,12 @@ class ConsoleEcho:
                 continue
             if line.lstrip().startswith("{"):
                 continue            # protocol JSON: logged parsed instead
-            lines.append(console_line(line))
+            cut = console_line(line)
+            if cut in CONSOLE_COLLAPSED:
+                cut = self._collapsed(cut)
+                if cut is None:
+                    continue
+            lines.append(cut)
         if len(self._buf) > self._limit:
             del self._buf[:-self._limit]
         return lines

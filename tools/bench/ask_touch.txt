@@ -1,0 +1,34 @@
+# "Keep figures fresh?" (firmware/src/ask_prompt.h), pressed both ways and
+# left to close itself.
+#
+#   tools/board_touch.py script tools/bench/ask_touch.txt
+#
+# `fake ask` is the daemon's real {"t":"ask","id":"refresh"} line. The board
+# answers on, no or later to this tool, which saves nothing: no setting
+# anywhere is turned on by a run. The last section waits out
+# ASK_PROMPT_OPEN_MS (60 s), so a run takes a little over a minute.
+
+expect ui_state scr=gauges modal=none
+
+# --- Turn on
+fake ask
+wait-widget "Turn on" 3
+expect ui_state modal=ask
+expect-widget "Keep figures fresh?"
+expect-widget "No thanks"
+click "Turn on"
+expect ui_state modal=none
+
+# --- No thanks
+fake ask
+wait-widget "No thanks" 3
+expect ui_state modal=ask
+click "No thanks"
+expect ui_state modal=none
+
+# --- nobody touches it: the box closes itself after a minute
+fake ask
+wait-widget "Turn on" 3
+expect ui_state modal=ask
+wait 63
+expect ui_state scr=gauges modal=none
