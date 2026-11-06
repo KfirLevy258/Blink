@@ -444,8 +444,11 @@ class _Watch:
             return self.idle_s[0]
 
         kw = {} if runner is None else {"runner": runner}
+        # `enabled` may be the real thing (a callable); otherwise a value the
+        # test turns through self.enabled.
+        on = enabled if callable(enabled) else (lambda: self.enabled[0])
         self.w = ur.RefreshWatch(
-            str(self.blink), home, enabled=lambda: self.enabled[0],
+            str(self.blink), home, enabled=on,
             board_alive=lambda: self.alive[0],
             view=ur.config_view(home), other_at=lambda: self.other[0],
             now=lambda: self.clock[0], idle=idle, **kw)
@@ -1989,14 +1992,20 @@ def test_a_desk_that_never_answered_runs_nothing(tmp_path, monkeypatch):
     _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
     monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
     ran = []
-    t = _Watch(tmp_path, monkeypatch,
-               runner=lambda *a, **k: ran.append(a) or 1 / 0)
-    (t.blink / "config.json").write_text("{}")
-    t.w._enabled = lambda: ur.enabled(str(t.blink))
+
+    def runner(*a, **k):
+        ran.append(a)
+        raise OSError("not run")
+    blink = tmp_path / ".blink"
+    blink.mkdir()
+    (blink / "config.json").write_text("{}")
+    t = _Watch(tmp_path, monkeypatch, runner=runner,
+               enabled=lambda: ur.enabled(str(blink)))
     t.w.tick_once()
     assert ran == [] and t.state() == State()
-    t.enabled[0] = True                    # the stub alone does run it
-    t.w._enabled = lambda: t.enabled[0]
+    # The same desk with the setting on does reach the runner, so the
+    # nothing above is the gate's doing.
+    (blink / "config.json").write_text(json.dumps({ur.SETTING: True}))
     t.w.tick_once()
     assert ran
 
@@ -2051,3 +2060,41 @@ def test_a_board_ask_fault_that_comes_back_is_said_again(tmp_path,
     k.a.due(CAPS)
     assert capsys.readouterr().err.splitlines() == [
         "usage refresh ask failed (PermissionError)"] * 2
+
+
+def test_an_exit_0_answer_that_is_not_the_result_is_said_so(
+        tmp_path, monkeypatch, capsys):
+    # Told apart from "no cache written" (a logged-out Claude Code), and
+    # nothing the run printed goes into the line.
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    t = _Watch(tmp_path, monkeypatch, runner=lambda argv, **kw:
+               subprocess.CompletedProcess(argv, 0, b"secret 42%", None))
+    t.w.tick_once()
+    assert t.state().fails == 1
+    err = capsys.readouterr().err
+    assert err.splitlines() == ["usage refresh failed (unexpected output)"]
+    assert "secret" not in err
+
+
+def test_a_cost_guard_whose_setting_write_fails_says_so(tmp_path,
+                                                         monkeypatch, capsys):
+    # The state file holds it off; config.json still says on, and the log
+    # says why, by type.
+    from pc import user_config
+    _write_config(pathlib.Path(os.environ["HOME"]), NOW - 3600)
+    monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
+    costly = json.loads(ZERO)
+    costly.update(num_turns=1, total_cost_usd=0.02)
+    t = _Watch(tmp_path, monkeypatch, runner=lambda argv, **kw:
+               subprocess.CompletedProcess(
+                   argv, 0, json.dumps(costly).encode(), None))
+
+    def refuse(*a, **k):
+        raise PermissionError(13, "refused")
+    monkeypatch.setattr(user_config, "put", refuse)
+    t.w.tick_once()
+    assert t.state().off_reason == "cost"
+    assert capsys.readouterr().err.splitlines() == [
+        "usage refresh off (cost)",
+        "usage refresh failed (PermissionError)"]

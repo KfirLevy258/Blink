@@ -1104,3 +1104,39 @@ def test_a_rise_dated_before_its_mark_counts_toward_no_usage():
     c.observe("s", 1.50, T - 1100, now=T - 1100)
     c.observe("s", 1.70, T - 1000, now=T - 1000)
     assert c.since(T - 1200) == 20
+
+
+def test_a_refused_save_is_said_once_per_streak(tmp_path, monkeypatch,
+                                                capsys):
+    """Said once while the folder keeps refusing, past the back-off and a
+    second attempt; said again only after a save has gone through."""
+    from pc import install_statusline
+    from pc.spend_count import SAVE_EVERY_S
+    real = install_statusline._open_temp
+    calls = []
+
+    def refuse(path):
+        calls.append(path)
+        raise PermissionError(13, "refused")
+    tick = Tick()
+    c = mk(tmp_path, clock=tick)
+    c.bind("fp", 0)
+    monkeypatch.setattr(install_statusline, "_open_temp", refuse)
+    c.observe("a", 1.00, 100)
+    c.save()
+    tick.t += SAVE_EVERY_S                # past the back-off: tried again
+    c.observe("b", 1.00, 200)
+    c.save()
+    assert len(calls) == 2
+    line = "[spend] count not saved (PermissionError)"
+    assert capsys.readouterr().err.splitlines() == [line]
+    monkeypatch.setattr(install_statusline, "_open_temp", real)
+    tick.t += SAVE_EVERY_S
+    c.save()                              # written: the streak ends
+    assert (tmp_path / "spend-count.json").exists()
+    assert capsys.readouterr().err == ""
+    monkeypatch.setattr(install_statusline, "_open_temp", refuse)
+    tick.t += SAVE_EVERY_S
+    c.observe("c", 1.00, 300)
+    c.save()
+    assert capsys.readouterr().err.splitlines() == [line]
