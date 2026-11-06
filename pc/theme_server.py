@@ -121,6 +121,13 @@ OPEN_EVERY_S = 2
 WAIT_SLICE_S = 0.5
 
 
+def check_token(token):
+    """A link token is a str of at least 32 characters. A blank one would
+    let a bare /open redeem a session (review of 4.1)."""
+    if not isinstance(token, str) or len(token) < 32:
+        raise ValueError("link token too short")
+
+
 def cookie_name(port):
     """Named for the port. Cookies are scoped by host, not port, so a second
     builder on 127.0.0.1 -- `blink theme` beside the daemon's own -- would
@@ -664,7 +671,8 @@ class BuilderServer:
         self._tick_s = tick_s
         self._lock = threading.Lock()
         self._links = {}            # unspent link -> when it was made
-        if token:
+        if token is not None:
+            check_token(token)
             self._links[token] = now()
         # Links that no longer work and why, "replaced" or "used", newest
         # last and kept few: only so the page the browser lands on can say
@@ -779,6 +787,7 @@ class BuilderServer:
 
     def add_token(self, token):
         """Another one-time link token, beside any unspent one."""
+        check_token(token)
         with self._lock:
             self._links[token] = self._now()
 
@@ -1106,6 +1115,27 @@ class Launcher:
                 self._told = server
             return ok
 
+    def serve_headless(self, panel, token, request_id):
+        """`blink settings`: start or re-use the page server with `token`
+        registered, then record its port with the request id (D37, D50).
+        Never calls the opener: the CLI opens the browser, and launch()
+        holds this lock across an opener measured stuck for 28.7 s."""
+        with self._lock:
+            server = self._server
+            if server is not None and not server.done:
+                server.add_token(token)
+                server.touch()
+            else:
+                kw = {} if self.board_ops is None \
+                    else {"board_ops": self.board_ops}
+                server = self._make(self._home, panel=panel, token=token,
+                                    **kw)
+                server.say = _say_ending
+                server.start()
+                self._server = server
+            # After the token: the record is what the CLI waits for.
+            theme.write_builder(self._home, server.port, ack=request_id)
+
     def _open(self, server):
         """Open a browser on `server`, or on a new builder when it is None.
         (ok, the server it was opened on). Called with the lock held."""
@@ -1132,7 +1162,7 @@ class Launcher:
             server.touch()
         # Held across the opener on purpose, so two taps cannot open two
         # tabs; close() and ended() do not wait for it (see there).
-        ok = bool(self._opener(server.new_link()))
+        ok = bool(self._opener(server.new_link() + "&panel=look"))
         if not ok and fresh:
             # Nothing was ever shown, so there is nothing to cancel; the
             # board puts up its own "Run blink theme" fallback.

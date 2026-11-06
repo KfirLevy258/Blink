@@ -12,13 +12,14 @@ import os
 import queue
 import signal
 import sys
+import threading
 import time
 
 import serial  # pyserial
 from serial.tools import list_ports
 
 from pc import ota as ota_mod
-from pc import wifi_link, wifi_pair
+from pc import private_file, settings_request, wifi_link, wifi_pair
 from pc import (ingest, install_statusline, interval, logbook, protocol,
                 settings_ops, status_page, statusline_source, theme,
                 theme_server, update, win_driver)
@@ -1057,7 +1058,29 @@ def main(argv=None):
     # print on a timer.
     _log_file = os.path.join(blink_home, "bridge.log")
 
+    def _settings_pickup():
+        # `blink settings` (D37). The page server starts on its own thread
+        # because Launcher's lock is held across a browser opener that has
+        # been stuck for 28.7 s, and this runs on the serial loop. The
+        # opener is never called here. Names only in the log.
+        try:
+            req = settings_request.take_request(blink_home)
+        except (OSError, private_file.NotPrivate):
+            print("[settings] request file refused", file=sys.stderr)
+            return
+        if req is None:
+            return
+
+        def serve():
+            try:
+                theme_builder.serve_headless(req["panel"], req["k"], req["id"])
+                print("[settings] request served", file=sys.stderr)
+            except (OSError, ValueError):
+                print("[settings] request failed", file=sys.stderr)
+        threading.Thread(target=serve, daemon=True).start()
+
     def _upkeep():
+        _settings_pickup()
         drifted = watchdog.tick()
         if drifted:
             print(f"[watchdog] {drifted}", file=sys.stderr)

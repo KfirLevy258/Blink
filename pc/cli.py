@@ -3167,6 +3167,9 @@ def cmd_install(_args) -> int:
     desk = read_desk()
     _note_if_no_claude_code(desk)
     _warn_if_claude_too_old(desk)
+    # Nothing opens here (D4): the page opens from the board or this command.
+    print("To set up WiFi and the display, press Open settings on the board"
+          " or run: blink settings")
     return 0
 
 
@@ -4545,6 +4548,49 @@ def cmd_theme(args) -> int:
     return 0
 
 
+SETTINGS_WAIT_S = 10
+
+
+def cmd_settings(args, opener=None, clock=time.monotonic,
+                 sleep=time.sleep) -> int:
+    """`blink settings`: ask the daemon for the page, then open it from here.
+
+    The daemon only registers the one-time token and records its port with
+    our request id (D37, D50); the browser is opened by this process, where
+    a stuck opener stalls the person watching and not the serial loop."""
+    from pc import private_file, settings_request
+    home = blink_home()
+    panel = getattr(args, "panel", None) or "connect"
+    try:
+        token, rid = settings_request.write_request(home, panel)
+    except (OSError, private_file.NotPrivate) as e:
+        print(f"Could not leave the request for the app: {e}")
+        return 1
+    start = clock()
+    while True:
+        # The id, not the port record alone: a builder the board opened
+        # earlier leaves a record before this token is registered.
+        if theme_mod.read_builder_ack(home) == rid:
+            port = theme_mod.read_builder(home)
+            if port is not None:
+                break
+        if clock() - start >= SETTINGS_WAIT_S:
+            try:
+                private_file.remove_private(home, settings_request.REQUEST_FILE)
+            except OSError:
+                pass
+            print("The app is not running. Run blink install, or blink run"
+                  " in another terminal.")
+            return 1
+        sleep(0.2)
+    url = f"http://127.0.0.1:{port}/open?k={token}&panel={panel}"
+    print("Opening the settings in your browser.")
+    print(f"If it does not open, go to this link on this computer: {url}")
+    if not (opener or theme_server.open_url)(url):
+        print("No browser opened here, so use the link above.")
+    return 0
+
+
 def cmd_run(args) -> int:
     """The daemon. This is what the login service starts.
 
@@ -4614,6 +4660,11 @@ def main(argv=None) -> int:
                               " blink theme list, a BT1. share code, or"
                               " key=value pairs (bg text gauge1 gauge2 low"
                               " mid high width ends dot arcs)")
+    settings_p = sub.add_parser(
+        "settings", help="Open the settings page (WiFi, display, board)")
+    settings_p.add_argument("panel", nargs="?",
+                            choices=["look", "connect", "board"],
+                            help="Which panel to open (default: connect)")
     run_p = sub.add_parser("run", help="Run the bridge in the foreground")
     run_p.add_argument("--port", default=None,
                        help="Serial port (default: find the board)")
@@ -4635,6 +4686,7 @@ def main(argv=None) -> int:
         "provision": cmd_provision,
         "config": cmd_config,
         "theme": cmd_theme,
+        "settings": cmd_settings,
         "run": cmd_run,
     }[args.cmd](args)
 

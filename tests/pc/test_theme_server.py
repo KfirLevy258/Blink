@@ -609,8 +609,8 @@ def test_the_launcher_starts_one_server_and_reopens_it(home):
     clock.t += theme_server.OPEN_EVERY_S
     assert lau.launch()
     assert len(FakeServer.made) == 1
-    assert opened == ["http://127.0.0.1:1/open?k=1",
-                      "http://127.0.0.1:1/open?k=2"]
+    assert opened == ["http://127.0.0.1:1/open?k=1&panel=look",
+                      "http://127.0.0.1:1/open?k=2&panel=look"]
 
 
 def test_an_ask_repeated_within_two_seconds_is_the_same_ask(home):
@@ -641,8 +641,8 @@ def test_an_open_page_is_shown_again_on_a_fresh_link(home):
     clock.t += 300
     assert lau.launch()
     assert len(FakeServer.made) == 1
-    assert opened == ["http://127.0.0.1:1/open?k=1",
-                      "http://127.0.0.1:1/open?k=2"]
+    assert opened == ["http://127.0.0.1:1/open?k=1&panel=look",
+                      "http://127.0.0.1:1/open?k=2&panel=look"]
 
 
 def test_the_launcher_gives_up_quietly_with_no_browser(home):

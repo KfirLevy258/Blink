@@ -172,21 +172,34 @@ def test_theme_only_server_says_use_blink_settings(home):
         s.wait(5)
 
 
+TOK = "t" * 40
+LATE = "l" * 40
+
+
 def test_preissued_token_is_one_time(home, ops):
-    s = make(home, board_ops=ops, token="tok-1")
+    s = make(home, board_ops=ops, token=TOK)
     try:
-        assert request(s, "GET", "/open?k=tok-1")[0] == 303
-        assert request(s, "GET", "/open?k=tok-1")[0] == 403
+        assert request(s, "GET", "/open?k=" + TOK + "")[0] == 303
+        assert request(s, "GET", "/open?k=" + TOK + "")[0] == 403
     finally:
         s.finish("test over")
         s.wait(5)
 
 
 def test_add_token_on_a_running_server(server):
-    assert request(server, "GET", "/open?k=late")[0] == 403
-    server.add_token("late")
-    assert request(server, "GET", "/open?k=late")[0] == 303
-    assert request(server, "GET", "/open?k=late")[0] == 403
+    assert request(server, "GET", f"/open?k={LATE}")[0] == 403
+    server.add_token(LATE)
+    assert request(server, "GET", f"/open?k={LATE}")[0] == 303
+    assert request(server, "GET", f"/open?k={LATE}")[0] == 403
+
+
+@pytest.mark.parametrize("bad", ["", "short", "x" * 31, None, b"x" * 40, 7])
+def test_a_short_or_non_str_token_is_refused(server, home, ops, bad):
+    with pytest.raises(ValueError):
+        server.add_token(bad)
+    if bad is not None:        # None is "no pre-issued token"
+        with pytest.raises(ValueError):
+            make(home, board_ops=ops, token=bad)
 
 
 def test_computer_settings_round_trip(server, home):
