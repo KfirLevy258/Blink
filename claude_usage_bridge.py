@@ -1196,8 +1196,14 @@ def main(argv=None):
     # False on the fast pass (answer my welcome), True on the patient one
     # (just say anything). See PROBE_PATIENT_S.
     patient = False
+    # Held while a WiFi image is on its way, as around esptool: a stop in the
+    # middle would cut the stream, and the board would show a failed update.
+    ota_hold, ota_after = None, False
 
     while True:  # reconnect loop
+        if ota_hold is not None:
+            ota_hold.close()        # exits at once if a stop was waiting
+            ota_hold = None
         try:
             # A PLAIN open, with DTR and RTS left exactly as the OS sets them.
             #
@@ -1445,11 +1451,6 @@ def main(argv=None):
             # first usage line after it boots names them again; the serial-
             # lost handler below does the same, and status_page.WANT_TTL_S
             # covers the paths that cannot say so and run out instead.
-            if via == "wifi":
-                # esptool needs the cable. The WiFi image path is its own
-                # stream; until then say so instead of flashing port None.
-                ser.close()
-                raise Reflashed("plug the board in to update")
             svc_watch.want(())
             time.sleep(4)
             print(f"[bridge] ota: closing port to flash {version}",
@@ -1518,8 +1519,8 @@ def main(argv=None):
                         builder_open=theme_builder.editing,
                         edit_answers=theme_answers,
                         board_ops=board_ops, home=blink_home,
-                        flash_refusal=("plug the board in to update"
-                                       if via == "wifi" else None),
+                        # Over WiFi a flash is a stream the loop pumps.
+                        link=ser if via == "wifi" else None,
                         # What the board can show, until it says again.
                         board_caps_hint=known.get("caps"),
                         pending=update.PendingFirmware(
@@ -1615,6 +1616,14 @@ def main(argv=None):
                 # its own thread. Every pass, so it goes out within one read
                 # timeout of the open returning.
                 bridge.pump()
+                if bridge.ota_streaming() and ota_hold is None:
+                    ota_hold = contextlib.ExitStack()
+                    ota_hold.enter_context(no_exit_while("firmware write"))
+                elif not bridge.ota_streaming() and ota_hold is not None:
+                    ota_hold.close()
+                    ota_hold = None
+                if bridge.take_ota_sealed():
+                    ota_after = True
                 if time.monotonic() >= next_link_write:
                     # Only ever "usb" or "wifi": the record is the ACTIVE
                     # link, written when it changes and every 60 s.
@@ -1720,7 +1729,11 @@ def main(argv=None):
             svc_watch.want(())
             if via == "usb":
                 time.sleep(1)
-            via, target = choose()
+            # After a sealed WiFi image the board reboots and its session
+            # drops: poll the remembered address for the new image's 90 s
+            # health window instead of backing off.
+            via, target = choose(after_ota=ota_after)
+            ota_after = False
 
 
 if __name__ == "__main__":

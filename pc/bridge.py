@@ -8,6 +8,7 @@ import threading
 import time
 
 from pc import ota as ota_mod
+from pc import wifi_ota
 from pc import private_file
 from pc import protocol
 from pc import settings_ops
@@ -103,7 +104,7 @@ class Bridge:
                  theme_sync=None, open_builder=None, run_async=_spawn,
                  edit_answers=None, builder_ended=None, builder_open=None,
                  sleep=time.sleep, board_ops=None, home=None, verify=None,
-                 flash_refusal=None):
+                 flash_refusal=None, link=None):
         self._write = write_msg          # callable(dict)
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
@@ -122,6 +123,11 @@ class Bridge:
         # Why a flash cannot happen on this link (esptool needs the cable),
         # said before anything is downloaded or ota_begin is sent.
         self._flash_refusal = flash_refusal
+        # The WifiLink when this connection is WiFi, else None. A flash then
+        # is a stream pumped from pump(), not a call that owns the port.
+        self._link = link
+        self._ota_stream = None
+        self._ota_sealed = False
         # What the board says it is. Set from hello; None until it speaks.
         self._board_proto = None
         self._board_fw = None
@@ -356,6 +362,9 @@ class Bridge:
             self._on_ota_query(cur)
         elif t == "ota_flash":
             self._on_ota_flash()
+        elif t == "ota_ack":
+            if self._ota_stream is not None:
+                self._ota_stream.ack(msg.get("off"), msg.get("err"))
         elif t == "theme_now":
             # Recorded, never answered here: whatever it makes owed goes out
             # on the next tick (see THEME_QUIET_S).
@@ -664,6 +673,8 @@ class Bridge:
         drive the new firmware, and installing them the other way round would
         leave the newest firmware being driven by the oldest app.
         """
+        if self._ota_stream is not None:
+            return              # a second tap while the image is on its way
         if self._manifest and self._app_update and self._self_update:
             version, artifact = self._app_update
             self._app_update = None
@@ -685,7 +696,7 @@ class Bridge:
         if not self._manifest:
             self._write(protocol.ota_error("nothing staged"))
             return
-        if self._flash is None:
+        if self._flash is None and self._link is None:
             self._write(protocol.ota_error("no flasher configured"))
             return
         if self._flash_refusal:
@@ -731,8 +742,41 @@ class Bridge:
               file=sys.stderr)
         # Tell the board to remember what it is about to become, now that
         # nothing else can come between this and esptool taking it away.
+        if self._link is not None:
+            # Over WiFi the board writes its own slot 1 and acks as it goes;
+            # the image follows the ready ack, from pump() (spec S9.3-4).
+            self._ota_stream = wifi_ota.WifiOtaStream(
+                blob, version, now=self._now)
+            self._write(protocol.ota_begin(version, size=len(blob)))
+            return
         self._write(protocol.ota_begin(version))
         self._flash(blob, version)
+
+    def ota_streaming(self) -> bool:
+        return self._ota_stream is not None
+
+    def take_ota_sealed(self) -> bool:
+        """True once, after ota_end went out: the board is about to reboot,
+        and the reconnect should poll for it (wait_for_link after_ota)."""
+        sealed, self._ota_sealed = self._ota_sealed, False
+        return sealed
+
+    def _pump_ota(self):
+        s = self._ota_stream
+        if s is None:
+            return
+        s.pump(self._link)          # a dead session raises: the loop reconnects
+        res = s.done()
+        if res is None:
+            return
+        self._ota_stream = None
+        ok, why = res
+        if ok:
+            self._ota_sealed = True
+            print("[bridge] ota: image sent", file=sys.stderr)
+        else:
+            print(f"[bridge] ota: FAILED: {why}", file=sys.stderr)
+            self._write(protocol.ota_error(why))
 
     # --- themes ---
 
@@ -981,6 +1025,7 @@ class Bridge:
                 break
             self._write(protocol.theme_edit_reply(ok))
         self._drain_ops()
+        self._pump_ota()
         # After any answer, so a board that asked again as the old builder
         # ended hears "ok" for the new one before "done" for the old: its
         # done is ignored while an ask is in flight, never the other way.
