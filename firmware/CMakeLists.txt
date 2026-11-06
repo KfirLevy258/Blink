@@ -5,6 +5,7 @@ project(claude_usage_display)
 target_sources(app PRIVATE
 	src/main.c
 	src/proto.c
+	src/link.c
 	src/msg_parse.c
 	src/usage_view.c
 	src/fmt.c

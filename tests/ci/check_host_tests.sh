@@ -95,6 +95,8 @@ run_one cfg_store    "cfg_store.c"     "-I$ROOT/tests/cfg_store/stub -DCFG_STUB_
 run_one edit_hold    "edit_hold.c theme.c msg_parse.c" "-lm"
 run_one fatal_policy "fatal_policy.c"  ""
 run_one fmt          "fmt.c"           ""
+# Which link protocol lines go to: USB wins, backoff, the verify window.
+run_one link         "link.c"          ""
 run_one logo         "logo_parse.c bootanim_dec.c" ""
 run_one msg_parse    "msg_parse.c"     ""
 run_one ota_parse    "ota_parse.c"     ""

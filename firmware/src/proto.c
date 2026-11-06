@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "proto.h"
+#include "link.h"
 #include "msg_parse.h"
 #include "ota.h"
 #include "version.h"
@@ -33,8 +34,9 @@
  * apart) is enough to be sure without being twitchy about one dropped line.
  */
 /* Three missed pongs (the board pings every 10 s). Past this a host that
- * has not said goodbye is taken to be asleep -- see proto_host_lost(). */
-#define HOST_TIMEOUT_MS 30000
+ * has not said goodbye is taken to be asleep -- see proto_host_lost().
+ * One definition, in link.h: link arbitration uses the same number. */
+#define HOST_TIMEOUT_MS LINK_HOST_TIMEOUT_MS
 #define LINE_MAX 512
 /*
  * Sized to the largest thing the daemon sends without waiting for an answer,
@@ -151,8 +153,8 @@ static void uart_isr(const struct device *dev, void *user_data)
 
 static void emit(const char *json)
 {
-	/* JSON lines go to the same console UART; '\n'-terminated. */
-	printk("%s\n", json);
+	/* Protocol lines only; link_emit picks USB or WiFi (spec 5.3). */
+	link_emit(json);
 }
 
 /*
@@ -421,7 +423,18 @@ static void dispatch(const char *json)
 		return; /* not a protocol line */
 	}
 
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	/* Bench images only: the PC's finger, and its question about what
+	 * the panel shows (touch_inject.h). Dispatched BEFORE the host stamp
+	 * and link_usb_heard(): these lines do not count as a USB host, so a
+	 * live WiFi session and an OTA in flight survive board_touch.py
+	 * --touch-only (D55). */
+	if (touch_inject_dispatch(type, json)) {
+		return;
+	}
+#endif
 	last_host_ms = k_uptime_get();
+	link_usb_heard(last_host_ms);
 	host_seen = true;
 	host_lost = false;
 	if (strcmp(type, "bye") == 0) {
@@ -438,13 +451,6 @@ static void dispatch(const char *json)
 		return;
 	}
 	host_bye = false;
-#ifdef CONFIG_BLINK_TOUCH_INJECT
-	/* Bench images only: the PC's finger, and its question about what
-	 * the panel shows (touch_inject.h). */
-	if (touch_inject_dispatch(type, json)) {
-		return;
-	}
-#endif
 	if (strcmp(type, "usage") == 0) {
 		double sp = 0, wp = 0;
 		/* Remaining seconds, not the absolute resets_at timestamps: the
