@@ -364,7 +364,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                    "application/json")
 
     def _refuse(self, status=403):
-        self._send(status, b"Not allowed. Run blink theme again.\n")
+        # The prefix is what the page's running_builder matches; the command
+        # is the one that started this server.
+        cmd = "blink settings" if self.builder.persistent else "blink theme"
+        self._send(status, f"Not allowed. Run {cmd} again.\n".encode())
 
     # -- checks
 
@@ -895,13 +898,13 @@ class BuilderServer:
         # on save as it always did.
         self.persistent = persistent
         self.board_ops = board_ops      # None: `blink theme`, no board routes
-        self.panel = panel
         self.nets = []                  # the last scan, for GET /api/wifi/nets
         self.idle_s = idle_s
         self._now = now
         self._tick_s = tick_s
         self._lock = threading.Lock()
         self._links = {}            # unspent link -> when it was made
+        self._minted = set()        # the ones new_link made, not add_token
         if token is not None:
             check_token(token)
             self._links[token] = now()
@@ -1011,9 +1014,15 @@ class BuilderServer:
         always refused; now so is a superseded or stale one."""
         k = secrets.token_urlsafe(32)
         with self._lock:
-            for old in self._links:
+            # Only links this method minted: the token a `blink settings`
+            # run printed is spoken for, and a press of Open settings on the
+            # board must not turn it into "replaced" (final review, page
+            # minor 8).
+            for old in [o for o in self._links if o in self._minted]:
                 self._retire_link(old, "replaced")
-            self._links = {k: self._now()}
+                del self._links[old]
+            self._minted = {k}
+            self._links[k] = self._now()
         extra = f"&panel={panel}" if panel in PANELS else ""
         return f"http://127.0.0.1:{self.port}/open?k={k}{extra}"
 

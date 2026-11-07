@@ -1334,3 +1334,26 @@ def test_done_refuses_no_origin_and_no_cookie(settings_server):
                    origin="http://evil.example")[0] == 403
     assert request(s, "POST", "/api/done")[0] == 403      # no cookie
     assert not s.done
+
+
+def test_a_new_link_does_not_retire_a_token_it_did_not_mint(server):
+    """`blink settings` prints a link built on its own token; a press of Open
+    settings on the board between the ack and the browser must not make that
+    link say 'replaced'."""
+    server.add_token("cli-token-" + "x" * 30)
+    server.new_link()
+    status, _, _ = request(server, "GET", "/open?k=cli-token-" + "x" * 30)
+    assert status == 303
+
+
+def test_a_settings_session_403_names_blink_settings(tmp_path):
+    s = theme_server.BuilderServer(str(tmp_path / ".blink"), persistent=True,
+                                   tick_s=3600)
+    s.start()
+    try:
+        status, _, body = request(s, "GET", "/open?k=made-up")
+        assert status == 403
+        assert body == b"Not allowed. Run blink settings again.\n"
+    finally:
+        s.finish("test over")
+        s.wait(5)
