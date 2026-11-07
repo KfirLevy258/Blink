@@ -2406,7 +2406,7 @@ def test_done_with_a_draft_nothing_was_saved_says_the_plain_line():
 
 # --- settings page fixes: pips on the drawing, Clear a chosen logo, scan spinner
 
-def test_the_board_drawing_has_a_running_waiting_and_stuck_pip_in_theme_colours():
+def test_the_board_drawing_has_a_running_finished_and_stuck_pip_in_theme_colours():
     r = builder_page.run("""
     await advance(10);
     const pips = () => $('scr').children.filter(n => n.className === 'pip')
@@ -2419,7 +2419,7 @@ def test_the_board_drawing_has_a_running_waiting_and_stuck_pip_in_theme_colours(
     first, second = r["first"], r["second"]
     # usage_layout.h: 8 px pips, 11 px apart from x 10, centred on y 14.
     assert [p[:3] for p in first] == [[14, 14, 4], [25, 14, 4], [36, 14, 4]]
-    assert first[1][3] == first[2][3] != first[0][3]        # waiting and stuck share red
+    assert len({p[3] for p in first}) == 3                   # green, amber, red: three tones
     assert second[0][3] != first[0][3]                      # a new theme recolours them
     assert r["legend"] is False         # no word key beside the drawing, only the pips
 
