@@ -544,7 +544,7 @@ display and board settings, and the logo.
 
 **Forget WiFi** makes the board delete the network and the key. It is on the
 page's Connect tab, and on the board itself: **Settings > Connection**, then
-the forget button on the detail screen, then **Forget** to confirm.
+**Forget WiFi**, then **Forget** to confirm.
 
 **Plugging the cable into a WiFi board.** The cable wins and the board uses
 it within seconds. Known fault: on the owner's desk the board restarted about
