@@ -804,7 +804,7 @@ const char *net_link_why_text(enum net_link_why w)
 	case NL_WHY_SCAN:
 		return "Could not scan. Try again.";
 	case NL_WHY_RADIO:
-		return "Could not start WiFi. Try again.";
+		return "Could not start WiFi"; /* a join reason: the page adds its own full stop */
 	default:
 		return "";
 	}
