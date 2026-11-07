@@ -43,12 +43,12 @@ Run after the steps above, with a board that has been given a network from
 
 | # | Do | Expect |
 |---|---|---|
-| W1 | `.\blink.exe settings`; pair the board from the page, with the cable. | The page says paired. No Windows Defender Firewall prompt appears, for the page or for the daemon's WiFi link (the daemon only connects out; nothing here listens). If one appears, write down which program and what it asked for: that is a bug. |
+| W1 | `.\blink.exe settings`; pair the board from the page, with the cable. | The page says **Connected. You can unplug the cable.** No Windows Defender Firewall prompt appears, for the page or for the daemon's WiFi link (the daemon only connects out; nothing here listens). If one appears, write down which program and what it asked for: that is a bug. |
 | W2 | Unplug the cable. Let the daemon run for a few minutes. | The panel keeps updating and shows the WiFi mark. `.\blink.exe status` says WiFi. Plug the cable in again: the board is on USB within seconds, no HOST LOST. |
-| W3 | `icacls %USERPROFILE%\.blink\private` and `icacls %USERPROFILE%\.blink\private\wifi_pair.json` | Each lists exactly one entry, the user's own. |
+| W3 | `icacls "$env:USERPROFILE\.blink\private"` and `icacls "$env:USERPROFILE\.blink\private\wifi_pair.json"` | Each lists exactly one entry, the user's own. |
 | W4 | From a second local account: `dir C:\Users\<user>\.blink\private` | `Access is denied.` |
 | W5 | In a scratch `HOME` (`set USERPROFILE=...`), pre-create `.blink\private` as that second account, then `.\blink.exe status` | The fixed refusal sentence, never a path or a key. |
-| W6 | In the settings page, Logo: upload a logo (a PNG, then a GIF) from Windows. | The page reports it sent; the board shows the logo at its next boot and Remove logo brings the default back. |
+| W6 | In the settings page, Logo: upload a logo (a PNG, then a GIF) from Windows. | The page reports it sent; the board shows the logo at its next boot and **Remove** brings the default back. |
 | W7 | `pytest tests/pc -q -k windows_real` on the machine (the Task 3.1 `windows_real` tests). | They run (not skipped) and pass. |
 
 ## Windows on Arm

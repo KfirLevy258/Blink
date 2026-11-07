@@ -9,6 +9,11 @@ import os
 
 import pytest
 
+# Playwright launches its own headless Chromium with its own profile, never the
+# owner's browser; the browser guard cannot tell the two apart (final review,
+# page minor 12), so this module says it may.
+pytestmark = pytest.mark.allow_browser
+
 pytest.importorskip("playwright.sync_api")
 pytest.importorskip("PIL")
 

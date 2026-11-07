@@ -28,6 +28,7 @@ the same session, not by a new page.
 import argparse
 import json
 import os
+import urllib.parse
 import sys
 
 STATES = ("closed", "Look", "Connect", "Board")
@@ -59,7 +60,9 @@ def main(argv=None):
 
     def only_local(route):
         u = route.request.url
-        if u.startswith(("http://127.0.0.1", "http://localhost", "file:", "data:")):
+        # The host, not a prefix: http://127.0.0.1.example.com is not loopback.
+        if u.startswith(("file:", "data:")) or \
+                urllib.parse.urlsplit(u).hostname in ("127.0.0.1", "localhost"):
             route.continue_()
         else:
             route.abort()

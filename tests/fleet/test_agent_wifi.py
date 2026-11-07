@@ -104,3 +104,27 @@ def test_wifi_scenario_forces_wifi_and_runs_the_tail_beside_the_daemon(tmp_path)
     assert wifi_pair.load(str(tmp_path / "w" / "home" / ".blink")) is None
     assert not (tmp_path / "w" / "home" / ".blink" / "private"
                 / "wifi_pair.json").exists()
+
+
+def test_a_daemon_spawn_that_raises_still_stops_the_tail(tmp_path):
+    ended = []
+
+    class Proc:
+        def poll(self): return None
+        def terminate(self): ended.append("terminate")
+        def kill(self): pass
+        def wait(self, timeout=None): return 0
+
+    calls = []
+
+    def spawn(cmd, env, cwd):
+        calls.append(cmd)
+        if len(calls) == 2:
+            raise OSError("no daemon")
+        return Proc()
+
+    deps = agent.Deps(spawn=spawn, sleep=lambda s: None, wall=lambda: 0.0)
+    with pytest.raises(OSError):
+        agent._one_pass("s", {}, tmp_path / "tap", 0, "/dev/ttyX", deps,
+                        "wifi", tail=True)
+    assert ended == ["terminate"]      # the tail, which holds the port

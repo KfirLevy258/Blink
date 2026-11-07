@@ -631,17 +631,21 @@ def _one_pass(name, env, tap, seconds, port, deps, label, tail=False):
     problems = []
     before = len(read_tap(tap))
     started = deps.wall()
-    tailer = deps.spawn(console_tail_cmd(tap, port), env, REPO_ROOT) \
-        if tail else None
-    proc = deps.spawn(daemon_cmd(port), env, REPO_ROOT)
+    tailer = proc = None
     try:
+        # Inside the try: if the daemon's spawn raises, the tailer still
+        # stops and lets go of the serial port (final review, page minor 9).
+        tailer = deps.spawn(console_tail_cmd(tap, port), env, REPO_ROOT) \
+            if tail else None
+        proc = deps.spawn(daemon_cmd(port), env, REPO_ROOT)
         deps.sleep(seconds)
         if proc.poll() is not None:
             problems.append(f"Scenario {name}: the daemon exited on its own"
                             f" during the {label} pass (status {proc.poll()});"
                             f" its output is beside the tap in {tap}.log.")
     finally:
-        problems += _stop_daemon(proc, f"{name}'s {label} daemon")
+        if proc is not None:
+            problems += _stop_daemon(proc, f"{name}'s {label} daemon")
         if tailer is not None:
             problems += _stop_daemon(tailer, f"{name}'s console tail")
 
