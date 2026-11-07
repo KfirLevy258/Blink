@@ -781,7 +781,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       <div class="tabpanel rows" role="tabpanel" id="tDevice" aria-labelledby="tDevice-t" tabindex="0">
         <div class="stack">
           <span class="label" id="devIdL">Board id</span>
-          <span class="val" id="devId" aria-labelledby="devIdL" translate="no">Not reported yet</span>
+          <span class="val" id="devId" translate="no">Not reported yet</span>
         </div>
         <div class="stack">
           <span class="label" id="brL">Brightness</span>
@@ -1799,7 +1799,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     post('/api/save', sent).then(function (j) {
       var owed = settled();
       if (j.status === 200) {
-        savedKey = JSON.stringify(sent);
+        savedKey = JSON.stringify(sent); savedHere = true;
         if (persistent) {
           // The page stays up. The server wrote its cancel with the save, so
           // what the board shows is the saved theme, and a later preview of
@@ -1855,6 +1855,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   // colours on screen and the popup offering their share code; the
   // newer tab opens on the last preview this one sent (/api/state "draft").
   var savedKey = null;
+  var savedHere = false;      // a save went through in this tab, for the Done popup's wording
   function unsaved() { return savedKey === null || JSON.stringify(wireTheme()) !== savedKey; }
   function superseded() {
     // closes: only a tab that holds nothing unsaved, which includes a tab
@@ -2014,7 +2015,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     function g(id) { return document.getElementById(id); }
     function show(id, on) { if (on) g(id).removeAttribute('hidden'); else g(id).setAttribute('hidden', ''); }
     function say(t, cls) { var m = g('c-msg'); m.textContent = t; m.className = 'msg' + (cls ? ' ' + cls : ''); }
-    function bad(on) { if (on) g('c-pwbox').setAttribute('aria-invalid', 'true'); else g('c-pwbox').removeAttribute('aria-invalid'); }
+    function bad(on) { if (on) { g('c-pwbox').setAttribute('aria-invalid', 'true'); g('c-pw').setAttribute('aria-invalid', 'true'); } else { g('c-pwbox').removeAttribute('aria-invalid'); g('c-pw').removeAttribute('aria-invalid'); } }
     // The SSID's bytes as text. Not UTF-8 shows its bytes, and controls and
     // direction overrides show as "?", so a name cannot rewrite the line.
     function name(hex) {
@@ -2507,7 +2508,6 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   byId('showSet').addEventListener('click', function () {
     st.showSettings = !st.showSettings;
     byId('showSet').setAttribute('aria-pressed', String(st.showSettings));
-    byId('showSet').textContent = st.showSettings ? 'Show the usage screen' : 'Show it on the board';
     syncScreen(); render();
   });
   // This computer.
@@ -2541,7 +2541,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       if (j.status === 409) return superseded();
       var keep = holdsDraft();
       if (retire('Done.', 'Your board keeps what it has now.', 'Done. Your board keeps what it has now.', 'ok',
-                 keep && KEEP_AFTER_SAVE, closeLine(CLOSE_AFTER_S)) && !keep) closeSoon();
+                 keep && (savedHere ? KEEP_AFTER_SAVE : KEEP_LINE), closeLine(CLOSE_AFTER_S)) && !keep) closeSoon();
     }, stopped);
   });
   // ?panel=look|connect|board: the board's "Edit on computer" and

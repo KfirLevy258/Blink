@@ -1757,11 +1757,13 @@ def test_password_field_is_mono_with_show_hide_and_not_autocompleted():
 def test_password_validation_sentences():
     r = builder_page.run(OPEN_PICKER + """
     $('c-go').click(); const a = [$('c-msg').textContent, $('c-pwbox').getAttribute('aria-invalid')];
+    const input = $('c-pw').getAttribute('aria-invalid');
     $('c-pw').value = 'short'; $('c-go').click(); const b = $('c-msg').textContent;
     $('c-pw').fire('input'); const cleared = $('c-pwbox').getAttribute('aria-invalid');
-    return { a, b, cleared, joins: requests.filter(q => q.path === '/api/wifi/join').length };
+    return { a, input, b, cleared, joins: requests.filter(q => q.path === '/api/wifi/join').length };
     """, _wifi(nets=NETS), search="?panel=connect")
     assert r["a"] == ["Enter the password for Home-2G.", "true"]
+    assert r["input"] == "true"       # the input is what a screen reader names
     assert r["b"] == "A WiFi password has at least 8 characters."
     assert r["cleared"] is None and r["joins"] == 0
 
@@ -2242,7 +2244,8 @@ def test_board_show_it_on_the_board_switches_the_preview():
     """, _live(), search="?panel=board")
     assert "Settings screen" not in r["before"]
     assert "Settings screen" in r["on"][0]
-    assert r["on"][1:] == ["Show the usage screen", "true"]
+    # One name, so a screen reader does not hear it flip under "pressed".
+    assert r["on"][1:] == ["Show it on the board", "true"]
     assert "Settings screen" not in r["off"][0] and r["off"][1] == "Show it on the board"
 
 
@@ -2355,3 +2358,13 @@ def test_a_newer_size_check_aborts_the_older_and_prefs_wait_for_a_logo_send():
     """, _live(**{"/api/logo?check=1": {"status": 200, "body": {"bytes": 2048}}}))
     assert r["aborted"] >= 2
     assert r["msg"] == "Wait for the logo to finish." and r["prefs"] == 0
+
+
+def test_done_with_a_draft_nothing_was_saved_says_the_plain_line():
+    r = builder_page.run("""
+    await advance(300);
+    pick('c-high', '#ff0000'); await advance(10);
+    $('done').click(); await advance(10);
+    return { keep: $('notice-keep-text').textContent };
+    """, _live())
+    assert r["keep"] == "Your changes here are not saved. Copy the share code to keep them."
