@@ -76,6 +76,10 @@ def run(scenario, answers=None, tmp=None, search=""):
     answers 200 {"ok": true}."""
     node = shutil.which("node")
     if node is None:
+        # CI sets BLINK_REQUIRE_NODE so a runner image that loses its node
+        # fails here instead of turning every page test into a skip.
+        if os.environ.get("BLINK_REQUIRE_NODE"):
+            pytest.fail("BLINK_REQUIRE_NODE is set and there is no node")
         pytest.skip("needs node")
     markup, script = page_parts()
     case = {"markup": markup, "script": script, "scenario": scenario,

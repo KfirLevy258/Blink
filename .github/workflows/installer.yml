@@ -88,6 +88,11 @@ jobs:
       # -rs: every skip with its reason in the log, so "needs node" or a
       # platform skip can be told apart from a test that stopped running.
       - run: python -m pytest tests/ -q -rs
+        env:
+          # Linux only: the page tests fail, not skip, when node is gone,
+          # as the mbedTLS pin below fails on a wrong hash. The other
+          # runners have not been measured with it.
+          BLINK_REQUIRE_NODE: ${{ runner.os == 'Linux' && '1' || '' }}
 
   # The Python a Mac already has. This started as a macos-13 x py3.9 entry in
   # the matrix above, which never once got scheduled across four runs -- x86
