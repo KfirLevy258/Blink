@@ -473,7 +473,7 @@ You get a confirmation on screen once the new version is up.
 ~/.blink/bin/blink status     # which versions are you on?
 ```
 
-The settings screen shows both versions, and says **App is old** when the half on your computer is the one that is behind.
+The **About** screen shows both versions, and the **Update** screen says **App is old** when the half on your computer is the one that is behind.
 
 Automatic app updates are off unless a release turns them on. To keep them off whatever a release says, `touch ~/.blink/no-auto-update`.
 

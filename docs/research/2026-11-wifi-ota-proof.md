@@ -27,11 +27,14 @@ running slot and reads it back, with no rollback.
 - **A logo over WiFi.** A GIF logo took 5.6 s, and every preference field
   applied.
 - **Charger-only desk run, 2026-11-07.** About 9.7 hours on WiFi with no
-  cable. The daemon log shows four drops, each explained (a daemon restart,
-  two Mac sleeps and a router restart, and plugging the cable in), and none
+  cable. The daemon log shows five drops, each explained (a daemon restart,
+  two Mac sleeps, a router restart, and plugging the cable in), and none
   unexplained, so no silent board reset was seen.
-- **Final image.** The final firmware was flashed and boot-verified, and the
-  stack and heap measurements were taken on it.
+- **Review-fix image.** The board runs firmware built from the review-fix
+  branch, flashed and boot-verified, and the stack and heap measurements were
+  taken on it. The firmware tree now is identical to the one at e3ddb77 except
+  for any later firmware fix, and a re-flash follows round 2, so "final" waits
+  for that.
 
 ## Not proved, still owed
 
@@ -43,8 +46,9 @@ running slot and reads it back, with no rollback.
 - **The 24 hour soak.** The desk run was stopped at about 9.7 hours, on an
   image that was not the final one. The 24 hours on the final image is still
   to do.
-- **A silent restart shorter than 35 s.** The board does not report uptime, so
-  a reboot inside the daemon's 35 s silence window would have gone unseen.
+- **A silent restart shorter than 35 s.** Every board ping carries its uptime
+  (`up_ms`), but the daemon does not log it, so a reboot inside the daemon's
+  35 s silence window would have gone unseen.
 - **A slow router.** The 90 s window was kept as it is on purpose. On a slow
   network a good update can read as failed and revert; the revert itself is
   safe.

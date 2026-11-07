@@ -128,7 +128,7 @@ The board's Settings screen has six tiles.
 
 Tap **Open on PC** on the board, or run `blink settings`, and the page opens in your browser. It has three tabs:
 
-- **Look** holds the twelve built-in themes (three of them light), the theme builder and your own logo. A custom theme is seven colours plus arc width and ends, previews on the board as you edit, and travels as a short share code. The logo takes a PNG, JPG, SVG or an animated GIF. `blink theme` opens the page on Look.
+- **Look** holds the twelve built-in themes (three of them light), the theme builder and your own logo. A custom theme is seven colours plus arc width and ends, previews on the board as you edit, and travels as a short share code. The logo takes a PNG, JPG, SVG or an animated GIF. `blink theme` opens a smaller page with the theme builder alone: colours only, no WiFi, logo or brightness controls.
 - **Connect** moves the board to WiFi.
 - **Board** holds its preferences.
 
