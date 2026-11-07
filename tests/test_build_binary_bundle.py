@@ -10,6 +10,8 @@ import re
 import stat
 import subprocess
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "tools", "build_binary.sh")
 
@@ -41,6 +43,10 @@ def _fonts_data(tmp_path, uname, with_cygpath):
                           text=True, env=env, check=True).stdout
 
 
+# Runs the case block under /bin/sh with stub commands on a ':' PATH, which a
+# Windows Python launched from PowerShell has neither of; the block itself is
+# exercised on Windows by every CI build, under Git Bash.
+@pytest.mark.skipif(os.name == "nt", reason="needs /bin/sh")
 def test_fonts_data_argument_per_platform(tmp_path):
     (tmp_path / "w").mkdir()
     assert _fonts_data(tmp_path / "w", "MINGW64_NT", True) == \
