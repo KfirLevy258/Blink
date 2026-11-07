@@ -24,6 +24,7 @@ mkdir -p "$WORK"
 CC="${CC:-cc}"
 SRC="$ROOT/firmware/src"
 failures=0
+ran=" "
 
 # name | extra sources (space separated, relative to firmware/src) | extra cflags
 run_one() {
@@ -31,6 +32,7 @@ run_one() {
 	extra=$2
 	cflags=$3
 	src="$ROOT/tests/$name/host_test.c"
+	ran="$ran$name "
 
 	if [ ! -f "$src" ]; then
 		echo "MISSING: tests/$name/host_test.c" >&2
@@ -200,7 +202,23 @@ elif [ "${BLINK_REQUIRE_MBEDTLS:-}" = 1 ]; then
 	failures=$((failures + 1))
 else
 	echo "  SKIP wl_crypto_real, wl_wire_real (no mbedTLS source; set BLINK_MBEDTLS_SRC)"
+	ran="${ran}wl_crypto_real wl_wire_real "
 fi
+
+# A suite with no row above is a suite CI never runs, and the table is
+# explicit on purpose (see the top), so it cannot find a new one by itself.
+# The WiFi branch added thirteen; each was listed by hand, and this makes
+# forgetting the next one a failure rather than a silence.
+for f in "$ROOT"/tests/*/host_test.c; do
+	name=$(basename "$(dirname "$f")")
+	case $ran in
+	*" $name "*) ;;
+	*)
+		printf '  %-14s NOT IN check_host_tests.sh\n' "$name"
+		failures=$((failures + 1))
+		;;
+	esac
+done
 
 if [ "$failures" -ne 0 ]; then
 	printf '\n%d host test(s) failed\n' "$failures" >&2
