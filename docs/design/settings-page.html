@@ -905,14 +905,16 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     chevrons(g, dim);
   }
   // The board's own Settings screen (ui_settings.c): back button, title,
-  // a rule at y 40, four 144 x 71 tiles two by two from (12, 46), and the
-  // two-line footer. The Theme tile is replaced by Open on PC.
+  // a rule at y 40 and six 94 x 91 tiles (gap 7) from (12, 46), three
+  // across (2026-11-07: it was four 144 x 71 tiles and a two-line footer).
   function icon(g, kind, cx, cy, c) {
     var s = { fill: 'none', stroke: '#' + c, 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
     function P(d) { g.appendChild(el('path', Object.assign({ d: d }, s))); }
     if (kind === 'sun') { g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 4.5 }, s))); for (var i = 0; i < 8; i++) { var a = i * Math.PI / 4; P('M' + (cx + 7.5 * Math.cos(a)).toFixed(1) + ' ' + (cy + 7.5 * Math.sin(a)).toFixed(1) + ' L' + (cx + 10 * Math.cos(a)).toFixed(1) + ' ' + (cy + 10 * Math.sin(a)).toFixed(1)); } }
     if (kind === 'open') { P('M' + (cx - 10) + ' ' + (cy + 6) + ' h20 M' + (cx - 8) + ' ' + (cy + 4) + ' v-11 h16 v11'); P('M' + (cx - 2) + ' ' + (cy + 1) + ' l5 -5 M' + (cx - .5) + ' ' + (cy - 4) + ' h3.5 v3.5'); }
     if (kind === 'focus') { g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 9 }, s))); g.appendChild(el('circle', { cx: cx, cy: cy, r: 3.5, fill: '#' + c })); }
+    if (kind === 'info') { g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 9 }, s))); P('M' + cx + ' ' + (cy - 5) + ' v.1 M' + cx + ' ' + (cy - 1.5) + ' v6'); }
+    if (kind === 'link') { P('M' + (cx - 1) + ' ' + (cy + 3) + ' l4 -4 a3.5 3.5 0 0 1 5 5 l-3 3 a3.5 3.5 0 0 1 -5 0'); P('M' + (cx + 1) + ' ' + (cy - 3) + ' l-4 4 a3.5 3.5 0 0 1 -5 -5 l3 -3 a3.5 3.5 0 0 1 5 0'); }
     if (kind === 'update') { P('M' + (cx + 8) + ' ' + (cy - 2) + ' A8.5 8.5 0 1 0 ' + (cx + 7) + ' ' + (cy + 5)); P('M' + (cx + 9) + ' ' + (cy - 8) + ' V' + (cy - 2) + ' H' + (cx + 3)); }
   }
   function drawSettings(g, dim) {
@@ -921,15 +923,13 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     g.appendChild(el('path', { d: 'M39 14 L33 20 L39 26', fill: 'none', stroke: '#' + st.text, 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
     txt(g, 160, 26, 14, st.text, 'Settings', { 'font-weight': 600 });
     g.appendChild(el('rect', { x: 0, y: 40, width: 320, height: 1, fill: '#' + line }));
-    [['sun', 'Brightness', st.bright + '%'], ['open', 'Open on PC', 'On your computer'], ['focus', 'Focus', { two: 'Off', burn: 'Off', session: 'Session', weekly: 'Weekly' }[st.vw]], ['update', 'Update', 'Up to date']].forEach(function (t, k) {
-      var x = 12 + (k % 2) * 152, y = 46 + Math.floor(k / 2) * 79, hi = k === 1;
-      g.appendChild(el('rect', { x: x + .5, y: y + .5, width: 143, height: 70, rx: 8, fill: '#' + card, stroke: '#' + (hi ? st.g1 : line), 'stroke-width': hi ? 1.5 : 1 }));
-      icon(g, t[0], x + 72, y + 16, hi ? st.g1 : st.text);
-      txt(g, x + 72, y + 45, 13, st.text, t[1], { 'font-weight': 500 });
-      txt(g, x + 72, y + 63, 11.5, dim, t[2]);
+    [['sun', 'Brightness', st.bright + '%'], ['open', 'Open on PC', 'In browser'], ['focus', 'Focus', { two: 'Off', burn: 'Off', session: 'Session', weekly: 'Weekly' }[st.vw]], ['update', 'Update', 'Up to date'], ['link', 'Connection', 'USB'], ['info', 'About', '1.4.1']].forEach(function (t, k) {
+      var x = 12 + (k % 3) * 101, y = 46 + Math.floor(k / 3) * 98, hi = k === 1;
+      g.appendChild(el('rect', { x: x + .5, y: y + .5, width: 93, height: 90, rx: 8, fill: '#' + card, stroke: '#' + (hi ? st.g1 : line), 'stroke-width': hi ? 1.5 : 1 }));
+      icon(g, t[0], x + 47, y + 24, hi ? st.g1 : st.text);
+      txt(g, x + 47, y + 55, 13, st.text, t[1], { 'font-weight': 500 });
+      txt(g, x + 47, y + 75, 11.5, dim, t[2]);
     });
-    txt(g, 160, 216, 12, dim, 'Blink 1.4.1  |  App 1.4.1');
-    txt(g, 160, 234, 12, dim, 'Keep the cable connected');
   }
   // The start-up screen: the company logo (logo_parse.h: one 320 x 240
   // frame, centred and fitted, on its background colour), or without one,
@@ -969,7 +969,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       title = st.logo ? 'Board preview: start-up screen with your logo.' : 'Board preview: start-up screen, no logo yet.';
     } else if (st.screen === 'settings') {
       drawSettings(g, dim);
-      title = "Board preview: the board's Settings screen, with Brightness, Open on PC, Focus and Update.";
+      title = "Board preview: the board's Settings screen, with Brightness, Open on PC, Focus, Update, Connection and About.";
     } else {
       drawMain(g, dim, track, pill);
       title = st.vw === 'burn' ? 'Board preview: burn view, ' + fmtTok(BURN.reduce(function (a, b) { return a + b; }, 0)) + ' tokens in five hours, rising; weekly ' + wordPct(st.p2) + '.'

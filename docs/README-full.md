@@ -394,12 +394,15 @@ Codex one.
 
 Any board can show a logo, set without opening the case: the settings page's
 **Look > Logo** tab takes a picture or an animation and sends it to the board
-over the cable or WiFi, with a preview of how it will sit (Fill, Large, With
-margin or Auto) and **Replace** and **Clear** for the one already there.
+over the cable or WiFi, with a preview of how it will sit (Fill, Large or
+With margin) on a background colour you pick, or **Auto** to take it from the
+picture's corner. **Replace** and **Clear** work on the file you picked:
+**Clear** drops that choice and never talks to the board. A logo already on
+the board is taken off with **Remove**, which asks first.
 
 | Format | Limits |
 |---|---|
-| PNG, JPG, SVG | A still, shown for 3 s; the file up to 2 MB |
+| PNG, JPG, SVG | A still, shown for 3, 5 or 10 s (3 s by default); the file up to 20 MB, since the page redraws it to 320x240 before sending |
 | GIF (animated) | The file up to 2 MB, up to 180 frames, 15 s long and 2048 px on a side |
 
 Whatever the format, the encoded logo has to fit the board's 512 KB logo
@@ -456,7 +459,10 @@ Blink is two halves that ship as one release: the firmware on the board, and the
 
 Blink checks for a new release as soon as it starts up, and if it finds one it asks you - **Update now** or **Later** - right on the gauge screen. One tap installs both halves. If the release also carries a newer app, the screen says so, and that half goes first: the new app is what knows how to drive the new firmware.
 
-The board never downloads anything, so the app does the work. It downloads the release, checks it against the hash the release publishes, and writes it over whichever link the board is on, the cable or the encrypted WiFi link - then reads it back off the chip to confirm what landed there. The screen goes dark for about four minutes while that happens; it tells you first, and comes back on the new version. Because this route writes the running slot directly it has no automatic rollback, which is a fair trade when the machine that can reflash it is the one already plugged in.
+The board never downloads anything, so the app does the work. It downloads the release and checks it against the hash the release publishes. What happens next depends on the link the board is on.
+
+- **Cable.** The app writes the image over USB straight into the running slot, then reads it back off the chip to confirm what landed there. The screen goes dark for about four minutes while that happens; it tells you first, and comes back on the new version. Because this route writes the running slot directly it has no automatic rollback, which is a fair trade when the machine that can reflash it is the one already plugged in.
+- **Encrypted WiFi.** The app sends the image over the link and the board writes it to the spare slot, checks the hash itself and asks the bootloader to test-boot it. The new version must confirm it is healthy within 90 seconds; if it does not, MCUboot reverts to the version that was running. There is no read-back over WiFi. The four-minute figure above was measured for the cable route only. See `docs/research/2026-11-wifi-ota-proof.md` for what has been proved on a board and what is still owed.
 
 You get a confirmation on screen once the new version is up.
 
@@ -657,14 +663,14 @@ theme.
 <img src="img/settings-page.png" alt="The settings page: the board drawn in the middle, linked to this computer by USB cable, with WiFi not set up, and Look, Connect and Board tabs under it.">
 
 The page has three tabs: **Look** (themes, the theme builder and the logo),
-**Connect** (WiFi) and **Board** (brightness, Focus and the screen shown).
+**Connect** (WiFi) and **Board** (board id, brightness, firmware, the screen shown, WiFi details and the computer-side settings). Focus and the main screen are under **Look > Customise > Screen**.
 
 <img src="img/settings-page-look.png" alt="The Look tab: twelve built-in themes on the left, the board preview in the middle, colour pickers and arc settings on the right.">
 
 ### Making a theme on your computer
 
 On the board, **Settings > Open on PC** opens the settings page in your
-computer's browser; its **Themes** tab is the theme builder. While the page
+computer's browser; its **Look** tab holds the built-in themes (**Look > Themes**) and the theme builder (**Look > Customise**). While the page
 is open the tile reads **Editing on your computer**, dimmed, and does nothing
 when pressed, so one page stays in one tab; it reads **Open on PC** again,
 ready to press, a moment after the page closes (about 2 s after its tab

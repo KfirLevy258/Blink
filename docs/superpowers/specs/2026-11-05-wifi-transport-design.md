@@ -16,6 +16,8 @@ The implementation plan that goes with it is
 
 ---
 
+> Renamed 2026-11-07: the board's tile is **Open on PC**, not "Open settings". The decisions below keep the name they were made under; read "Open settings" as "Open on PC" (the install hint in `pc/cli.py` says "press Open on PC on the board").
+
 ## 1. Who decided what
 
 Each decision below carries a tag. **Owner** means the owner said it.

@@ -207,7 +207,7 @@ for BLINK_TAP and `console_tail` alike, so a line is a constant, a bare tag or
 ## Hardware
 
 **Zephyr 4.3.x, SDK 0.17.4 — not 4.4.0**, which cannot build this firmware:
-its mbedTLS 4.x dropped `mbedtls/sha256.h` (`src/ota.c`) and its LVGL moved
+its mbedTLS 4.x dropped `mbedtls/sha256.h` (`src/proto.c`, `src/wl_crypto_mbedtls.c`) and its LVGL moved
 `gesture_limit` out of the public headers (`src/ui_settings.c`). The scripts
 locate the workspace via `tools/lib_zephyr.sh`; `BLINK_ZEPHYR` overrides.
 

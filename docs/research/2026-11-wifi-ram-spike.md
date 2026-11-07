@@ -353,7 +353,7 @@ here holds a network name, an address or a key.
 Observations:
 - The first connect after a daemon start or a reboot sometimes logs
   `handshake refused` or `board not found` once, and succeeds 5 to 9 s later.
-- The brief's own `session_touch.txt` clicks "Open settings", which asks the
+- The brief's own `session_touch.txt` clicks "Open settings" (renamed Open on PC since; the script now clicks that), which asks the
   real daemon for the theme builder. Run once without the opener patched, that
   would open a browser tab on the owner's Mac; every later run used the daemon
   with `pc.theme_server.open_url` replaced by a no-op (a scratch wrapper).

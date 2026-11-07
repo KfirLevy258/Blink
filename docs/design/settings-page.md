@@ -380,6 +380,7 @@ marks a capability the board or app does not have yet.
 - **Settings screen** (`ui_settings.c`): Back, "Settings", four 144×71
   tiles (Brightness, **Open on PC / On your computer**, Focus, Update),
   and the footer "Blink 1.4.1 | App 1.4.1" / "Keep the cable connected".
+  *Superseded 2026-11-07, see section 9: six tiles now.*
 - **Start-up screen:** the logo fitted on its background, or the BLINK mark
   with "No logo yet".
 
@@ -434,7 +435,7 @@ marks a capability the board or app does not have yet.
   automatic on the board.
 - **"New" items need firmware or daemon work first:**
   - sending a logo over USB (today the logo is factory-only, esptool);
-  - the board's Open on PC tile;
+  - the board's Open on PC tile (shipped, 2026-11-07);
   - the doze switch;
   - usage refresh, until feat/usage-refresh ships.
 - **Google Fonts:** the mock loads them. The shipped page must not.
@@ -474,3 +475,11 @@ differ from the sections above, they win.
    colour, stale the theme's stale colour, error the theme's high (COL_RED),
    no link or no data the theme's grey (COL_GREY). The glyph is WiFi on a WiFi
    link and USB otherwise, unpaired included.
+5. **The board's Settings screen has six tiles.** Section 4 above describes
+   the first build, four 144x71 tiles and a footer. It is now six 94x91 tiles,
+   three across and two down, from (12, 46) with a gap of 7: Brightness, Open
+   on PC, Focus, Update, Connection and About. Open on PC rests at "In
+   browser" (not "On your computer") and reads "Editing on your computer"
+   while the page is open. The footer is gone: the versions are on About, and
+   the "Keep the cable connected" line is on the download screen. The mock's
+   drawn Settings screen follows the same layout.
