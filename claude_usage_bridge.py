@@ -978,6 +978,17 @@ class LinkChooser:
         return bool(candidates())
 
 
+def _ota_ended(ota_hold, ota_after):
+    """One bridge.log line for a WiFi OTA whose session ended. The drop used
+    to surface only as "link lost", so the file customers send could not say
+    whether the image was cut or sealed. ota_hold is set while a stream is
+    live; ota_after is Bridge.ota_sealing() as of the last pass."""
+    if ota_hold is None:
+        return
+    print("[bridge] ota: sent; waiting for the board to restart" if ota_after
+          else "[bridge] ota: FAILED: connection lost", file=sys.stderr)
+
+
 def wait_for_link(explicit=None, poll_s=3.0, on_wait=None, home=None,
                   force_wifi=False, connect=wifi_link.connect,
                   autodetect=autodetect_port, clock=time.monotonic,
@@ -1466,6 +1477,10 @@ def main(argv=None):
                 pass
 
     def choose(after_ota=False):
+        # Every road to here is a link lost or none yet. Fail the settings
+        # page's waiting ops now and drop the link state it would report
+        # (BoardOps.link_down); the next Bridge brings the link back.
+        board_ops.link_down()
         # Lambdas, not the functions, so a test that replaces
         # candidate_ports or usb_topology on this module is heard.
         return wait_for_link(
@@ -1606,7 +1621,10 @@ def main(argv=None):
                     target.close()
                 except Exception:
                     pass
-                print("[wifi] link lost", file=sys.stderr)
+                # The class names the cause (a bug, a refused frame, a
+                # network drop) without its text, which could hold wire bytes.
+                print(f"[wifi] link lost ({type(e).__name__})", file=sys.stderr)
+                _ota_ended(ota_hold, ota_after)
                 link_state.wifi_dropped(time.monotonic())
                 via, target = choose()
                 continue
@@ -1690,7 +1708,7 @@ def main(argv=None):
                           file=sys.stderr)
             # edit_state is a once-a-minute restatement (pc/bridge.py,
             # _restate_edit), like pong a line that says nothing new.
-            elif kind not in ("ota_data", "pong", "edit_state"):
+            elif kind not in ("ota_data", "pong", "edit_state", "logo_chunk"):
                 print(f"[bridge] -> {protocol.log_name(m)}", file=sys.stderr)
             # encode_CHECKED. This is the only writer, and it used to call
             # plain encode() -- so protocol.encode_checked, written precisely
@@ -1887,6 +1905,8 @@ def main(argv=None):
                         # placeholder, because t is off the wire too.
                         if msg.get("t") == "ping":
                             heartbeat.beat()
+                        elif msg.get("t") == "logo_ack" and "err" not in msg:
+                            pass    # one per chunk, ~2000 for a big logo
                         else:
                             print(f"[bridge] <- {protocol.log_name(msg)}",
                                   file=sys.stderr)
@@ -1987,6 +2007,7 @@ def main(argv=None):
         except LeaveWifi:
             # Before choose(), which can block: a hold left on would make a
             # stop wait for a stream that is already dead.
+            _ota_ended(ota_hold, ota_after)
             ota_hold, ota_after = _release(ota_hold), False
             ser.close()
             link_state.wifi_dropped(time.monotonic())
@@ -2008,9 +2029,10 @@ def main(argv=None):
             via, target = choose()
             continue
         except (serial.SerialException, OSError) as e:
+            _ota_ended(ota_hold, ota_after)
             ota_hold = _release(ota_hold)     # as at LeaveWifi
             if via == "wifi":
-                print("[wifi] link lost", file=sys.stderr)
+                print(f"[wifi] link lost ({type(e).__name__})", file=sys.stderr)
                 link_state.wifi_dropped(time.monotonic())
             else:
                 print(f"[bridge] serial lost: {e}; looking for the board on"

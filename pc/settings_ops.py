@@ -36,11 +36,31 @@ class BoardOps:
         self._lock = threading.Lock()
         self._state = {}
         self._dev = {}
+        self._down = False
+        self._live = set()          # ops queued or in flight, for link_down
 
     # --- called from the serial loop (Bridge) ---
     def clear(self):
+        """A new Bridge means a link again (and nothing known about it)."""
         with self._lock:
             self._state, self._dev = {}, {}
+            self._down = False
+
+    def link_down(self):
+        """The link is gone, or there is none yet. Forget what the board last
+        said, so /api/wifi stops reporting a live link, and fail every op
+        waiting on it now: its Bridge is thrown away with the op unanswered,
+        and the page would otherwise wait out 300 s for a logo and then blame
+        the board (PR 9 review). Called from the daemon's loop."""
+        with self._lock:
+            self._state, self._dev = {}, {}
+            self._down = True
+            live, self._live = list(self._live), set()
+        for op in live:
+            op.abandoned = True     # a later Bridge must not start it
+            op.args = None
+            op.error = "The connection to the board dropped. Try again."
+            op.done.set()
 
     def note_state(self, msg):
         with self._lock:
@@ -54,8 +74,16 @@ class BoardOps:
 
     # --- called from page threads ---
     def _run(self, op, timeout_s):
+        with self._lock:
+            if self._down:
+                raise BoardOpError("The board is not connected. Plug it in,"
+                                   " or wait for its WiFi link.")
+            self._live.add(op)
         self.queue.put(op)
-        if not op.done.wait(timeout_s):
+        finished = op.done.wait(timeout_s)
+        with self._lock:
+            self._live.discard(op)
+        if not finished:
             op.abandoned = True
             raise BoardOpError("The board did not answer.")
         if op.error:

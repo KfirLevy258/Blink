@@ -1160,6 +1160,15 @@ class Bridge:
             if st == "off":
                 wifi_pair.remove(self._home)
                 self._finish(op, result=dict(self._ops.state()))
+            elif st == "fail":
+                # cfg_clear_pairing failed on the board: its sector may still
+                # hold the password and key. Say so now rather than let the
+                # page time out and blame a silent board. The PC pairing
+                # stays: the board may still hold the matching key.
+                print("[wifi] the board could not erase its WiFi settings",
+                      file=sys.stderr)
+                self._finish(op, error=(
+                    "The board could not erase its WiFi settings. Try again."))
             return
         j = self._join
         if j is not None and self._now() >= j["until"]:
@@ -1213,6 +1222,7 @@ class Bridge:
             except (OSError, ValueError, TypeError):
                 err = "Could not save the pairing."
         if err:
+            print("[wifi] could not save the pairing", file=sys.stderr)
             if op is not None:
                 op.args = None
                 op.result, op.error = None, err
@@ -1227,7 +1237,12 @@ class Bridge:
                 self._verify(ip, port, key)
                 steps = j["steps"] + ["proved", "encrypted"]
                 res = {"state": state, "steps": steps}
-            except Exception:
+            except Exception as e:
+                # Any failure, not only OSError: this thread has no one to
+                # re-raise to, and an op left unanswered costs the page 30 s.
+                # The class only; an OSError's text can carry the address.
+                print("[wifi] the board joined but did not answer over WiFi"
+                      f" ({type(e).__name__})", file=sys.stderr)
                 res = {"state": state, "steps": j["steps"], "problem": (
                     "The board joined, but this computer could not reach it"
                     " over WiFi.")}

@@ -1,0 +1,136 @@
+"""PR #9 review fixes in the daemon: ops that must not hang, a forget that
+fails loudly, and the pairing-removal rule's other cases."""
+import queue
+import threading
+import time
+
+import pytest
+
+from pc import protocol, settings_ops, wifi_pair
+from pc.bridge import Bridge
+from tests.pc.test_wifi_bridge import (
+    PW, call, kid_of, make, pump_until, start_join, up)
+
+OFF = {"t": "wifi_state", "v": 1, "st": "off", "link": "usb"}
+
+
+# --- 1. forget: the board's "fail" ends it, with the reason ---
+
+def test_forget_fail_tells_the_page_and_keeps_the_pairing(tmp_path, capsys):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    wifi_pair.save(home, "abcd", b"k" * 32, "10.0.0.5", 49731)
+    t, box = call(ops.forget, 5.0)
+    pump_until(b, lambda: sent)
+    t0 = time.monotonic()
+    b.on_message({"t": "wifi_state", "v": 1, "st": "fail", "link": "usb",
+                  "why": "forget"})
+    t.join(3)
+    assert time.monotonic() - t0 < 2
+    assert isinstance(box["e"], settings_ops.BoardOpError)
+    assert "could not erase" in str(box["e"])
+    assert wifi_pair.load(home) is not None
+    err = capsys.readouterr().err
+    assert "[wifi] the board could not erase its WiFi settings" in err
+    assert "10.0.0.5" not in err
+
+
+# --- 2 and 3. a lost link fails ops now and clears the link state ---
+
+def test_link_down_fails_the_op_in_flight_at_once(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path, caps=("wifi", "logo"))
+    t, box = call(ops.logo, b"x" * 10, 300.0)
+    pump_until(b, lambda: b._op is not None)
+    t0 = time.monotonic()
+    ops.link_down()
+    t.join(3)
+    assert not t.is_alive() and time.monotonic() - t0 < 2
+    assert "dropped" in str(box["e"])
+
+
+def test_link_down_fails_a_queued_op_and_the_next_bridge_skips_it(tmp_path):
+    ops = settings_ops.BoardOps(queue.SimpleQueue())
+    t, box = call(ops.forget, 300.0)
+    time.sleep(0.05)
+    ops.link_down()
+    t.join(3)
+    assert isinstance(box["e"], settings_ops.BoardOpError)
+    assert ops.queue.get_nowait().abandoned    # a later Bridge drops it
+
+
+def test_an_op_with_no_link_fails_without_waiting():
+    ops = settings_ops.BoardOps(queue.SimpleQueue())
+    ops.link_down()
+    t0 = time.monotonic()
+    with pytest.raises(settings_ops.BoardOpError) as e:
+        ops.scan(300.0)
+    assert time.monotonic() - t0 < 1 and ops.queue.empty()
+    assert "not connected" in str(e.value)
+
+
+def test_a_new_bridge_means_a_link_again(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    ops.link_down()
+    Bridge(write_msg=lambda m: None, fetch_usage=lambda: None,
+           board_ops=ops, home=home, fetch_manifest=lambda: None,
+           fetch_signed_manifest=lambda: None)
+    t, box = call(ops.scan, 0.2)
+    t.join(3)
+    assert "did not answer" in str(box["e"])    # it waited: the link is up
+
+
+def test_link_down_clears_what_the_page_reports(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    b.on_message({"t": "wifi_state", "v": 1, "st": "up", "link": "wifi",
+                  "s": "x"})
+    ops.note_device(fw="1.5.0")
+    assert ops.state()["link"] == "wifi"
+    ops.link_down()
+    assert ops.state() == {"usb": False} and ops.device() == {"link": None}
+
+
+# --- pairing removal: the two cases the suite lacked ---
+
+def test_same_board_off_with_no_kid_removes_the_pairing(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    wifi_pair.save(home, "abcd", b"k" * 32, "10.0.0.5", 49731)
+    b.on_message(OFF)
+    assert wifi_pair.load(home) is None
+
+
+@pytest.mark.parametrize("st", ["fail", "joining", "idle"])
+def test_same_board_other_state_with_no_kid_keeps_the_pairing(tmp_path, st):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    wifi_pair.save(home, "abcd", b"k" * 32, "10.0.0.5", 49731)
+    b.on_message({"t": "wifi_state", "v": 1, "st": st, "link": "usb"})
+    assert wifi_pair.load(home) is not None
+
+
+# --- 6. save and verify failures reach bridge.log ---
+
+def test_a_late_save_failure_is_logged(tmp_path, monkeypatch, capsys):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    t, box = start_join(b, sent, ops, timeout=0.2)
+    t.join(3)                                    # the page gave up
+    b.pump()
+
+    def boom(*a):
+        raise OSError("disk")
+    monkeypatch.setattr(wifi_pair, "save", boom)
+    b.on_message(up(kid_of(sent)))
+    err = capsys.readouterr().err
+    assert "[wifi] could not save the pairing" in err and "disk" not in err
+
+
+def test_a_failed_verify_is_logged_by_class_only(tmp_path, capsys):
+    def bad():
+        raise OSError("10.0.0.5 refused")
+    b, ops, sent, home, verified, th = make(tmp_path, verify=bad)
+    t, box = start_join(b, sent, ops)
+    b.on_message(up(kid_of(sent)))
+    t.join(3)
+    for x in th:
+        x.join(3)
+    err = capsys.readouterr().err
+    assert "did not answer over WiFi (OSError)" in err
+    assert "10.0.0.5" not in err
+    assert "could not reach it" in box["r"]["problem"]

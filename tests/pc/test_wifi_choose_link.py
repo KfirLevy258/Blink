@@ -493,7 +493,9 @@ def test_a_session_error_on_the_first_write_is_a_dropped_link(tmp_path, fake_boa
     finally:
         log = d.stop()
     assert d.proc.returncode == 0, log
-    assert "[wifi] link lost" in log and "Traceback" not in log
+    # The class, so a programming bug is not hidden behind the same sentence
+    # as a router going away; never the text, which could hold wire bytes.
+    assert "[wifi] link lost (SessionError)" in log and "Traceback" not in log
 
 
 @posix
