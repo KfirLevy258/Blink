@@ -124,3 +124,12 @@ def test_uninstall_finishes_when_the_pairing_will_not_go(tmp_path, capsys,
     assert not os.path.exists(cli.bin_dir()), "uninstall stopped early"
     assert "pairing" in out.err and wifi_pair.pair_path(home) not in (
         out.out + out.err)
+
+
+def test_load_on_an_unopenable_folder_is_unpaired_not_a_crash(tmp_path, monkeypatch):
+    from pc import private_file
+
+    def deny(*a):
+        raise PermissionError()
+    monkeypatch.setattr(private_file, "open_private", deny)
+    assert wifi_pair.load(str(tmp_path)) is None

@@ -2,6 +2,7 @@
 import gc
 import os
 import queue
+import types
 import threading
 import time
 
@@ -415,3 +416,13 @@ def test_the_boards_pref_is_published_for_the_pages_first_paint(tmp_path):
     b.on_message({"t": "pref", "v": 1, "provider": "claude", "focus": 0,
                   "bright": 20, "view": 0, "ok": 0})
     assert ops.device()["pref"]["bright"] == 60
+
+
+def test_a_logo_is_refused_while_an_ota_is_streaming(tmp_path):
+    b, ops, sent, *_ = make(tmp_path, caps=("logo",))
+    b._ota_stream = types.SimpleNamespace(
+        end_sent=False, went_quiet=False, pump=lambda *a: None, done=lambda: None)
+    t, box = call(ops.logo, bytes(range(256)) * 3)
+    pump_until(b, lambda: not t.is_alive())
+    assert isinstance(box.get("e"), settings_ops.BoardOpError)
+    assert not any(m["t"] == "logo_begin" for m in sent)

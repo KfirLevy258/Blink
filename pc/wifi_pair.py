@@ -85,6 +85,14 @@ def load(home: str) -> dict | None:
             print("[wifi] the pairing file is not owner-only, so the board"
                   " is treated as unpaired", file=sys.stderr)
         return None
+    except OSError:
+        # An unwritable ~/.blink (left root-owned by a sudo run): unpaired,
+        # not a crash loop. Said once, like the case above.
+        if not _said_not_private:
+            _said_not_private = True
+            print("[wifi] the pairing file cannot be read, so the board"
+                  " is treated as unpaired", file=sys.stderr)
+        return None
     if raw is None:
         return None
     try:

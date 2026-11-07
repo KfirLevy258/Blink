@@ -1613,3 +1613,8 @@ def test_wifi_set_refuses_a_non_ascii_password_without_quoting_it():
     assert e.value.__cause__ is None and e.value.__context__ is None
     assert str(e.value) == "the WiFi password must be ASCII"
     assert "\u00e4" not in repr(e.value) and "\u00f6" not in repr(e.value)
+
+
+def test_the_tap_keeps_every_ota_ack_error_word():
+    for word in ("", "unconfirmed", "refused", "failed"):
+        assert protocol.redact({"t": "ota_ack", "err": word})["err"] == word

@@ -722,6 +722,9 @@ class Bridge:
         """
         if self._ota_stream is not None:
             return              # a second tap while the image is on its way
+        if self._logo is not None:
+            self._write(protocol.ota_error("a logo is being sent"))
+            return
         if self._manifest and self._app_update and self._self_update:
             version, artifact = self._app_update
             self._app_update = None
@@ -984,6 +987,10 @@ class Bridge:
                 " first."))
         if self._logo is not None:
             return self._finish(op, error="A logo is already being sent.")
+        if self.ota_streaming():
+            # Two flash writers on one WiFi session, on the board's tightest
+            # heap (final review, daemon minor 4).
+            return self._finish(op, error="An update is being installed.")
         if op.kind == "logo_remove":
             self._op = op
             self._write(protocol.logo_remove())

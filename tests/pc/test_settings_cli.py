@@ -258,3 +258,17 @@ def test_pickup_hands_the_request_to_the_launcher_and_logs_failure():
     assert "request served" in log.getvalue()
     assert "request failed" in log.getvalue()
     assert tok not in log.getvalue()
+
+
+def test_a_refused_request_folder_is_said_once_per_process(monkeypatch):
+    import claude_usage_bridge as b
+    import io
+
+    def refuse(*a):
+        raise private_file.NotPrivate("x")
+    monkeypatch.setattr(b.settings_request, "take_request", refuse)
+    monkeypatch.setattr(b, "_said_request_refused", False)
+    log = io.StringIO()
+    for _ in range(5):
+        b.settings_pickup(home(), None, log)
+    assert log.getvalue().count("refused") == 1

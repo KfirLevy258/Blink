@@ -267,7 +267,7 @@ TAP_ENUMS = {
         "", "Wrong WiFi password", "Network not found",
         "No address from the router", "WPA3-only networks are not supported",
         "WiFi self-test failed", "Could not forget WiFi. Try again."}),
-    "err": frozenset({"", "unconfirmed"}),
+    "err": frozenset({"", "unconfirmed", "refused", "failed"}),
 }
 # Fields that are numbers on the wire (spec S6.1, S7.5). Review of Task 0.1:
 # redact() kept any string of 64 characters or fewer in them, so a board

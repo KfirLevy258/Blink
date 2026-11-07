@@ -27,13 +27,14 @@ KEY = bytes(range(32))
 class Clock:
     def __init__(self):
         self.t = 0.0
+        self.limit = 400
 
     def __call__(self):
         return self.t
 
     def sleep(self, d):
         self.t += d
-        if self.t > 400:
+        if self.t > self.limit:
             raise RuntimeError("the test clock ran away")
 
 
@@ -544,3 +545,15 @@ def test_learn_board_over_wifi_keeps_the_port_only_for_the_same_board(
         d.stop()
     rec = d.board()
     assert rec["port"] == ("/dev/known" if same else None)
+
+
+def test_a_second_ota_in_one_process_polls_every_5s_again():
+    c, ch = Clock(), bridge.LinkChooser()
+    choose(c, after_ota=True, chooser=ch, connect=lambda h: ("L", "connected"))
+    c.t += 700                      # the first 600 s window is long over
+    c.limit = c.t + 400
+    times = []
+    choose(c, after_ota=True, chooser=ch,
+           connect=lambda h: (times.append(c.t) or (("L", "connected") if len(times) == 4
+                                                    else (None, "not found"))))
+    assert [b - a for a, b in zip(times, times[1:])] == [5, 5, 5]

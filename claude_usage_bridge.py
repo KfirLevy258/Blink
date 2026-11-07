@@ -26,6 +26,9 @@ from pc import (ingest, install_statusline, interval, logbook, protocol,
 from pc.version import RELEASE_VERSION
 from pc.bridge import Bridge
 
+_said_request_refused = False
+
+
 def settings_pickup(home, launcher, log=None):
     """`blink settings` (D37), called from _upkeep. The page server starts on
     its own thread so a slow start never holds the serial loop; the opener is
@@ -34,7 +37,12 @@ def settings_pickup(home, launcher, log=None):
     try:
         req = settings_request.take_request(home)
     except (OSError, private_file.NotPrivate):
-        print("[settings] request file refused", file=log)
+        # This runs on every serial-loop pass (about 5 a second): once is
+        # enough for a customer's log, the way wifi_pair.load says its own.
+        global _said_request_refused
+        if not _said_request_refused:
+            _said_request_refused = True
+            print("[settings] request file refused", file=log)
         return None
     if req is None:
         return None
@@ -773,7 +781,7 @@ def wait_for_link(explicit=None, poll_s=3.0, on_wait=None, home=None,
     """
     ch = chooser or LinkChooser()
     announced = False
-    if after_ota and ch.ota_until is None:
+    if after_ota:           # every OTA, not just the first of the process
         ch.ota_until = clock() + ch.OTA_WINDOW_S
         ch.wifi_due = clock()
     while True:
