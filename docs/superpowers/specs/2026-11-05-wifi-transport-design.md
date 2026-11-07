@@ -1239,7 +1239,7 @@ repository sets every sysbuild Kconfig symbol
 documents for the self-test knob; a bare `-DBLINK_TEST_...=1` is a CMake
 variable that reaches no `CONFIG_` symbol), guarded in C with
 `IS_ENABLED(CONFIG_...)`, and each prints a fixed `[test] <knob>` boot line
-so the binary carries a marker the guard can grep for. Before every trial
+so the binary carries a marker the guard can grep for. `tools/burn.sh` refuses such a build too (it signs confirmed, so there is no revert), unless `BLINK_BENCH_KNOBS=1` is set. Before every trial
 the `.config` is grepped for the symbol and the console for the marker. The cache-call-path review is a step with a command and a pass
 criterion in the plan (Task 5.5), not a sentence. The deleted mode's
 download did write slot 1 while receiving over WiFi (ota.c records a 416 s

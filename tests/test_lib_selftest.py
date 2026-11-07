@@ -132,6 +132,27 @@ def test_burn_sh_checks_before_it_signs_or_flashes():
     assert guard < sign and guard < flash
 
 
+def test_burn_sh_refuses_test_knobs_and_standalone_net_unless_told():
+    """burn.sh signs the image confirmed, so a knob build it flashes hangs
+    or reverts with no rescue (PR 9 round 2, finding 1). Both guards sit
+    before the sign and the flash, and the only way past is the loud
+    BLINK_BENCH_KNOBS=1."""
+    text = (ROOT / "tools" / "burn.sh").read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    def at(pat):
+        return next(i for i, l in enumerate(lines)
+                    if re.search(pat, l) and not l.lstrip().startswith("#"))
+
+    sign = at(r"sign_confirmed\.py")
+    for fn in ("blink_refuse_test_knobs", "blink_refuse_standalone_net"):
+        i = at(rf"\b{fn}\b")
+        assert i < sign and "||" in lines[i] + lines[i + 1]
+    gate = at(r'BLINK_BENCH_KNOBS:-0\}" = 1')
+    assert gate < at(r"\bblink_refuse_test_knobs\b")
+    assert "SKIPPED" in text
+
+
 # --- the touch trace and the pilot panel: release.sh's alone (review, S6) ---
 
 PRODUCTION_LINE = b"[usage] panel: MADCTL=0x%02x\n"
