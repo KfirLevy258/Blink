@@ -429,6 +429,12 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[wifi] paired",
     "[wifi] forgotten",
     "[wifi] forget failed",
+    # firmware review fixes: a failed erase, a socket that would not open,
+    # a scan the radio refused. Fixed text, an errno at most.
+    "[logo] remove failed",
+    "[wifi] listen failed",
+    "[wifi] discovery socket failed",
+    "[wifi] scan failed",
     # wl_server.c (spec S5.8): the session's three fixed lines and the
     # verify-only candidate's one.
     "[wifi] session open",

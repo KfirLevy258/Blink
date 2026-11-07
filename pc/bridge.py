@@ -531,6 +531,8 @@ class Bridge:
             if self._logo is not None:
                 self._logo[0].state(msg.get("present"))
             state = {k: msg.get(k) for k in ("present", "bytes", "frames")}
+            if "err" in msg:
+                state["err"] = msg["err"]    # a failed erase (firmware review)
             self._logo_state = state
             if self._ops is not None:
                 self._ops.note_device(logo=state)
@@ -1154,6 +1156,12 @@ class Bridge:
             self._ops.note_state(msg)
         op, st = self._op, msg.get("st")
         usb = msg.get("link") == "usb"
+        if (op is not None and op.kind == "scan" and st == "fail"
+                and msg.get("why") == "Could not scan. Try again."):
+            # The radio refused the scan and the board sends no wifi_net at
+            # all; without this the page waited out 15 s and said "did not
+            # answer", or showed an empty list as "no networks".
+            return self._finish(op, error="Could not scan. Try again.")
         if op is not None and op.kind == "forget":
             # Only the board's "off" answers a forget: an earlier state still
             # in flight is not the answer, and the pairing goes with it.

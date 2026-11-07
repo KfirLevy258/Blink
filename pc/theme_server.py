@@ -682,7 +682,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         # The board answers logo_state either way. A failed flash erase
         # leaves present:1, and a 200 then had the page drop the logo and
         # say nothing while the next boot showed it again.
-        if not isinstance(state, dict) or state.get("present") != 0:
+        if (not isinstance(state, dict) or state.get("present") != 0
+                or state.get("err") == 1):
             print("[settings] the board still reports its logo after remove",
                   file=sys.stderr)
             return self._json(409, {"why": (

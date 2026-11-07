@@ -134,3 +134,26 @@ def test_a_failed_verify_is_logged_by_class_only(tmp_path, capsys):
     assert "did not answer over WiFi (OSError)" in err
     assert "10.0.0.5" not in err
     assert "could not reach it" in box["r"]["problem"]
+
+
+# --- firmware contract: a refused scan, a failed logo erase ---
+
+def test_a_refused_scan_ends_at_once_with_its_sentence(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path)
+    t, box = call(ops.scan, 5.0)
+    pump_until(b, lambda: sent)
+    t0 = time.monotonic()
+    b.on_message({"t": "wifi_state", "v": 1, "st": "fail", "link": "usb",
+                  "why": "Could not scan. Try again."})
+    t.join(3)
+    assert time.monotonic() - t0 < 2
+    assert str(box["e"]) == "Could not scan. Try again."
+
+
+def test_logo_state_err_is_kept_for_the_page(tmp_path):
+    b, ops, sent, home, verified, th = make(tmp_path, caps=("wifi", "logo"))
+    t, box = call(ops.logo_remove, 5.0)
+    pump_until(b, lambda: sent)
+    b.on_message({"t": "logo_state", "v": 1, "present": 0, "err": 1})
+    t.join(3)
+    assert box["r"]["err"] == 1

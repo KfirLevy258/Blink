@@ -97,6 +97,11 @@ LINES = [
     ("[wifi] verified", "[wifi] verified", []),
     ("[wifi] heap low, restarting", "[wifi] heap low, restarting", []),
     ("[wifi] heap free=31244", "[wifi] heap free", ["31244"]),
+    ("[logo] remove failed: -5", "[logo] remove failed", ["-5"]),
+    ("[wifi] listen failed: -23", "[wifi] listen failed", ["-23"]),
+    ("[wifi] discovery socket failed: -23", "[wifi] discovery socket failed",
+     ["-23"]),
+    ("[wifi] scan failed: -16", "[wifi] scan failed", ["-16"]),
     # a known stem with something riding on the end of it
     ("[theme] saved SECRET-TAIL", "[theme] saved", ["SECRET-TAIL"]),
     # no tag the firmware uses: the bootloader, Zephyr, the touch tracer,

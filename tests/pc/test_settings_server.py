@@ -772,3 +772,9 @@ def test_no_copy_at_all_is_not_trouble(server, ops, capsys):
     ops.device = lambda: {"logo": {"present": 1, "bytes": 5, "frames": 1}}
     assert _preview(server, login(server))[0] == 404
     assert "could not be read" not in capsys.readouterr().err
+
+
+def test_a_remove_with_err_one_is_an_error_even_if_present_is_zero(server, ops):
+    ops.logo_remove = lambda: {"t": "logo_state", "present": 0, "err": 1}
+    s, _, body = post(server, "/api/logo/remove", {}, login(server))
+    assert s == 409 and "could not remove" in json.loads(body)["why"]

@@ -247,7 +247,7 @@ TAP_FIELDS = {
     "wifi_state": frozenset({"t", "st", "link", "kid", "why"}),
     "ota_ack": frozenset({"t", "off", "err"}),
     "logo_ack": frozenset({"t", "off", "err"}),
-    "logo_state": frozenset({"t", "present", "bytes", "frames"}),
+    "logo_state": frozenset({"t", "present", "bytes", "frames", "err"}),
     # host -> board
     "welcome": frozenset({"t", "app", "app_ver", "editing"}),
     "bye": _T, "pong": _T,
