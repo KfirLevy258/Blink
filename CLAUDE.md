@@ -86,16 +86,17 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**On the WiFi branch (wifi/t5.6, 2026-11-07), each platform its own count:**
-macOS 3816 passed, 5 skipped (a foreground run of `tests/test_dev_sh.py` and
-`tests/pc/test_theme_cli.py` passes all 71; their Ctrl-C tests fail only when
-pytest is started in the background, where SIGINT is ignored); Ubuntu (Docker,
-x86_64, Python 3.12) 3603 passed, 215 skipped, 3 failed (the pixel-budget and
-the WiFi OTA pump tests are timing under Rosetta, 12 s against a 10 s budget;
-`test_learn_board_over_wifi_keeps_the_port_only_for_the_same_board[False]`
-fails every run); Ubuntu under Python 3.9 3393 passed, 220 skipped, 5 failed;
-Windows (ARM64 VM) 3378 passed, 431 skipped, 6 failed. The failures are open
-and listed in the Task 5.6 report; `host-tests` and `check_factory.sh` pass.
+**On the WiFi branch (wifi/platfix, 2026-11-07), each platform its own count,
+all on one tree and none failing:** macOS 3816 passed, 5 skipped (run in the
+foreground: `tests/test_dev_sh.py` and `tests/pc/test_theme_cli.py` have
+Ctrl-C tests that fail when pytest is started in the background, where SIGINT
+is ignored); Ubuntu (Docker, x86_64, Python 3.12) 3606 passed, 215 skipped;
+Ubuntu under Python 3.9 (python:3.9-slim) 3398 passed, 220 skipped; Windows
+(ARM64 VM, x64 Python 3.11) 3383 passed, 432 skipped. `host-tests` and
+`check_factory.sh` pass. Python 3.9 matters beyond its count: before 3.12 a
+comprehension is a nested function, so a test that searches for a value in
+one makes that value a closure cell of the test itself (the WiFi password
+check fell into it).
 The last all-green numbers, 2026-10-31, before the WiFi work: macOS 3281
 passed, 1 skipped (os.startfile, Windows only); Ubuntu 3133 passed and 149
 skipped; Windows 2962 passed and 314 skipped. The skips are platform tests
