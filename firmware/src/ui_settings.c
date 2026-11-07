@@ -1109,7 +1109,7 @@ static void upd_cb(lv_event_t *e)
 	ARG_UNUSED(e);
 	struct ota_ui snap;
 
-	/* As on the other three tiles: LVGL sends CLICKED on the release of a
+	/* As on the other five tiles: LVGL sends CLICKED on the release of a
 	 * swipe too, and the back swipe that starts on this tile must not
 	 * start a check -- or, with an update waiting, put up the install
 	 * confirm in the face of someone leaving. */
@@ -1854,8 +1854,8 @@ static lv_obj_t *mk_back(lv_obj_t *parent, lv_event_cb_t cb)
  * right-hand pair were 40% wider than the left, and the chevron sat 3 px
  * from "Brightness" but 10 px from "Software update". The split was uneven
  * because the right-hand titles were the long ones; stacking the lines
- * instead of setting them beside an icon gives every line the tile's full
- * 128 px, so "Software update" could become "Update" -- the icon says which
+ * instead of setting them beside an icon gave every line the old tile's full
+ * 128 px (it is TILE_TEXT_W, 82, in today's 94 px tile), so "Software update" could become "Update" -- the icon says which
  * tile it is -- and nothing needs a wider column.
  *
  * Stacked rather than icon-beside-text for the state's sake: beside a 28 px
@@ -2052,7 +2052,7 @@ static void panel_empty(void)
 	upd_lbl = NULL;
 	pct_lbl = NULL;
 	focus_sub = NULL;
-	/* The Open settings tile's handle dies with the clean; a timer, a
+	/* The Open on PC tile's handle dies with the clean; a timer, a
 	 * theme_edit reply or a restatement arriving while Brightness is up
 	 * would paint through it (review of Task 6.1). */
 	theme_edit_lbl = NULL;
