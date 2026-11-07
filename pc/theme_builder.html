@@ -2269,6 +2269,9 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   var prefChain = Promise.resolve();
   function prefSet(fields, mid) {
     if (!persistent || finished) return;
+    // A logo streams for about a minute and the board answers nothing else
+    // meanwhile, so a click now would time out as "did not answer".
+    if (lgBusy) { msgSet(mid, 'Wait for the logo to finish.', 'bad'); return; }
     prefChain = prefChain.then(function () {
       return post('/api/pref', fields, true).then(function (j) {
         if (j.status !== 200 || !j.pref) { msgSet(mid, j.why || 'The board did not accept that setting.', 'bad'); return; }
@@ -2323,7 +2326,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   // encoding, asked for with ?check=1, not an estimate made here.
   var FITS = { fill: 1, large: .8, margin: .6 };
   var MAX_PICK = 20 * 1024 * 1024, MAX_GIF = 2 * 1024 * 1024 - 1024;
-  var lg = null, onBoard = false, lgBusy = false, checkSeq = 0, checkTimer = null;
+  var lg = null, onBoard = false, lgBusy = false, checkSeq = 0, checkTimer = null, checkCtl = null;
   function byId(id) { return document.getElementById(id); }
   function vis(id, on) { if (on) byId(id).removeAttribute('hidden'); else byId(id).setAttribute('hidden', ''); }
   function lmsg(t, kind) { msgSet('lMsg', t, kind); }
@@ -2374,11 +2377,11 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     x.drawImage(lg.img, (320 - w) / 2, (240 - h) / 2, w, h);
     return x.getImageData(0, 0, 320, 240).data;
   }
-  function sendLogo(path) {
+  function sendLogo(path, signal) {
     var body = lg.kind === 'gif' ? lg.bytes : stillRGBA();
     return fetch(path, { method: 'POST', credentials: 'same-origin', body: body, headers: {
       'Content-Type': 'application/octet-stream', 'X-Blink-Tab': TAB, 'X-Blink-Logo': lg.kind === 'gif' ? 'gif' : 'rgba',
-      'X-Blink-Bg': lg.bg.toLowerCase(), 'X-Blink-Hold-Ms': String(lg.hold), 'X-Blink-Fit': lg.fit } })
+      'X-Blink-Bg': lg.bg.toLowerCase(), 'X-Blink-Hold-Ms': String(lg.hold), 'X-Blink-Fit': lg.fit }, signal: signal })
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j.status = r.status; return j; }); });
   }
   var TOO_BIG = 'Too big for the board. Pick a plainer background or a smaller size.';
@@ -2389,10 +2392,12 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     clearTimeout(checkTimer);
     if (!lg) return;
     var mine = ++checkSeq;
+    if (checkCtl) checkCtl.abort();      // the older check's answer is not wanted
+    checkCtl = typeof AbortController === 'function' ? new AbortController() : null;
     lg.kb = null; byId('lSend').disabled = true;
     byId('lSize').textContent = 'Working out the size…'; lmsg('');
     checkTimer = setTimeout(function () {
-      sendLogo('/api/logo?check=1').then(function (j) {
+      sendLogo('/api/logo?check=1', checkCtl ? checkCtl.signal : undefined).then(function (j) {
         if (mine !== checkSeq || !lg) return;
         if (j.status === 200 && typeof j.bytes === 'number') {
           lg.kb = Math.max(1, Math.round(j.bytes / 1024));

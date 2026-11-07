@@ -465,3 +465,11 @@ def test_logo_check_gives_the_encoders_size_and_sends_nothing(server, ops):
                          ctype="application/octet-stream",
                          extra=_logo_headers())
     assert s == 400
+
+
+def test_a_non_ascii_digit_hold_is_a_400_not_a_crash(server, ops, capsys):
+    c = login(server)
+    for hold in ("\u00b2", "\u00b3", "3000.0", "+3000"):
+        s, _, body = _logo(server, c, bytes(307200), hold=hold)
+        assert s == 400 and json.loads(body)["why"], hold
+    assert "Traceback" not in capsys.readouterr().err and ops.logos == []

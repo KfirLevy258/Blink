@@ -91,6 +91,7 @@ MAX_BODY = 4096         # the widest theme is about 200 bytes of JSON
 # 320x240 compress far smaller) and below what a hostile page could use to
 # hold the handler thread and memory.
 MAX_LOGO_BODY = 2 * 1024 * 1024
+_ENCODE_LOCK = threading.Lock()
 # What POST /api/pref takes, and the values the board's own checks allow
 # (proto.c pref_set_line). view is an integer the board ignores until
 # feat/ultra-burn gives it meaning; the page sends 0.
@@ -604,7 +605,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         bg = h.get("X-Blink-Bg", "")
         if kind not in ("rgba", "gif"):
             return refuse(400, "That was not a picture.")
-        if not hold.isdigit() or int(hold) not in logo_encode.HOLD_CHOICES:
+        # Compared as text: str.isdigit() is true for "²" and the like, and
+        # int() of those raises past the handler.
+        if hold not in {str(x) for x in logo_encode.HOLD_CHOICES}:
             return refuse(400, "Pick 3, 5 or 10 seconds.")
         if kind == "gif" and fit not in logo_encode.FIT_SCALE:
             return refuse(400, "Pick a size on the screen.")
@@ -613,10 +616,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         bgc = tuple(bytes.fromhex(bg))
         raw = self.rfile.read(n)
         try:
-            if kind == "rgba":
-                blob = logo_encode.from_rgba(raw, bgc, int(hold))
-            else:
-                blob = logo_encode.from_gif(raw, bgc, int(hold), fit)
+            # One encode at a time: a page that re-checks after every
+            # change must not run several 2 MiB decodes at once.
+            with _ENCODE_LOCK:
+                if kind == "rgba":
+                    blob = logo_encode.from_rgba(raw, bgc, int(hold))
+                else:
+                    blob = logo_encode.from_gif(raw, bgc, int(hold), fit)
         except ValueError as e:
             msg = str(e)
             return self._json(400, {"why": msg[:1].upper() + msg[1:] + "."})

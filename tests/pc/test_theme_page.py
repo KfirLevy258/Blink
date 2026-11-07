@@ -2322,3 +2322,21 @@ def test_the_boards_current_pref_is_marked_at_load():
     assert r["b"] == ["false", "false", "true", "false", "false"]
     assert r["src"] == ["false", "true"]
     assert r["cards"][1] == "true" and r["posts"] == 0
+
+
+def test_a_newer_size_check_aborts_the_older_and_prefs_wait_for_a_logo_send():
+    r = builder_page.run(_PICK + """
+    await pick('mark.png', 'image/png', """ + _PNG + """);
+    const fits = document.querySelectorAll('#lScale button');
+    fits[1].click(); await advance(300);
+    fits[2].click(); await advance(10);
+    const aborted = requests.filter(q => q.path === '/api/logo?check=1' && q.limited).length;
+    await advance(400);
+    answer('/api/logo', () => 'hold');
+    $('lSend').click(); await advance(10);
+    document.querySelectorAll('[data-b]')[1].click(); await advance(10);
+    return { aborted, msg: $('b-msg').textContent,
+             prefs: requests.filter(q => q.path === '/api/pref').length };
+    """, _live(**{"/api/logo?check=1": {"status": 200, "body": {"bytes": 2048}}}))
+    assert r["aborted"] >= 2
+    assert r["msg"] == "Wait for the logo to finish." and r["prefs"] == 0
