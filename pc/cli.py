@@ -495,11 +495,14 @@ def claude_version(home=None):
     home = home or claude_home.current()
     if home.kind == claude_home.WSL:
         return None, None
-    # usage_refresh's PATH search, never shutil.which: that one finds a
+    # usage_refresh's search, never shutil.which: that one finds a
     # `claude` in the current folder (first, on Windows), and `blink
     # install` run inside a clone ran the clone's (review of
-    # 277b81a..4003b0b, item 10).
-    exe = usage_refresh._on_path("claude")
+    # 277b81a..4003b0b, item 10). find_claude, not PATH alone: the
+    # refresh runs the one it finds in ~/.local/bin, and on a Windows 11
+    # VM whose PATH lacked that folder (2026-11-07) install asked the
+    # refresh question and then said Claude Code was not installed.
+    exe = usage_refresh.find_claude(_home())
     if not exe:
         return None, None
     try:
@@ -640,7 +643,8 @@ def codex_present() -> bool:
 
 
 def claude_on_path(home=None) -> bool:
-    """Is there a `claude` on PATH, whether or not it answered --version?
+    """Is there a `claude` (on PATH, or where find_claude looks), whether or
+    not it answered --version?
 
     claude_version() returns (None, None) on ANY failure -- a 30 s timeout, an
     npm shim whose node is gone, a version printed only to stderr -- so "no
@@ -654,7 +658,7 @@ def claude_on_path(home=None) -> bool:
     home = home or claude_home.current()
     if home.kind == claude_home.WSL:
         return False
-    return usage_refresh._on_path("claude") is not None   # as claude_version
+    return usage_refresh.find_claude(_home()) is not None   # as claude_version
 
 
 class ClaudeHooks(NamedTuple):

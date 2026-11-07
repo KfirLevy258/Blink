@@ -1040,11 +1040,34 @@ def test_desktop_app_installed_wants_desktops_own_files(tmp_path):
 
 def test_claude_on_path_finds_one_that_is_there(tmp_path, monkeypatch):
     """Unstubbed: every install/status test patches it."""
+    from pc import usage_refresh
+    # find_claude also searches /opt/homebrew/bin and /usr/local/bin, which
+    # are this machine's: a real claude there would answer for the sandbox.
+    monkeypatch.setattr(usage_refresh, "SYSTEM_BIN_DIRS",
+                        (str(tmp_path / "no-system-bin"),))
     bindir = tmp_path / "bin"
     bindir.mkdir()
     monkeypatch.setenv("PATH", str(bindir))
     assert not cli.claude_on_path()
     exe = bindir / ("claude.exe" if sys.platform == "win32" else "claude")
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    assert cli.claude_on_path()
+
+
+def test_claude_off_path_in_the_installers_folder_counts(tmp_path, monkeypatch):
+    """The native installer's ~/.local/bin, not on PATH: the refresh finds
+    and runs it there, so install and status must not say Claude Code is
+    missing (a Windows 11 VM, 2026-11-07, asked the refresh question and
+    then printed "not installed on the command line")."""
+    from pc import usage_refresh
+    monkeypatch.setattr(usage_refresh, "SYSTEM_BIN_DIRS",
+                        (str(tmp_path / "no-system-bin"),))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert not cli.claude_on_path()
+    local = tmp_path / ".local" / "bin"     # HOME is tmp_path (conftest)
+    local.mkdir(parents=True)
+    exe = local / ("claude.exe" if sys.platform == "win32" else "claude")
     exe.write_text("#!/bin/sh\n")
     exe.chmod(0o755)
     assert cli.claude_on_path()
