@@ -706,8 +706,15 @@ def test_copy_is_owner_only(server, ops, home):
     assert mode & 0o077 == 0 or os.name == "nt"
 
 
-def test_first_frame_of_a_gif_is_what_is_kept():
-    blob = logo_encode.from_rgba(bytes([0, 255, 0, 255]) * (320 * 240), (0, 0, 0), 3000)
-    png = logo_preview.png_from_565(logo_encode.parse(blob, first_frame=True)["frames"][0])
-    assert len(logo_encode.parse(blob, first_frame=True)["frames"]) == 1
-    assert zlib.decompress(png[png.index(b"IDAT") + 4:png.index(b"IEND") - 8])[1:4] == bytes([0, 255, 0])
+def test_first_frame_of_an_animation_is_what_is_kept():
+    from array import array
+    solid = lambda v: array("H", [v]) * (320 * 240)
+    red, green, blue = 0xF800, 0x07E0, 0x001F
+    blob = logo_encode.build([solid(red), solid(green), solid(blue)], 10, 3000, (0, 0, 0))
+    kept = logo_encode.parse(blob, first_frame=True)["frames"]
+    assert len(kept) == 1 and set(kept[0]) == {red}
+    # parse(frames=True) holds all three, so a first_frame that took the last
+    # one would show blue here.
+    assert len(logo_encode.parse(blob, frames=True)["frames"]) == 3
+    png = logo_preview.png_from_565(kept[0])
+    assert zlib.decompress(png[png.index(b"IDAT") + 4:png.index(b"IEND") - 8])[1:4] == bytes([255, 0, 0])

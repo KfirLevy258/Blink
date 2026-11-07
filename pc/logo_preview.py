@@ -7,7 +7,11 @@ bytes and frames the board will report, in ~/.blink/private (owner-only,
 written atomically by private_file). The page gets the image only when the
 board's own report matches that record: a logo set from another computer, or
 by an older daemon, matches nothing and the page says so instead of showing a
-stale picture. Standard library only; never logs image content.
+stale picture. The match is only that: bytes and frames are in the board's
+report and nothing better is. A picture re-sent from another computer with a
+different background or hold encodes to the same size, as does any solid-colour
+logo of another colour, and then the old copy is shown as the board's. It is
+not exact. Standard library only; never logs image content.
 """
 from __future__ import annotations
 
