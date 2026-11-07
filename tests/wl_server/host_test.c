@@ -268,14 +268,22 @@ static void hmac_label(const char *label, const uint8_t *a, const uint8_t *b,
 /* The PC end of M1/M2/M3. 0 when the board answered M3 (so keys are set),
  * -1 when it closed or never opened (refused at accept), -2 for a refused
  * M2. */
-static int pc_handshake(struct pc *c, int good_m2)
+extern int wl_fake_fail_next;	/* tests/support/wl_crypto_fake.c */
+
+/* crypto_fail: the board's cipher fails on its next call, which is the check
+ * of M2 (the PC's own hmac calls are all done by then). preconnected: the
+ * caller already connected c->fd and stepped, and c is zeroed. */
+static int pc_handshake_ex(struct pc *c, int good_m2, int crypto_fail,
+			   int preconnected)
 {
 	uint8_t m1[WL_M1_LEN], m2[WL_M2_LEN], m3[WL_M3_LEN], salt[32], keys[64];
 	uint8_t np[16], tag[32];
 
-	memset(c, 0, sizeof(*c));
-	c->fd = cli_connect();
-	step(1);
+	if (!preconnected) {
+		memset(c, 0, sizeof(*c));
+		c->fd = cli_connect();
+		step(1);
+	}
 	if (cli_closed(c->fd) || cli_read(c->fd, m1, sizeof(m1)) != sizeof(m1)) {
 		return -1;
 	}
@@ -287,7 +295,9 @@ static int pc_handshake(struct pc *c, int good_m2)
 	memcpy(m2, np, 16);
 	memcpy(m2 + 16, tag, 32);
 	cli_send(c->fd, m2, sizeof(m2));
+	wl_fake_fail_next = crypto_fail;
 	step(1);
+	wl_fake_fail_next = 0;
 	if (cli_read(c->fd, m3, sizeof(m3)) != sizeof(m3)) {
 		return -2;
 	}
@@ -298,6 +308,10 @@ static int pc_handshake(struct pc *c, int good_m2)
 	memcpy(c->tx.key, keys, 32);
 	memcpy(c->rx.key, keys + 32, 32);
 	return 0;
+}
+static int pc_handshake(struct pc *c, int good_m2)
+{
+	return pc_handshake_ex(c, good_m2, 0, 0);
 }
 static void pc_send(struct pc *c, uint8_t type, const char *line)
 {
@@ -347,6 +361,9 @@ static void reset(void)
 	fail_stream_socket = fail_dgram_socket = fail_dgram_bind = 0;
 	rx_head = rx_tail = tx_head = tx_tail = 0;
 	rng_dead = false;
+	atomic_set(&close_req, 0);
+	sink_o = sink_g = NULL;
+	wl_fake_fail_next = 0;
 	last_answer = open_after = 0;
 	listen_said = disc_said = false;
 	paired = true;
@@ -360,17 +377,256 @@ static int ok(const char *s)
 	return wl_verify_body_ok((const uint8_t *)s, strlen(s));
 }
 
-static void query(int usock_idx)
+/* flip: a tag byte flipped; len: the datagram's length (0: a whole one). */
+static void query_ex(int usock_idx, int flip, size_t len)
 {
 	struct fsock *s = &fs[usock_idx];
 	uint8_t nq[16], tag[32];
 
 	memset(nq, 0x33, sizeof(nq));
 	hmac_label("blink-disc-1 q", nq, NULL, tag);
+	tag[0] ^= (uint8_t)flip;
 	memcpy(s->q[s->nq].d, "BLQ\x01", 4);
 	memcpy(s->q[s->nq].d + 4, nq, 16);
 	memcpy(s->q[s->nq].d + 20, tag, 16);
-	s->q[s->nq++].n = WL_Q_LEN;
+	s->q[s->nq++].n = len ? len : WL_Q_LEN;
+}
+static void query(int usock_idx)
+{
+	query_ex(usock_idx, 0, 0);
+}
+
+/* The n of a line {"t":"ping","n":N}, or -1. */
+static int line_n(const uint8_t *b, int len)
+{
+	for (int i = 0; i + 4 < len; i++) {
+		if (memcmp(b + i, "\"n\":", 4) == 0) {
+			return b[i + 4] - '0';
+		}
+	}
+	return -1;
+}
+static void send_n(struct pc *c, int n)
+{
+	char l[40];
+
+	snprintf(l, sizeof(l), "{\"t\":\"ping\",\"n\":%d}\n", n);
+	pc_send(c, WL_T_LINE, l);
+}
+/* The next frame the main thread would take: its n, or -1 for none. */
+static int next_n(void)
+{
+	uint8_t t, body[600];
+	int k = wl_server_rx_frame(&t, body, sizeof(body));
+
+	return k < 0 ? -1 : line_n(body, k);
+}
+
+static void review_round_two(void)
+{
+	struct pc a, b;
+	int u;
+
+	/* --- 1. the verify-only candidate's frame cap (82 B) ------------- */
+	for (int len = 65; len <= 517; len += (len < 70 ? 1 : 112)) {
+		uint8_t hdr[2] = { (uint8_t)(len >> 8), (uint8_t)len };
+		char what[80];
+
+		reset();
+		step(25);
+		link_usb_heard(fake_now_ms);
+		link_verify_window(fake_now_ms);
+		pc_handshake(&a, 1);
+		cli_send(a.fd, hdr, 2);
+		step(1);
+		snprintf(what, sizeof(what),
+			 "a verify candidate announcing %d bytes is closed at the header",
+			 len);
+		eq(what, cli_closed(a.fd), 1);
+	}
+
+	/* --- 2. tick() ends the session ---------------------------------- */
+	reset();
+	step(25);
+	pc_handshake(&a, 1);
+	eq("a session is open", wl_server_session_up(), 1);
+	link_usb_heard(fake_now_ms);
+	step(1);
+	eq("USB heard ends the WiFi session and its socket",
+	   !wl_server_session_up() && cli_closed(a.fd), 1);
+
+	reset();
+	step(25);
+	pc_handshake(&a, 1);
+	link_wifi_up(false);	/* what link_emit does when the TX ring stays full */
+	step(1);
+	eq("link_emit giving up closes the socket too",
+	   !wl_server_session_up() && cli_closed(a.fd), 1);
+
+	reset();
+	step(25);
+	pc_handshake(&a, 1);
+	pc_send(&a, WL_T_OTA, "x");
+	step(3);
+	{
+		uint8_t t = 0, body[600];
+		int k = wl_server_rx_frame(&t, body, sizeof(body));
+
+		eq("an O frame reaches the main thread", k == 1 && t == WL_T_OTA, 1);
+		wl_server_sink(t, body, (size_t)k);	/* proto's call: no sink */
+	}
+	eq("not yet: the close is asked of the network thread", cli_closed(a.fd), 0);
+	step(1);
+	eq("an O frame with no sink ends the session",
+	   !wl_server_session_up() && cli_closed(a.fd), 1);
+
+	reset();
+	step(25);
+	pc_handshake(&a, 1);
+	paired = false;
+	step(1);
+	eq("forgetting the pairing ends the session",
+	   !wl_server_session_up() && cli_closed(a.fd), 1);
+
+	/* --- 3. a second connection while a candidate is pending --------- */
+	reset();
+	step(25);
+	memset(&a, 0, sizeof(a));
+	a.fd = cli_connect();
+	step(1);
+	b.fd = cli_connect();
+	step(1);
+	eq("the second is closed at once", cli_closed(b.fd), 1);
+	eq("the first candidate is untouched", !cli_closed(a.fd), 1);
+	eq("and still finishes its handshake",
+	   pc_handshake_ex(&a, 1, 0, 1) == 0 && wl_server_session_up(), 1);
+
+	/* --- 4. ring epochs and backpressure ----------------------------- */
+	reset();
+	step(25);
+	pc_handshake(&a, 1);
+	send_n(&a, 1);
+	step(3);
+	eq("a frame waits unread in the ring", rx_head - rx_tail, 1);
+	pc_handshake(&b, 1);
+	eq("replaced by a new session", wl_server_session_up() && cli_closed(a.fd), 1);
+	eq("the old session's frame is not delivered to the new one",
+	   next_n(), -1);
+	send_n(&b, 2);
+	step(3);
+	eq("the new session's own frame is", next_n(), 2);
+
+	reset();
+	step(25);
+	pc_handshake(&a, 1);
+	wl_server_tx_line("{\"t\":\"old1\"}", 0);
+	wl_server_tx_line("{\"t\":\"old2\"}", 0);
+	pc_handshake(&b, 1);
+	eq("a reply queued for the old session is dropped with it",
+	   atomic_get(&tx_tail) == atomic_get(&tx_head) &&
+	   pc_read_line(&b) == NULL, 1);
+	{
+		/* What the main thread's tx_line can still do after a close it
+		 * did not see: write a slot under the old epoch. */
+		struct tx_slot *sl = &tx_ring[(uint32_t)atomic_get(&tx_head) % WL_TX_LINES];
+
+		memcpy(sl->line, "{\"t\":\"stale\"}\n", 14);
+		sl->len = 14;
+		sl->epoch = (uint32_t)atomic_get(&epoch) - 1;
+		atomic_inc(&tx_head);
+	}
+	step(1);
+	eq("a slot of an older epoch never goes out on the new session",
+	   pc_read_line(&b) == NULL && atomic_get(&tx_tail) == atomic_get(&tx_head), 1);
+
+	reset();
+	step(25);
+	pc_handshake(&a, 1);
+	for (int i = 1; i <= 6; i++) {
+		send_n(&a, i);
+	}
+	step(40);
+	eq("a full ring holds four", rx_head - rx_tail, WL_RX_FRAMES);
+	eq("and the session is not read further: TCP holds the rest",
+	   F(a.fd)->tb_off < F(a.fd)->tb_len, 1);
+	eq("frame 1 first", next_n(), 1);
+	eq("frame 2", next_n(), 2);
+	eq("frame 3", next_n(), 3);
+	eq("frame 4", next_n(), 4);
+	step(40);
+	eq("room again: frame 5, not overwritten", next_n(), 5);
+	eq("frame 6", next_n(), 6);
+	eq("and no more", next_n(), -1);
+
+	/* --- 5. hang-up and crypto errors are not authentication failures */
+	reset();
+	step(25);
+	memset(&a, 0, sizeof(a));
+	a.fd = cli_connect();
+	step(1);
+	F(a.fd)->peer_closed = 1;	/* a port probe: connects, hears M1, leaves */
+	step(1);
+	eq("a hang-up drops the candidate", cli_closed(a.fd), 1);
+	eq("and is not an authentication failure: the next good one is let in",
+	   pc_handshake(&b, 1), 0);
+
+	reset();
+	step(25);
+	eq("a cipher failure checking M2 is refused",
+	   pc_handshake_ex(&a, 1, 1, 0), -2);
+	eq("and is not the peer's failure either",
+	   pc_handshake(&b, 1), 0);
+	eq("it says nothing of a refused handshake", said("[wifi] handshake refused"), 0);
+
+	reset();
+	step(25);
+	wl_fake_fail_next = 1;		/* the random draw for M1 */
+	b.fd = cli_connect();
+	step(1);
+	wl_fake_fail_next = 0;
+	eq("a dead RNG closes the connection unanswered",
+	   cli_closed(b.fd) && cli_read(b.fd, (uint8_t[20]){ 0 }, 20) == 0, 1);
+	eq("says so", said("[wifi] selftest failed"), 1);
+	eq("and stops listening", lsock < 0 && usock < 0, 1);
+	step(200);
+	eq("for good: the retry never reopens a socket", lsock < 0 && usock < 0, 1);
+
+	/* --- 6. discovery: what is not answered -------------------------- */
+	reset();
+	step(25);
+	u = usock - 3;
+	query_ex(u, 1, 0);
+	step(1);
+	eq("a query with a wrong tag is not answered", fs[u].answers, 0);
+	query_ex(u, 0, 10);
+	step(1);
+	eq("nor a short datagram", fs[u].answers, 0);
+	query(u);
+	step(1);
+	eq("and neither used up the second's rate limit", fs[u].answers, 1);
+
+	/* --- 7. the tx line boundary ------------------------------------- */
+	reset();
+	step(25);
+	{
+		char line[600];
+
+		eq("no session: -ENOTCONN", wl_server_tx_line("x", 0), -ENOTCONN);
+		pc_handshake(&a, 1);
+		memset(line, 'x', 512);
+		line[512] = 0;
+		eq("a 512-byte line fits", wl_server_tx_line(line, 0), 0);
+		step(1);
+		eq("and leaves whole", strlen(pc_read_line(&a)), 513);
+		memset(line, 'x', 513);
+		line[513] = 0;
+		eq("a 513-byte line is refused", wl_server_tx_line(line, 0), -EINVAL);
+		for (int i = 0; i < WL_TX_LINES; i++) {
+			wl_server_tx_line("{}", 0);
+		}
+		eq("a full ring with no wait is -ENOSPC",
+		   wl_server_tx_line("{}", 0), -ENOSPC);
+	}
 }
 
 int main(void)
@@ -559,6 +815,8 @@ int main(void)
 	query(u);
 	step(1);
 	eq("none while USB owns the link", fs[u].answers, 2);
+
+	review_round_two();
 
 	printf("%d failure(s)\n", fails);
 	return fails ? 1 : 0;
