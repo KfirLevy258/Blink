@@ -108,8 +108,8 @@ def test_an_ask_while_the_builder_is_open_shows_it_again(tmp_path):
     b.on_message({"t": "theme_edit", "v": 2})
     # A fresh one-time link on the same builder, not a silent ok.
     assert len(FakeServer.made) == 1
-    assert opened == ["http://127.0.0.1:1/open?k=1&panel=look",
-                      "http://127.0.0.1:1/open?k=2&panel=look"]
+    assert opened == ["http://127.0.0.1:1/open?k=1",
+                      "http://127.0.0.1:1/open?k=2"]
     assert edit_lines(sent) == [OK, OK]
 
 
@@ -303,7 +303,7 @@ def test_a_builder_that_ends_while_the_browser_opens_is_replaced(tmp_path):
     first = FakeServer.made[0]
 
     def dying(url):
-        if url.startswith("http://127.0.0.1:1/open?k=2&panel=look"):
+        if url.startswith("http://127.0.0.1:1/open?k=2"):
             first.finish("closed")
         return True
 

@@ -90,6 +90,14 @@ h1 span { font-weight: 400; letter-spacing: 0; color: var(--muted); margin-left:
 
 /* ---------- the studio: a light pool, a contact shadow, two desk objects ---------- */
 .stage { width: 100%; position: relative; isolation: isolate; }
+.scanning { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--muted); }
+.scanning[hidden] { display: none; }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.pipkey { position: absolute; top: 0; left: 0; z-index: 1; list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.pipkey[hidden] { display: none; }
+.pipkey li { display: flex; align-items: center; gap: 6px; }
+.pipkey i { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 1px var(--line); }
 .stage::before { content: ""; position: absolute; z-index: -1; left: -14%; right: -14%; top: -10%; bottom: 4%;
   background: radial-gradient(50% 50% at 50% 46%, var(--stage) 0%, color-mix(in srgb, var(--stage) 55%, var(--bg)) 45%, transparent 100%);
   pointer-events: none; }
@@ -500,6 +508,9 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   <!-- the board, always centred -->
   <section class="hub" aria-label="Your board">
     <div class="stage">
+      <ul class="pipkey" id="pipkey" aria-label="Session marks in the header" hidden>
+        <li><i></i>Running</li><li><i></i>Waiting</li><li><i></i>Stuck</li>
+      </ul>
       <svg class="hero" id="hero" viewBox="0 0 600 470" role="img" aria-labelledby="heroTitle">
         <title id="heroTitle">Board preview</title>
         <defs>
@@ -610,7 +621,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
           <label class="dropzone" for="logoFile" id="drop"><svg viewBox="0 0 28 28" aria-hidden="true"><rect x="3" y="5" width="22" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M14 18V10M10.5 13.5 14 10l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><b>Drop a logo here</b><span>or <u>choose a file</u>. PNG, SVG, JPEG or GIF.</span></label>
         </div>
         <div class="stack" id="logoOn" hidden style="gap:16px">
-          <div class="lfile"><span class="thumb" id="lThumb"></span><div style="min-width:0"><b id="lName"></b><span id="lSize" aria-live="polite"></span></div><button type="button" class="link" id="lReplace">Replace</button></div>
+          <div class="lfile"><span class="thumb" id="lThumb"></span><div style="min-width:0"><b id="lName"></b><span id="lSize" aria-live="polite"></span></div><button type="button" class="link" id="lReplace">Replace</button><button type="button" class="link" id="lClear">Clear</button></div>
           <div class="stack">
             <span class="label" id="lScaleL">Size on the screen</span>
             <div class="seg" role="group" aria-labelledby="lScaleL" id="lScale">
@@ -749,6 +760,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
               <legend class="label" style="padding:0;margin-bottom:8px">Networks the board can hear</legend>
               <ul class="nets" id="c-nets"></ul>
             </fieldset>
+            <p class="scanning" id="c-scanning" role="status" aria-live="polite" hidden><span class="spin" aria-hidden="true"></span>Looking for networks…</p>
             <p class="note">2.4 GHz networks only</p>
             <button type="button" class="link" id="c-scan">Scan again</button>
             <button type="button" class="link" id="c-other">Network not listed?</button>
@@ -1320,7 +1332,16 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     var dim = customDim(st.text, st.bg), track = mix(st.bg, st.text, .15), pill = mix(st.bg, st.text, .1);
     svg.appendChild(el('rect', { x: 0, y: 0, width: 320, height: 240, fill: '#' + st.bg }));
     var F = 'Montserrat, sans-serif';
+    var key = document.getElementById('pipkey');
+    if (key) key.hidden = st.screen !== 'usage';
     if (st.screen !== 'usage') { drawOther(svg, dim, track, pill); setTitle(); return; }
+    // The header's session marks, one per session, as usage_view.c lays them
+    // out: 8 px circles, 11 px apart from x 10, centred on the 12 px header
+    // row at y 8. Tones are fmt_pip_tone(): running green (low), waiting and
+    // stuck both red (high). A running, a waiting and a stuck session here.
+    var pipCol = [st.low, st.high, st.high];
+    pipCol.forEach(function (c, i) { svg.appendChild(el('circle', { 'class': 'pip', cx: 14 + i * 11, cy: 14, r: 4, fill: '#' + c })); });
+    if (key) Array.prototype.forEach.call(key.querySelectorAll('i'), function (d, i) { d.style.background = '#' + pipCol[i]; });
     if (st.view === 'gauges') {
       svg.appendChild(el('text', { x: 160, y: 18, 'text-anchor': 'middle', 'font-family': F, 'font-size': 11.5, 'letter-spacing': 3, fill: '#' + dim }, 'BLINK'));
       // With the burn view up the session reading is unknown, as on the
@@ -2264,19 +2285,20 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       show('c-picker', true); show('c-move', false); g('c-move').setAttribute('aria-expanded', 'true'); scan();
     }
     function closePicker() {
-      scanning++; show('c-picker', false); show('c-move', true); g('c-move').setAttribute('aria-expanded', 'false');
+      scanning++; show('c-scanning', false); g('c-nets').removeAttribute('aria-busy'); show('c-picker', false); show('c-move', true); g('c-move').setAttribute('aria-expanded', 'false');
       g('c-pw').value = ''; bad(false); unshow(); other(false); g('c-name').value = '';
     }
     // Synchronous on the PC for up to ~15 s, so the list says it is looking.
     function scan() {
       var mine = ++scanning;
-      list([]); say('Looking for networks…'); g('c-go').disabled = true;
+      list([]); say(''); show('c-scanning', true); g('c-nets').setAttribute('aria-busy', 'true'); g('c-go').disabled = true;
+      function done() { show('c-scanning', false); g('c-nets').removeAttribute('aria-busy'); }
       post('/api/wifi/scan', null).then(function (j) {
         if (mine !== scanning) return;
-        g('c-go').disabled = busy;
+        done(); g('c-go').disabled = busy;
         if (j.status === 200) { say(''); list(j.nets); }
         else note(j.why || 'The board did not answer.');
-      }, function () { if (mine !== scanning) return; g('c-go').disabled = busy; note('The app did not answer.'); });
+      }, function () { if (mine !== scanning) return; done(); g('c-go').disabled = busy; note('The app did not answer.'); });
     }
     // A hand-typed name goes the way a scanned one does: its UTF-8 bytes as hex.
     function typed() {
@@ -2520,6 +2542,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       byId('lHold').value = String(lg.hold);
       byId('lRemove').disabled = !onBoard || lgBusy;
       byId('lSend').disabled = lgBusy || lg.kb == null;
+      byId('lClear').disabled = lgBusy;
       byId('lSend').textContent = lgBusy ? 'Sending…' : 'Send to board';
     }
     board.show({ logo: lg ? { url: lg.url, w: lg.w, h: lg.h, bg: '#' + lg.bg, scale: FITS[lg.fit] } : null });
@@ -2612,6 +2635,14 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   byId('drop').addEventListener('dragleave', function () { byId('drop').classList.remove('over'); });
   byId('drop').addEventListener('drop', function (e) { e.preventDefault(); byId('drop').classList.remove('over'); takeFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]); });
   byId('lReplace').addEventListener('click', function () { byId('logoFile').click(); });
+  // Drops the chosen picture only. A logo already on the board goes through
+  // Remove, which asks first; this never talks to the board.
+  byId('lClear').addEventListener('click', function () {
+    if (!lg || lgBusy) return;
+    checkSeq++; clearTimeout(checkTimer); if (checkCtl) checkCtl.abort();
+    lg = null; lmsg(''); byId('lSize').textContent = '';
+    paintLogo(); byId('logoFile').focus();
+  });
   document.querySelectorAll('#lScale button').forEach(function (b) {
     b.addEventListener('click', function () { if (!lg) return; lg.fit = b.dataset.s; if (lg.bgAuto) lg.bg = corner(lg.img); paintLogo(); check(); });
   });

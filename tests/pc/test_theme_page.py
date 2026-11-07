@@ -2401,3 +2401,67 @@ def test_done_with_a_draft_nothing_was_saved_says_the_plain_line():
     return { keep: $('notice-keep-text').textContent };
     """, _live())
     assert r["keep"] == "Your changes here are not saved. Copy the share code to keep them."
+
+
+# --- settings page fixes: pips on the drawing, Clear a chosen logo, scan spinner
+
+def test_the_board_drawing_has_a_running_waiting_and_stuck_pip_in_theme_colours():
+    r = builder_page.run("""
+    await advance(10);
+    const pips = () => $('scr').children.filter(n => n.className === 'pip')
+        .map(n => [+n.attrs.cx, +n.attrs.cy, +n.attrs.r, n.attrs.fill]);
+    const first = pips();
+    preset('Ocean'); await advance(10);
+    return { first, second: pips(), key: $('pipkey').hidden,
+             words: $('pipkey').querySelectorAll('li').map(l => l.textContent) };
+    """, SAVED_DARK)
+    first, second = r["first"], r["second"]
+    # usage_layout.h: 8 px pips, 11 px apart from x 10, centred on y 14.
+    assert [p[:3] for p in first] == [[14, 14, 4], [25, 14, 4], [36, 14, 4]]
+    assert first[1][3] == first[2][3] != first[0][3]        # waiting and stuck share red
+    assert second[0][3] != first[0][3]                      # a new theme recolours them
+    assert r["key"] is False and r["words"] == ["Running", "Waiting", "Stuck"]
+
+
+def test_clear_drops_a_chosen_logo_without_touching_the_board():
+    r = builder_page.run(_PICK + """
+    await pick('mark.png', 'image/png', """ + _PNG + """);
+    const had = [$('logoOn').hidden, $('logoOn').getAttribute('hidden')];
+    const before = requests.length;
+    $('lClear').click(); await advance(10);
+    return { had, on: $('logoOn').getAttribute('hidden'), empty: $('logoEmpty').getAttribute('hidden'),
+             tag: $('lClear').tagName,
+             removes: requests.slice(before).filter(x => x.path === '/api/logo/remove').length };
+    """, _live(**{"/api/logo?check=1": {"status": 200, "body": {"bytes": 51200}}}))
+    assert r["had"][1] is None and r["tag"] == "BUTTON"
+    assert r["on"] == "" and r["empty"] is None and r["removes"] == 0
+
+
+def test_the_scan_shows_a_spinner_until_the_list_arrives():
+    r = builder_page.run("""
+    await advance(300);
+    const h = hold(); answer('/api/wifi/scan', () => h.p);
+    $('c-move').click(); await advance(10);
+    const during = [$('c-scanning').getAttribute('hidden'), $('c-nets').getAttribute('aria-busy'), $('c-scanning').textContent];
+    h.release({ status: 200, body: { nets: [] } }); await advance(10);
+    return { during, after: [$('c-scanning').getAttribute('hidden'), $('c-nets').getAttribute('aria-busy')] };
+    """, _wifi(nets=NETS), search="?panel=connect")
+    assert r["during"] == [None, "true", "Looking for networks…"]
+    assert r["after"] == ["", None]
+
+
+def test_the_scan_spinner_goes_when_the_scan_fails():
+    r = builder_page.run("""
+    await advance(300);
+    $('c-move').click(); await advance(10);
+    return [$('c-scanning').getAttribute('hidden'), $('c-nets').getAttribute('aria-busy')];
+    """, _wifi(scan={"status": 500, "body": {"why": "The board did not answer."}}), search="?panel=connect")
+    assert r == ["", None]
+
+
+def test_the_spinner_stops_for_reduced_motion_and_is_a_live_region():
+    assert re.search(r'id="c-scanning" role="status" aria-live="polite"', theme_server.page())
+    css = _css()
+    assert "@keyframes spin" in css and "animation: spin" in css
+    assert "animation: none !important" in re.search(
+        r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*?)\}\s*\}", css, re.S).group(1)

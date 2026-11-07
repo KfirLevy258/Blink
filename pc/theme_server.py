@@ -1434,7 +1434,7 @@ class Launcher:
             server.touch()
         # Held across the opener on purpose, so two taps cannot open two
         # tabs; close() and ended() do not wait for it (see there).
-        ok = bool(self._opener(server.new_link(panel="look")))
+        ok = bool(self._opener(server.new_link()))
         if not ok and fresh:
             # Nothing was ever shown, so there is nothing to cancel; the
             # board puts up its own "Run blink theme" fallback.

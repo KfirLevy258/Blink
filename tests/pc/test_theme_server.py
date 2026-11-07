@@ -612,8 +612,8 @@ def test_the_launcher_starts_one_server_and_reopens_it(home):
     clock.t += theme_server.OPEN_EVERY_S
     assert lau.launch()
     assert len(FakeServer.made) == 1
-    assert opened == ["http://127.0.0.1:1/open?k=1&panel=look",
-                      "http://127.0.0.1:1/open?k=2&panel=look"]
+    assert opened == ["http://127.0.0.1:1/open?k=1",
+                      "http://127.0.0.1:1/open?k=2"]
 
 
 def test_an_ask_repeated_within_two_seconds_is_the_same_ask(home):
@@ -644,8 +644,8 @@ def test_an_open_page_is_shown_again_on_a_fresh_link(home):
     clock.t += 300
     assert lau.launch()
     assert len(FakeServer.made) == 1
-    assert opened == ["http://127.0.0.1:1/open?k=1&panel=look",
-                      "http://127.0.0.1:1/open?k=2&panel=look"]
+    assert opened == ["http://127.0.0.1:1/open?k=1",
+                      "http://127.0.0.1:1/open?k=2"]
 
 
 def test_the_launcher_gives_up_quietly_with_no_browser(home):
@@ -1297,18 +1297,19 @@ def test_any_request_but_the_heartbeat_touches_a_settings_sessions_idle_clock(
     assert s.wait(5) == "idle"
 
 
-def test_edit_on_computer_opens_the_page_on_look(home):
-    """The board's Edit on computer is Launcher.launch(): its link, followed
-    for real, redirects to the page with Look open (it opened on no control)."""
+def test_open_on_pc_opens_the_page_on_the_board_alone(home):
+    """The board's Open on PC is Launcher.launch(): its link, followed for
+    real, redirects to the bare page, so no panel is open over the board
+    drawing (it used to carry panel=look)."""
     opened = []
     lau = theme_server.Launcher(home, opener=lambda u: opened.append(u) or True)
     try:
         assert lau.launch()
         link = urllib.parse.urlsplit(opened[0])
-        assert "panel=look" in link.query
+        assert "panel" not in link.query
         s = lau._server
         status, headers, _ = request(s, "GET", link.path + "?" + link.query)
-        assert status == 303 and headers["Location"] == "/?panel=look"
+        assert status == 303 and headers["Location"] == "/"
     finally:
         lau.close()
 
