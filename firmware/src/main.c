@@ -25,6 +25,7 @@
 #include "ui_settings.h"
 #include "ui_anim.h"
 #include "ota.h"
+#include "logo_write.h"
 #include "upd_tap.h"
 #include "whatsnew.h"
 #include "ui_touchfx.h"
@@ -356,7 +357,8 @@ static void heap_restart_if_due(void)
 {
 	if (IS_ENABLED(CONFIG_BLINK_WIFI_LINK) &&
 	    wl_heap_reboot_due(net_link_heap_free(), wl_server_session_up(),
-			       ota_blocks_sleep(), ui_settings_busy())) {
+			       ota_blocks_sleep() || logo_write_active(),
+			       ui_settings_busy())) {
 		printk("[wifi] heap low, restarting\n");
 		k_msleep(50);	/* let the console drain */
 		sys_reboot(SYS_REBOOT_COLD);
