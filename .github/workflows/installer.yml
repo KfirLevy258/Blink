@@ -51,7 +51,14 @@ jobs:
         # covered by the macos-system-python job below, on a better
         # interpreter than setup-python could have given us anyway.
         include:
-          - {os: ubuntu-latest, python: '3.9'}
+          # 24.04, not -latest: ubuntu-latest moved to 26.04 and setup-python
+          # has no 3.9 for it (PR #9's run failed in setup, "3.9 ... was not
+          # found for Ubuntu 26.04"). 3.9 is past end of life, so its last
+          # build (3.9.25) was published for 22.04 and 24.04 only, per
+          # actions/python-versions' versions-manifest.json, 2026-11-07. The
+          # floor install.sh enforces stays tested; move this to 22.04 when
+          # 24.04 runners go, and decide about the floor when both have.
+          - {os: ubuntu-24.04, python: '3.9'}
           - {os: ubuntu-latest, python: '3.13'}
           - {os: macos-latest, python: '3.13'}
           # The suite itself on Windows, not only the installed binary: the
