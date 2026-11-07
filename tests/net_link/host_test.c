@@ -110,5 +110,13 @@ int main(void)
 	eq("and stays there for good", (int)net_link_rejoin_delay_ms(4000000000u),
 	   1800000);
 
+	/* --- a scan that never ran is not an empty air ----------------- */
+	eq("an error with an empty table is the error",
+	   net_link_scan_answer(-19, 0), -19);
+	eq("no error is the count", net_link_scan_answer(0, 7), 7);
+	eq("no error and no networks is zero", net_link_scan_answer(0, 0), 0);
+	eq("a scan in progress stays -EAGAIN-shaped (negative)",
+	   net_link_scan_answer(-11, 3) < 0, 1);
+
 	return fails ? 1 : 0;
 }

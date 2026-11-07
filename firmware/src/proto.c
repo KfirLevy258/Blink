@@ -1281,8 +1281,12 @@ static void wifi_poll(void)
 
 	if (scan_sent == -2) {
 		scan_n = net_link_scan_results(scan_tab, NET_LINK_SCAN_MAX);
-		if (scan_n != -EAGAIN) {
-			scan_n = scan_n < 0 ? 0 : scan_n;
+		if (scan_n < 0 && scan_n != -EAGAIN) {
+			/* Not "no networks": the radio never scanned. */
+			wifi_send_state("fail", net_link_why_text(NL_WHY_SCAN),
+					false);
+			scan_sent = -1;
+		} else if (scan_n != -EAGAIN) {
 			scan_sent = 0;
 		}
 	} else if (scan_sent >= 0) {

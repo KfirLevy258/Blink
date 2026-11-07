@@ -21,7 +21,7 @@
 enum net_link_state { NL_OFF, NL_SCANNING, NL_JOINING, NL_UP, NL_FAILED };
 enum net_link_why {
 	NL_WHY_NONE, NL_WHY_WRONG_PSK, NL_WHY_NOT_FOUND, NL_WHY_NO_IP,
-	NL_WHY_WPA3_ONLY, NL_WHY_SELFTEST, NL_WHY_FORGET
+	NL_WHY_WPA3_ONLY, NL_WHY_SELFTEST, NL_WHY_FORGET, NL_WHY_SCAN
 };
 
 struct net_link_ap {
@@ -39,8 +39,17 @@ struct net_link_ap {
 /* Spec S6.1: one wifi_net line per network, strongest first, at most 20. */
 #define NET_LINK_SCAN_MAX 20
 
+/* What net_link_scan_results returns: the failure if there was one, else the
+ * count. Here so tests/net_link can pin that an empty table with an error is
+ * never read as "no networks". */
+static inline int net_link_scan_answer(int err, int n)
+{
+	return err < 0 ? err : n;
+}
+
 void net_link_request_scan(void);
-/* -EAGAIN while scanning. */
+/* -EAGAIN while scanning, another negative errno when the scan never ran
+ * (distinct from 0, an empty air). */
 int net_link_scan_results(struct net_link_ap *out, int max);
 /* Disconnect-and-wait first if associated (esp_wifi_drv.c:495). */
 /* Returns a ticket (never 0) naming THIS request, or 0 if it was refused.

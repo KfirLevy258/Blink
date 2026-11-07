@@ -128,6 +128,11 @@ static int64_t idle_at;		/* 0: no scan is keeping the interface up */
 static struct k_spinlock lock;
 static struct net_link_ap scan_tab[NET_LINK_SCAN_MAX];
 static int scan_n;
+/* Why the last scan never ran (negative errno), 0 when it did. An empty table
+ * with scan_err set is "could not scan", not "no networks": the page read the
+ * two alike and told an owner whose radio was busy that their network was out
+ * of range. Guarded by `lock` with the table. */
+static int scan_err;
 static uint8_t req_ssid[32];
 static size_t req_ssid_len;
 static char req_psk[65];
@@ -292,15 +297,21 @@ static void do_down(bool keep_failed)
 static void scan_run(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&lock);
+	int rc;
 
 	scan_n = 0;
+	scan_err = 0;
 	k_spin_unlock(&lock, key);
 	atomic_set(&scanning, 1);
 	k_sem_reset(&sem_scan);
-	if (net_mgmt(NET_REQUEST_WIFI_SCAN, iface, NULL, 0) == 0) {
+	rc = net_mgmt(NET_REQUEST_WIFI_SCAN, iface, NULL, 0);
+	if (rc == 0) {
 		(void)k_sem_take(&sem_scan, K_SECONDS(SCAN_WAIT_S));
+	} else {
+		printk("[wifi] scan failed\n");	/* the radio refused: busy mid-join, say */
 	}
 	key = k_spin_lock(&lock);
+	scan_err = rc == 0 ? 0 : (rc < 0 ? rc : -EIO);
 	net_link_scan_sort(scan_tab, scan_n);
 	k_spin_unlock(&lock, key);
 	atomic_set(&scanning, 0);
@@ -631,6 +642,13 @@ SYS_INIT(net_link_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 void net_link_request_scan(void)
 {
 	if (iface == NULL || refused) {
+		/* Never started: the next poll must read a failure, not the
+		 * previous scan's table and not an empty one. */
+		k_spinlock_key_t key = k_spin_lock(&lock);
+
+		scan_n = 0;
+		scan_err = -ENODEV;
+		k_spin_unlock(&lock, key);
 		return;
 	}
 	/* Set here, not in the work, so a caller polling straight after the
@@ -649,7 +667,7 @@ int net_link_scan_results(struct net_link_ap *out, int max)
 		return -EAGAIN;
 	}
 	key = k_spin_lock(&lock);
-	n = MIN(scan_n, max);
+	n = net_link_scan_answer(scan_err, MIN(scan_n, max));
 	if (n > 0) {
 		memcpy(out, scan_tab, (size_t)n * sizeof(*out));
 	}
@@ -764,6 +782,8 @@ const char *net_link_why_text(enum net_link_why w)
 		return "WiFi self-test failed";
 	case NL_WHY_FORGET:
 		return "Could not forget WiFi. Try again.";
+	case NL_WHY_SCAN:
+		return "Could not scan. Try again.";
 	default:
 		return "";
 	}
