@@ -290,6 +290,15 @@ TAP_ENUMS = {
         "No address from the router", "WPA3-only networks are not supported",
         "WiFi self-test failed", "Could not forget WiFi. Try again."}),
     "err": frozenset({"", "unconfirmed", "refused", "failed"}),
+    # The board's `answer` (ASK_ANSWERS, below; test_protocol holds the two
+    # equal): a board-to-host string, so only our own three words.
+    "a": frozenset({"on", "no", "later"}),
+}
+# The same, for a field whose name another type uses differently: `id` is a
+# number on theme, but on the board's answer it names the question, and
+# "refresh" is the only one (ask()).
+TAP_TYPE_ENUMS = {
+    ("answer", "id"): frozenset({"refresh"}),
 }
 # Fields that are numbers on the wire (spec S6.1, S7.5). Review of Task 0.1:
 # redact() kept any string of 64 characters or fewer in them, so a board
@@ -327,8 +336,9 @@ def redact(msg) -> dict:
             continue
         if v is not None and not isinstance(v, (str, int, float, bool)):
             continue
-        if k in TAP_ENUMS:
-            if not isinstance(v, str) or v not in TAP_ENUMS[k]:
+        enum = TAP_TYPE_ENUMS.get((t, k), TAP_ENUMS.get(k))
+        if enum is not None:
+            if not isinstance(v, str) or v not in enum:
                 continue
         elif k == "kid":
             if not isinstance(v, str) or not _KID.match(v):

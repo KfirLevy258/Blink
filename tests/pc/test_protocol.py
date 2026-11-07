@@ -1526,6 +1526,22 @@ def _builders():
     ]
 
 
+
+def test_the_boards_answer_keeps_only_its_own_words():
+    """answer comes from the board, so its id and a are someone else's
+    strings until they are one of ours: free text is dropped, not kept."""
+    assert protocol.TAP_ENUMS["a"] == frozenset(protocol.ASK_ANSWERS)
+    for a in protocol.ASK_ANSWERS:
+        assert protocol.redact({"t": "answer", "v": 2, "id": "refresh",
+                                "a": a}) == {"t": "answer", "id": "refresh",
+                                             "a": a}
+    assert protocol.redact({"t": "answer", "id": "my secret project",
+                            "a": "yes please"}) == {"t": "answer"}
+    assert protocol.redact({"t": "answer", "id": 3, "a": 1}) == \
+        {"t": "answer"}
+    # theme's numeric id is untouched by answer's word list
+    assert protocol.redact({"t": "theme", "op": "set", "id": 3})["id"] == 3
+
 def test_each_builder_redacts_to_its_expected_projection():
     for name, msg, kept, dropped in _builders():
         got = protocol.redact(msg)
