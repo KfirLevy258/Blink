@@ -37,48 +37,20 @@ I build them, test them and post them.
 
 BLINK is a small touchscreen that shows the same numbers as Claude Code's `/usage` command, always in view: your **5-hour session** and your **7-day week**, each as a dial that turns from green to amber to red, with a countdown to its reset. It plugs into your computer over USB, or talks to it over WiFi if you set that up, sets itself up in one command, and keeps itself updated.
 
-## Open source
+BLINK is open source and free: the firmware, the app, the build scripts and the tests are all here, and the case is a 3D print ([MakerWorld](https://makerworld.com/en/models/3294736-blink-claude-code-codex-usage-monitor)) around an ESP32 "Cheap Yellow Display" (about $12). Build as many as you like, for yourself, and change anything. The one thing the licence forbids is selling it, as a device, as software or inside a product; if that is what you want, write to me and ask. I also sell finished units, put together and tested by hand, which is what pays for the work.
 
-**BLINK is open source, and it is free.** Everything the device is made of is
-here: the firmware that draws the dials, the app that reads your usage, the
-build scripts, the tests. Nothing is held back, nothing is a trial, nothing
-expires. The board is an ESP32 "Cheap Yellow Display", about $12 anywhere, and
-the case is a 3D print - the files are on
-[MakerWorld](https://makerworld.com/en/models/3294736-blink-claude-code-codex-usage-monitor).
-
-**You can do anything you like with it, for yourself.** Build one. Build ten.
-Change it, rewrite it, put your own name on it. Give them to your friends. Use
-it at home, at school, in a club. You will never owe me anything for it.
-
-**The one thing you cannot do is sell it.** Not the device, not the software,
-not a product with this inside it. Making money out of BLINK is the only thing
-the licence forbids. If that is what you want to do, write to me and ask -
-the answer is often yes.
-
-And if you would rather not build one at all, I sell finished units, put
-together and tested by hand. That is what pays for the work that goes into
-this.
-
-## Features
+## What it shows
 
 - **Two dials, two countdowns.** Session and weekly limits, and the time until each one resets.
-- **An activity light.** Amber the moment any session - Claude or Codex - is waiting on you; a green pulse while everything is still working; red when a turn dies on an error - a rate limit, most often.
-- **A page per provider.** Claude and Codex each get their own screen. Swipe to switch; the needles move from one reading to the other.
-- **It sleeps when your computer does.** About thirty seconds after the computer stops answering, the screen closes its eyes and dozes; it opens them the moment the computer is back. A tap while it sleeps shows the last figures.
-- **Claude Desktop too.** With Desktop alone the dials show percentages, a five-hour countdown whenever Desktop is holding a reset time, and a weekly countdown once one has been learned. Desktop keeps that reset time only while a window is running and clears it in between, so the countdown comes and goes; the fill rate covers the gaps. The dials follow Desktop's own refresh - about every 5 minutes while you are using it, up to 15 when it sits idle - where Claude Code updates them live.
-- **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. It needs no credential, and sends nothing about you anywhere. The one optional extra, status-page alerts, reads the public status pages and is off until you turn it on.
-- **Themes.** Twelve built in, three of them light for a bright room, and one of your own: seven colours, arc width and ends, made in a builder that opens in your browser from the board's own Settings (Open on PC, or `blink settings`) and previews on the panel as you edit. A custom theme travels as a short share code.
-- **Focus.** One window big instead of two - session or weekly - with the other kept as a line under it.
-- **A burn view where there is no five-hour limit.** Claude Ultra accounts have no five-hour window (from 2026-10-30), so a session dial would have nothing to show. There, BLINK draws the last five hours of Claude Code output instead: the total, an arrow for whether you are speeding up or easing off, and a bar for every quarter-hour, labelled with the hour. Pro and Max keep the session dial, and the weekly dial is the same on every plan.
-- **Cable or WiFi.** USB is the default. WiFi is an opt-in second link, set up from the settings page: pick your network, type its password, and the board talks to your computer over an encrypted link, even when it is running from a phone charger. Updates go over it too.
-- **A settings page on your computer.** The board's *Open on PC* tile (or `blink settings`) opens a page in your browser for the theme, your own logo (PNG, JPG, SVG or an animated GIF), WiFi and the board's preferences.
-- **Settings on the board.** Six tiles on the screen beside the dials: Brightness, Open on PC, Focus, Update, Connection and About.
-- **Status pages, per provider.** Optional: each provider's page says when that provider's own service is having trouble, so you know it is not your machine.
-- **Updates over the cable or WiFi.** A new release asks on screen; one tap installs both the firmware and the app. Both halves are signed.
-- **Cheap, open hardware.** An ESP32 "Cheap Yellow Display" (~$12) and a 3D-printed case.
-- **Company units.** A unit built for a company shows its logo - a still or a short clip - after the boot animation, written once at the factory.
+- **An activity light.** Amber the moment any session, Claude or Codex, is waiting on you; a green pulse while everything is still working; red when a turn dies on an error, a rate limit most often.
+- **A page per provider.** Claude and Codex each get their own screen. Swipe to switch.
+- **Claude Desktop too.** With Desktop alone the dials show percentages and a fill rate, and countdowns whenever Desktop holds a reset time. See "What it works with".
+- **A burn view where there is no five-hour limit.** Claude Ultra accounts have no five-hour window (from 2026-10-30), so there BLINK draws the last five hours of Claude Code output instead: the total, an arrow for speeding up or easing off, and a bar per quarter-hour. The weekly dial is the same on every plan.
+- **It sleeps when your computer does.** About thirty seconds after the computer stops answering, the screen dozes; a tap shows the last figures.
+- **Optional status-page alerts.** Off until you turn them on: the panel says when a provider's own service is having trouble, so you know it is not your machine.
+- **Company units.** A unit built for a company shows its logo after the boot animation.
 
-## The screens
+It needs no sign-in: it reads figures Claude Code and Codex have already written to disk, and sends nothing about you anywhere.
 
 <table>
   <tr>
@@ -106,41 +78,7 @@ bar per quarter-hour, and an arrow comparing this hour with the one before.
 
 *Rendered by the shipping firmware's own drawing code, not mocked up.*
 
-### Settings
-
-<table>
-  <tr>
-    <td width="50%"><img src="docs/img/screen-settings.png" alt="The board's Settings screen: six tiles, Brightness, Open on PC, Focus, Update, Connection and About."></td>
-    <td width="50%"><img src="docs/img/screen-about.png" alt="The About screen: board name, firmware version, app version on the computer and time up."></td>
-  </tr>
-  <tr>
-    <td align="center"><sub><b>Settings</b></sub>&nbsp;</td>
-    <td align="center"><sub><b>About</b></sub>&nbsp;</td>
-  </tr>
-</table>
-
-### The settings page
-
-<img src="docs/img/settings-page.png" alt="The settings page in a browser: the board drawn in the middle, linked to this computer by USB cable, with WiFi not set up, and Look, Connect and Board tabs under it.">
-
-Tap *Open on PC* in the board's Settings, or run `blink settings`, and the page
-opens in your browser. **Connect** moves the board to WiFi (the cable is needed
-once to hand it the network and pair it; details in the
-[full README](docs/README-full.md#wifi)), **Board** holds its preferences, and
-**Look** holds the theme builder and the logo.
-
-### The theme builder
-
-<img src="docs/img/theme-builder.png" alt="The theme builder in a browser: a preview of the board on the left, here showing the burn view, with switches for Gauges or Focus mode and for the session gauge or the burn view; the twelve built-in themes and the colour pickers on the right; Save to board, Cancel and Copy share code along the top.">
-
-It is the **Look** tab of the settings page. `blink theme` opens the builder
-alone. Pick a built-in theme or choose the seven
-colours yourself; every change shows on the board as a preview until you save
-or cancel. The preview beside it can show either left half, the session gauge
-or the burn view, so a theme can be judged on both. Readability checks under
-the preview flag text or arcs that would be hard to see.
-
-## Setup
+## Install
 
 One file. Download it, run it, delete it. It copies itself to `~/.blink/bin`, finds the board, and starts again every time you log in.
 
@@ -167,7 +105,44 @@ Windows on Arm (Snapdragon laptops, Surface Pro X) gets the Arm64 build of the U
 
 Needs Claude Code 2.1.100 or newer. The installer changes Claude Code's `settings.json` (in `~/.claude`, or the folder `CLAUDE_CONFIG_DIR` names: the status line command and one hook per lifecycle event), Codex's `hooks.json` when Codex is installed, and `~/.blink/config.json`, where it records which Claude Code folder it set up; it says all of it before it does it, and keeps your own status line running. Everything it does is reversible with `uninstall`.
 
-## Something's wrong?
+## Settings on the board
+
+The board's Settings screen has six tiles.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/img/screen-settings.png" alt="The board's Settings screen: six tiles, Brightness, Open on PC, Focus, Update, Connection and About."></td>
+    <td width="50%"><img src="docs/img/screen-about.png" alt="The About screen: board name, firmware version, app version on the computer and time up."></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Settings</b></sub>&nbsp;</td>
+    <td align="center"><sub><b>About</b></sub>&nbsp;</td>
+  </tr>
+</table>
+
+**Brightness**, **Open on PC** (opens the settings page below), **Focus** (one window big instead of two, with the other as a line under it), **Update**, **Connection** (the link in use; WiFi details and **Forget WiFi** are on its screen) and **About** (board name, firmware and app versions, time up).
+
+## The settings page
+
+<img src="docs/img/settings-page.png" alt="The settings page in a browser: the board drawn in the middle, linked to this computer by USB cable, with WiFi not set up, and Look, Connect and Board tabs under it.">
+
+Tap **Open on PC** on the board, or run `blink settings`, and the page opens in your browser. It has three tabs:
+
+- **Look** holds the twelve built-in themes (three of them light), the theme builder and your own logo. A custom theme is seven colours plus arc width and ends, previews on the board as you edit, and travels as a short share code. The logo takes a PNG, JPG, SVG or an animated GIF. `blink theme` opens the page on Look.
+- **Connect** moves the board to WiFi.
+- **Board** holds its preferences.
+
+<img src="docs/img/settings-page-look.png" alt="The Look tab: twelve built-in themes on the left, the board preview in the middle, colour pickers and arc settings on the right.">
+
+## WiFi
+
+WiFi is an opt-in second link; USB stays the default and wins whenever the cable is plugged in. On the Connect tab press **Move to WiFi**, pick your network and type its password. The cable is needed once, to hand the board the network and pair it with this computer. After that the link is encrypted and the board works from a phone charger. It needs a 2.4 GHz WPA2 network that lets devices see each other. The limits, **Forget WiFi** and a known restart when you plug the cable into a WiFi board are in the [full README](docs/README-full.md#wifi).
+
+## Updates
+
+A new release asks on screen; one tap installs both the firmware and the app, and both are signed. Over the cable the app writes the image and reads it back. Over WiFi the board writes a spare slot and test-boots it, and reverts on its own if the new version has not confirmed within 90 seconds. Details in the [full README](docs/README-full.md#updates). To update the app by itself, run `blink update`.
+
+## Troubleshooting
 
 ```bash
 ~/.blink/bin/blink status
@@ -214,7 +189,7 @@ BLINK keeps no credential and never sends your usage or your sessions anywhere. 
 
 ## Building units
 
-`tools/burn.sh` programs a unit end to end: it builds signed firmware with the bootloader, flashes it, stamps the edition (Claude or Codex, write-once), and confirms the stamp survives a power cycle. Add `--logo` and the unit shows a company logo after the boot animation. The script fails loudly rather than half-succeeds, and CI runs it on every push against a scripted board so a change to it cannot quietly ship a unit that boots wrong. Details in [docs/README-full.md](docs/README-full.md#programming-a-unit).
+`tools/burn.sh` programs a unit end to end: it builds signed firmware, flashes it, stamps the edition (Claude or Codex, write-once) and confirms the stamp survives a power cycle; add `--logo` for a company logo. Details in [docs/README-full.md](docs/README-full.md#programming-a-unit).
 
 ## Read more
 
