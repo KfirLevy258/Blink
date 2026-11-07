@@ -18,19 +18,26 @@ from pc import private_file, wifi_pair
 from pc import wifi_session as ws
 
 _LOST = "link lost"
+# The board pings every 10 s and drops a host it has not heard for 30 s, so a
+# healthy session never goes 35 s without a frame. A board that restarted, or
+# a laptop that slept past the board's retransmit budget, leaves an open socket
+# with nobody on it and no RST ever arrives: this silence is the only signal.
+# After a sealed ota_end the bridge's own 30 s went_quiet fires first.
+SILENT_S = 35.0
 
 
 class WifiLink:
     # __slots__ so that code written for serial.Serial fails loudly: setting
     # link.dtr or link.rts raises AttributeError instead of quietly doing
     # nothing, and the daemon never pulses reset over a socket (CLAUDE.md).
-    __slots__ = ("_sock", "_s", "_buf", "_closed")
+    __slots__ = ("_sock", "_s", "_buf", "_closed", "_heard")
     kind = "wifi"
 
     def __init__(self, sock, session):
         self._sock, self._s = sock, session
         self._buf = b""
         self._closed = False
+        self._heard = time.monotonic()
 
     def _pump(self, timeout: float) -> None:
         """One recv into the plaintext buffer; O and G frames from the board
@@ -41,6 +48,9 @@ class WifiLink:
             self._sock.settimeout(timeout)
             data = self._sock.recv(4096)
         except (socket.timeout, BlockingIOError):
+            if time.monotonic() - self._heard > SILENT_S:
+                self.close()
+                ws._fail(_LOST)
             return
         except OSError:
             self.close()
@@ -48,6 +58,7 @@ class WifiLink:
         if not data:
             self.close()
             ws._fail(_LOST)
+        self._heard = time.monotonic()
         try:
             frames = self._s.feed(data)
         except ws.SessionError:

@@ -328,3 +328,30 @@ def test_discovery_survives_a_transient_sendto_error():
 
     assert wifi_link.discover(KEY, sendto, recv, gap_s=0.05) == ("127.0.0.1", 4321)
     assert len(calls) == 2
+
+
+def test_a_silent_open_socket_is_lost_after_35_seconds(monkeypatch):
+    """The board restarted or the laptop slept: the socket stays open and
+    nothing ever arrives, no FIN, no RST."""
+    now = [1000.0]
+    monkeypatch.setattr(wifi_link.time, "monotonic", lambda: now[0])
+    sock = StubSock()
+    link = wifi_link.WifiLink(sock, _pair_sessions()[0])
+    now[0] += 30
+    assert link.read(8) == b""              # a quiet half minute is fine
+    now[0] += 6
+    with pytest.raises(OSError) as e:
+        link.read(8)
+    assert str(e.value) == "link lost" and sock.closed >= 1
+
+
+def test_a_frame_resets_the_silence_clock(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(wifi_link.time, "monotonic", lambda: now[0])
+    mine, peer = _pair_sessions()
+    link = wifi_link.WifiLink(StubSock(), mine)
+    now[0] += 30
+    link._sock.script.append(peer.seal_line(b'{"t":"ping"}\n'))
+    assert link.read(64)
+    now[0] += 30
+    assert link.read(8) == b""
