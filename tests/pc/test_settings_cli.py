@@ -169,7 +169,7 @@ def test_install_opens_nothing_and_says_how(tmp_path, capsys, monkeypatch):
     assert not os.path.exists(req_path())
 
 
-def test_theme_edit_opens_look():
+def test_theme_edit_opens_the_board_alone():
     opened = []
     lau = theme_server.Launcher(home(), opener=lambda u: opened.append(u) or True,
                                 make_server=Fake)
@@ -179,7 +179,7 @@ def test_theme_edit_opens_look():
         assert lau.launch()
     finally:
         del Fake.new_link
-    assert opened == ["http://127.0.0.1:6000/open?k=1&panel=look"]
+    assert opened == ["http://127.0.0.1:6000/open?k=1"]
 
 
 def test_settings_succeeds_while_launch_is_stuck_in_the_opener():
