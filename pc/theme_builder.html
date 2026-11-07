@@ -2420,9 +2420,10 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     session: 'Session big, weekly as a line.',
     weekly: 'Weekly big, session as a line. This one previews here only: the board keeps the window its Focus tile names.',
     // The burn view is no setting on the board: it takes the session
-    // gauge's place by itself while the account has no five-hour window
+    // gauge's place by itself, on the two-gauge screen only (Focus keeps
+    // its own), while the account has no five-hour window
     // (docs/plans/burn-5h.md), so the card previews and sends nothing.
-    burn: 'Recent token use in place of the session gauge. Your board shows it by itself when your plan has no five-hour window; this previews it here.'
+    burn: 'Recent token use in place of the session gauge. Your board shows it on the two-gauge screen by itself when your plan has no five-hour window; this previews it here.'
   };
   function cardOf(b) { return b.dataset.card || (b.dataset.v === 'gauges' ? 'gauges' : b.dataset.f); }
   function paintCards() {

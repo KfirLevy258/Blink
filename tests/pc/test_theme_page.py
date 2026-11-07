@@ -2120,7 +2120,7 @@ def test_burn_view_card_previews_and_sends_nothing():
     assert on["off"] is False and on["pressed"] == "true" and on["posts"] == 0
     assert "BURN 5h" in on["words"] and "SESSION 5h" not in on["words"]
     assert "burn view" in on["title"].lower()
-    assert "by itself" in on["note"]
+    assert "two-gauge screen by itself" in on["note"]
     assert r["back"] == "false"
     assert "SESSION 5h" in r["words"] and "BURN 5h" not in r["words"]
 
