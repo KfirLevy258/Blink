@@ -57,6 +57,11 @@ class BoardOps:
             self._down = True
             live, self._live = list(self._live), set()
         for op in live:
+            # _live keeps an op after _finish set done, until its page thread
+            # wakes and discards it; a drop in that gap must not turn a
+            # finished op into a failure (PR 9 re-review).
+            if op.done.is_set():
+                continue
             op.abandoned = True     # a later Bridge must not start it
             op.args = None
             op.error = "The connection to the board dropped. Try again."

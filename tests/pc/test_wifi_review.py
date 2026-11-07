@@ -23,7 +23,7 @@ def test_forget_fail_tells_the_page_and_keeps_the_pairing(tmp_path, capsys):
     pump_until(b, lambda: sent)
     t0 = time.monotonic()
     b.on_message({"t": "wifi_state", "v": 1, "st": "fail", "link": "usb",
-                  "why": "forget"})
+                  "why": "Could not forget WiFi. Try again."})
     t.join(3)
     assert time.monotonic() - t0 < 2
     assert isinstance(box["e"], settings_ops.BoardOpError)
@@ -32,6 +32,22 @@ def test_forget_fail_tells_the_page_and_keeps_the_pairing(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "[wifi] the board could not erase its WiFi settings" in err
     assert "10.0.0.5" not in err
+
+
+def test_an_unrelated_fail_does_not_end_a_pending_forget(tmp_path):
+    # M1: a stored rejoin failing ("not found") can already be on the wire
+    # when wifi_forget is written; the board then erases and sends "off".
+    b, ops, sent, home, verified, th = make(tmp_path)
+    wifi_pair.save(home, "abcd", b"k" * 32, "10.0.0.5", 49731)
+    t, box = call(ops.forget, 5.0)
+    pump_until(b, lambda: sent)
+    b.on_message({"t": "wifi_state", "v": 1, "st": "fail", "link": "usb",
+                  "why": "Network not found"})
+    t.join(0.3)
+    assert t.is_alive()
+    b.on_message(OFF)
+    t.join(3)
+    assert "e" not in box and wifi_pair.load(home) is None
 
 
 # --- 2 and 3. a lost link fails ops now and clears the link state ---
@@ -50,7 +66,9 @@ def test_link_down_fails_the_op_in_flight_at_once(tmp_path):
 def test_link_down_fails_a_queued_op_and_the_next_bridge_skips_it(tmp_path):
     ops = settings_ops.BoardOps(queue.SimpleQueue())
     t, box = call(ops.forget, 300.0)
-    time.sleep(0.05)
+    deadline = time.monotonic() + 5
+    while ops.queue.empty() and time.monotonic() < deadline:
+        time.sleep(0.005)               # until the op is really queued
     ops.link_down()
     t.join(3)
     assert isinstance(box["e"], settings_ops.BoardOpError)
@@ -157,3 +175,14 @@ def test_logo_state_err_is_kept_for_the_page(tmp_path):
     b.on_message({"t": "logo_state", "v": 1, "present": 0, "err": 1})
     t.join(3)
     assert box["r"]["err"] == 1
+
+
+def test_link_down_leaves_an_op_that_already_finished(tmp_path):
+    # M2: _live holds an op after done is set until the page thread wakes.
+    ops = settings_ops.BoardOps(queue.SimpleQueue())
+    op = settings_ops._Op("forget")
+    ops._live.add(op)
+    op.result = {"ok": 1}
+    op.done.set()                       # the Bridge's _finish ran
+    ops.link_down()
+    assert op.error is None and not op.abandoned and op.result == {"ok": 1}

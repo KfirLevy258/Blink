@@ -2694,7 +2694,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     var limit = ctl ? setTimeout(function () { ctl.abort(); }, REQUEST_MS) : null;
     return fetch(path, { credentials: 'same-origin', signal: ctl ? ctl.signal : undefined }).then(function (r) {
       clearTimeout(limit);
-      if (r.status === 200) return r.json();
+      if (r.status === 200) { msgSet(mid, ''); return r.json(); }
       return r.json().then(function (j) { return j && j.why; }, function () { return null; }).then(function (why) {
         msgSet(mid, why || 'The app did not answer.', 'bad'); return null;
       });
@@ -2745,13 +2745,17 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     syncScreen(); render();
   });
   // This computer.
+  // False until a good /api/computer load: before it the switches sit in their
+  // HTML defaults and a tap would post the inverse of the real value.
+  var computerLoaded = false;
   function paintComputer(c) {
     if (!c) return;
+    computerLoaded = true;
     document.querySelectorAll('.switch[data-key]').forEach(function (b) { if (typeof c[b.dataset.key] === 'boolean') b.setAttribute('aria-checked', String(c[b.dataset.key])); });
   }
   document.querySelectorAll('.switch[data-key]').forEach(function (b) {
     b.addEventListener('click', function () {
-      if (!loaded || finished) return;
+      if (!loaded || !computerLoaded || finished) return;
       var want = {}; want[b.dataset.key] = b.getAttribute('aria-checked') !== 'true';
       post('/api/computer', want).then(function (j) {
         if (j.status !== 200) { msgSet('k-msg', j.why || 'This computer could not save that setting.', 'bad'); return; }

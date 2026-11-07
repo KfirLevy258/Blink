@@ -107,6 +107,8 @@ def _proto_for_log(proto) -> str:
 
 # How long a join's key is kept for a late `up` (the board's verify window).
 JOIN_LATE_S = 60.0
+# net_link_why_text(NL_WHY_FORGET) in firmware/src/net_link.c, byte for byte.
+FORGET_FAIL_WHY = "Could not forget WiFi. Try again."
 
 
 class _UsbLogoLink:
@@ -1168,7 +1170,10 @@ class Bridge:
             if st == "off":
                 wifi_pair.remove(self._home)
                 self._finish(op, result=dict(self._ops.state()))
-            elif st == "fail":
+            elif st == "fail" and msg.get("why") == FORGET_FAIL_WHY:
+                # Only the firmware's forget failure (NL_WHY_FORGET): a stored
+                # rejoin failing ("not found") can already be on the wire when
+                # wifi_forget is written, and must not end the op early.
                 # cfg_clear_pairing failed on the board: its sector may still
                 # hold the password and key. Say so now rather than let the
                 # page time out and blame a silent board. The PC pairing

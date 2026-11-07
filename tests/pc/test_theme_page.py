@@ -2541,6 +2541,33 @@ def test_a_failed_computer_or_device_load_says_why_not_defaults():
     assert r["b"] == "The app did not answer." and "bad" in r["kc"] + r["bc"]
 
 
+def test_switches_ignore_taps_until_a_computer_load_succeeds():
+    # M3: a failed /api/computer left the switches in their HTML defaults and
+    # a tap posted the inverse of the owner's real value.
+    r = builder_page.run("""
+    await advance(300);
+    const before = $('cfgStatus').getAttribute('aria-checked');
+    $('cfgStatus').click(); await advance(10);
+    return { before, posts: """ + _POSTS + """.length };
+    """, _live(**{"/api/computer": {"status": 500, "body": {}}}),
+        search="?panel=board")
+    assert r["posts"] == 0
+
+
+def test_a_load_error_goes_when_a_later_load_succeeds():
+    # M4: the first /api/device timed out; coming back to the tab painted the
+    # device but b-msg still said the app did not answer.
+    r = builder_page.run("""
+    await advance(300);
+    const had = $('b-msg').textContent;
+    answer('/api/device', () => ({ status: 200, body: { fw: '1.5.0', app: '1.5.0' } }));
+    """ + _SEE_AGAIN + """
+    return { had, now: $('b-msg').textContent };
+    """, _live(**{"/api/device": {"status": 500, "body": {}}}),
+        search="?panel=board")
+    assert r["had"] == "The app did not answer." and r["now"] == ""
+
+
 _SEE_AGAIN = """
     document.hidden = false;
     (document.listeners.visibilitychange || []).forEach(f => f()); await advance(10);
