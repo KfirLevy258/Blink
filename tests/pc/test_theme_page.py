@@ -2503,4 +2503,12 @@ def test_a_logo_without_a_matching_copy_says_there_is_no_preview():
              text: $('lBoardText').textContent, hidden: $('lHave').getAttribute('hidden') };
     """, _on_board(**{"/api/logo/preview": {"status": 404, "body": {}}}))
     assert r["imgs"] == 0 and r["hidden"] is None
-    assert "Set from another computer, so there is no preview here." in r["text"]
+    assert "Sent from another computer, so no preview here." in r["text"]
+
+
+def test_the_remove_confirm_sits_below_the_logo_note_not_beside_it():
+    # The confirm is inserted into the .lhave flex row; unwrapped it took a
+    # share of the row and squeezed the note to one word per line.
+    html = (Path(__file__).resolve().parents[2] / "pc" / "theme_builder.html").read_text()
+    assert re.search(r"\.lhave \{[^}]*flex-wrap: wrap", html)
+    assert re.search(r"\.lhave \.confirm \{ flex: 1 0 100%", html)

@@ -489,6 +489,9 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
 .fw .tag.old { color: var(--muted); }
 .lhave { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 12px; background: var(--field); }
 .lhave .btn { width: auto; }
+/* The remove confirm is inserted as a sibling in this row; without wrap it took a flex share and squeezed the note to one word per line. */
+.lhave { flex-wrap: wrap; }
+.lhave .confirm { flex: 1 0 100%; }
 .ok-quiet { color: var(--ok); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
@@ -2541,7 +2544,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     var bt = byId('lBoardThumb');
     while (bt.firstChild) bt.removeChild(bt.firstChild);
     if (onBoard && boardLogo) { var bi = document.createElement('img'); bi.setAttribute('src', boardLogo); bi.setAttribute('alt', 'The logo on the board'); bt.appendChild(bi); }
-    byId('lBoardText').textContent = !onBoard ? '' : boardLogo ? 'The logo on the board.' : 'A logo is on the board. Set from another computer, so there is no preview here.';
+    byId('lBoardText').textContent = !onBoard ? '' : boardLogo ? 'The logo on the board.' : 'A logo is on the board. Sent from another computer, so no preview here.';
     board.show({ logo: lg ? { url: lg.url, w: lg.w, h: lg.h, bg: '#' + lg.bg, scale: FITS[lg.fit] }
                  : onBoard && boardLogo ? { url: boardLogo, w: 320, h: 240, bg: '#' + CLEAR, scale: 1 } : null });
   }
