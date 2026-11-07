@@ -54,8 +54,10 @@ HOLD_BAND = 1.0
 SAME_WINDOW_S = 300
 
 # How long each window lasts, which is what lets a reading with no reset
-# stamp be placed against one that has a stamp: see _same_window.
-SESSION_WINDOW_S = 5 * 3600
+# stamp be placed against one that has a stamp: see _same_window. The
+# five-hour figure is base's, where the sources that retire a stampless
+# session reading read it too.
+SESSION_WINDOW_S = base.SESSION_WINDOW_S
 WEEKLY_WINDOW_S = 7 * 86400
 
 
@@ -258,8 +260,60 @@ def merge(frames):
     s_rolled = _rolled_at(frames, "session_rolled_at")
     w_rolled = _rolled_at(frames, "weekly_rolled_at")
 
+    # An account with no session window has no session figure to pick.
+    #
+    # pc/session_verdict marks the frames of an account proved to have none
+    # (see there for the evidence). Without this, a remembered payload
+    # or a Claude Desktop sample two days old filled the dial, won `primary`
+    # below, and the board was told live data was 37 hours old (measured
+    # 2026-10-30, a verified Ultra account). The mark applies whatever the
+    # age of the frame that carries it: a stale payload still says what the
+    # account had, and its own staleness is reported honestly through
+    # `primary` below. Nothing is borrowed then -- not Claude Desktop's
+    # history, not its Local Storage, not the remembered payload -- and the
+    # countdown and the burn rate go with the figure.
+    #
+    # Nothing here voids the mark. It used to be lifted by an unmarked
+    # source carrying a session reset time, back when the mark was inferred
+    # from quiet data and needed a way out. Now it is a verdict on evidence
+    # that already weighed that source: a Local Storage window, a status
+    # line with five_hour, a Desktop fh figure each clear it at once when
+    # they are newer than the proof against them (pc/session_verdict).
+    #
+    # So `no_window` on the merged frame is True exactly when the session
+    # below is unknown because of this rule, and pc/ingest's burn view keys
+    # on that.
+    #
+    # Of the frames that are not a spend page's. A spend share is not a
+    # five-hour figure, and pc/session_verdict never marks one; a spend
+    # frame that came here marked (a merged frame merged again, a scenario)
+    # must not take the share off its own page, nor turn on the burn view.
+    #
+    # And never on a group that holds a spend page with a figure, whatever
+    # the other frames say. A seat billed by usage has no five-hour window
+    # to lack. The status line of a real usage-billed seat carries no
+    # rate_limits at all, and the hook's frames carry no figure, so both
+    # pass pc/ingest's spend-page filter. A verdict saved by an earlier
+    # Ultra login marked them, and until the final review of 2026-11-04
+    # the merged spend page came out with no_session_window=True and the
+    # token burn view on (tests/pc/test_spend_page.py).
+    #
+    # Nor on a page that says its login reports nothing (PLAN_UNREPORTED,
+    # an Enterprise or Team login, pc/claude_account.select). The hook's
+    # frames beside it carry whatever mark a verdict saved by an earlier
+    # Ultra login puts on them, and until the /code-review max of
+    # 2026-11-04 (U38) the "Not reported" page came out marked: the token
+    # burn view drawn on it, and the transcripts read for it.
+    no_window = (not any(f.plan == base.PLAN_SPEND and f.has_usage()
+                         for f in frames)
+                 and not any(f.plan == base.PLAN_UNREPORTED for f in frames)
+                 and any(f.no_session_window for f in frames
+                         if f.plan != base.PLAN_SPEND))
+    session_frames = ([f for f in frames if f.plan == base.PLAN_SPEND]
+                      if no_window else frames)
+
     session_pct, session_src, session_dated = _pick_pct(
-        frames,
+        session_frames,
         lambda f: (_known_pct(f.session_pct)
                    and _survives_rollover(f, s_rolled, "session_rolled_at")),
         "session_pct", "session_resets_at", SESSION_WINDOW_S)
@@ -273,7 +327,21 @@ def merge(frames):
     # provider then goes out as unknown rather than not at all, dated and
     # judged by the newest frame that saw a window end.
     ended_evidence = None
-    if session_src is None and weekly_src is None:
+    # "This account reports nothing" (pc/claude_account.select). It may
+    # stand in for a reading but never displace one, so it is consulted only
+    # when nothing carries a number -- and select() only makes it then.
+    stand_in = next((f for f in frames
+                       if f.plan == base.PLAN_UNREPORTED), None)
+    # A spend page with dollars and no share: a seat billed by usage whose
+    # cap is not known (no /usage this month). Its dollars are the reading,
+    # so it names the page where a share would have; the newest, if there
+    # are several.
+    spend_stand_in = max((f for f in frames
+                          if f.plan == base.PLAN_SPEND
+                          and f.spend_usd is not None),
+                         key=lambda f: f.observed_at, default=None)
+    if (session_src is None and weekly_src is None and stand_in is None
+            and spend_stand_in is None):
         # Nothing here carries a usage percentage. A frame with only a model
         # name would render as two blank dials, which is worse than the
         # board keeping the last reading it already has.
@@ -298,8 +366,11 @@ def merge(frames):
             return None
         ended_evidence = max(evidence, key=lambda f: f.observed_at)
 
+    # Nor a countdown or a rate for it: a remembered window's reset stamp
+    # would otherwise ride along on a dial that is drawn "--%". Picked from
+    # session_frames, so there is none to pick under the rule above.
     session_resets_at, _ = _pick(
-        frames, lambda f: _stamp(f, "session_resets_at") is not None,
+        session_frames, lambda f: _stamp(f, "session_resets_at") is not None,
         lambda f: f.session_resets_at)
     weekly_resets_at, _ = _pick(
         frames, lambda f: _stamp(f, "weekly_resets_at") is not None,
@@ -322,7 +393,7 @@ def merge(frames):
         # a reset leaves session_resets_at None, which is precisely the state
         # that lets a rate through at all.
         session_burn_pph, _ = _pick(
-            frames,
+            session_frames,
             lambda f: (f.session_burn_pph is not None
                        and _survives_rollover(f, s_rolled, "session_rolled_at")),
             lambda f: f.session_burn_pph)
@@ -344,7 +415,8 @@ def merge(frames):
     # the number drawn to within HOLD_BAND (_pick_pct, rule 3). Still a
     # source that vouches for the figure next to it, which is the point of
     # the paragraph above, and never a stale one while a fresh one agrees.
-    primary = session_dated or weekly_dated or ended_evidence
+    primary = (session_dated or weekly_dated or spend_stand_in or stand_in
+               or ended_evidence)
 
     # And the fact `primary` cannot carry: when this provider last said
     # anything at all.
@@ -377,6 +449,7 @@ def merge(frames):
         # Carried so a merged frame is still a valid input to another merge.
         session_rolled_at=s_rolled,
         weekly_rolled_at=w_rolled,
+        no_session_window=no_window,
         # The counts travel with the state they describe. Taking them
         # field-by-field like everything else would let a session count from
         # one source sit beside a state from another, which is a panel saying
@@ -387,6 +460,20 @@ def merge(frames):
         n_idle=state_src.n_idle if state_src else 0,
         n_agents=state_src.n_agents if state_src else 0,
         label=state_src.label if state_src else "",
+        # Copied whole from `primary`, unlike the percentages above. A
+        # share, a cap and the dollars spent are three numbers from one
+        # response; picking each from whichever source is newest could
+        # print 63% next to a $500 cap that the 63% was not taken against.
+        # Mixing plans is not a risk here: by the time frames reach merge(),
+        # claude_account.select has dropped every reading whose plan differs
+        # from the newest one's.
+        plan=primary.plan,
+        spend_usd=primary.spend_usd,
+        spend_limit_usd=primary.spend_limit_usd,
+        spend_period=primary.spend_period,
+        account=primary.account,
+        spend_exact=primary.spend_exact,
+        spend_hint=primary.spend_hint,
     )
 
 

@@ -169,6 +169,42 @@ void theme_dot_colours(const struct palette *p, uint32_t *live,
 uint32_t theme_arc_colour(const struct palette *p, int which, double pct);
 
 /*
+ * The five-hour burn view's four inks: the kind of mark this screen never
+ * had and no palette role describes (usage_view.c burn_draw_cb() draws
+ * them; docs/plans/burn-5h.md is the contract). `contract` is true for
+ * THEME_DARK, the one theme the contract names, which starts from the
+ * contract's own bytes; every other theme, custom ones included, starts
+ * from the same relationships worked out of its own roles.
+ *
+ * Both bar inks are then held to a floor on the ground, as the panel shows
+ * it (RGB565): THEME_BURN_INK_FLOOR, or the text's own ratio where a custom
+ * theme's text is lower than that. And the newest hour is held
+ * THEME_BURN_INK_STEP apart from the bars before it, on the far side of
+ * them from the ground, so it stays the stronger mark. theme.c says why
+ * each figure is what it is; pc/theme_builder.html draws its preview with
+ * the same walk.
+ */
+#define THEME_BURN_INK_FLOOR	3.0
+#define THEME_BURN_INK_STEP	1.5
+
+struct theme_burn_inks {
+	uint32_t hot;			/* the newest hour's four bars */
+	uint32_t cold;			/* the sixteen before them */
+	uint32_t base;			/* the baseline */
+	uint32_t tick;			/* the hour ticks */
+};
+
+void theme_burn_inks(const struct palette *p, bool contract,
+		     struct theme_burn_inks *k);
+
+/*
+ * theme_burn_inks() for the active palette, computed when it was selected
+ * (the walk is milliseconds of soft float; see theme.c). Dark is the
+ * contract theme, so the contract flag is cur_id == THEME_DARK.
+ */
+const struct theme_burn_inks *theme_cur_burn_inks(void);
+
+/*
  * A `{"t":"theme",...}` line, parsed and validated as a whole.
  *
  * Returns false -- and leaves *out unspecified -- for ANY bad value: an

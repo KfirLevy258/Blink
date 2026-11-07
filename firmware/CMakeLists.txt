@@ -18,6 +18,7 @@ target_sources(app PRIVATE
 	src/ui_sleep.c
 	src/sleep_gate.c
 	src/upd_prompt.c
+	src/ask_prompt.c
 	src/upd_row.c
 	src/upd_tap.c
 	src/whatsnew.c
@@ -42,6 +43,7 @@ target_sources(app PRIVATE
 	src/theme.c
 	src/font_focus_40.c
 	src/ui_theme.c
+	src/burn5h.c
 )
 
 # The radio's station half (spec S5.1); on in every image (Kconfig).

@@ -95,6 +95,7 @@ run_one() {
 echo "== firmware host tests"
 run_one backlight    ""                ""
 run_one bootanim     "bootanim_dec.c"  ""
+run_one burn5h       "burn5h.c msg_parse.c" ""
 # cfg_store.c unchanged against a RAM flash; the stubs stand in for Zephyr.
 # CFG_STUB_CAPTURE keeps its log lines for the boot-line check.
 run_one cfg_store    "cfg_store.c"     "-I$ROOT/tests/cfg_store/stub -DCFG_STUB_CAPTURE"
@@ -109,7 +110,7 @@ run_one logo         "logo_parse.c bootanim_dec.c" ""
 run_one logo_parse   "logo_parse.c bootanim_dec.c" ""
 # The partition written from a stream, on a RAM partition.
 run_one logo_write   "logo_write.c logo_parse.c bootanim_dec.c $ROOT/tests/support/flash_area_fake.c" ""
-run_one msg_parse    "msg_parse.c"     ""
+run_one msg_parse    "msg_parse.c burn5h.c" ""
 # The WiFi scan table: one entry a name, strongest first, at most 20.
 run_one net_link     ""                ""
 run_one ota_parse    "ota_parse.c"     ""
@@ -134,13 +135,15 @@ run_one touch_inject ""                ""
 # Its widget listing's wire format: the worst page fits, a label needs no
 # escaping, the aim grid finds a strip beside a popup.
 run_one touch_widgets ""               ""
+# "Keep figures fresh?": never stacked, withdrawn on host loss, later at 60 s.
+run_one ask_prompt  "ask_prompt.c"    ""
 run_one upd_prompt  "upd_prompt.c"    ""
 run_one upd_row     "upd_row.c"       ""
 run_one upd_tap     "upd_tap.c"       ""
 run_one whatsnew    "whatsnew.c ota_parse.c" ""
 run_one usage_contrast "theme.c msg_parse.c" "-lm"
 run_one usage_freshness "usage_freshness.c" ""
-run_one usage_layout ""                ""
+run_one usage_layout "fmt.c"           ""
 run_one usage_state  "usage_state.c"   ""
 run_one svc_state    "svc_state.c fmt.c" ""
 run_one wifi_msg     "wifi_msg.c msg_parse.c" ""

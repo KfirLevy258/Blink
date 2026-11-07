@@ -102,6 +102,18 @@ void ui_settings_theme_edit_welcome(const char *json);
  * (pc/protocol.edit_state). Holds, frees, or starts the bound again. */
 void ui_settings_theme_edit_state(bool editing);
 
+/* The daemon asked "Keep figures fresh?" (proto.c, an `ask` line with a
+ * known id). Put up on the next 250 ms tick that finds the glass clear, and
+ * never on top of anything; see ask_prompt.h. */
+void ui_settings_ask(void);
+
+/* The board starts (true) or stops (false) dozing. While it dozes neither
+ * the ask nor the update offer is put up -- either would eat the tap that
+ * wakes the board -- and one already up is taken down at once, unanswered:
+ * the ask comes back if the daemon sends it again, the offer once the board
+ * is awake. */
+void ui_settings_dozing(bool dozing);
+
 /* The host went away (HOST LOST) or said bye: the hold goes. */
 void ui_settings_theme_edit_host_gone(void);
 
@@ -118,7 +130,7 @@ bool ui_settings_connection_open(void);
 struct ui_settings_bench {
 	bool open;		/* the panel is up (or is the ground under one) */
 	const char *sub;	/* none|brightness|theme|focus|connection|confirm */
-	const char *modal;	/* none|notice|whatsnew|prompt|download */
+	const char *modal;	/* none|notice|whatsnew|prompt|ask|download */
 	bool busy;		/* a transition is latched or a close queued */
 	int theme_page;		/* the theme screen's page, from 0 */
 	const char *edit;	/* "Edit on computer": name|waiting|opened|run|held */

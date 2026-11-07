@@ -87,6 +87,7 @@ def test_every_type_the_daemon_builds_is_one_the_log_can_name():
              protocol.status("ok"), protocol.theme("cancel"),
              protocol.theme_edit_reply(True), protocol.theme_edit_done(),
              protocol.svc("claude", "ok"),
+             protocol.burn("claude", 1_793_430_000, [0] * 20),
              protocol.ota_avail("1.4.0", 1, "0" * 64),
              protocol.ota_begin("1.4.0"), protocol.ota_resume("1.4.0"),
              protocol.ota_none(), protocol.ota_error("x")]
@@ -248,3 +249,17 @@ def test_an_unknown_provider_from_the_board_is_not_named(capsys):
     err = capsys.readouterr().err
     assert "PROVIDERSECRET" not in err and "\x1b" not in err
     assert "not reporting; keeping 'claude'" in err
+
+
+def test_a_deferred_bus_never_names_an_unknown_provider(capsys):
+    """Item 6 of the /code-review max of 277b81a..4003b0b: unbuilt, the
+    DeferredBus kept any non-empty name and said True, so Bridge logged the
+    board's raw `provider` as "main source: ...", newlines and escapes
+    included. It answers as the bus it stands on does."""
+    interim = ingest.IngestionBus(providers=[_Fixed()], now=lambda: 1_700_000_000)
+    bus = ingest.DeferredBus(interim, lambda: None)
+    assert bus.set_preferred("PROVIDERSECRET\x1b[2J\n[bridge] forged") is False
+    err = capsys.readouterr().err
+    assert "PROVIDERSECRET" not in err and "\x1b" not in err
+    assert "forged" not in err
+    assert bus.set_preferred("claude") is True

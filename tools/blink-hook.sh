@@ -63,6 +63,17 @@ codex) sub=state-codex ;;
 *) sub=state ;;
 esac
 
+# BLINK'S OWN `claude -p /usage` RUN is not a render and not a session.
+# The daemon starts it with BLINK_REFRESH=1 and --settings disableAllHooks, and
+# that setting already stops hooks and the status line. This is the second
+# lock, in case a future Claude Code ignores the setting: a refresh payload
+# saved here would be read back as the person's own activity. Drain stdin so
+# the writer never gets SIGPIPE, then leave without writing or printing.
+if [ "${BLINK_REFRESH:-}" = 1 ]; then
+	cat >/dev/null
+	exit 0
+fi
+
 input=$(cat)
 
 # Extract the session id, and SANITISE IT IN THE PATTERN rather than after.
@@ -76,9 +87,10 @@ input=$(cat)
 #
 # The FIRST character must be alphanumeric. The class used to admit any of
 # `._-` anywhere, which let the literal names `.` and `..` through -- and
-# `$DIR/..` is ~/.blink itself, where the SubagentStart/Stop branches below
-# would then truncate or delete whichever file the agent id named. Reproduced
-# against the signing key before this was tightened.
+# `$DIR/..` is ~/.blink itself (or the WSL drop folder), where the
+# SubagentStart/Stop branches below would then truncate or delete whichever
+# file the agent id named. Reproduced against the signing key before this was
+# tightened.
 #
 # And the FIRST occurrence, not the last. The pattern's leading `.*` was
 # greedy, so on PreToolUse/PostToolUse it matched the last "session_id" on the
@@ -140,7 +152,23 @@ _projname() {
 # Private to the user. These files name the sessions someone has open, and
 # the default umask would leave them readable by every account on the machine.
 umask 077
-DIR="$HOME/.blink/$sub"
+# Under the folder $HOME/.blink/out names when it exists -- the Windows folder
+# the daemon reads for a WSL install -- and ~/.blink otherwise. The same rule,
+# with the same reasons, as tools/blink-statusline.sh: builtins only, since
+# this runs on every tool call, and the value tested rather than read's status.
+OUT="$HOME/.blink"
+if [ -f "$HOME/.blink/out" ]; then
+	# 2>/dev/null before the `<`: an unreadable out file must not print on
+	# every render, and the shell reports a failed open on the stderr in
+	# effect when it reaches that redirection (blink-statusline.sh).
+	# Cleared first: a failed read leaves the variable as it was, and an
+	# out_dir exported in the user's environment then became the folder
+	# every payload went to (review of feat/enterprise-spend, U30).
+	out_dir=
+	IFS= read -r out_dir 2>/dev/null < "$HOME/.blink/out"
+	[ -n "$out_dir" ] && OUT=$out_dir
+fi
+DIR="$OUT/$sub"
 [ -d "$DIR" ] || mkdir -p "$DIR" 2>/dev/null
 
 case $event in

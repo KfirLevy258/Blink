@@ -237,19 +237,54 @@ def test_computer_settings_round_trip(server, home):
     def get():
         return json.loads(request(server, "GET", "/api/computer", cookie=c)[2])
 
-    assert get() == {"status_page": False, "auto_update": True}
+    assert get() == {"status_page": False, "auto_update": True,
+                     "usage_refresh": False}
     assert post(server, "/api/computer", {"status_page": True}, c)[0] == 200
     assert user_config.load(home)["status_page"] is True
     s, _, body = post(server, "/api/computer", {"auto_update": False}, c)
     assert s == 200 and os.path.exists(os.path.join(home, "no-auto-update"))
-    assert get() == {"status_page": True, "auto_update": False}
+    assert get() == {"status_page": True, "auto_update": False,
+                     "usage_refresh": False}
     post(server, "/api/computer", {"auto_update": True, "status_page": False},
          c)
-    assert get() == {"status_page": False, "auto_update": True}
+    assert get() == {"status_page": False, "auto_update": True,
+                     "usage_refresh": False}
     assert not os.path.exists(os.path.join(home, "no-auto-update"))
     assert post(server, "/api/computer", {"status_page": "yes"}, c)[0] == 400
     assert post(server, "/api/computer", {}, c)[0] == 400
 
+
+
+def test_keep_figures_fresh_is_the_usage_refresh_setting(server, home,
+                                                         monkeypatch):
+    """The page's switch is `blink config usage-refresh`: the same key, and
+    on is the same fresh start (usage_refresh.switch_on), so a refresh that
+    turned itself off for a reason does not stay off for it."""
+    from pc import usage_refresh
+    calls = []
+    monkeypatch.setattr(usage_refresh, "switch_on",
+                        lambda bh, h: calls.append(bh))
+    c = login(server)
+    s, _, body = post(server, "/api/computer", {"usage_refresh": True}, c)
+    assert s == 200 and json.loads(body)["usage_refresh"] is True
+    assert user_config.load(home)[usage_refresh.SETTING] is True
+    assert calls == [home]
+    s, _, body = post(server, "/api/computer", {"usage_refresh": False}, c)
+    assert s == 200 and json.loads(body)["usage_refresh"] is False
+    assert user_config.load(home)[usage_refresh.SETTING] is False
+    assert calls == [home]          # off is only the setting
+    assert post(server, "/api/computer", {"usage_refresh": 1}, c)[0] == 400
+
+
+def test_switch_on_is_a_fresh_start(tmp_path):
+    from pc import usage_refresh
+    bh = str(tmp_path / ".blink")
+    st = usage_refresh.load_state(bh)
+    st.off_reason, st.fails = "cost", 3
+    usage_refresh.save_state(bh, st)
+    usage_refresh.switch_on(bh, str(tmp_path))
+    st = usage_refresh.load_state(bh)
+    assert st.off_reason == "" and st.fails == 0 and st.cleared_at
 
 # ------------------------------------------------------------ the logo route
 

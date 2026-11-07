@@ -307,6 +307,19 @@ static struct palette custom;
 static const struct palette *cur = &builtin[THEME_DARK];
 static int cur_id = THEME_DARK;
 
+/*
+ * The burn view's inks for `cur`, worked out once when the palette changes
+ * rather than on every draw. theme_burn_inks() is a soft-float contrast walk
+ * (no FPU doubles on the ESP32): the 2026-11-01 re-review measured it at
+ * about 2.2 ms on Retro LCD and up to about 9.5 ms on a garish custom theme,
+ * and burn_draw_cb() ran it on every LV_EVENT_DRAW_MAIN -- each strip of the
+ * 80-strip wipe and every redraw after. The inks depend on the palette alone,
+ * so theme_select() and theme_select_custom() set them, and the boot default
+ * (Dark, before anything is selected) is filled on the first read. 16 bytes.
+ */
+static struct theme_burn_inks cur_inks;
+static bool cur_inks_ok;
+
 const struct palette *theme_builtin(int id)
 {
 	if (id < 0 || id >= THEME_BUILTIN_N) {
@@ -509,7 +522,10 @@ static uint32_t custom_dim(uint32_t tx, uint32_t bg, uint32_t card)
  * it walks back the same way, to 3:1, the figure every built-in palette's
  * grey meets on the ground (tests/theme). It is checked on the ground only,
  * because that is the only place it is drawn (fp/fix-fwlog review, NICE-4).
- * The builder page draws no grey, so it has nothing to keep in step.
+ * The builder page draws grey too, since the burn view: its hour numbers
+ * are in it and its baseline and ticks are mixed from it, so
+ * pc/theme_builder.html's customGrey() walks the same way and
+ * tests/pc/test_theme_page_burn.py holds the two to each other.
  */
 #define GREY_MIN_CONTRAST 3.0
 
@@ -581,6 +597,8 @@ bool theme_select(int id)
 	}
 	cur = p;
 	cur_id = id;
+	theme_burn_inks(cur, cur_id == THEME_DARK, &cur_inks);
+	cur_inks_ok = true;
 	return true;
 }
 
@@ -592,7 +610,18 @@ bool theme_select_custom(const struct theme_custom *t)
 	theme_derive(t, &custom);
 	cur = &custom;
 	cur_id = THEME_CUSTOM;
+	theme_burn_inks(cur, false, &cur_inks);
+	cur_inks_ok = true;
 	return true;
+}
+
+const struct theme_burn_inks *theme_cur_burn_inks(void)
+{
+	if (!cur_inks_ok) {
+		theme_burn_inks(cur, cur_id == THEME_DARK, &cur_inks);
+		cur_inks_ok = true;
+	}
+	return &cur_inks;
 }
 
 static bool neutral(uint32_t c)
@@ -622,6 +651,125 @@ uint32_t theme_arc_colour(const struct palette *p, int which, double pct)
 		return which == 0 ? p->g1 : p->g2;
 	}
 	return pct >= 60.0 ? p->mid : p->low;
+}
+
+/*
+ * The burn view's inks; see theme.h.
+ *
+ * Dark's start from the contract's bytes. Two of the contract's colours are
+ * already Dark ROLES -- the arrow's #4387DF is g1 and the hour numbers'
+ * #6B7280 is grey -- so usage_view.c reads those two from the theme on every
+ * theme. These four are what no role describes, so every other theme gets
+ * the contract's RELATIONSHIPS from its own roles, which is what Dark's
+ * bytes are to within a few steps of RGB: the newest hour is g1 35% of the
+ * way to the text colour, the older bars g1 35% into the ground, the
+ * baseline and the ticks the track lifted 30% and 77% towards grey.
+ * Expressed that way the newest hour is still the stronger mark on a white
+ * ground, where "brighter" would have made it the fainter one.
+ *
+ * The floor. A bar is a graphic, and 3:1 is the figure tests/theme holds
+ * every graphic on this screen to (WCAG 1.4.11; the low arc, the grey). The
+ * plain mix did not meet it: the /code-review max of 2026-11-01 measured the
+ * older bars, as drawn, at 2.14:1 on Retro LCD, 2.23 on Light soft, 2.26 on
+ * Colour-blind, 2.60 on Light and 2.88 on Dark -- the contract's own byte --
+ * and a custom theme had no floor at all. So each ink walks, a percent at a
+ * time, from where the mix put it until it reads the floor:
+ *
+ *   - the older bars back towards g1, which keeps their hue, and if g1
+ *     itself is under the floor (a custom theme's g1 is its owner's choice,
+ *     and only the text is checked against the ground) on from g1 towards
+ *     the text;
+ *   - the newest hour on towards the text, until it reads the floor AND
+ *     sits THEME_BURN_INK_STEP from the older bars on the far side of them
+ *     from the ground. Raising the older bars closes the gap the plain mix
+ *     left; on Retro LCD it would have closed to 1.44:1. 1.5 is the step
+ *     tests/theme already calls "a visible step" between two of the
+ *     colour-blind theme's levels.
+ *
+ * Where the text cannot give the newest hour its step -- a custom theme
+ * whose g1 reads stronger than its text, so the older bars, mixed from g1,
+ * already outshine where the newest hour can go -- the newest hour takes
+ * whichever of the text and g1 is the stronger, and the older bars walk
+ * back towards the ground, never under the floor, until the step is there.
+ * 20,000 random customs found 14 such themes among those with text of 5:1
+ * or better before this second stage existed.
+ *
+ * The text always passes the floor, because a custom theme's floor is the
+ * text's own ratio where that is under 3:1 (as custom_grey() does), so
+ * every walk ends. The step cannot always be had: with nothing on the
+ * screen reading much over 4.5:1 there is no room for two marks 3:1 and
+ * 1.5 apart, and there the floor wins and the older bars stop at it, as
+ * far from the newest hour as the floor lets them be. Every built-in gets
+ * both from the first stage alone; tests/theme checks every one, and
+ * 20,000 random customs. Measured on the colours as the panel shows them,
+ * as custom_dim() is.
+ */
+static bool ink_apart(uint32_t hot, uint32_t cold, uint32_t bg)
+{
+	return shown_contrast(hot, bg) > shown_contrast(cold, bg) &&
+	       shown_contrast(hot, cold) >= THEME_BURN_INK_STEP;
+}
+
+/* `from` walked a percent at a time towards `to` until it reads `floor`
+ * on the ground and, with `cold` given, stands its step above it. */
+static uint32_t ink_walk(uint32_t from, uint32_t to, uint32_t bg,
+			 double floor, const uint32_t *cold)
+{
+	for (int pct = 0; pct < 100; pct++) {
+		uint32_t c = theme_mix(from, to, pct / 100.0);
+
+		if (shown_contrast(c, bg) >= floor &&
+		    (cold == NULL || ink_apart(c, *cold, bg))) {
+			return c;
+		}
+	}
+	return to;
+}
+
+void theme_burn_inks(const struct palette *p, bool contract,
+		     struct theme_burn_inks *k)
+{
+	double floor = shown_contrast(p->text, p->bg);
+
+	floor = floor < THEME_BURN_INK_FLOOR ? floor : THEME_BURN_INK_FLOOR;
+	if (contract) {
+		k->hot = 0x7FB2F0;
+		k->cold = 0x2D5C99;
+		k->base = 0x3A414B;
+		k->tick = 0x5C636B;
+	} else {
+		k->hot = theme_mix(p->g1, p->text, 0.35);
+		k->cold = theme_mix(p->g1, p->bg, 0.35);
+		k->base = theme_mix(p->track, p->grey, 0.30);
+		k->tick = theme_mix(p->track, p->grey, 0.77);
+	}
+	k->cold = ink_walk(k->cold, p->g1, p->bg, floor, NULL);
+	if (shown_contrast(k->cold, p->bg) < floor) {
+		k->cold = ink_walk(p->g1, p->text, p->bg, floor, NULL);
+	}
+	k->hot = ink_walk(k->hot, p->text, p->bg, floor, &k->cold);
+	if (ink_apart(k->hot, k->cold, p->bg)) {
+		return;
+	}
+	/* The second stage: the stronger of the two, and the older bars
+	 * stepped back towards the ground, the floor before the step. */
+	k->hot = shown_contrast(p->g1, p->bg) > shown_contrast(p->text, p->bg)
+		 ? p->g1 : p->text;
+	{
+		uint32_t from = k->cold;
+
+		for (int pct = 1; pct < 100; pct++) {
+			uint32_t c = theme_mix(from, p->bg, pct / 100.0);
+
+			if (shown_contrast(c, p->bg) < floor) {
+				break;
+			}
+			k->cold = c;
+			if (ink_apart(k->hot, c, p->bg)) {
+				break;
+			}
+		}
+	}
 }
 
 /*

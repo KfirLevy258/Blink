@@ -272,10 +272,10 @@ class Journal:
 # What a line of the board's console may say in bridge.log.
 #
 # ConsoleEcho used to forward each printk line verbatim, and the firmware
-# prints values: the usage it applied (proto.c:620, "[usage] session 41%
+# prints values: the usage it applied (proto.c:627, "[usage] session 41%
 # (11723s) weekly 9% ..."), every version on offer and running (ota.c:374,
 # ui_settings.c:830, main.c:126, main.c:233), the app and protocol of the
-# host (proto.c:711), the edition (bootclip.c:68), heap figures
+# host (proto.c:727), the edition (bootclip.c:68), heap figures
 # (mem_stats.c:131), touch coordinates (ui_swipe.c:190 and :313), the
 # backlight level (backlight.c:39) -- and until 2026-10-28 the stored WiFi
 # network's name, verbatim (cfg_store.c:491, which now says only "present").
@@ -334,22 +334,25 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[ota] offer shown",                              # ui_settings.c:830
     "[ota] offer withdrawn: a different version is on offer",  # :1311
     "[ota] offer withdrawn: state is no longer available",     # :1326
+    "[ota] offer withdrawn: the board is dozing",     # ui_settings.c:1443
     "[ota] install confirm withdrawn: the offer it named is no longer"
     " available",                                     # ui_settings.c:1346
     "[ota] test boot of",                                      # main.c:126
     "[ota] image confirmed",                                   # main.c:160
     "[ota] not healthy within 90 s -- rebooting to revert",    # main.c:164
     # [proto] -- firmware/src/proto.c
-    "[proto] host says bye",                                   # :433
-    "[proto] host time synced",                                # :632
-    "[proto] host connected",                                  # :711
-    "[proto] daemon offers",                                   # :796
-    "[proto] ota: writing",                                    # :810
-    "[proto] daemon resuming install of",                      # :830
-    "[proto] ota failed",                                      # :860
-    "[proto] host status",                                     # :867
-    "[proto] rx ring overflow, dropped",                       # :947
-    "[proto] host went away",                                  # :1025
+    "[proto] host says bye",                                   # :437
+    "[proto] host time synced",                                # :642
+    "[proto] host connected",                                  # :727
+    "[proto] daemon offers",                                   # :825
+    "[proto] ota: writing",                                    # :839
+    "[proto] daemon resuming install of",                      # :859
+    "[proto] ota failed",                                      # :889
+    "[proto] host status",                                     # :896
+    "[proto] burn line refused",                               # :995
+    "[proto] sburn line refused",                              # :993
+    "[proto] rx ring overflow, dropped",                       # :1000
+    "[proto] host went away",                                  # :1078
     "[proto] pref_set refused",                                # pref_set_line
     # [fatal] -- firmware/src/fatal.c. The three "reason" lines differ only
     # after their numbers, so they share one stem.
@@ -367,7 +370,7 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[usage] cleared a stored refresh token: no WiFi in this build",
     "[usage] mode: USB bridge (no host yet)",                  # main.c:680
     "[usage] mode: USB bridge",                                # main.c:656
-    "[usage] session",                                         # proto.c:620
+    "[usage] session",                                         # proto.c:627
     # [cfg] -- firmware/src/cfg_store.c, proto.c
     "[cfg] migrated 1.3.4 record",                             # :218
     "[cfg] migrated pre-lock record",                          # :268
@@ -377,16 +380,16 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[cfg] persist failed",                                    # :383
     "[cfg] storage open failed",                               # :412
     "[cfg] theme and focus taken from the older slot",         # :480
-    "[cfg] unknown edition",                                   # proto.c:666
-    "[cfg] edition already stamped as",                        # proto.c:683
-    "[cfg] edition set to",                                    # proto.c:688
-    "[cfg] could not store the edition",                       # proto.c:691
+    "[cfg] unknown edition",                                   # proto.c:676
+    "[cfg] edition already stamped as",                        # proto.c:693
+    "[cfg] edition set to",                                    # proto.c:698
+    "[cfg] could not store the edition",                       # proto.c:701
     # [theme] -- firmware/src/ui_theme.c, proto.c
     "[theme] preview timed out; back to the stored theme",     # :114
     "[theme] could not store the theme",                       # :155
     "[theme] preview cancelled",                               # :214
     "[theme] saved",                                           # :248
-    "[theme] line refused",                                    # proto.c:753
+    "[theme] line refused",                                    # proto.c:769
     # [logo] -- firmware/src/proto.c (spec S15.2): the partition written or
     # removed over the protocol, or a written image logo_parse refused.
     "[logo] written",
@@ -399,11 +402,19 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[boot] logo: none",                                       # logo.c:53
     "[boot] unknown edition",                                  # bootclip.c:64
     "[boot] edition",                                          # bootclip.c:68
+    # [ask] -- firmware/src/ui_settings.c: "Keep figures fresh?". Never
+    # which way it was answered; that is the person's.
+    "[ask] shown",
+    "[ask] answered",
+    "[ask] closed unanswered",
+    "[ask] withdrawn: the computer went away",
+    "[ask] withdrawn: the board is dozing",
+    "[ask] dropped: not shown in time",
     # the rest
     "[sleep] dozing",                                          # ui_sleep.c:183
     "[sleep] waking",                                          # ui_sleep.c:201
     "[focus] could not store the choice",                # ui_settings.c:2717
-    "[slide] VSCRDEF refused; transitions will not scroll",    # ui_slide.c:131
+    "[slide] VSCRDEF refused; transitions will not scroll",    # ui_slide.c:132
     "[touch] INJECT BUILD: the PC can drive this panel -- bench only, never"
     " ship this",                                         # touch_inject.c:490
     "[time] manual time",                                      # net_time.c:67
@@ -458,12 +469,22 @@ CONSOLE_EXTERNAL = (
 # banners, the touch tracer's #TT rows -- is a fixed placeholder, because
 # its first word is the board's text too.
 CONSOLE_TAGS = frozenset({
-    "bl", "boot", "cfg", "fatal", "focus", "logo", "mem", "ota", "proto",
-    "sleep", "slide", "swipe", "test", "theme", "time", "touch", "usage",
-    "wifi",
+    "ask", "bl", "boot", "cfg", "fatal", "focus", "logo", "mem", "ota",
+    "plan", "proto", "sleep", "slide", "swipe", "test", "theme", "time",
+    "touch", "usage", "wifi",
 })
 
 BOARD_LINE = "(board line)"
+
+# Console lines the board prints for a message the daemon restates on a
+# timer, cut to their bare tag by console_line, so every one is the same
+# line. proto.c prints "[plan] <page> <kind>" for each plan it takes, and the
+# heartbeat restates the plan; with a plan per cent on a working spend desk
+# the echo was some 360 identical lines an hour (/code-review max of
+# 2026-11-04, U5). ConsoleEcho logs one per COLLAPSE_EVERY_S and counts the
+# rest.
+CONSOLE_COLLAPSED = frozenset({"[plan]"})
+COLLAPSE_EVERY_S = 600.0
 
 
 def console_line(line: str) -> str:
@@ -549,12 +570,29 @@ class ConsoleEcho:
     # Deliberately a shape test on the first character and not a parse. This
     # is not deciding what a message means -- the reader does that -- only
     # whether the bridge is about to log the same bytes twice.
-    def __init__(self, limit=4096):
+    def __init__(self, limit=4096, now=None, every_s=COLLAPSE_EVERY_S):
         self._buf = bytearray()
         # A board that emits a very long line without a newline must not grow
         # this without bound. Nothing does today; the cap is here because a
         # buffer fed from a wire is the wrong place to assume that.
         self._limit = limit
+        # CONSOLE_COLLAPSED: line -> [when last logged, how many held back].
+        self._now = now or time.monotonic
+        self._every = every_s
+        self._held = {}
+
+    def _collapsed(self, line):
+        """The text to log for a CONSOLE_COLLAPSED line, or None to hold it
+        back. The first is logged; then one per every_s, saying how many
+        were held back in between. The count is ours, never the board's."""
+        now = self._now()
+        held = self._held.get(line)
+        if held is None or not 0 <= now - held[0] < self._every:
+            n = 0 if held is None else held[1]
+            self._held[line] = [now, 0]
+            return f"{line} ({n} more not logged)" if n else line
+        held[1] += 1
+        return None
 
     def feed(self, data):
         """Returns the complete console lines in `data`, as text."""
@@ -571,7 +609,12 @@ class ConsoleEcho:
                 continue
             if line.lstrip().startswith("{"):
                 continue            # protocol JSON: logged parsed instead
-            lines.append(console_line(line))
+            cut = console_line(line)
+            if cut in CONSOLE_COLLAPSED:
+                cut = self._collapsed(cut)
+                if cut is None:
+                    continue
+            lines.append(cut)
         if len(self._buf) > self._limit:
             del self._buf[:-self._limit]
         return lines

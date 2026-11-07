@@ -40,6 +40,41 @@ STATE_FAILED = "failed"
 VALID_STATES = (STATE_UNKNOWN, STATE_IDLE, STATE_RUNNING, STATE_WAITING,
                 STATE_STUCK, STATE_FAILED)
 
+# What a claude page's percentages are a share OF -- NormalizedUsageFrame.plan.
+#
+# PLAN_WINDOWS is every frame this project produced before the Enterprise
+# work, and every frame it produces now unless Claude Code's status line
+# carries a `rate_limits.spend_limit` object. It is spelled out rather than
+# left as "" so that the wire can say "back to windows" in a word when an
+# account switch takes a spend page away (protocol.plan).
+PLAN_WINDOWS = "windows"
+PLAN_SPEND = "spend"
+PLAN_UNREPORTED = "unreported"
+# The periods Claude Code documents for a spend cap. Anything else in that
+# field is dropped rather than relayed: the firmware has a caption for each
+# of these three and none for a fourth.
+SPEND_PERIODS = ("daily", "weekly", "monthly")
+# The src of the spend page pc/providers/claude_cli builds from Claude
+# Code's saved usage and the running count (pc/spend_count), on a seat
+# billed by usage that has no gateway figure. Spelled here, not only in
+# claude_cli, because pc/claude_account keeps such a frame whatever a login
+# switch says and cannot import claude_cli: claude_cli reaches it again
+# through pc/claude_plan. claude_cli.SPEND_SRC_ID is this value.
+SPEND_SRC_ID = "claude_spend"
+# The src of the frame built from the 5-hour and weekly figures in the same
+# saved /usage (claude_cli._usage_frame). Account-wide like the spend page,
+# so claude_account keeps it across a terminal's quiet and reads it by this
+# name.
+USAGE_SRC_ID = "claude_usage"
+# The active_at of a frame that carries figures and no sign of anybody at the
+# desk: merge() takes the newest active_at, so any real contact wins over it,
+# and alone it ages past every doze threshold. The saved /usage is moved by
+# BLINK's own refresh (pc/usage_refresh) as well as by a person, and dated
+# by it, the cache frame and the spend page kept the board's activity age
+# fresh with nobody there -- on Linux, where the idle probe cannot say, all
+# night (/code-review max of feat/usage-refresh, V4).
+NO_CONTACT = 0.0
+
 # Worst-first. This is the order the single scalar `state` collapses to when
 # several sessions -- of one provider or of both -- disagree, and the order is
 # a product decision rather than an implementation detail.
@@ -182,6 +217,72 @@ class NormalizedUsageFrame:
     # after observed_at. observed_at itself, and every age derived from it
     # (the wire's age_s, staleness), mean what they always meant.
     first_seen_at: object = None
+    # The claude page has NO session window: this account, as of this
+    # frame, has no five-hour limit to show. Verified Ultra accounts
+    # (2026-10-30) look like this, and Claude Code's status line then
+    # carries rate_limits.seven_day and no five_hour at all.
+    #
+    # The frame says it rather than leaving pc/normalizer to infer it from
+    # session_pct == UNKNOWN, because that value also means "the window
+    # expired while nobody rendered", and the two want opposite answers: the
+    # second borrows a session figure from the bus, the first must not, since
+    # whatever it borrowed (a remembered payload, a Claude Desktop sample two
+    # days old) describes a window the account does not have. No single
+    # provider can tell them apart: pc/session_verdict weighs the evidence
+    # every claude source reports (window_evidence, below) and marks the
+    # frames before they are merged, on positive evidence only.
+    # pc/normalizer.merge owns what the decision means; on a merged frame
+    # the field is True exactly when merge() reported the session unknown
+    # because of it, which is what the burn view (pc/ingest) keys on.
+    no_session_window: bool = False
+    # What this frame's source proves about the account's five-hour window,
+    # or None when it proves nothing: (has_window, kind, at), built by
+    # pc/session_verdict.evidence, `at` being when the figure it rests on
+    # was taken. See pc/session_verdict for each kind and why quiet data is
+    # never one.
+    window_evidence: object = None
+    # WHICH ALLOWANCE session_pct describes. Claude Pro and Max are metered
+    # by a five-hour window and a seven-day one, which is what the two
+    # gauges were built for. A Claude Enterprise seat behind a Claude apps
+    # gateway is metered by spend instead -- a dollar cap per day, week or
+    # month set by its admin -- and has no five-hour window to report. The
+    # status line carries that as `rate_limits.spend_limit`, and
+    # pc/statusline_source turns it into:
+    #
+    #   PLAN_SPEND       session_pct is the share of the cap used and
+    #                    session_resets_at the end of its period; the weekly
+    #                    fields are UNKNOWN, because that window does not
+    #                    exist on this account. The dollars below come along
+    #                    when Claude Code had fetched them.
+    #   PLAN_UNREPORTED  An Enterprise or Team login with nothing on this
+    #                    machine to read. No percentage at all, on purpose:
+    #                    pc/claude_account makes it so the panel can say so
+    #                    in words instead of drawing two blank gauges.
+    #
+    # Said on the frame, not inferred downstream, because the alternative is
+    # a spend share travelling as an unlabelled session_pct and a board
+    # drawing it as "SESSION 5h" -- a real number under another account's
+    # name (gapietro, 2026-10-14, the fork this is written after).
+    plan: str = PLAN_WINDOWS
+    # Dollars, or None when the source did not say. None and not 0.0, for
+    # the reason UNKNOWN is not 0.0: "$0 spent" is a claim.
+    spend_usd: object = None
+    spend_limit_usd: object = None
+    # One of SPEND_PERIODS, or "" when not reported.
+    spend_period: str = ""
+    # "enterprise" or "team" on a PLAN_UNREPORTED frame, "" everywhere else.
+    # It is the word the board shows, and the only fact about the account
+    # that ever leaves pc/claude_account.
+    account: str = ""
+    # How far a spend page's dollars can be trusted, on a SPEND_SRC_ID
+    # frame (docs/plans/enterprise-spend.md, "The figure"). spend_exact: the
+    # figure is the one /usage saved less than fifteen minutes ago, with
+    # nothing counted since. spend_hint: there is no /usage figure for this
+    # month, or it is more than a day old, so the board asks for one. Both
+    # False on every other frame, and pc/normalizer.merge copies them from
+    # the frame that names the page, with the dollars they describe.
+    spend_exact: bool = False
+    spend_hint: bool = False
 
     def __post_init__(self):
         if self.active_at is None:
@@ -200,8 +301,48 @@ class NormalizedUsageFrame:
         model name or an execution state -- but it must not be allowed to win
         a recency contest for numbers it does not have. The normalizer merges
         field by field for exactly this reason.
+
+        A spend frame with dollars counts as a figure even with no
+        percentage: a seat billed by usage with no monthly cap known (no
+        /usage this month, or a cap Claude Code did not save) has only the
+        dollars, and they are the page. Without this, pc/claude_account put
+        "Not reported" over a running count and pc/normalizer dropped it.
         """
-        return self.session_pct >= 0 or self.weekly_pct >= 0
+        return (self.session_pct >= 0 or self.weekly_pct >= 0
+                or (self.plan == PLAN_SPEND and self.spend_usd is not None))
+
+
+# How long a five-hour window lasts, and the slack on any judgement made
+# from it. ONE spelling: pc/normalizer places a stampless reading against a
+# stamped one with SESSION_WINDOW_S, and two sources retire a session figure
+# by session_outlived() below. Claude Desktop's retire used to spell
+# 5 * 3600 + 600 out on its own beside the normalizer's 5 * 3600 (review,
+# 2026-10-31).
+#
+# Ten minutes of slack, because the clocks a window is judged by are not the
+# server's: Claude Desktop samples every five minutes, so a sample can be up
+# to that late for the moment it describes, and Claude Code re-renders a
+# second after a reset and on its own idle cadence after that. Ten minutes
+# covers both with room; a different five-hour window is hours away.
+SESSION_WINDOW_S = 5 * 3600
+SESSION_SLACK_S = 600
+
+
+def session_outlived(fetched_at, now_epoch: float) -> bool:
+    """Has a five-hour window that was open when this reading was fetched
+    certainly ended by now?
+
+    For a reading with no reset stamp to say so itself. Claude Desktop's
+    usage cache has none at all, and a status-line five_hour can carry one
+    that will not read (null, a string, milliseconds): without a bound, such
+    a figure stayed on the bus for as long as its file did, and on
+    2026-10-30 a Desktop sample 37 hours old was still filling the session
+    dial of an account that no longer had a window. Measured from when the
+    figure was FETCHED, not from when its file was last written: Claude Code
+    repaints an unchanged block with a new mtime every time it renders, so
+    an mtime would never let it age out.
+    """
+    return now_epoch - fetched_at > SESSION_WINDOW_S + SESSION_SLACK_S
 
 
 def window_ended(resets_at, now_epoch: float) -> bool:

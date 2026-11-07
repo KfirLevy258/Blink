@@ -10,8 +10,22 @@
 # the install disclosure repeats it: this stores Claude Code's whole status
 # line payload, which alongside the two usage percentages carries the session
 # id, the working directory, the transcript path, the workspace directories
-# and the session's cost. The daemon reads only `rate_limits` out of it and
-# nothing else leaves this file -- but the file exists, so it is written
+# and the session's cost. The daemon reads `rate_limits`, `session_id` and
+# `cost.total_cost_usd` out of it -- the last two, held in memory and never
+# logged or saved, only to tell a reply that came back without a five-hour
+# window (pc/session_verdict). On a usage-billed seat they are saved after
+# all: the daemon keeps each session's id with its highest cost estimate
+# and when that was first seen or last rose, each rise counted in the last
+# five hours with its time, the month's total of the older ones and the
+# time of the last /usage, in ~/.blink/spend-count.json
+# (pc/spend_count), because the month's spend between two /usage runs is
+# those rises added up, and a total that dies with the process would start
+# the month again at every restart. Older rises are folded into the one
+# total (the final review of 2026-11-04: the file had kept every rise of
+# the month). Every other seat still holds them in memory only. This said
+# "only `rate_limits`" after the other two started being read, until the
+# /code-review max of 2026-11-01.
+# Nothing leaves this file -- but the file exists, so it is written
 # readable by this user alone (the umask below), and the disclosure says what
 # is in it rather than claiming it holds two numbers. POSIX sh has no JSON
 # parser, and a sed that tried to cut the payload down would be a second
@@ -24,9 +38,44 @@
 # number is any of them. With them gone the two remaining figures are
 # account-wide and identical in every terminal, so the last render is as good
 # as any.
+# BLINK'S OWN `claude -p /usage` RUN is not a render and not a session.
+# The daemon starts it with BLINK_REFRESH=1 and --settings disableAllHooks, and
+# that setting already stops hooks and the status line. This is the second
+# lock, in case a future Claude Code ignores the setting: a refresh payload
+# saved here would be read back as the person's own activity. Drain stdin so
+# the writer never gets SIGPIPE, then leave without writing or printing.
+if [ "${BLINK_REFRESH:-}" = 1 ]; then
+	cat >/dev/null
+	exit 0
+fi
+
 input=$(cat)
 umask 077
 
+# WHERE the copy goes. Natively ~/.blink, as it always was. Inside a WSL
+# distribution the daemon is not here -- it stays on Windows with the board --
+# so `blink install --wsl` writes $HOME/.blink/out naming a Windows folder it
+# owns, reached through the automount (/mnt/c/Users/.../.blink/wsl-<guid>),
+# and the daemon's 2 s poll reads that folder without ever starting the
+# distribution or crossing into it (docs/plans/enterprise-spend.md, section 4).
+#
+# `[ -f ]` and `read` are builtins: this runs on every render, and a native
+# desk, which has no out file, pays one stat for it and no fork. IFS= and -r
+# keep the path byte for byte -- a profile folder can hold a space ("Zoe
+# Smith"). `read` fails on a last line with no newline but has still set the
+# variable, so the test is on the value, not on read's status.
+OUT="$HOME/.blink"
+if [ -f "$HOME/.blink/out" ]; then
+  # 2>/dev/null before the `<`: an unreadable out file must not print on
+  # every render, and the shell reports a failed open on the stderr in
+  # effect when it reaches that redirection (see the write below).
+  # Cleared first: a failed read leaves the variable as it was, and an
+  # out_dir exported in the user's environment then became the folder
+  # every payload went to (review of feat/enterprise-spend, U30).
+  out_dir=
+  IFS= read -r out_dir 2>/dev/null < "$HOME/.blink/out"
+  [ -n "$out_dir" ] && OUT=$out_dir
+fi
 
 # Atomic write: the daemon may read this file at any moment, and a half-written
 # file would parse as malformed and blank the panel. Failures here (disk full,
@@ -35,7 +84,7 @@ umask 077
 # Guarded, because this runs on EVERY status line render -- many times a
 # minute -- and an unconditional mkdir forks a process each time to create a
 # directory that has existed since the first one.
-[ -d "$HOME/.blink" ] || mkdir -p "$HOME/.blink" 2>/dev/null
+[ -d "$OUT" ] || mkdir -p "$OUT" 2>/dev/null
 # 2>/dev/null must come BEFORE the '>' target on this line, not after: if
 # opening the target itself fails (e.g. the mkdir above also failed), the
 # shell reports that failure using whatever stderr was in effect when the '>'
@@ -47,8 +96,8 @@ umask 077
 # The temp name carries this process's pid: several terminals render at once,
 # and one shared temp name let a second render truncate the first's
 # half-written file before its rename.
-printf '%s' "$input" 2>/dev/null > "$HOME/.blink/statusline.json.$$.tmp" &&
-  mv -f "$HOME/.blink/statusline.json.$$.tmp" "$HOME/.blink/statusline.json" 2>/dev/null
+printf '%s' "$input" 2>/dev/null > "$OUT/statusline.json.$$.tmp" &&
+  mv -f "$OUT/statusline.json.$$.tmp" "$OUT/statusline.json" 2>/dev/null
 
 # Delegate to the previously configured command, if any. Never fail the status
 # bar because Blink had a problem.
@@ -68,6 +117,9 @@ printf '%s' "$input" 2>/dev/null > "$HOME/.blink/statusline.json.$$.tmp" &&
 # statusline is hung. Do not reorder this to "only record on success" -- that
 # would let a hanging chain block Blink's own capture too, which is exactly
 # the failure this ordering exists to prevent.
+# $HOME/.blink, not $OUT, even inside WSL: the chain file holds a command for
+# this shell to run, so it lives beside the shim in the distribution, where
+# install writes it and uninstall puts it back from.
 CHAIN="$HOME/.blink/statusline-chain"
 if [ -s "$CHAIN" ]; then
   # `read`, not `cat`: a builtin instead of a fork, on the same every-render

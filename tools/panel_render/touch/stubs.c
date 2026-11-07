@@ -301,6 +301,19 @@ bool proto_ota_staged(void)
 	return ota_staged_now;
 }
 
+/* "Keep figures fresh?" (ask_prompt.h): the bench's host is always there,
+ * and an answer goes nowhere -- the board script reads the box from
+ * ui_state, not from the wire. */
+bool proto_host_seen(void)
+{
+	return true;
+}
+
+void proto_send_answer(enum ask_answer a)
+{
+	(void)a;
+}
+
 void harness_theme_now(const char *why)
 {
 	char buf[96];

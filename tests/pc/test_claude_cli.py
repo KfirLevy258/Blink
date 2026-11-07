@@ -51,13 +51,18 @@ def test_a_live_reading_is_returned_alone(tmp_path):
 
 def test_the_last_reading_with_a_percentage_is_offered_when_the_file_loses_one(tmp_path):
     """The field case: the file was rewritten without the five-hour window,
-    so the only session figure left in the world is the one we read six hours
-    ago, and nothing says the window it describes has rolled."""
+    so the only session figure left in the world is the one we read five
+    hours ago, and nothing says the window it describes has rolled.
+
+    Five hours, not the six this test used to use: an unstamped figure
+    fetched more than five hours and ten minutes ago describes a window that
+    has certainly ended, and is no longer lent at all
+    (test_an_unstamped_window_is_lent_no_longer_than_a_window_lasts)."""
     p = tmp_path / "statusline.json"
     prov = ClaudeCliProvider(path=str(p))
 
-    write(p, payload(five_hour=27.0), NOW - 6 * 3600)
-    prov.poll(NOW - 6 * 3600 + 1)
+    write(p, payload(five_hour=27.0), NOW - 5 * 3600)
+    prov.poll(NOW - 5 * 3600 + 1)
 
     write(p, {"rate_limits": {"seven_day": {"used_percentage": 12.0}}}, NOW - 60)
     frames = prov.poll(NOW)
@@ -65,7 +70,7 @@ def test_the_last_reading_with_a_percentage_is_offered_when_the_file_loses_one(t
     remembered = [f for f in frames if f.session_pct >= 0]
     assert len(remembered) == 1
     assert remembered[0].session_pct == 27.0
-    assert remembered[0].observed_at == NOW - 6 * 3600
+    assert remembered[0].observed_at == NOW - 5 * 3600
     assert remembered[0].src == "cli"
 
 
@@ -93,15 +98,15 @@ def test_a_remembered_window_that_has_since_ended_is_not_re_offered(tmp_path):
 
 
 def test_the_remembered_reading_is_marked_stale_by_its_own_age(tmp_path):
-    """Not frozen at the staleness it had when captured. A six-hour-old
+    """Not frozen at the staleness it had when captured. A five-hour-old
     number under a green dot is the confident-wrong-number failure
     pc/normalizer's docstring exists to prevent."""
     p = tmp_path / "statusline.json"
     prov = ClaudeCliProvider(path=str(p))
 
-    write(p, payload(five_hour=27.0), NOW - 6 * 3600)
-    prov.poll(NOW - 6 * 3600 + 1)
-    assert prov.poll(NOW - 6 * 3600 + 1)[0].stale is False
+    write(p, payload(five_hour=27.0), NOW - 5 * 3600)
+    prov.poll(NOW - 5 * 3600 + 1)
+    assert prov.poll(NOW - 5 * 3600 + 1)[0].stale is False
 
     write(p, {"rate_limits": {}}, NOW - 60)
     remembered = [f for f in prov.poll(NOW) if f.session_pct >= 0][0]

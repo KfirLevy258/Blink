@@ -280,35 +280,71 @@ def _fw_line(name, buf_name="buf"):
     return line, size
 
 
-def test_the_boards_hello_carries_both_caps_and_fits_its_buffer():
+# Every cap this firmware lists. "burn" is the five-hour burn view
+# (docs/plans/burn-5h.md): the daemon sends a board `burn` lines only when its
+# caps say so, so a board built without the view must never claim it, and
+# one built with it must never forget to. "plan" is the spend page
+# (docs/plans/enterprise-spend.md), on the same terms for `plan` lines.
+# "ask" is the touch prompt that asks someone already running BLINK whether
+# to keep the figures fresh with /usage (docs/plans/usage-refresh.md, 1b):
+# the daemon sends `ask` only to a board that lists it.
+# "wifi", "logo" and "pref" are the WiFi branch's: the network link, the
+# start-up logo and pref_set (spec S15.2, S15.3).
+FW_CAPS = {"svc", "theme", "edit_done", "burn", "plan", "spendburn", "ask",
+           "wifi", "logo", "pref"}
+
+
+def test_the_boards_hello_carries_its_caps_and_fits_its_buffer():
     line, size = _fw_line("send_hello")
     msg = json.loads(line)
     assert msg["t"] == "hello"
-    assert protocol.board_caps(msg) == {"svc", "theme", "edit_done", "wifi",
-                                        "logo", "pref"}
+    assert protocol.board_caps(msg) == FW_CAPS
     # snprintf truncates silently, and a truncated hello is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
 
 
-def test_the_boards_pref_carries_both_caps_and_fits_its_buffer():
+def test_the_boards_pref_carries_its_caps_and_fits_its_buffer():
     line, size = _fw_line("proto_send_pref")
     # The first %s is the provider, at its widest "claude"; the second is
     # the board id at hwinfo's widest, 32 hex digits.
     line = line.replace("f" * 32, "claude", 1)
     msg = json.loads(line)
     assert msg["t"] == "pref"
-    assert protocol.board_caps(msg) == {"svc", "theme", "edit_done", "wifi",
-                                        "logo", "pref"}
+    assert protocol.board_caps(msg) == FW_CAPS
     # snprintf truncates silently, and a truncated pref is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
     # focus, bright and view are what pref_set sets (spec S15.3); ok says
     # whether the pref_set it answers was refused.
     assert {"focus", "bright", "view", "ok"} <= set(msg)
-    # Measured 185 B in the 224 B buffer (hello: 171 in 192), after the
-    # logo and pref caps, the three preferences and ok. A cap costs its name's
-    # length plus 3 B. The daemon reads 512 and the board itself drops a
-    # longer inbound line whole; a pref anywhere near that is a mistake.
-    assert len(line) <= 200, len(line)
+    # Measured 217 B in the 256 B buffer (hello: 203 in 256) once
+    # develop merged into the WiFi branch, with all ten caps. On develop
+    # alone it was 151 in 160 (hello 180 in 192) with "ask", 145 (174) with
+    # "spendburn", 133 (162) with "plan", 126 in 128 (155 in 160) before;
+    # on the WiFi branch alone 185 in 224 (hello 171 in 192), after the
+    # logo and pref caps, the three preferences and ok. A cap costs its
+    # name's length plus 3 B. The daemon reads 512 and the board itself
+    # drops a longer inbound line whole; a pref anywhere near that is a
+    # mistake.
+    assert len(line) <= 256, len(line)
+    assert len(line) == 217, len(line)
+
+
+def test_the_boards_hello_is_measured_at_its_widest():
+    """The figure the comment in send_hello quotes, held to it: a cap that
+    grows the hello moves this number and the comment with it."""
+    line, size = _fw_line("send_hello")
+    assert (len(line), size) == (203, 256)
+
+
+def test_the_caps_are_appended_never_reordered():
+    """Append-only, like THEME_IDS: a new cap goes at the end, and the ones
+    already shipped keep their places."""
+    src = (ROOT / "firmware" / "src" / "proto.c").read_text()
+    caps = re.search(r'#define BOARD_CAPS "\\"caps\\":\[(.*?)\]"', src)
+    assert caps, "BOARD_CAPS is gone from proto.c"
+    names = re.findall(r'\\"([a-z_]+)\\"', caps.group(1))
+    assert names == ["svc", "theme", "edit_done", "burn", "plan",
+                     "spendburn", "ask", "wifi", "logo", "pref"], names
 
 
 def test_the_boards_pref_names_the_board_as_hello_does():
@@ -344,3 +380,93 @@ def test_a_pref_with_a_board_id_is_read_as_before(tmp_path):
                                      "board_id": "a1b2c3d4e5f6",
                                      "caps": BOTH})
     assert set(known["caps"]) == {"svc", "theme"}
+
+
+# ----------------------------------------- the hint, keyed to this board
+
+
+class _ProbePort:
+    """A port for the probe: the chunks the board says, then silence."""
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+
+    def reset_input_buffer(self):
+        pass
+
+    def write(self, raw):
+        pass
+
+    def read(self, n):
+        return self.chunks.pop(0) if self.chunks else b""
+
+
+def _line(msg):
+    return (json.dumps(msg) + "\n").encode()
+
+
+def test_the_probe_hands_back_the_pref_that_answered_it():
+    """The pref that answers the probe's welcome is THIS board's word on
+    what it draws, and it used to be read and thrown away. A ping that
+    lands first does not end the listening: the pref follows it."""
+    pref = {"t": "pref", "v": 2, "provider": "claude",
+            "caps": ["plan", "svc"]}
+    heard = []
+    port = _ProbePort([_line({"t": "ping", "v": 2}), _line(pref)])
+    assert claude_usage_bridge.probe_is_our_board(port, 0.3, heard=heard)
+    assert pref in heard
+    # Without a list, the probe is what it always was.
+    port = _ProbePort([_line(pref)])
+    assert claude_usage_bridge.probe_is_our_board(port, 0.3) is True
+
+
+def test_the_hint_is_the_boards_own_when_it_answered():
+    """/code-review max of 2026-11-04, U17: board.json's caps are the LAST
+    board's. A board swapped for an older one, or reflashed down, on the
+    same port was handed the spend share as "SESSION 5h" until its own pref
+    reached the bridge. The probe heard that pref already; it wins."""
+    hint = claude_usage_bridge.board_caps_hint
+    known = {"caps": ["plan", "spendburn", "svc", "theme"]}
+    old = {"t": "pref", "v": 2, "provider": "claude", "caps": ["svc"]}
+    assert hint([old], known) == ["svc"]
+    bare = {"t": "pref", "v": 2, "provider": "claude"}
+    assert hint([{"t": "ping"}, bare], known) == []
+    # Unheard -- a reset board, a ping and nothing else -- board.json
+    # stands for what a wrong guess cannot hurt, and never for the plan:
+    # every board that draws plans answers a welcome with its pref, and a
+    # plan-less board handed a spend share draws dollars as a session.
+    assert hint([], known) == ["svc", "theme"]
+    assert hint([{"t": "ping"}], known) == ["svc", "theme"]
+    assert hint([], {}) is None
+    assert hint([], {"caps": "junk"}) is None
+
+
+def test_a_hint_without_the_plan_blanks_the_share_until_the_board_says():
+    from pc.providers import base
+    f = base.NormalizedUsageFrame(
+        provider="claude", src="claude_spend", observed_at=1.0,
+        session_pct=62.8, plan=base.PLAN_SPEND, spend_usd=314.0,
+        spend_limit_usd=500.0, spend_period="monthly")
+
+    class Fetch:
+        def __call__(self):
+            return protocol.frame_to_usage(f, 2.0)
+
+        def plan_msg(self):
+            return protocol.plan_for(f)
+
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=Fetch(),
+               now=lambda: 1000.0, wall=lambda: (1752444000, 0),
+               board_caps_hint=claude_usage_bridge.board_caps_hint(
+                   [], {"caps": ["plan", "svc"]}), **_NO_FEED)
+    b.greet()
+    assert [m for m in sent if m["t"] == "usage"][-1]["session_pct"] == -1
+
+
+def test_the_daemon_keys_the_hint_to_what_the_probe_heard():
+    src = ast.unparse(ast.parse(
+        pathlib.Path(claude_usage_bridge.__file__).read_text(
+            encoding="utf-8")))
+    assert "board_caps_hint=board_caps_hint(heard, known)" in src
+    assert "heard=heard" in src

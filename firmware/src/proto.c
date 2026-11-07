@@ -39,6 +39,8 @@
 #include <zephyr/sys/reboot.h>
 #include "ui_boot.h"
 #endif
+#include "burn5h.h"
+#include "ask_prompt.h"
 
 #define PROTO_VERSION BLINK_PROTO_VERSION
 #define PING_INTERVAL_MS 10000
@@ -106,9 +108,16 @@ static size_t line_len;
  * past its limit. The ceiling used to be 100, and num() does not clamp -- it
  * refuses -- so 102 left the caller's `double wp = 0` untouched and the panel
  * drew an empty ring at the moment the user went over. Accept the real number
- * and let usage_view saturate the ring.
+ * and let usage_view saturate the ring -- and past this ceiling too, hold the
+ * figure at it (num_pct below) rather than refuse it, for the same reason.
  */
 #define PCT_MAX 1000.0
+/*
+ * Dollars, on the spend page. A billion is nobody's cap; it is the bound past
+ * which a field is a misread rather than a figure, and fmt_usd() is handed
+ * nothing it would have to guess at.
+ */
+#define USD_MAX 1e9
 
 static void num(const char *json, const char *key, double *out,
 		double lo, double hi)
@@ -123,10 +132,36 @@ static void num(const char *json, const char *key, double *out,
 	}
 	*out = v;
 }
+/*
+ * A percentage on the usage line: as num(), except that a reading past
+ * PCT_MAX is held at it rather than refused. Refused, it left the caller's
+ * `double sp = 0` standing, and a spend seat whose cap was cut below what it
+ * had already spent -- $300 of $20, share 1500 -- drew an empty 0% ring with
+ * no "used up", the opposite of the truth (review of feat/enterprise-spend,
+ * 2026-11-04, U3). The ring saturates and the display holds "1000%" either
+ * way; NaN and anything below `lo` are still refused, because those are not
+ * a lot of usage but no reading.
+ */
+static void num_pct(const char *json, const char *key, double *out,
+		    double lo)
+{
+	double v;
+
+	if (!msg_get_double(json, key, &v)) {
+		return;
+	}
+	if (v != v || v < lo) {
+		return;
+	}
+	*out = v > PCT_MAX ? PCT_MAX : v;
+}
 static int64_t last_ping_ms;
 static int64_t last_host_ms;
 static bool host_seen;
 static bool host_bye;		/* the app said it is going, on purpose */
+/* A welcome came and no plan since: the plan on screen is the last host's,
+ * reset at this host's first usage line if it never states one (dispatch). */
+static bool plan_unconfirmed;
 static bool host_lost;		/* silence past the timeout, without a bye */
 static char host_ver[16];	/* the daemon's release version, from welcome */
 static int host_proto;		/* ...and the protocol it speaks */
@@ -192,8 +227,26 @@ static void emit(const char *json)
 /* logo: takes logo_begin/logo_chunk/G frames/logo_end/logo_remove and answers
  * logo_state; pref: takes pref_set (spec S15.2, S15.3). The daemon sends
  * neither to a board that does not list them. */
-/* One line: tests/pc/test_board_caps.py reads the macro as one literal. */
-#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"wifi\",\"logo\",\"pref\"]"
+/* burn: this firmware draws the five-hour burn view (docs/plans/burn-5h.md),
+ * so the daemon may send it `burn` lines. A board that does not list it --
+ * every 1.3.4 in the field -- never receives one. */
+/* plan: this firmware draws the spend page (docs/plans/enterprise-spend.md)
+ * from the daemon's `plan` message. Without it the daemon sends no plan and
+ * blanks a spend share on the usage line rather than let it be drawn as
+ * "SESSION 5h". A capability and not a version because 1.4.0 already means
+ * "draws svc", and the two features need not ship together. */
+/* spendburn: this firmware draws the spend page's dollar burn view from the
+ * daemon's `sburn` line, which goes only to a board that lists it -- a board
+ * with "plan" and not this, the first spend-page builds, draws the page
+ * without the view and is sent no line it would drop. */
+/* ask: this firmware puts up "Keep figures fresh?" for the daemon's `ask`
+ * line and answers it with an `answer` line (ask_prompt.h). The daemon
+ * sends one only to a board that lists this: an older board would drop it,
+ * and the daemon would wait a day to ask again for nothing. */
+/* One line: tests/pc/test_board_caps.py reads the macro as one literal.
+ * develop's four first, then the WiFi branch's three: order means nothing
+ * to the daemon, which reads the list as a set. */
+#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"burn\",\"plan\",\"spendburn\",\"ask\",\"wifi\",\"logo\",\"pref\"]"
 
 /*
  * The board's id, as hello and pref both say it: hwinfo's device id in hex,
@@ -233,20 +286,24 @@ void proto_send_pref(void)
 	 * had nothing but board.json's memory to say which board it was --
 	 * and a remembered id must never decide whose theme wins.
 	 *
-	 * 185 bytes at its widest ("claude", a 32-digit id, bright 100, ok
-	 * and the six caps), measured by tests/pc/test_board_caps.py, which
+	 * 217 bytes at its widest ("claude", a 32-digit id, bright 100, ok
+	 * and the ten caps), measured by tests/pc/test_board_caps.py, which
 	 * fails if it outgrows this. It was 119 in 128 before Task 6.3 added
-	 * focus, bright, view, ok and the logo and pref caps. A cap costs its name's
+	 * focus, bright, view, ok and the logo and pref caps, 185 on the WiFi
+	 * branch alone, and 151 on develop alone (burn, plan, spendburn, ask);
+	 * the merge of the two put both sets on one line. A cap costs its name's
 	 * length plus 3 B (the comma and two quotes). Far under the daemon's
 	 * 512.
 	 *
 	 * focus, bright and view are what pref_set sets (spec S15.3), so the
 	 * page renders what the board holds and sees a pref_set land. view is
-	 * 0, the gauges: the only view until feat/ultra-burn merges. ok is 0
+	 * 0, the gauges, always: develop's burn view is no setting but the
+	 * board's own choice, made while a page has no session window
+	 * (docs/plans/burn-5h.md), so there is no view enum to report. ok is 0
 	 * only on the pref that answers a refused pref_set, so the page hears
 	 * the refusal at once instead of waiting out its timeout.
 	 */
-	char buf[224];
+	char buf[256];
 
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"pref\",\"v\":%d,\"provider\":\"%s\","
@@ -270,12 +327,14 @@ static void send_hello(void)
 	uint32_t cause = 0;
 	(void)hwinfo_get_reset_cause(&cause);
 
-	/* 171 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
-	 * "1.4.0", the six caps), measured by tests/pc/test_board_caps.py,
+	/* 203 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
+	 * "1.4.0", the ten caps), measured by tests/pc/test_board_caps.py,
 	 * which fails if it outgrows this; a truncated hello is not JSON. It
-	 * was 148 in 160 before the logo and pref caps. A cap costs its name's
-	 * length plus 3 B and a two-digit minor in fw 1 B. */
-	char buf[192];
+	 * was 171 on the WiFi branch alone and 180 on develop alone, each in a
+	 * 192 B buffer; with both sets of caps it is over that, so the buffer
+	 * is 256. A cap costs its name's length plus 3 B and a two-digit minor
+	 * in fw 1 B. */
+	char buf[256];
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"hello\",\"v\":%d,\"board\":\"cyd\","
 		 "\"board_id\":\"%s\",\"fw\":\"" BLINK_FW_VERSION "\","
@@ -326,6 +385,17 @@ void proto_send_theme_now(const char *why)
 			 PROTO_VERSION, id, why);
 	}
 	emit(buf);
+}
+
+void proto_send_answer(enum ask_answer a)
+{
+	/* 47 bytes at its widest ("later"); ask_prompt_line refuses rather
+	 * than cut a line short. */
+	char buf[64];
+
+	if (ask_prompt_line(buf, sizeof(buf), PROTO_VERSION, a) > 0) {
+		emit(buf);
+	}
 }
 
 void proto_send_theme_edit(void)
@@ -892,8 +962,10 @@ static void pref_set_line(const char *json)
 		}
 		bright = (int)v;
 	}
-	/* view: a non-negative integer, then ignored until feat/ultra-burn,
-	 * which adds the view enum, merges here (S15.3). */
+	/* view: a non-negative integer, then ignored (S15.3). The burn view
+	 * merged from develop with no view enum: it is the board's own choice,
+	 * the session gauge's place on a page with no session window
+	 * (docs/plans/burn-5h.md), so there is nothing here for it to set. */
 	if (msg_find_value(json, "view")) {
 		if (!msg_get_double(json, "view", &v) || v != v || v < 0 ||
 		    v > 255 || v != (double)(int)v) {
@@ -1312,17 +1384,46 @@ static void dispatch(const char *json, enum proto_src src)
 		 */
 		double ss = -1, ws = -1;
 
-		num(json, "session_pct", &sp, -1, PCT_MAX);
-		num(json, "weekly_pct", &wp, -1, PCT_MAX);
+		num_pct(json, "session_pct", &sp, -1);
+		num_pct(json, "weekly_pct", &wp, -1);
 		num(json, "session_resets_in_s", &ss, -1, SECS_MAX);
 		num(json, "weekly_resets_in_s", &ws, -1, SECS_MAX);
+
+		/* A host that welcomed us and stated no plan before its first
+		 * figures has none: windows (see the welcome arm). Before the
+		 * figures, because a page whose plan changes kind drops what
+		 * it holds, and these are the figures it should keep. */
+		if (plan_unconfirmed) {
+			plan_unconfirmed = false;
+			usage_view_set_plan(NULL, NULL, NULL, NULL, -1, -1, false,
+					    false);
+		}
+
+		/*
+		 * Whose figures these are, BEFORE they are drawn. The plan
+		 * record names a provider (usage_view_set_plan), so whether
+		 * the page is a spend page, and so its captions and its status
+		 * words, is decided by this name. Set after
+		 * usage_view_update(), as it was, the first line of a
+		 * connection on a board that booted first was drawn under the
+		 * name "" -- a spend share as "SESSION 5h 63%" -- and a switch
+		 * of main source drew Codex's windows under Claude's spend
+		 * captions (review of feat/enterprise-spend, 2026-11-04, FW1).
+		 * usage_view_set_provider1() redraws on a new name too; this
+		 * order is what keeps the first drawing right as well.
+		 */
+		char p1[USAGE_TAG_MAX];
+
+		if (msg_get_str(json, "provider", p1, sizeof(p1))) {
+			usage_view_set_provider1(p1);
+		}
 		usage_view_update(sp, (int32_t)ss, wp, (int32_t)ws);
 
 		/* Flat model key (protocol.py flattens its models list for
 		 * us); an absent key leaves the -1 "unknown" default. */
 		double mf = -1;
 
-		num(json, "fable_pct", &mf, -1, PCT_MAX);
+		num_pct(json, "fable_pct", &mf, -1);
 		usage_view_set_models(mf);
 
 		/* Every usage message says whether its own numbers can be
@@ -1390,12 +1491,6 @@ static void dispatch(const char *json, enum proto_src src)
 		num(json, "n_stuck", &nst, 0, 9999);
 		usage_view_set_counts((int)ns, (int)nr, (int)nw, (int)nst);
 
-		char p1[16];
-
-		if (msg_get_str(json, "provider", p1, sizeof(p1))) {
-			usage_view_set_provider1(p1);
-		}
-
 		/*
 		 * How fast the session window is filling, when nothing can say
 		 * WHEN it rolls. Absent is the normal case and means zero, so a
@@ -1411,14 +1506,14 @@ static void dispatch(const char *json, enum proto_src src)
 		num(json, "burn_pph", &burn, 0, 9999);
 		usage_view_set_burn(burn);
 
-		char p2[16];
+		char p2[USAGE_TAG_MAX];
 		double p2s = -1, p2w = -1, p2si = -1, p2wi = -1;
 
 		if (msg_get_str(json, "p2", p2, sizeof(p2))) {
 			bool p2stale = false;
 
-			num(json, "p2_session_pct", &p2s, -1, PCT_MAX);
-			num(json, "p2_weekly_pct", &p2w, -1, PCT_MAX);
+			num_pct(json, "p2_session_pct", &p2s, -1);
+			num_pct(json, "p2_weekly_pct", &p2w, -1);
 			num(json, "p2_s_in_s", &p2si, -1, SECS_MAX);
 			num(json, "p2_w_in_s", &p2wi, -1, SECS_MAX);
 			/* Absent leaves this false, so a daemon older than
@@ -1491,6 +1586,9 @@ static void dispatch(const char *json, enum proto_src src)
 		    off >= -840 && off <= 840) {
 			net_time_set_manual((int64_t)epoch);
 			net_time_set_offset((int32_t)off);
+			/* The burn view's hour axis is local time; this is the
+			 * only place the offset ever changes. */
+			usage_view_set_utc_offset((int32_t)off);
 			printk("[proto] host time synced\n");
 		}
 	} else if (strcmp(type, "pong") == 0) {
@@ -1595,6 +1693,25 @@ static void dispatch(const char *json, enum proto_src src)
 		 */
 		ota_request_check();
 		/*
+		 * Every page back to windows unless this host says otherwise:
+		 * a daemon with a spend page states it again right after its
+		 * welcome (pc/bridge.greet), and one from before plans never
+		 * will -- so a spend page must not outlive the daemon that
+		 * described it, captioning another app's figures.
+		 *
+		 * Decided at the first usage line, not here. A daemon that
+		 * reconnects without resetting the board sends welcome twice
+		 * before its plan -- the probe's (probe_is_our_board), then
+		 * greet()'s after the 0.2 s read and the bridge's build -- and
+		 * a reset here put a live spend page back on the five-hour
+		 * layout for that gap, red "Session almost used up" and burn
+		 * view blink included, on every such reconnect (review of
+		 * feat/enterprise-spend, 2026-11-04, FW3). The daemon sends
+		 * the plan ahead of the usage line it explains, so a usage
+		 * line that arrives first is a host that has no plan to state.
+		 */
+		plan_unconfirmed = true;
+		/*
 		 * Answer. The daemon sends `welcome` as a question -- "is a
 		 * Blink board on this port?" -- and decides whether to pull
 		 * the reset line on whether anything comes back within 1.5 s
@@ -1643,6 +1760,17 @@ static void dispatch(const char *json, enum proto_src src)
 			ui_settings_theme_edit_builder_seen();
 		}
 		ui_theme_wire(&m);
+	} else if (strcmp(type, "ask") == 0) {
+		/* "Keep figures fresh?" (ask_prompt.h). Only a question this
+		 * firmware knows: an id it does not would be a box with nothing
+		 * in it. Whether and when it goes up is ui_settings' to decide
+		 * -- never on top of anything, withdrawn on HOST LOST. */
+		char id[16];
+
+		if (msg_get_str(json, "id", id, sizeof(id)) &&
+		    ask_prompt_known(id)) {
+			ui_settings_ask();
+		}
 	} else if (strcmp(type, "theme_edit") == 0) {
 		/* The daemon's answer to ours: ok 1 once a browser is open,
 		 * ok 0 when it has no display to open one on. Absent reads as
@@ -1832,6 +1960,96 @@ static void dispatch(const char *json, enum proto_src src)
 		logo_line(type, json, src);
 	} else if (strcmp(type, "pref_set") == 0) {
 		pref_set_line(json);
+	} else if (burn5h_line_of(type) != BURN5H_LINE_NONE) {
+		/*
+		 * `burn`: output tokens over the trailing five hours, for a
+		 * page whose account has no session window
+		 * (docs/plans/burn-5h.md). Sent only to a board whose caps say
+		 * "burn", while the claude page has no session window; when
+		 * the window comes back the daemon just stops, and the view
+		 * lets go after 180 s of silence -- or at once, on a usage
+		 * line with a real session_pct.
+		 *
+		 * `sburn`: the same shape in whole cents, for a spend page's
+		 * dollar burn view (pc/protocol.spend_burn,
+		 * docs/plans/enterprise-spend.md section 3), sent only to a
+		 * board whose caps say "spendburn". Each goes to its own
+		 * record, by its whole type; burn5h_line_of() is the one
+		 * place that decides, and says why the two never mix.
+		 *
+		 * Their own lines because `usage` has no room for twenty more
+		 * numbers. Validated whole before anything is kept, the theme
+		 * line's rule: one bad bucket and the line is refused entire,
+		 * and the view goes on showing the last good one. Nothing from
+		 * either is logged -- usage figures, and what someone spent,
+		 * are exactly what the console must not carry -- only that it
+		 * was refused, by a fixed sentence pc/logbook.py allows.
+		 */
+		struct burn5h m;
+		bool dollars = burn5h_line_of(type) == BURN5H_LINE_DOLLARS;
+
+		if (!burn5h_parse(json, &m)) {
+			if (dollars) {
+				printk("[proto] sburn line refused\n");
+			} else {
+				printk("[proto] burn line refused\n");
+			}
+			return;
+		}
+		if (dollars) {
+			usage_view_set_sburn(&m, k_uptime_get());
+		} else {
+			usage_view_set_burn5h(&m, k_uptime_get());
+		}
+	} else if (strcmp(type, "plan") == 0) {
+		/*
+		 * Which allowance one page is showing: a dollar cap, a login
+		 * that reports nothing, or the five-hour and seven-day windows
+		 * (pc/protocol.plan). Dollars travel here and not on `usage`
+		 * because the widest usage line leaves single-digit bytes
+		 * spare. The daemon sends this ahead of the usage line it
+		 * explains, so the captions are right before the numbers land.
+		 *
+		 * Only `p` and `plan` always come. Absent amounts stay at -1
+		 * and are drawn as "--": Claude Code fetches the dollar figures
+		 * separately and later than the share, and with its
+		 * nonessential traffic switched off not at all, so a page
+		 * without them is a normal page.
+		 */
+		char who[USAGE_TAG_MAX] = "-", kind[12] = "windows";
+		char period[12] = "", acct[12] = "";
+		double usd = -1, lim = -1, est = 0, hint = 0;
+
+		plan_unconfirmed = false;	/* this host has stated it */
+		msg_get_str(json, "p", who, sizeof(who));
+		msg_get_str(json, "plan", kind, sizeof(kind));
+		msg_get_str(json, "period", period, sizeof(period));
+		msg_get_str(json, "acct", acct, sizeof(acct));
+		num(json, "usd", &usd, 0, USD_MAX);
+		num(json, "lim", &lim, 0, USD_MAX);
+		/*
+		 * Two flags, each 1 or absent (pc/protocol.plan omits a false
+		 * one so the common line does not grow): "est" when the
+		 * dollars are the last /usage figure plus what the status line
+		 * has counted since, "hint" when there is no /usage figure at
+		 * all. Anything but 1 is left at 0 -- a newer daemon's 2 is
+		 * not a reason to mark an exact figure as a guess.
+		 */
+		num(json, "est", &est, 0, 1);
+		num(json, "hint", &hint, 0, 1);
+		usage_view_set_plan(who, kind, period, acct, usd, lim,
+				    est == 1, hint == 1);
+		/*
+		 * One console line per plan received, which a scripted run
+		 * (tests/fleet/spend_board_run.py) matches against the steps
+		 * it sent. Page, kind and period only: the dollar figures are
+		 * someone's budget and have no place in a console log.
+		 */
+		if (period[0] != '\0') {
+			printk("[plan] %s %s %s\n", who, kind, period);
+		} else {
+			printk("[plan] %s %s\n", who, kind);
+		}
 	}
 	/* unknown types ignored */
 }

@@ -66,9 +66,10 @@ this.
 - **A page per provider.** Claude and Codex each get their own screen. Swipe to switch; the needles move from one reading to the other.
 - **It sleeps when your computer does.** About thirty seconds after the computer stops answering, the screen closes its eyes and dozes; it opens them the moment the computer is back. A tap while it sleeps shows the last figures.
 - **Claude Desktop too.** With Desktop alone the dials show percentages, a five-hour countdown whenever Desktop is holding a reset time, and a weekly countdown once one has been learned. Desktop keeps that reset time only while a window is running and clears it in between, so the countdown comes and goes; the fill rate covers the gaps. The dials follow Desktop's own refresh - about every 5 minutes while you are using it, up to 15 when it sits idle - where Claude Code updates them live.
-- **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. No credential, and nothing about you sent anywhere. The one optional extra, status-page alerts, reads the public status pages and is off until you turn it on.
+- **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. It needs no credential, and sends nothing about you anywhere. The one optional extra, status-page alerts, reads the public status pages and is off until you turn it on.
 - **Themes.** Twelve built in, three of them light for a bright room, and one of your own: seven colours, arc width and ends, made in a builder that opens in your browser from the board's own Settings (or `blink theme`) and previews on the panel as you edit. A custom theme travels as a short share code.
 - **Focus.** One window big instead of two - session or weekly - with the other kept as a line under it.
+- **A burn view where there is no five-hour limit.** Claude Ultra accounts have no five-hour window (from 2026-10-30), so a session dial would have nothing to show. There, BLINK draws the last five hours of Claude Code output instead: the total, an arrow for whether you are speeding up or easing off, and a bar for every quarter-hour, labelled with the hour. Pro and Max keep the session dial, and the weekly dial is the same on every plan.
 - **Settings on the board.** Brightness, Theme, Focus and Update, four tiles on the screen beside the dials.
 - **Status pages, per provider.** Optional: each provider's page says when that provider's own service is having trouble, so you know it is not your machine.
 - **Updates over the cable.** A new release asks on screen; one tap installs both the firmware and the app. Both halves are signed.
@@ -79,14 +80,16 @@ this.
 
 <table>
   <tr>
-    <td width="33%"><img src="docs/img/screen-claude.png" alt="The Claude page: six coloured marks in the top-left corner, one per live session, the clock under the BLINK wordmark, and the session and weekly dials."></td>
-    <td width="33%"><img src="docs/img/screen-codex.png" alt="The Codex page, with its own session and weekly dials."></td>
-    <td width="33%"><img src="docs/img/screen-desktop.png" alt="Claude Desktop alone: the session dial shows a fill rate where a countdown would otherwise be."></td>
+    <td width="25%"><img src="docs/img/screen-claude.png" alt="The Claude page: six coloured marks in the top-left corner, one per live session, the clock under the BLINK wordmark, and the session and weekly dials."></td>
+    <td width="25%"><img src="docs/img/screen-codex.png" alt="The Codex page, with its own session and weekly dials."></td>
+    <td width="25%"><img src="docs/img/screen-desktop.png" alt="Claude Desktop alone: the session dial shows a fill rate where a countdown would otherwise be."></td>
+    <td width="25%"><img src="docs/img/screen-burn.png" alt="An account with no five-hour window: the left half shows 2.9M tokens in five hours with an up arrow, a bar per quarter-hour labelled 10 to 14, and 940k/h rising; the weekly dial stays on the right."></td>
   </tr>
   <tr>
     <td align="center"><sub><b>Claude</b></sub>&nbsp;</td>
     <td align="center"><sub><b>Codex</b></sub>&nbsp;</td>
     <td align="center"><sub><b>Desktop alone</b></sub>&nbsp;</td>
+    <td align="center"><sub><b>No five-hour window</b></sub>&nbsp;</td>
   </tr>
 </table>
 
@@ -95,8 +98,22 @@ The marks in the top-left corner are your live sessions - one per session,
 coloured by what each is doing. Claude and Codex each get a page of their own,
 and a swipe moves between them. With Claude Desktop alone there is often no reset
 time to count down to, so the session dial shows how fast it is filling instead.
+On an account with no five-hour window, such as Claude Ultra, the session dial
+gives way to the burn view: Claude Code's output over the last five hours, a
+bar per quarter-hour, and an arrow comparing this hour with the one before.
 
 *Rendered by the shipping firmware's own drawing code, not mocked up.*
+
+### The theme builder
+
+<img src="docs/img/theme-builder.png" alt="The theme builder in a browser: a preview of the board on the left, here showing the burn view, with switches for Gauges or Focus mode and for the session gauge or the burn view; the twelve built-in themes and the colour pickers on the right; Save to board, Cancel and Copy share code along the top.">
+
+Tap *Edit on computer* in the board's Theme settings, or run `blink theme`, and
+the builder opens in your browser. Pick a built-in theme or choose the seven
+colours yourself; every change shows on the board as a preview until you save
+or cancel. The preview beside it can show either left half, the session gauge
+or the burn view, so a theme can be judged on both. Readability checks under
+the preview flag text or arcs that would be hard to see.
 
 ## Setup
 
@@ -123,7 +140,7 @@ Windows on Arm (Snapdragon laptops, Surface Pro X) gets the Arm64 build of the U
 ~/.blink/bin/blink uninstall   # put everything back
 ```
 
-Needs Claude Code 2.1.100 or newer. The installer changes one file, `~/.claude/settings.json` (the status line command and one hook per lifecycle event), says so before it does, and keeps your own status line running. Everything it does is reversible with `uninstall`.
+Needs Claude Code 2.1.100 or newer. The installer changes Claude Code's `settings.json` (in `~/.claude`, or the folder `CLAUDE_CONFIG_DIR` names: the status line command and one hook per lifecycle event), Codex's `hooks.json` when Codex is installed, and `~/.blink/config.json`, where it records which Claude Code folder it set up; it says all of it before it does it, and keeps your own status line running. Everything it does is reversible with `uninstall`.
 
 ## Something's wrong?
 
@@ -157,13 +174,18 @@ For Claude Desktop, the app learns usage by reading Claude Desktop's own local f
 |---|---|
 | Claude Code, in a terminal or an IDE | Everything |
 | Codex CLI | Everything, on its own page |
+| Claude Code on a usage-billed seat | The month's spend against the seat's cap: exact after `/usage` in a terminal, estimated between runs; no five-hour or weekly window |
+| Claude Code inside WSL on Windows | Everything, once you run `blink install --wsl <name>` with the distribution's name (`blink install --wsl` alone lists them). Blink stays on Windows with the board; it never looks into WSL unless you name a distribution, reads Claude Code's files there while you are using it, checks every five minutes that its status line is still in place there while the distribution is running anyway (never starting it to do so), and reads that Claude Code and not one on Windows |
 | Claude Code in Claude Desktop's Code tab | The same as Desktop below, plus the activity light: the Code tab runs Claude Code's hooks, though not its status line, so the figures are Desktop's rather than Claude Code's |
 | Claude Desktop, without Claude Code | Five-hour percentage and countdown, refreshed within seconds of a turn; weekly percentage on Desktop's own schedule (about 5 min in use, up to 15 idle); a weekly countdown too, once one has been learned, published only while nothing contradicts it; no activity light |
-| claude.ai in a browser | Nothing - there is no usage data to read |
+| claude.ai in a browser | Nothing - there is no usage data to read, unless you also have Claude Code (next row) |
+| Claude Desktop or claude.ai in a browser, with Claude Code installed | Kept fresh by an optional background `/usage` run of your own Claude Code (off unless you say yes; see [Keeping figures fresh](docs/README-full.md#keeping-figures-fresh)) |
+
+BLINK is an independent product. It is not affiliated with, endorsed by or sponsored by Anthropic or OpenAI. Claude and Claude Code are trademarks of Anthropic, PBC; Codex and OpenAI are trademarks of OpenAI.
 
 ## Privacy
 
-BLINK never sees a credential and never sends your usage or your sessions anywhere. If you turn on status-page alerts (`blink config status-page on`), it reads status.claude.com, and status.openai.com for a Codex page, every 5 minutes, with nothing of yours attached. It keeps the last usage payload Claude Code wrote, readable by you alone, in `~/.blink/`. The device holds no token: nothing to leak, nothing to revoke if you lend it.
+BLINK keeps no credential and never sends your usage or your sessions anywhere. If you turn the usage refresh on, BLINK runs your own Claude Code's `/usage` in the background now and then; it sends no message and keeps nothing from it but the figures Claude Code saves. If you turn on status-page alerts (`blink config status-page on`), it reads status.claude.com, and status.openai.com for a Codex page, every 5 minutes, with nothing of yours attached. It keeps the last usage payload Claude Code wrote, readable by you alone, in `~/.blink/`, and reads the usage figures, the session id and the session's cost from it. To tell an Ultra plan from Pro or Max, it reads Claude Code's config, `~/.claude.json`: the whole file is parsed in memory, and it can hold your MCP servers' tokens (and, on Linux and Windows, an API key), but only the plan name and rate-limit tier, the seat type (`oauthAccount.seatTier`, `billingType`), the account and organisation ids, and on a usage-billed seat the spend Claude Code saved at the last `/usage`, are looked at. Nothing from the file is logged. On a usage-billed seat a one-way fingerprint of the two ids, each session's id with its highest cost estimate and when that was first seen or last rose, each rise in cost counted in the last five hours with its time (for the board's quarter-hour view), the month's total of older ones and the time of the last `/usage` are kept in `~/.blink/spend-count.json`. Between `/usage` runs that figure is an estimate; just after a `/login` to another account the spend page can be blank until Claude Code next draws its status line, or show the old account's figures once, because the status line does not say which account drew it. While the account is marked as having no five-hour limit it also reads the output-token count of each reply from Claude Code's transcripts (the next five-hour figure Claude Code shows lifts the mark, and the reading stops), and on a Codex account with none (such as Codex Pro) every token count of each turn from Codex's session log, held in memory until five hours after Codex last wrote that turn (board plugged in or not), of which only the output tokens are added up. It sends the board only a total per quarter-hour, never the conversation. [docs/README-full.md](docs/README-full.md#what-the-installer-changes) lists exactly what is read and kept. The device holds no token: nothing to leak, nothing to revoke if you lend it.
 
 ## Building units
 

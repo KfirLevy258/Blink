@@ -21,7 +21,7 @@ import shlex
 import sys
 
 from pc.install_statusline import (SettingsUnreadable, _load, _save,
-                                   windows_bash_path,
+                                   windows_bash_path, wsl_shim_path,
                                    _sniff_format)
 
 INSTALLED_MARKER_PATH = "~/.blink/hooks-installed-commands"
@@ -73,34 +73,57 @@ def hook_command(shim_path: str, event: str) -> str:
     """
     if sys.platform == "win32":
         return f"bash {windows_bash_path(shim_path)} {event}"
+    return posix_hook_command(shim_path, event)
+
+
+def posix_hook_command(shim_path: str, event: str) -> str:
+    """hook_command as a POSIX shell spells it, whatever this computer is:
+    what Claude Code inside a WSL distribution runs."""
     return f"sh {shlex.quote(shim_path)} {event}"
 
 
-def _marker_path():
-    return os.path.expanduser(INSTALLED_MARKER_PATH)
+def wsl_hook_command(home, event: str) -> str:
+    """The hook command a WSL install writes for `home` (claude_home): the
+    shim in the Linux home's .blink, in the form Linux runs. Never the
+    Windows form -- `bash "$USERPROFILE/..."` names nothing inside Linux."""
+    return posix_hook_command(wsl_shim_path(home, "blink-hook.sh"), event)
 
 
-def _read_marker() -> set:
+def _marker_path(home=None):
+    """Beside the status line's marker, in the marker_dir of `home`
+    (claude_home): ~/.blink natively, the drop folder for a WSL home, so
+    the two installs never read each other's record."""
+    base = (os.path.join(os.path.expanduser("~"), ".blink") if home is None
+            else home.marker_dir)
+    return os.path.join(base, os.path.basename(INSTALLED_MARKER_PATH))
+
+
+def _read_marker(home=None) -> set:
     try:
-        with open(_marker_path(), encoding="utf-8") as f:
+        with open(_marker_path(home), encoding="utf-8") as f:
             return {ln.strip() for ln in f if ln.strip()}
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, so a marker that is not valid
+        # UTF-8 slipped past `except OSError` into install and uninstall
+        # (review of feat/enterprise-spend). No marker is the answer
+        # install_statusline._read_marker gives such a file too: the hooks
+        # are then recognised by the commands this home would write.
         return set()
 
 
-def _write_marker(commands) -> None:
-    os.makedirs(os.path.dirname(_marker_path()), exist_ok=True)
+def _write_marker(commands, home=None) -> None:
+    os.makedirs(os.path.dirname(_marker_path(home)), exist_ok=True)
     # encoding= because the commands carry the shim's path, which carries the
     # user's home directory -- and a Windows locale cannot encode every name a
     # home directory can have. _load() in install_statusline says the same.
-    with open(_marker_path(), "w", encoding="utf-8") as f:
+    with open(_marker_path(home), "w", encoding="utf-8") as f:
         for c in sorted(commands):
             f.write(c + "\n")
 
 
-def _remove_marker() -> None:
+def _remove_marker(home=None) -> None:
     try:
-        os.remove(_marker_path())
+        os.remove(_marker_path(home))
     except OSError:
         pass
 
@@ -115,7 +138,16 @@ def _ours(command: str, expected: set, marker: set) -> bool:
     The marker is passed in rather than read here: this is called once per
     hook entry inside two nested loops, and reading the same small file a
     couple of dozen times per install is a file read for no new information.
+
+    A "command" that is not a string is never ours: we only ever write
+    strings. It used to be tested with `in` like any other, and a hand-edited
+    {"command": ["sh", "x"]} raised TypeError (a list is unhashable) out of
+    install and uninstall alike -- natively since 1.0, and on WSL after the
+    service had already been stopped, so the desk lost its status line
+    (found in the review of the WSL work, 2026-11-05).
     """
+    if not isinstance(command, str):
+        return False
     return command in marker or command in expected
 
 
@@ -137,18 +169,20 @@ def _entries_for(data, event):
     return lst
 
 
-def install(settings_path: str, shim_path: str) -> str:
-    """Add our hook to each lifecycle event. Idempotent."""
-    indent, trailing_newline = _sniff_format(settings_path)
-    data = _load(settings_path)
+def merge_install(doc: dict, marker: set, command_for):
+    """install() on a document: (doc, new_marker, added, repointed).
 
-    expected = {hook_command(shim_path, ev) for ev, _ in HOOK_EVENTS}
-    marker = _read_marker()
+    Pure -- no file read or written -- so a WSL install merges with exactly
+    the rules a native one does (install_statusline.install_into).
+    `command_for(event)` is the command to write for one event; `marker` is
+    the set the last install recorded. `doc` is changed in place.
+    """
+    expected = {command_for(ev) for ev, _ in HOOK_EVENTS}
     added = 0
     repointed = 0
     for event, matcher in HOOK_EVENTS:
-        command = hook_command(shim_path, event)
-        entries = _entries_for(data, event)
+        command = command_for(event)
+        entries = _entries_for(doc, event)
 
         # Already present, in any group. A reinstall must not stack a second
         # copy that then fires twice per tool call forever.
@@ -202,9 +236,10 @@ def install(settings_path: str, shim_path: str) -> str:
             group["matcher"] = matcher
         entries.append(group)
         added += 1
+    return doc, expected, added, repointed
 
-    _save(settings_path, data, indent, trailing_newline)
-    _write_marker(expected)
+
+def install_message(added: int, repointed: int) -> str:
     if added == 0 and repointed == 0:
         return "Blink state hooks already installed."
     if added == 0:
@@ -215,27 +250,36 @@ def install(settings_path: str, shim_path: str) -> str:
     return f"Blink state hooks installed ({added} events)."
 
 
-def uninstall(settings_path: str, shim_path: str = None) -> str:
-    """Remove only our hook entries, and only the ones we can prove are ours.
+def install(settings_path: str, shim_path: str, home=None) -> str:
+    """Add our hook to each lifecycle event. Idempotent. `home` names the
+    marker, as in install_statusline.install. The decisions are
+    merge_install's; this reads and writes the native files around it."""
+    indent, trailing_newline = _sniff_format(settings_path)
+    data = _load(settings_path)
+    data, marker, added, repointed = merge_install(
+        data, _read_marker(home), lambda ev: hook_command(shim_path, ev))
+    _save(settings_path, data, indent, trailing_newline)
+    _write_marker(marker, home)
+    return install_message(added, repointed)
+
+
+def merge_uninstall(doc: dict, marker: set, command_for=None):
+    """uninstall() on a document: (doc, removed). doc is None when there is
+    no "hooks" object to take anything out of, and then nothing is to be
+    written; the marker is to be removed either way, as natively.
 
     Symmetric with install by construction: it drops exactly the commands the
-    marker recorded, plus the ones this call would itself write, and leaves
-    every other entry in place. An empty group left behind by that removal is
-    dropped too, and an event whose list ends up empty loses its key, so
-    uninstalling returns settings.json to the shape it had.
+    marker recorded, plus the ones `command_for` would write (none when it
+    is None), and leaves every other entry in place. An empty group left
+    behind by that removal is dropped too, and an event whose list ends up
+    empty loses its key, so uninstalling returns settings.json to the shape
+    it had.
     """
-    try:
-        data = _load(settings_path)
-    except SettingsUnreadable:
-        return "settings.json could not be read; left it alone."
-
-    expected = ({hook_command(shim_path, ev) for ev, _ in HOOK_EVENTS}
-                if shim_path else set())
-    marker = _read_marker()
-    hooks = data.get("hooks")
+    expected = ({command_for(ev) for ev, _ in HOOK_EVENTS}
+                if command_for else set())
+    hooks = doc.get("hooks")
     if not isinstance(hooks, dict):
-        _remove_marker()
-        return "No Blink state hooks to remove."
+        return None, 0
 
     removed = 0
     for event, _ in HOOK_EVENTS:
@@ -267,11 +311,32 @@ def uninstall(settings_path: str, shim_path: str = None) -> str:
             hooks.pop(event, None)
 
     if not hooks:
-        data.pop("hooks", None)
+        doc.pop("hooks", None)
+    return doc, removed
 
-    indent, trailing_newline = _sniff_format(settings_path)
-    _save(settings_path, data, indent, trailing_newline)
-    _remove_marker()
+
+def uninstall_message(removed: int) -> str:
     if removed == 0:
         return "No Blink state hooks to remove."
     return f"Blink state hooks removed ({removed})."
+
+
+def uninstall(settings_path: str, shim_path: str = None, home=None) -> str:
+    """Remove only our hook entries, and only the ones we can prove are
+    ours (merge_uninstall)."""
+    try:
+        data = _load(settings_path)
+    except SettingsUnreadable:
+        return "settings.json could not be read; left it alone."
+
+    data, removed = merge_uninstall(
+        data, _read_marker(home),
+        (lambda ev: hook_command(shim_path, ev)) if shim_path else None)
+    if data is None:
+        _remove_marker(home)
+        return uninstall_message(0)
+
+    indent, trailing_newline = _sniff_format(settings_path)
+    _save(settings_path, data, indent, trailing_newline)
+    _remove_marker(home)
+    return uninstall_message(removed)

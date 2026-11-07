@@ -1,0 +1,397 @@
+"""Windows Subsystem for Linux: list distributions, check them, run in them,
+and probe one for where Claude Code lives (docs/plans/enterprise-spend.md,
+section 4).
+
+Nothing here runs unless a caller asks, and the callers only ask when the
+user named a distribution with `blink install --wsl <name>`.
+
+Facts this module is built on, each checked against the microsoft/WSL source:
+
+* wsl.exe is called by its absolute path under %SystemRoot%\\System32, never
+  found through PATH, with ota.NO_WINDOW (a console window flashing on a
+  desk is a defect), binary pipes, all three standard handles and a timeout.
+* WSL_UTF8 is set explicitly in the child's environment. "1" makes wsl.exe's
+  own messages UTF-8; without it they are UTF-16LE with no BOM, and the
+  default depends on the Windows build. `running` asks for UTF-16LE on
+  purpose and decodes it; everything that goes into Linux sets "1".
+* Commands into Linux are `-d <name> [-u <user>] -e <argv...>`, never `--`.
+  `-e` splits the rest of the command line with CommandLineToArgvW, which
+  is what Python's list2cmdline quotes for, so an argv list round-trips.
+* A distribution is identified by its registry GUID (HKCU\\...\\Lxss), not
+  by `wsl -l -q`, whose names carry no GUID and can be renamed.
+* `wsl -l --running -q` prints nothing and exits 0 when none is running.
+
+Nothing the probe reads from a distribution -- the environment above all, which
+can hold tokens and proxy credentials -- is printed or logged, and no
+proxy or certificate variable is kept: Probe holds five strings and whether
+CLAUDE_CONFIG_DIR was set, and the captured PATH is used once and dropped.
+
+`winreg` is imported inside the default registry reader, so importing this
+module does nothing and works on macOS and Linux (tests/test_import_is_inert.py
+imports every module there). Registry access goes through a reader object
+(`values(hive, path)`, `subkeys(hive, path)`, both raising OSError) so the
+tests run on every platform.
+"""
+import os
+import re
+import subprocess
+import threading
+from dataclasses import dataclass
+from typing import Optional
+
+from pc import claude_home
+from pc.ota import NO_WINDOW
+
+HKCU = "HKCU"
+HKLM = "HKLM"
+LXSS = r"Software\Microsoft\Windows\CurrentVersion\Lxss"
+POLICY = r"Software\Policies\WSL"
+
+_STATE_INSTALLED = 1
+
+# What a failed or timed-out call returns; callers test rc != 0.
+FAILED = (-1, b"", b"")
+
+
+def wsl_exe():
+    """The argv prefix that starts wsl.exe: a tuple, so a test can hand in
+    (sys.executable, "fake_wsl.py"). Resolved at call time, not import."""
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") \
+        or r"C:\Windows"
+    return (os.path.join(root, "System32", "wsl.exe"),)
+
+
+@dataclass(frozen=True)
+class Distro:
+    guid: str
+    name: str
+    version: int
+    default: bool
+
+
+@dataclass(frozen=True)
+class Probe:
+    user: str
+    home: str
+    shell: str
+    config_dir: str
+    claude_exe: Optional[str]
+    # Whether CLAUDE_CONFIG_DIR chose config_dir, which decides where
+    # .claude.json is (claude_home.ClaudeHome.config_dir_set). Not "differs
+    # from ~/.claude": the variable set to ~/.claude still moves the file.
+    config_dir_set: bool = False
+
+
+class _WinReg:
+    """The real reader. winreg is imported here, not at the top."""
+
+    @staticmethod
+    def _open(hive, path):
+        import winreg
+        root = {HKCU: winreg.HKEY_CURRENT_USER,
+                HKLM: winreg.HKEY_LOCAL_MACHINE}[hive]
+        return winreg, winreg.OpenKey(root, path)
+
+    def values(self, hive, path):
+        winreg, key = self._open(hive, path)
+        out = {}
+        with key:
+            i = 0
+            while True:
+                try:
+                    name, value, _ = winreg.EnumValue(key, i)
+                except OSError:
+                    return out
+                out[name] = value
+                i += 1
+
+    def subkeys(self, hive, path):
+        winreg, key = self._open(hive, path)
+        out = []
+        with key:
+            i = 0
+            while True:
+                try:
+                    out.append(winreg.EnumKey(key, i))
+                except OSError:
+                    return out
+                i += 1
+
+
+def policy_blocks(reg=None):
+    """Does group policy forbid WSL? AllowWSL equal to 0, and nothing else.
+    Missing means allowed; so does an unreadable registry, because the
+    policy key is absent on almost every machine.
+
+    AllowInboxWSL is not read on purpose. Microsoft's WSL settings policy
+    ("Allow the Inbox version of WSL") turns off only the WSL component that
+    ships inside Windows; the Store WSL, which is what `wsl --install` puts
+    on any current Windows, keeps running, and Microsoft's Intune
+    recommended settings set AllowInboxWSL=0 to steer desks onto it. The
+    first cut refused on that value too, and so told exactly the managed
+    enterprise desks this feature is for that WSL was turned off. A desk
+    left with only the inbox WSL under that policy fails at the first
+    wsl.exe call instead, and the probe's own message covers it."""
+    reg = reg or _WinReg()
+    try:
+        values = reg.values(HKLM, POLICY)
+    except OSError:
+        return False
+    return values.get("AllowWSL") == 0
+
+
+class Unreadable(Exception):
+    """The registry's list of distributions could not be read at all. Not
+    the same answer as a distribution that is not in it: a caller that
+    took one for the other would move a desk off WSL, or leave its shims
+    behind, because a registry read failed once."""
+
+
+def scan(reg=None):
+    """(installed, unsure) from the registry. `installed` are the
+    distributions with State == 1. `unsure` are the GUIDs whose own key is
+    there but was not read, or names a state other than installed (half
+    installed, converting, being removed): neither proves the distribution
+    gone. Raises Unreadable when the Lxss key itself cannot be listed;
+    a Lxss key that does not exist is WSL with no distributions, and gives
+    ([], set()).
+
+    One subkey that will not read costs that subkey alone. Until the final
+    branch review it emptied the whole list, and a plain install then took
+    the recorded distribution for removed."""
+    reg = reg or _WinReg()
+    try:
+        default = str(reg.values(HKCU, LXSS).get("DefaultDistribution", ""))
+        subs = list(reg.subkeys(HKCU, LXSS))
+    except FileNotFoundError:
+        return [], set()
+    except (OSError, ValueError, TypeError) as e:
+        raise Unreadable(type(e).__name__) from None
+    found, unsure = [], set()
+    for sub in subs:
+        if not isinstance(sub, str) or not sub.startswith("{"):
+            continue
+        try:
+            v = reg.values(HKCU, LXSS + "\\" + sub)
+            name = v.get("DistributionName")
+            if v.get("State") != _STATE_INSTALLED or not name:
+                unsure.add(sub.lower())
+                continue
+            found.append(Distro(guid=sub, name=str(name),
+                                version=int(v.get("Version", 0) or 0),
+                                default=sub.lower() == default.lower()))
+        except (OSError, ValueError, TypeError, AttributeError):
+            unsure.add(sub.lower())
+    return found, unsure
+
+
+def distros(reg=None):
+    """Installed distributions (State == 1; a half-installed one is skipped),
+    from the registry. [] when the list cannot be read -- the caller says to
+    check WSL; scan() tells that apart from none. No fallback to
+    `wsl -l -q`, whose names carry no GUID."""
+    try:
+        return scan(reg)[0]
+    except Unreadable:
+        return []
+
+
+# How long a killed wsl.exe is given to hand back its pipes before they are
+# abandoned. Short: by then the call has already failed.
+_REAP_SECONDS = 2.0
+
+
+def _feed(pipe, data):
+    try:
+        pipe.write(data)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _bounded_run(argv, *, input=None, timeout=None, **kwargs):
+    """subprocess.run whose timeout bounds the whole call, on every platform.
+
+    CPython 3.11's run() on Windows, once the timeout fires, kills wsl.exe
+    and then calls communicate() with no timeout at all; a WSL relay
+    process still holding the pipes (wslhost, a hung wslservice) keeps that
+    wait going for ever, and WslWatch's thread with it, so the burn view
+    froze on its last snapshot. 3.11's Windows communicate() also writes
+    `input` on the calling thread before the timeout starts, so a child
+    that never reads blocks there once the pipe buffer is full. Here the
+    input goes in on a thread of its own, the reap after the kill is
+    bounded, and a call that still will not end is abandoned: its pipes are
+    left open rather than closed, because closing a buffered pipe another
+    thread is reading takes that reader's lock and would block the same
+    way. Raises TimeoutExpired like run(); the caller maps it to FAILED."""
+    if input is not None:
+        kwargs["stdin"] = subprocess.PIPE
+    p = subprocess.Popen(argv, **kwargs)
+    if input is not None:
+        feed, p.stdin = p.stdin, None
+        threading.Thread(target=_feed, args=(feed, input), daemon=True,
+                         name="blink-wsl-stdin").start()
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        try:
+            p.communicate(timeout=_REAP_SECONDS)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        raise
+    return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+
+def _call(argv, wsl_utf8, stdin, timeout, runner):
+    """One wsl.exe launch. Returns (rc, out, err) or FAILED on a timeout or
+    when wsl.exe cannot start."""
+    env = dict(os.environ)
+    env["WSL_UTF8"] = wsl_utf8
+    kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                  env=env, timeout=timeout, **NO_WINDOW)
+    if stdin is None:
+        kwargs["stdin"] = subprocess.DEVNULL
+    else:
+        kwargs["input"] = stdin
+    try:
+        done = runner(list(argv), **kwargs)
+    except (subprocess.TimeoutExpired, OSError):
+        return FAILED
+    return done.returncode, done.stdout or b"", done.stderr or b""
+
+
+def running(name, exe=None, timeout=5, runner=_bounded_run):
+    """Is the named distribution running right now? Never starts it."""
+    rc, out, _ = _call([*(exe or wsl_exe()), "-l", "--running", "-q"],
+                       "0", None, timeout, runner)
+    if rc != 0:
+        return False
+    text = out.decode("utf-16-le", "replace").lstrip("\ufeff")
+    return any(line.strip().casefold() == name.casefold()
+               for line in text.splitlines())
+
+
+def run(name, argv, user=None, env=None, exe=None, stdin=None, timeout=30,
+        runner=_bounded_run):
+    """Run argv inside the distribution as `user`: (rc, stdout, stderr), or
+    (-1, b"", b"") on a timeout.
+
+    The command is wrapped in `timeout -k 5 <t>` inside Linux so a hung
+    program dies there and not only the wsl.exe that carries it; the Windows
+    side waits ten seconds longer so the Linux side ends first. `env` is
+    passed as K=V words to env(1), not through the Windows environment, which
+    wsl.exe does not forward."""
+    secs = max(1, int(timeout))
+    cmd = [*(exe or wsl_exe()), "-d", name]
+    if user:
+        cmd += ["-u", user]
+    cmd += ["-e", "env"]
+    cmd += [f"{k}={v}" for k, v in (env or {}).items()]
+    cmd += ["timeout", "-k", "5", str(secs), *argv]
+    return _call(cmd, "1", stdin, secs + 10, runner)
+
+
+# The Windows path of a file inside the distribution: claude_home's builder,
+# the only one, so the record and the probe spell it alike.
+unc = claude_home.unc
+
+
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_DRIVE_MOUNT = re.compile(r"^/mnt/[A-Za-z]/")
+
+
+def _parse_env0(raw):
+    """NUL-separated environment out of an interactive login shell. An rc
+    file may print a banner before `exec env -0` runs; it lands in front of
+    the first entry, so the first entry is cut at its last newline. Entries
+    that still do not look like NAME=value are dropped."""
+    entries = raw.decode("utf-8", "replace").split("\0")
+    env = {}
+    for i, entry in enumerate(entries):
+        if i == 0 and not _ENV_NAME.match(entry) and "\n" in entry:
+            entry = entry.rsplit("\n", 1)[1]
+        if _ENV_NAME.match(entry):
+            k, v = entry.split("=", 1)
+            env[k] = v
+    return env
+
+
+def _passwd(out):
+    for line in reversed(out.decode("utf-8", "replace").splitlines()):
+        f = line.strip().split(":")
+        if len(f) >= 7 and f[0] and f[5].startswith("/"):
+            return f[0], f[5], f[6].strip() or "/bin/sh"
+    return None
+
+
+def _usable(path):
+    """A claude inside Linux, not the Windows one reached through the
+    automount root (/mnt/c/...) or a .exe/.cmd."""
+    return (path.startswith("/") and not _DRIVE_MOUNT.match(path)
+            and not path.lower().endswith((".exe", ".cmd", ".bat")))
+
+
+# tcsh and csh accept -l only as the sole flag: `tcsh -lic ...` prints
+# "Unknown option" and exits 1, so for a csh user every probe came back
+# None and `install --wsl` said the distribution could not be read (review
+# of feat/enterprise-spend, W5, measured under tcsh). -ic reads ~/.cshrc,
+# which every csh reads and where csh users set PATH; ~/.login, read only
+# by a login shell, is missed, and a PATH set only there is not seen.
+_CSH = ("csh", "tcsh")
+
+
+def env_capture_args(shell):
+    """The flags and command after `shell` that print its environment."""
+    base = shell.rstrip("/").rsplit("/", 1)[-1]
+    flags = "-ic" if base in _CSH else "-lic"
+    return [flags, "exec env -0"]
+
+
+def probe(name, exe=None, runner=_bounded_run):
+    """Find the Linux user, home, shell, Claude config folder and claude
+    binary of a distribution, or None if it cannot be read. Starts the
+    distribution; callers only reach this after the user named it."""
+    kw = dict(exe=exe, runner=runner)
+    rc, out, _ = run(name, ["sh", "-c", 'getent passwd "$(id -un)"'], **kw)
+    pw = _passwd(out) if rc == 0 else None
+    if not pw:
+        return None
+    user, home, shell = pw
+
+    # The user's own login shell, interactive so ~/.zshrc and nvm-style
+    # additions to PATH count; stdin is closed so nothing waits for a tty.
+    # `exec env -0` works in bash, zsh, fish, tcsh and csh, and zsh has no
+    # `type -P`.
+    rc, out, _ = run(name, [shell, *env_capture_args(shell)],
+                     user=user, timeout=20, **kw)
+    captured = _parse_env0(out) if rc == 0 else {}
+    path = captured.get("PATH")
+    if not path:
+        return None
+    config = captured.get("CLAUDE_CONFIG_DIR") or home + "/.claude"
+    # A Windows claude on the mounted drive, early in PATH, would hide a real
+    # Linux one later in it; drop those entries before looking.
+    path = ":".join(d for d in path.split(":") if not _DRIVE_MOUNT.match(d + "/"))
+
+    # Non-login sh with the captured PATH: the rc files already did their work.
+    claude = None
+    rc, out, _ = run(name, ["sh", "-c", "command -v claude"],
+                     user=user, env={"PATH": path}, **kw)
+    if rc == 0:
+        lines = [l.strip() for l in out.decode("utf-8", "replace").splitlines()]
+        found = [l for l in lines if l.startswith("/")]
+        if found and _usable(found[-1]):
+            claude = found[-1]
+    if claude is None:
+        for cand in (home + "/.local/bin/claude", home + "/.claude/local/claude"):
+            if run(name, ["test", "-x", cand], user=user, **kw)[0] == 0:
+                claude = cand
+                break
+    return Probe(user=user, home=home, shell=shell, config_dir=config,
+                 claude_exe=claude,
+                 config_dir_set=bool(captured.get("CLAUDE_CONFIG_DIR")))

@@ -49,7 +49,7 @@ import urllib.parse
 import webbrowser
 
 from pc import (logo_encode, settings_ops, status_page, theme, update,
-                user_config, wifi_pair)
+                usage_refresh, user_config, wifi_pair)
 
 IDLE_S = 600            # 10 minutes with no edit (plan, revision 2026-10-25)
 # A reload fires pagehide too, then loads the page again, and the builder
@@ -510,18 +510,28 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._json(500, {"why": "This computer's settings file"
                                            " could not be read."})
         self._json(200, {"status_page": on,
-                         "auto_update": update.auto_update_allowed(home)})
+                         "auto_update": update.auto_update_allowed(home),
+                         # Keep figures fresh: develop's usage refresh,
+                         # the same key `blink config usage-refresh` sets.
+                         "usage_refresh": usage_refresh.enabled(home) is True})
 
     def _post_computer(self, want):
         home = self.builder.home
         if not (isinstance(want, dict) and want and all(
-                k in ("status_page", "auto_update")
+                k in ("status_page", "auto_update", "usage_refresh")
                 and isinstance(v, bool) for k, v in want.items())):
             return self._json(400, {"why": "That was not a setting."})
         try:
             if "status_page" in want:
                 user_config.put(home, status_page.SETTING,
                                 want["status_page"])
+            if "usage_refresh" in want:
+                user_config.put(home, usage_refresh.SETTING,
+                                want["usage_refresh"])
+                if want["usage_refresh"]:
+                    # As `blink config usage-refresh on` does: a fresh
+                    # start, and where claude is now.
+                    usage_refresh.switch_on(home, os.path.expanduser("~"))
             if "auto_update" in want:
                 marker = os.path.join(home, "no-auto-update")
                 if want["auto_update"]:

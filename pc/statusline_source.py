@@ -9,9 +9,10 @@ old. Old is reported as `stale` rather than hidden -- a frozen meter presented
 as live is the one failure mode worth designing against.
 """
 import json
+import math
 import os
 
-from pc import protocol
+from pc import claude_home, protocol
 from pc.providers import base
 
 # Who we are on the ingestion bus. The board and the normalizer both key off
@@ -20,7 +21,7 @@ PROVIDER_ID = "claude"
 SRC_ID = "cli"
 
 
-def payload_path() -> str:
+def payload_path(home=None) -> str:
     """Where the shim writes the payload, resolved now rather than at import.
 
     This was a module constant, expanduser'd when the module was imported,
@@ -38,8 +39,13 @@ def payload_path() -> str:
     status` and `blink uninstall` all ask here. Only the shell shim
     (tools/blink-statusline.sh) writes it out separately, because it cannot
     import this.
+
+    In the drop folder of `home` (claude_home.current() when None): ~/.blink
+    natively, and for Claude Code inside WSL the Windows folder its shim
+    writes into, so the poll never reads across into the distribution.
     """
-    return os.path.expanduser("~/.blink/statusline.json")
+    return os.path.join((home or claude_home.current()).drop_dir,
+                        "statusline.json")
 
 
 # How old the payload may get before we stop vouching for it.
@@ -73,6 +79,34 @@ RESET_EPOCH_MIN = 0
 RESET_EPOCH_MAX = 4_102_444_800
 
 
+def window_present(rate_limits, key: str) -> bool:
+    """Does the payload carry this window at all?
+
+    An object under the key, and nothing else: absent, null, a string or a
+    list is no window. The ONE definition. ClaudeCliProvider reports a
+    window from it, and tells a reply that came back without one by it
+    (pc/session_verdict), and it used to ask with
+    `"five_hour" in limits` while _window below treated null as absent, so a
+    `"five_hour": null` was a window to one and not to the other (review,
+    2026-10-31). An object with no usable percentage IS a window here: that
+    is the likeliest shape of a payload change, and not something to
+    conclude "this account has no limit" from.
+    """
+    return isinstance(rate_limits, dict) and isinstance(rate_limits.get(key),
+                                                        dict)
+
+
+def window_usable(rate_limits, key: str) -> bool:
+    """Does this window carry a percentage the dial could show?
+
+    Asked of the payload alone, with no clock: what the file said when it
+    was written, which is the question a payload's own shape answers.
+    Whether that figure still holds now is settle_window's business, below.
+    """
+    return window_present(rate_limits, key) and _window(rate_limits,
+                                                        key)[0] >= 0
+
+
 def _window(rate_limits: dict, key: str):
     """(used_percentage, resets_at_epoch|None) for one window.
 
@@ -83,12 +117,15 @@ def _window(rate_limits: dict, key: str):
     "0% used", which is a stronger claim than "we don't have this number" and
     is exactly the frozen-meter failure mode this module exists to avoid.
     """
-    w = rate_limits.get(key)
-    if not isinstance(w, dict):
+    if not window_present(rate_limits, key):
         return -1.0, None
+    w = rate_limits[key]
     try:
         pct = float(w["used_percentage"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
+        # OverflowError: an int of 309 digits or more, which json reads and
+        # float() refuses. It raised out of every poll and the source was
+        # benched with backoff (the re-review of 2026-11-01, finding 12).
         # Absent, null, or not a number -- all three are "we don't have it",
         # and all three used to land on 0.0 here, which is the confident zero
         # the paragraph above says this function exists to avoid. A window
@@ -129,6 +166,137 @@ _secs_until = protocol.secs_until
 # case DevOceanIT brought from their own desk.
 
 
+# The largest dollar figure the spend page believes: ten million, as
+# pc/spend_count's MAX_CENTS. No developer's monthly cap or spend is near
+# it, and a figure json reads -- an int of any length, a float up to 1e308
+# -- reached the wire unbounded.
+MAX_USD = 10_000_000
+# A spend share is held at 1000, the board's PCT_MAX: 1000 and not 100
+# because overage carries a share past its cap. Held, not refused (_share).
+MAX_SHARE = 1000
+
+
+def _share(v):
+    """A spend share from the payload: a number at or above zero, held at
+    MAX_SHARE, else None.
+
+    Held rather than refused (round 2 of the 2026-11-04 review, K2). $300
+    against a cap cut to $20 is 1500%, a figure a gateway really sends, and
+    refusing it dropped the whole spend page for the windows one;
+    protocol._share and proto.c's num_pct hold one past 1000 at 1000 for
+    the same reason. NaN, a negative and a non-number are no share, and
+    nor is an infinity: json reads `Infinity`, which no gateway sends for
+    a share and Python's own json.dumps writes for float('inf'), so it is
+    a damaged figure rather than a large one, and held at 1000 it drew a
+    full red dial and "used up" out of nothing (R4, round 2's review). A
+    finite figure past 1000, however large, is a share far over its cap.
+    An int too long for a float (10**400) is finite and compared as an
+    int, never converted, which is where math.isfinite raised
+    OverflowError (U2).
+    """
+    if type(v) not in (int, float) or v != v or v < 0:
+        return None
+    if isinstance(v, float) and math.isinf(v):
+        return None
+    return float(MAX_SHARE) if v > MAX_SHARE else float(v)
+
+
+def _amount(v, ceiling=MAX_USD):
+    """A finite number from 0 to `ceiling` from the payload, else None.
+
+    bool is refused by name because it is an int: `"used_usd": true` is a
+    malformed field, not one dollar. A negative or infinite amount would
+    reach the panel as "$-4" or "$inf", and "not reported" is the honest
+    reading of either.
+
+    The try: math.isfinite converts to float, and an int of 309 digits or
+    more raises OverflowError there instead of answering. It came out of
+    every poll and benched the provider, spend page and all (the final
+    review of 2026-11-04, U2). Unreadable, so not reported, like the rest.
+    """
+    # type() rather than isinstance(): bool passes isinstance(v, int).
+    if type(v) not in (int, float):
+        return None
+    try:
+        usable = math.isfinite(v) and 0 <= v <= ceiling
+    except OverflowError:
+        return None
+    return float(v) if usable else None
+
+
+def _spend_frame(rate_limits: dict, now_epoch: float, mtime_epoch: float):
+    """The dollar cap Claude Code put on the status line, as a frame.
+
+    None when `rate_limits.spend_limit` is absent or unreadable. That object
+    is how one kind of Claude Enterprise seat reports its
+    allowance: one behind a Claude apps gateway that sets a dollar cap for
+    this developer (code.claude.com/docs/en/statusline, "spend limit
+    fields"). A desk on Pro or Max never has it, and nor does an Enterprise
+    login straight to claude.ai, so for every desk this project ships to
+    today this returns None and the payload is read exactly as it was.
+
+    Only `used_percentage` is required. Claude Code sends it, with
+    `resets_at`, on every response; `used_usd`, `limit_usd` and `period`
+    come from a second request that runs minutes behind and is skipped
+    altogether under CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC. A frame
+    without the dollars is therefore ordinary and is still drawn.
+
+    If the payload has the five-hour and seven-day windows as well, they
+    are ignored. The gateway checks the dollar cap on each request, so the
+    cap is what refuses work when it runs out; drawing both on one page
+    would put two different allowances under one heading.
+
+    When the period's reset has passed, the share goes through
+    base.settle_window exactly as a window's percentage does, and the
+    dollars spent are made to agree with whatever it decides: zero beside
+    a zero, unknown beside an unknown. The cap keeps its value. Reaching
+    the 1st of the month empties what was spent, not what may be spent.
+
+    Never logs anything from the object. A spend figure is somebody's
+    budget, and the rule for serial buffers applies to it in spirit.
+    """
+    obj = rate_limits.get("spend_limit")
+    if not isinstance(obj, dict):
+        return None
+    pct = _share(obj.get("used_percentage"))
+    if pct is None:
+        # Not a percentage, or a negative or NaN one. Without it there is
+        # nothing to put on a gauge, and an object we cannot read is not
+        # evidence of an allowance -- so the payload is read the old way.
+        return None
+    resets = obj.get("resets_at")
+    # Bounded like a window's stamp (_window). Unbounded, 10**400 reached
+    # protocol.secs_until, which raised out of every poll and froze both
+    # pages behind "showing last known", and the remembered payload offered
+    # it again on the next (U2). Out of bounds is unknown, like a stamp
+    # that is absent; what an unknown reset costs the page after five hours
+    # and ten minutes is pc/providers/claude_cli's _frame.
+    if (isinstance(resets, bool) or not isinstance(resets, (int, float))
+            or not (RESET_EPOCH_MIN <= resets <= RESET_EPOCH_MAX)):
+        resets = None
+    period = obj.get("period")
+    if period not in base.SPEND_PERIODS:
+        period = ""
+    frame = base.NormalizedUsageFrame(
+        provider=PROVIDER_ID, src=SRC_ID, observed_at=mtime_epoch,
+        plan=base.PLAN_SPEND, spend_period=period,
+        spend_limit_usd=_amount(obj.get("limit_usd")),
+        stale=(now_epoch - mtime_epoch) > STALE_AFTER_S)
+    settled = base.settle_window(pct, resets, now_epoch, frame.stale)
+    share = settled.pct
+    frame.session_pct = share
+    frame.session_resets_at = settled.resets_at
+    frame.session_rolled_at = settled.ended_at
+    spent = _amount(obj.get("used_usd"))
+    if frame.session_rolled_at is not None:
+        # The period this was spent in is over. settle_window has said either
+        # 0.0 (a fresh reading: definitely empty) or UNKNOWN (an old one),
+        # and the dollar figure claims exactly as much.
+        spent = None if share < 0 else 0.0
+    frame.spend_usd = spent
+    return frame
+
+
 def map_statusline_frame(payload: dict, now_epoch: float,
                          mtime_epoch: float):
     """Convert a statusline payload into a NormalizedUsageFrame.
@@ -143,6 +311,11 @@ def map_statusline_frame(payload: dict, now_epoch: float,
     # took this source off the bus for the rest of the process.
     if not isinstance(rate_limits, dict):
         rate_limits = {}
+    # The only door to the spend page, and it opens only when Claude Code
+    # actually sent the object. See _spend_frame.
+    spend = _spend_frame(rate_limits, now_epoch, mtime_epoch)
+    if spend is not None:
+        return spend
     session_pct, session_resets = _window(rate_limits, "five_hour")
     weekly_pct, weekly_resets = _window(rate_limits, "seven_day")
 

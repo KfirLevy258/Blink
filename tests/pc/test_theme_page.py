@@ -1594,11 +1594,14 @@ def test_confirm_replaces_the_button_with_keep_focused():
 
 # The old renderer, moved and not rewritten: these three functions are the
 # board's own drawing, reviewed as such, and their texts are pinned by hash
-# of the commit before this page (24163b7).
+# of the commit before this page (24163b7). customDim and readableMix are
+# develop's text as merged (1fb07bf put customDim on readableMix for the
+# burn view's custom grey): the same bytes as on develop, not rewritten here.
 _RENDERER_HASHES = {
     "gauge": "22f85fbb33ca5f32ca9ae11877596645ac4eb0571c3f67d5138fac1afc84a1f0",
     "arcPath": "6b59b7039f1e84f813f324414e46d7d2f79bc7a3ff4d89e9d13dea63d65cebb4",
-    "customDim": "d9cd94478d8292ee55e6df9744f9a0e801c59b94ca23dc7d168830568e31401c",
+    "customDim": "17ed250d247d12f0bd5c7ebff341f900045dd40831fe93cc2411dfd58b621ad0",
+    "readableMix": "dfa30dcab19fb017dc139f8781b02b2520a8f9742315234b156c9ccb0bbade16",
 }
 
 
@@ -2095,17 +2098,31 @@ def test_screen_subtab_lists_view_focus_provider_and_no_weekly_scope():
     assert r["pressed"] == ["true", "false", "false", "false"]
 
 
-def test_burn_view_card_is_greyed_until_the_branch():
+def test_burn_view_card_previews_and_sends_nothing():
+    """develop's burn view is the board's own choice, made when the account
+    has no five-hour window (docs/plans/burn-5h.md); there is no view enum
+    for pref_set to carry. So the card is live but previews only, like
+    Weekly big, and Two gauges takes the preview back."""
     r = builder_page.run("""
     await advance(300);
-    const burn = document.querySelectorAll('.vw').find(b => b.querySelector('b').textContent === 'Burn view');
+    const card = n => document.querySelectorAll('.vw').find(b => b.querySelector('b').textContent === n);
+    const burn = card('Burn view');
     burn.click(); await advance(10);
-    return { off: burn.disabled, text: burn.textContent, pressed: burn.getAttribute('aria-pressed'),
-             posts: """ + _POSTS + """.length, title: $('heroTitle').textContent };
+    const on = { off: burn.disabled, pressed: burn.getAttribute('aria-pressed'),
+                 posts: """ + _POSTS + """.length, title: $('heroTitle').textContent,
+                 note: $('vNote').textContent,
+                 words: $('scr').children.map(n => n.textContent) };
+    card('Two gauges').click(); await advance(10);
+    return { on, back: burn.getAttribute('aria-pressed'),
+             words: $('scr').children.map(n => n.textContent) };
     """, _live())
-    assert r["off"] is True and "needs the burn view" in r["text"].lower()
-    assert r["pressed"] == "false" and r["posts"] == 0
-    assert "burn" not in r["title"].lower()
+    on = r["on"]
+    assert on["off"] is False and on["pressed"] == "true" and on["posts"] == 0
+    assert "BURN 5h" in on["words"] and "SESSION 5h" not in on["words"]
+    assert "burn view" in on["title"].lower()
+    assert "by itself" in on["note"]
+    assert r["back"] == "false"
+    assert "SESSION 5h" in r["words"] and "BURN 5h" not in r["words"]
 
 
 def test_preview_sliders_send_nothing():
@@ -2322,7 +2339,9 @@ def test_new_rows_are_disabled_with_their_sentences():
     return { refresh: row('cfgRefresh'), doze: row('cfgDoze'),
              posts: """ + _POSTS + """.length };
     """, _live(), search="?panel=board")
-    assert r["refresh"] == [True, "false", "Runs Claude Code's own /usage now and then. Sends no messages."]
+    # Keep figures fresh is live since develop's usage refresh merged:
+    # the usage_refresh key of /api/computer. Doze still waits.
+    assert r["refresh"] == [False, "false", "Runs Claude Code's own /usage now and then. Sends no messages."]
     assert r["doze"] == [True, "false", "Dims the board after 4 hours with nothing running"]
     assert r["posts"] == 0
 

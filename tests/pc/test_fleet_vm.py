@@ -31,6 +31,7 @@ import importlib.util
 import json
 import pathlib
 import subprocess
+import sys
 
 import pytest
 
@@ -648,6 +649,44 @@ def test_the_service_comes_back_when_the_run_is_interrupted(tmp_path):
     assert "disconnect" in runner.kinds
 
 
+def test_a_ctrl_c_while_the_service_is_being_stopped_still_starts_it(
+        tmp_path):
+    """The bootout may have happened before the interrupt landed. hold()
+    used to record "held" only after the stop returned, so release() did
+    nothing and the board's daemon stayed unloaded."""
+    (tmp_path / "wd").mkdir()
+    runner = VmRunner(local_workdir=tmp_path / "wd",
+                      fail={"hold": KeyboardInterrupt()})
+    with pytest.raises(KeyboardInterrupt):
+        fleet_run.main(["--inventory", str(_vm_inventory(tmp_path)),
+                        "--state", str(tmp_path / "s.json")], runner=runner,
+                       ask=lambda p: None, interactive=False,
+                       leases=tmp_path / "none")
+    assert runner.kinds[-1] == "release"
+
+
+def test_the_service_is_started_with_ctrl_c_ignored_and_it_is_restored(
+        tmp_path):
+    """A second Ctrl-C reaches the whole foreground group, `start`'s child
+    included. Ignored while it runs; the handler is put back after."""
+    import signal
+    seen = []
+
+    class Watching(VmRunner):
+        def __call__(self, cmd, **kw):
+            if "tests.fleet.service" in " ".join(cmd) and cmd[-1] == "start":
+                seen.append(signal.getsignal(signal.SIGINT))
+            return super().__call__(cmd, **kw)
+
+    before = signal.getsignal(signal.SIGINT)
+    runner = Watching()
+    bench = _bench(runner)
+    assert bench.hold() == []
+    assert bench.release() == []
+    assert seen == [signal.SIG_IGN]
+    assert signal.getsignal(signal.SIGINT) == before
+
+
 def test_a_second_ctrl_c_ends_the_handback_but_not_the_service_start(
         tmp_path, capsys):
     """What docs/fleet-testing.md says a second Ctrl-C does, pinned. The
@@ -836,3 +875,44 @@ def test_a_ctrl_c_during_a_handback_stops_the_run_and_says_so(tmp_path):
     doc = json.loads(state.read_text(encoding="utf-8"))
     assert doc["ok"] is False
     assert ["may still be in that VM" in w for w in doc["warnings"]] == [True]
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="SIGHUP is POSIX; the fleet runs on this Mac")
+@pytest.mark.parametrize("name", ["SIGHUP", "SIGTERM"])
+def test_a_closed_terminal_still_starts_the_service_again(tmp_path, name):
+    """The /code-review max of 277b81a..4003b0b (C32): only Ctrl-C was
+    handled. Closing the terminal window (SIGHUP) or a kill (SIGTERM)
+    during the VM phase ended run.py with no finally, so this Mac's
+    booted-out service was never started again and the board was never
+    asked back from the VM. Either now unwinds like a Ctrl-C."""
+    import os as _os
+    import signal
+    sig = getattr(signal, name)
+
+    class Signalling(VmRunner):
+        def __call__(self, cmd, **kw):
+            if self._kind(list(cmd)) == "guest_wait":
+                self.calls.append(list(cmd))
+                self.kinds.append("guest_wait")
+                _os.kill(_os.getpid(), sig)
+            return super().__call__(cmd, **kw)
+
+    def unhandled(signum, frame):
+        # Stands in for the default action, which would end pytest itself.
+        raise RuntimeError("the signal reached the default action")
+
+    (tmp_path / "wd").mkdir()
+    before = signal.signal(sig, unhandled)
+    try:
+        runner = Signalling(local_workdir=tmp_path / "wd")
+        with pytest.raises(SystemExit):
+            fleet_run.main(["--inventory", str(_vm_inventory(tmp_path)),
+                            "--state", str(tmp_path / "s.json")],
+                           runner=runner, ask=lambda p: None,
+                           interactive=False, leases=tmp_path / "none")
+        assert "disconnect" in runner.kinds
+        assert runner.kinds[-1] == "release"
+        assert signal.getsignal(sig) is unhandled
+    finally:
+        signal.signal(sig, before)

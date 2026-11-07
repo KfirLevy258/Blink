@@ -844,7 +844,10 @@ def test_the_widest_line_the_daemon_can_build_still_fits():
     widest_src = max(widths, key=widths.get)
     # The measured width, asserted so the docstring cannot go stale again. A
     # new field or source id that moves it is a deliberate change: say the new
-    # figure here and above.
+    # figure here and above. Still 454 with the spend source in the set
+    # (2026-11-04): claude_spend frames send no weekly window, so the
+    # spend page's own widest line is 410 (tests/pc/test_spend_wire.py,
+    # test_widest_usage_line_with_spend) and does not move this.
     assert (widest_src, widths[widest_src]) == ("weekly_anchor", 454), widths
 
 
@@ -1509,6 +1512,17 @@ def _builders():
         ("pref_set", protocol.pref_set(main_src="codex", focus=1, view=2,
                                        bright=40),
          {"t", "main_src", "focus", "view", "bright"}, {"v"}),
+        # develop's, met at the merge: the page and the plan's words, never
+        # the buckets or the dollars.
+        ("burn", protocol.burn("claude", 1793430000, [0] * 19 + [4120]),
+         {"t", "p"}, {"v", "q", "b"}),
+        ("spend_burn", protocol.spend_burn("claude", 1793430000,
+                                           [0] * 19 + [412]),
+         {"t", "p"}, {"v", "q", "b"}),
+        ("plan", protocol.plan("claude", "spend", "monthly", usd=314.12,
+                               limit=500.0),
+         {"t", "p", "plan", "period"}, {"v", "usd", "lim"}),
+        ("ask", protocol.ask("refresh"), {"t", "id"}, {"v"}),
     ]
 
 

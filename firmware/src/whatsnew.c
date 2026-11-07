@@ -30,7 +30,7 @@ static const struct {
 	const char *version;
 	const char *lines;
 } NOTES[] = {
-	{ "1.4.0", "12 themes, light ones, your own\nFocus mode and service status" },
+	{ "1.4.1", "12 themes, light ones, your own\nBurn view for Ultra, Codex Pro" },
 	{ "1.3.4", "Works on Windows on Arm\nClearer install messages" },
 	{ "1.3.3", "A dropped update finishes itself\nThe board asks again if one fails" },
 	{ "1.3.2", "Updates report honestly\nFinished sessions clear away" },
