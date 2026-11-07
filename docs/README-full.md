@@ -475,7 +475,7 @@ Limits:
 ## Settings on the board
 
 Settings is the screen beside the dials: swipe across from them to reach it,
-and back to return. It is four tiles, each with an icon:
+and back to return. It is five tiles, each with an icon:
 
 | Tile | What it does |
 |---|---|
@@ -483,9 +483,11 @@ and back to return. It is four tiles, each with an icon:
 | **Open settings** | Opens the settings page on your computer, where the theme, the logo and WiFi are set (below) |
 | **Focus** | One window big instead of two side by side: **Off**, **Session** or **Weekly**. The other window stays on screen as a single dim line under the big dial. Off remembers which window was big |
 | **Update** | The software update: **Up to date**, an offer to install, or **App is old** when the half on your computer is behind (see "Updates") |
+| **Connection** | A wide row under the other four: how the board is reaching your computer now, **USB**, **WiFi** or **None** (see "WiFi") |
 
-Open settings and Focus need board firmware 1.4.0 or later. A board on 1.3.4 or
-earlier shows its old settings screen; update it to see these.
+Focus needs board firmware 1.4.0 or later; Open settings and Connection come
+with the WiFi firmware (a 1.4.0 board still shows a Theme tile). A board on
+1.3.4 or earlier shows its old settings screen; update it to see these.
 
 ### Themes
 
