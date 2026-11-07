@@ -34,7 +34,9 @@ counts bytes and looks at no payload. ConsoleEcho does look at what it
 forwards, on purpose and only to cut it down: see console_line.
 """
 import contextlib
+import json
 import os
+import re
 import threading
 import time
 
@@ -317,13 +319,16 @@ class Journal:
 # boot follows" on the next boot.
 CONSOLE_MESSAGES = tuple(sorted((
     # [ota] -- firmware/src/ota.c, ui_settings.c, main.c
-    "[ota] slot1 write failed",                                # ota.c:175
-    "[ota] bad redirect target",                               # ota.c:344
-    "[ota] too many redirects for",                            # ota.c:352
-    "[ota] downloading",                                       # ota.c:412
-    "[ota] transfer ended",                                    # ota.c:436
-    "[ota] truncated",                                         # ota.c:466
-    "[ota] sha256 mismatch",                                   # ota.c:480
+    "[ota] slot1 write failed",                                # ota_net.c
+    "[ota] stream aborted",                                    # ota_net.c
+    "[ota] confirm failed",                                    # main.c
+    "[ota] verified and marked pending",                       # ota_net.c
+    "[test] never healthy",                                    # main.c
+    "[test] confirm fails",                                    # main.c
+    "[test] hang after boot",                                  # main.c
+    "[ota] downloading",                                       # ota_net.c
+    "[ota] truncated",                                         # ota_net.c
+    "[ota] sha256 mismatch",                                   # ota_net.c
     "[ota] install not started: the offer changed under the prompt",
     "[ota] install not started: the offer changed under the confirm",
     "[ota] offer shown",                              # ui_settings.c:830
@@ -348,6 +353,7 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[proto] sburn line refused",                              # :993
     "[proto] rx ring overflow, dropped",                       # :1000
     "[proto] host went away",                                  # :1078
+    "[proto] pref_set refused",                                # pref_set_line
     # [fatal] -- firmware/src/fatal.c. The three "reason" lines differ only
     # after their numbers, so they share one stem.
     "[fatal] reason",                                          # :68 :78 :82
@@ -355,15 +361,15 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[fatal] this boot follows",                               # :117
     "[fatal] SELFTEST BUILD: will fault at",                   # :122
     # [usage] -- firmware/src/main.c, proto.c
-    "[usage] panel: DBI bus not ready, MADCTL uncorrected",    # main.c:97
-    "[usage] panel: MADCTL write failed",                      # main.c:103
-    "[usage] no app after 60 s; dozing until one speaks",      # main.c:542
-    "[usage] firmware boot OK",                                # main.c:568
-    "[usage] FATAL: mbedTLS allocator hookup failed",          # main.c:584
-    "[usage] display not ready",                               # main.c:589
+    "[usage] panel: DBI bus not ready, MADCTL uncorrected",    # main.c:99
+    "[usage] panel: MADCTL write failed",                      # main.c:105
+    "[usage] no app after 60 s; dozing until one speaks",      # main.c:544
+    "[usage] firmware boot OK",                                # main.c:570
+    "[usage] FATAL: mbedTLS allocator hookup failed",          # main.c:586
+    "[usage] display not ready",                               # main.c:606
     "[usage] cleared a stored refresh token: no WiFi in this build",
-    "[usage] mode: USB bridge (no host yet)",                  # main.c:663
-    "[usage] mode: USB bridge",                                # main.c:639
+    "[usage] mode: USB bridge (no host yet)",                  # main.c:680
+    "[usage] mode: USB bridge",                                # main.c:656
     "[usage] session",                                         # proto.c:627
     # [cfg] -- firmware/src/cfg_store.c, proto.c
     "[cfg] migrated 1.3.4 record",                             # :218
@@ -384,6 +390,11 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[theme] preview cancelled",                               # :214
     "[theme] saved",                                           # :248
     "[theme] line refused",                                    # proto.c:769
+    # [logo] -- firmware/src/proto.c (spec S15.2): the partition written or
+    # removed over the protocol, or a written image logo_parse refused.
+    "[logo] written",
+    "[logo] removed",
+    "[logo] rejected",
     # [boot] -- firmware/src/ui_boot.c, logo.c, bootclip.c
     "[boot] logo: frame failed to decode",                     # ui_boot.c:203
     "[boot] logo: cannot map partition",                       # logo.c:38
@@ -407,6 +418,35 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[touch] INJECT BUILD: the PC can drive this panel -- bench only, never"
     " ship this",                                         # touch_inject.c:490
     "[time] manual time",                                      # net_time.c:67
+    # [wifi] -- firmware/src/net_link.c (spec S5.8). The join's reason is one
+    # of net_link_why_text's fixed sentences, and is cut like any value.
+    "[wifi] radio up",                                         # :171
+    "[wifi] joined",                                           # :368
+    "[wifi] join failed",                                      # :281
+    "[wifi] lost the network",                                 # :142
+    "[wifi] selftest failed",                                  # main.c:601
+    # proto.c: the pairing, over the cable (spec S5.8)
+    "[wifi] paired",
+    "[wifi] forgotten",
+    "[wifi] forget failed",
+    # firmware review fixes: a failed erase, a socket that would not open,
+    # a scan the radio refused. Fixed text, an errno at most.
+    "[logo] remove failed",
+    "[wifi] listen failed",
+    "[wifi] discovery socket failed",
+    "[wifi] scan failed",
+    # net_link.c join_run: the radio refused the connect request. An errno
+    # at most, which the echo cuts like any value; names no network.
+    "[wifi] connect refused",
+    # wl_server.c (spec S5.8): the session's three fixed lines and the
+    # verify-only candidate's one.
+    "[wifi] session open",
+    "[wifi] session closed",
+    "[wifi] handshake refused",
+    "[wifi] verified",
+    # net_link.c / main.c: the leak mitigation (wl_heap.h)
+    "[wifi] heap low, restarting",
+    "[wifi] heap free",
 ), key=len, reverse=True))
 
 # "[ota] update %s: wanted %s, running %s (from %s)" (main.c:233) is the line
@@ -416,13 +456,31 @@ CONSOLE_MESSAGES = tuple(sorted((
 # value.
 CONSOLE_RENDERED = ("[ota] update landed", "[ota] update REVERTED")
 
+# Lines the board prints that are not ours: the ESP32 ROM's reset reason and
+# Zephyr's banner. They are the one thing on the console that says WHY a board
+# restarted (a brownout is not a watchdog), and a customer's "it keeps
+# rebooting" is unanswerable without them. Kept apart from CONSOLE_MESSAGES
+# because the provenance test over that list proves each stem is a printk in
+# firmware/src, and these live in the ROM and in Zephyr, not here (the same
+# reason LVGL's and Zephyr's other lines are left out, above). That is also
+# why the list is short and exact: every entry is a whole fixed token, and the
+# ROM appends ",boot:0x13 (SPI_FAST_FLASH_BOOT)" or a clock figure that is cut
+# like any other value. Matched after CONSOLE_MESSAGES. The WiFi plan's D49.
+CONSOLE_EXTERNAL = (
+    "rst:0x1 (POWERON_RESET)", "rst:0xc (SW_CPU_RESET)",
+    "rst:0xf (BROWNOUT_RESET)", "rst:0x10 (RTCWDT_RTC_RESET)",
+    "rst:0x7 (TG0WDT_SYS_RESET)", "rst:0x8 (TG1WDT_SYS_RESET)",
+    "*** Booting Zephyr OS",
+)
+
 # Every tag a printk in firmware/src opens with. A line opening with any
 # other bracketed word -- or with none: the bootloader's and Zephyr's own
 # banners, the touch tracer's #TT rows -- is a fixed placeholder, because
 # its first word is the board's text too.
 CONSOLE_TAGS = frozenset({
-    "ask", "bl", "boot", "cfg", "fatal", "focus", "mem", "ota", "plan",
-    "proto", "sleep", "slide", "swipe", "theme", "time", "touch", "usage",
+    "ask", "bl", "boot", "cfg", "fatal", "focus", "logo", "mem", "ota",
+    "plan", "proto", "sleep", "slide", "swipe", "test", "theme", "time",
+    "touch", "usage", "wifi",
 })
 
 BOARD_LINE = "(board line)"
@@ -446,7 +504,7 @@ def console_line(line: str) -> str:
     formatted into the line survives.
     """
     text = line.strip()
-    for known in CONSOLE_RENDERED + CONSOLE_MESSAGES:
+    for known in CONSOLE_RENDERED + CONSOLE_MESSAGES + CONSOLE_EXTERNAL:
         if text.startswith(known):
             return known
     if text.startswith("[") and "]" in text:
@@ -454,6 +512,51 @@ def console_line(line: str) -> str:
         if tag in CONSOLE_TAGS:
             return f"[{tag}]"
     return BOARD_LINE
+
+
+# What the transcript says for the board's "[usage] session 50% (12s) ..."
+# line: that a frame was applied, and whether it was marked STALE. The figures
+# on the line are the owner's usage, so they are cut like any other value; the
+# fleet suite (tests/fleet/tap_asserts.py) needs only these two facts.
+APPLIED_LINE = "[usage] session applied"
+_STALE_WORD = re.compile(r"(?:^|\s)STALE(?:\s|$)")
+
+
+def tap_console_line(line: str) -> str:
+    """One console line as a BLINK_TAP transcript or tools/console_tail.py
+    may hold it (D49). An allowlist, so nothing passes for what it lacks.
+
+    A line that is a whole JSON object whose `t` is in protocol.WIRE_TYPES is
+    the compact encoding of protocol.redact(obj). A "[usage] session" line is
+    APPLIED_LINE, plus " STALE" when the board marked the frame so. Anything
+    else is console_line(line): a known message as its constant, a known tag
+    bare, the rest BOARD_LINE.
+
+    "No braces and no quotes, so it is a printk" was the first rule and it was
+    wrong: the deleted firmware printed an unquoted SSID ("[cfg] mode=1
+    ssid=home-net-SECRET token=present", the fixture in
+    tests/pc/test_console_allowlist.py), proto.c echoes the daemon's error
+    text after "[proto] ota failed: ", and a reset prints arbitrary bytes. A
+    line cut in half, or one with a protocol object glued behind a tag, is
+    not an object and therefore falls to console_line, which keeps at most
+    its tag.
+    """
+    from pc import protocol
+    text = line.strip()
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            obj = None
+        # isinstance first: a list or dict t is unhashable, and this runs in
+        # the daemon's read loop on whatever the board printed.
+        t = obj.get("t") if isinstance(obj, dict) else None
+        if isinstance(t, str) and t in protocol.WIRE_TYPES:
+            return json.dumps(protocol.redact(obj), separators=(",", ":"))
+    kept = console_line(line)
+    if kept == "[usage] session":
+        return APPLIED_LINE + (" STALE" if _STALE_WORD.search(text) else "")
+    return kept
 
 
 class ConsoleEcho:

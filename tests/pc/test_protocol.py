@@ -1414,3 +1414,237 @@ def test_svc_keys_never_collide_with_its_values():
         short for page in status_page.PAGES.values()
         for _, short in page.components} | {"svc"}
     assert not keys & values
+
+
+# --- the transcript allowlist (S7.5, D54) -------------------------------------
+
+def test_redact_is_a_field_allowlist():
+    assert protocol.redact({"t": "ping", "k": "SECRET"}) == {"t": "ping"}
+    assert protocol.redact({"t": "wifi_set", "s": "6e6574", "p": "..",
+                            "k": ".."}) == {"t": "wifi_set"}
+    got = protocol.redact({"t": "wifi_state", "s": "6e6574",
+                           "ip": "192.168.1.2", "port": 49731, "r": -50,
+                           "st": "up", "link": "wifi", "kid": "0a1b2c3d",
+                           "why": ""})
+    assert got == {"st": "up", "link": "wifi", "kid": "0a1b2c3d", "why": "",
+                   "t": "wifi_state"}
+    assert "st" not in protocol.redact({"t": "wifi_state", "st": "6e6574"})
+    assert "kid" not in protocol.redact({"t": "wifi_state", "kid": "zz"})
+    assert "kid" not in protocol.redact({"t": "wifi_state", "kid": "0A1B2C3D"})
+    assert protocol.redact({"t": "wifi_state",
+                            "why": {"nested": "x"}}) == {"t": "wifi_state"}
+    assert protocol.redact({"t": "usage", "session_pct": 41,
+                            "extra": "SECRET"}) == {"t": "usage",
+                                                    "session_pct": 41}
+    assert protocol.redact({"t": "nope"}) == {"t": "(unknown)"}
+    assert protocol.redact({"no": "t"}) == {"t": "(unknown)"}
+    assert protocol.redact("not a dict") == {"t": "(unknown)"}
+    # numeric fields: a string, even a short one, is not a number
+    assert protocol.redact({"t": "ota_ack", "off": "hello"}) == \
+        {"t": "ota_ack"}
+    assert protocol.redact({"t": "ota_ack", "off": True}) == {"t": "ota_ack"}
+    assert protocol.redact({"t": "ota_ack", "off": 16384}) == \
+        {"t": "ota_ack", "off": 16384}
+    assert protocol.redact({"t": "wifi_net", "i": "x", "n": 3}) == \
+        {"t": "wifi_net", "n": 3}
+    assert protocol.redact({"t": "usage", "session_pct": "41"}) == \
+        {"t": "usage"}
+    assert protocol.redact({"t": "usage", "session_pct": 4.5, "weekly_pct": 3,
+                            "stale": True}) == \
+        {"t": "usage", "session_pct": 4.5, "weekly_pct": 3, "stale": True}
+    # a string past 64 characters is somebody's text
+    assert protocol.redact({"t": "usage", "src": "x" * 65}) == {"t": "usage"}
+    assert protocol.redact({"t": "usage", "src": "x" * 64})["src"] == "x" * 64
+
+
+def test_every_wire_type_has_tap_fields():
+    assert set(protocol.TAP_FIELDS) == set(protocol.WIRE_TYPES)
+    for t, fields in protocol.TAP_FIELDS.items():
+        assert "t" in fields and "v" not in fields, t
+
+
+def _builders():
+    return [
+        ("welcome", protocol.welcome("blink", "1.4.0", editing=True),
+         {"t", "app", "app_ver", "editing"}, {"v", "caps"}),
+        ("bye", protocol.bye(), {"t"}, {"v"}),
+        ("pong", protocol.pong(), {"t"}, {"v"}),
+        ("time_msg", protocol.time_msg(1700000000, 120),
+         {"t", "epoch", "utc_offset_min"}, {"v"}),
+        ("usage", protocol.usage(
+            41.0, 0, 62.0, 0, [{"name": "sonnet", "weekly_pct": 5.0}],
+            session_resets_in_s=100, weekly_resets_in_s=200, stale=True,
+            provider="claude", src="cli", state="running", n_sess=2, n_run=1,
+            n_wait=1, n_stuck=1, n_agents=3, p2="codex", p2_session_pct=10.0,
+            p2_weekly_pct=20.0, p2_session_resets_in_s=5,
+            p2_weekly_resets_in_s=6, p2_stale=True, burn_pph=1.5, age_s=3,
+            p2_age_s=4, active_age_s=2),
+         None, {"v"}),
+        ("edition", protocol.edition("codex"), {"t", "edition"}, {"v"}),
+        ("session", protocol.session("SECRET label", 3), {"t", "n"},
+         {"v", "label"}),
+        ("status", protocol.status("ok", "SECRET detail"), {"t", "state"},
+         {"v", "detail"}),
+        ("svc", protocol.svc("claude", "degraded", "SECRET what"),
+         {"t", "provider", "level"}, {"v", "what"}),
+        ("theme", protocol.theme("preview", {"id": 3, "bg": "#101010"}),
+         {"t", "op", "id"}, {"v", "bg"}),
+        ("theme_edit_reply", protocol.theme_edit_reply(True), {"t", "ok"},
+         {"v"}),
+        ("theme_edit_done", protocol.theme_edit_done(), {"t", "done"}, {"v"}),
+        ("ota_avail", protocol.ota_avail("1.4.0", 1000, "a" * 64, app="1.4.0"),
+         {"t", "version", "size"}, {"v", "sha256", "app"}),
+        ("ota_begin", protocol.ota_begin("1.4.0"), {"t", "version"}, {"v"}),
+        ("ota_resume", protocol.ota_resume("1.4.0"), {"t", "version"}, {"v"}),
+        ("ota_none", protocol.ota_none(app="1.4.0"), {"t"}, {"v", "app"}),
+        ("ota_error", protocol.ota_error("SECRET why"), {"t"}, {"v", "why"}),
+        ("edit_state", protocol.edit_state(True), {"t", "editing"}, {"v"}),
+        ("ota_end", protocol.ota_end(1000), {"t"}, {"v", "size"}),
+        ("wifi_scan", protocol.wifi_scan(), {"t"}, {"v"}),
+        ("wifi_set", protocol.wifi_set(b"net", "SECRETpw", bytes(32)),
+         {"t"}, {"v", "s", "p", "k"}),
+        ("wifi_forget", protocol.wifi_forget(), {"t"}, {"v"}),
+        ("logo_begin", protocol.logo_begin(900, 7), {"t", "size"}, {"v", "crc"}),
+        ("logo_chunk", protocol.logo_chunk(512, b"\x01\x02"), {"t", "off"},
+         {"v", "d"}),
+        ("logo_end", protocol.logo_end(), {"t"}, {"v"}),
+        ("logo_remove", protocol.logo_remove(), {"t"}, {"v"}),
+        ("pref_set", protocol.pref_set(main_src="codex", focus=1, view=2,
+                                       bright=40),
+         {"t", "main_src", "focus", "view", "bright"}, {"v"}),
+        # develop's, met at the merge: the page and the plan's words, never
+        # the buckets or the dollars.
+        ("burn", protocol.burn("claude", 1793430000, [0] * 19 + [4120]),
+         {"t", "p"}, {"v", "q", "b"}),
+        ("spend_burn", protocol.spend_burn("claude", 1793430000,
+                                           [0] * 19 + [412]),
+         {"t", "p"}, {"v", "q", "b"}),
+        ("plan", protocol.plan("claude", "spend", "monthly", usd=314.12,
+                               limit=500.0),
+         {"t", "p", "plan", "period"}, {"v", "usd", "lim"}),
+        ("ask", protocol.ask("refresh"), {"t", "id"}, {"v"}),
+    ]
+
+
+
+def test_the_boards_answer_keeps_only_its_own_words():
+    """answer comes from the board, so its id and a are someone else's
+    strings until they are one of ours: free text is dropped, not kept."""
+    assert protocol.TAP_ENUMS["a"] == frozenset(protocol.ASK_ANSWERS)
+    for a in protocol.ASK_ANSWERS:
+        assert protocol.redact({"t": "answer", "v": 2, "id": "refresh",
+                                "a": a}) == {"t": "answer", "id": "refresh",
+                                             "a": a}
+    assert protocol.redact({"t": "answer", "id": "my secret project",
+                            "a": "yes please"}) == {"t": "answer"}
+    assert protocol.redact({"t": "answer", "id": 3, "a": 1}) == \
+        {"t": "answer"}
+    # theme's numeric id is untouched by answer's word list
+    assert protocol.redact({"t": "theme", "op": "set", "id": 3})["id"] == 3
+
+def test_each_builder_redacts_to_its_expected_projection():
+    for name, msg, kept, dropped in _builders():
+        got = protocol.redact(msg)
+        if kept is None:    # usage: every scalar it builds, nothing else
+            kept = set(msg) - dropped
+            assert {"session_pct", "weekly_pct", "stale", "p2_age_s"} <= kept
+        assert set(got) == kept, name
+        assert not set(got) & dropped, name
+        assert all(got[k] == msg[k] for k in got), name
+
+
+def test_the_table_names_every_host_to_board_builder():
+    """A new builder with no row here is a new message whose transcript
+    projection nobody looked at."""
+    tree = ast.parse(pathlib.Path(protocol.__file__).read_text("utf-8"))
+    found = set()
+    for fn in tree.body:
+        if isinstance(fn, ast.FunctionDef) and not fn.name.startswith("_"):
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Dict) and any(
+                        isinstance(k, ast.Constant) and k.value == "t"
+                        for k in node.keys):
+                    found.add(fn.name)
+    found.discard("redact")    # the allowlist itself, not a builder
+    assert found == {name for name, *_ in _builders()}
+
+
+def test_fleet_fields_survive():
+    """tests/fleet/agent.py:720-723 and tap_asserts.py:127-129 read these
+    from the transcript."""
+    got = protocol.redact({"t": "usage", "v": 2, "session_pct": 41,
+                           "weekly_pct": 12, "stale": True})
+    assert got == {"t": "usage", "session_pct": 41, "weekly_pct": 12,
+                   "stale": True}
+
+
+def test_redact_never_keeps_a_container():
+    import random
+    rng = random.Random(7)
+    junk = [{"a": 1}, [1, 2], ("x",), {"s": "6e6574"}, [], {}, object(),
+            b"bytes", "ok", 3, 2.5, None, True, "x" * 200]
+    for t, fields in protocol.TAP_FIELDS.items():
+        for _ in range(50):
+            msg = {k: rng.choice(junk) for k in fields | {"s", "p", "k", "ip"}}
+            msg["t"] = t
+            got = protocol.redact(msg)
+            assert got["t"] == t
+            assert set(got) <= fields
+            for v in got.values():
+                assert v is None or isinstance(v, (str, int, float, bool))
+                assert not isinstance(v, str) or len(v) <= 64
+
+
+def test_the_widest_wifi_set_fits():
+    """The widest wifi_set measures 298 bytes of MAX_LINE_BYTES=512
+    (2026-11-06): a 32-byte SSID and a 63-character password. A 64-character
+    password also fits (it is accepted only as hex, a raw PSK), and so does a
+    64-character non-hex one that password_problem refuses: the budget is not
+    what stops it."""
+    raw, why = protocol.encode_checked(
+        protocol.wifi_set(b"\xff" * 32, "~" * 63, bytes(32)))
+    assert why is None and len(raw) == 298
+    raw, why = protocol.encode_checked(
+        protocol.wifi_set(b"\xff" * 32, "a" * 64, bytes(32)))
+    assert why is None
+    raw, why = protocol.encode_checked(
+        protocol.wifi_set(b"\xff" * 32, "x" * 64, bytes(32)))
+    assert why is None
+
+
+def test_the_widest_board_lines_fit():
+    """The board's own widest lines, built by hand because only firmware
+    sends them: wifi_net 131 bytes, wifi_state 215 (2026-11-06)."""
+    net = {"t": "wifi_net", "v": 1, "i": 19, "n": 20, "s": "ff" * 32,
+           "r": -100, "sec": "mixed"}
+    state = {"t": "wifi_state", "v": 1, "st": "joining", "link": "wifi",
+             "s": "ff" * 32, "ip": "255.255.255.255", "port": 65535,
+             "r": -100, "kid": "ffffffff", "why": "Wrong WiFi password"}
+    raw_net, why = protocol.encode_checked(net)
+    assert why is None and len(raw_net) == 131
+    raw_state, why = protocol.encode_checked(state)
+    assert why is None and len(raw_state) == 215
+
+
+def test_wifi_types_log_by_name_only():
+    assert protocol.log_name(
+        protocol.wifi_set(b"x", "secretpw", bytes(32))) == "wifi_set"
+
+
+def test_the_builders_output_is_redacted_by_the_task_0_1_redactor():
+    assert protocol.redact(
+        protocol.wifi_set(b"net", "secretpw", bytes(32))) == {"t": "wifi_set"}
+
+
+def test_wifi_set_refuses_a_non_ascii_password_without_quoting_it():
+    import pytest
+    with pytest.raises(ValueError) as e:
+        protocol.wifi_set(b"net", "p\u00e4ss\u00f6word", bytes(32))
+    assert e.value.__cause__ is None and e.value.__context__ is None
+    assert str(e.value) == "the WiFi password must be ASCII"
+    assert "\u00e4" not in repr(e.value) and "\u00f6" not in repr(e.value)
+
+
+def test_the_tap_keeps_every_ota_ack_error_word():
+    for word in ("", "unconfirmed", "refused", "failed"):
+        assert protocol.redact({"t": "ota_ack", "err": word})["err"] == word

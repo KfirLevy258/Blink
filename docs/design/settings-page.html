@@ -1,0 +1,1368 @@
+<!--
+  BLINK settings page: the approved design reference (2026-11-06).
+  A mock with example data only: no figure, name or network here is real,
+  and the flows (WiFi join, logo send) are simulated in the page.
+  Build the shipped page from this and docs/design/settings-page.md, but the
+  shipped page must NOT load Google Fonts or anything else from the network:
+  it is served by the daemon and has to work offline. Bundle the faces or
+  fall back to the system stack.
+-->
+<title>BLINK Settings</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Montserrat:wght@500;600&display=swap">
+<style>
+/* Concept: the board is a product on a desk under one soft lamp. The page is
+   the studio around it: a neutral sweep, a pool of light behind the case, a
+   contact shadow under its feet. The board sits dead centre at every moment;
+   the status and three controls sit right under it, and the one open panel
+   docks beside it at its own height, Look to the left (what the screen shows),
+   Connect and Board to the right (the device itself), so opening one never
+   moves the board. Below 1200px the board, status and controls stick to the
+   top and the panel scrolls under them.
+   Type is IBM Plex, the face the BLINK wordmark is drawn from; the board's own
+   screen uses Montserrat, LVGL's built-in font, and only arcs, rects, lines
+   and text, which is all the firmware draws. */
+:root {
+  --bg: #e6e5e2; --stage: #f7f6f4; --panel: #fbfbfa; --raise: #ffffff; --ink: #1c1b1a; --muted: #5b5853;
+  --line: #dcd9d4; --field: #efeeeb; --accent: #ff6a13; --accent-ink: #a8400a; --on-accent: #1f0b00;
+  --ok: #1b7642; --danger: #b1261d; --floor: rgba(60, 40, 20, .30);
+  --shadow: 0 1px 2px rgba(50, 35, 20, .06), 0 18px 40px -16px rgba(50, 35, 20, .22);
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --out: cubic-bezier(.2, .7, .2, 1);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121110; --stage: #262421; --panel: #1b1a18; --raise: #2a2825; --ink: #eceae6; --muted: #a29e97;
+  --line: #2f2d2a; --field: #23211f; --accent: #ff6a13; --accent-ink: #ff9152; --on-accent: #1f0b00;
+  --ok: #5fd394; --danger: #ff8a7d; --floor: rgba(0, 0, 0, .55);
+  --shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 22px 48px -16px rgba(0, 0, 0, .7);
+  color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #121110; --stage: #262421; --panel: #1b1a18; --raise: #2a2825; --ink: #eceae6; --muted: #a29e97;
+  --line: #2f2d2a; --field: #23211f; --accent: #ff6a13; --accent-ink: #ff9152; --on-accent: #1f0b00;
+  --ok: #5fd394; --danger: #ff8a7d; --floor: rgba(0, 0, 0, .55);
+  --shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 22px 48px -16px rgba(0, 0, 0, .7);
+  color-scheme: dark;
+}
+
+[hidden] { display: none !important; }
+* { box-sizing: border-box; }
+html { scrollbar-gutter: stable; }
+body {
+  margin: 0; min-height: 100dvh; color: var(--ink); font: 400 14px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  background: var(--bg);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px;
+  display: flex; flex-direction: column;
+}
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+select option { background: var(--panel); color: var(--ink); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+h1, h2, p { margin: 0; }
+.label { font: 500 13px/1.4 var(--sans); color: var(--muted); }
+.val { font: 400 13px/1.4 var(--mono); font-variant-numeric: tabular-nums; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* ---------- top bar: wordmark left, quiet ---------- */
+.top { display: flex; align-items: center; gap: 10px; max-width: 1720px; width: 100%; margin: 0 auto; }
+.top svg { width: 26px; height: 20px; color: var(--ink); flex: none; }
+h1 { font: 600 15px/1 var(--sans); letter-spacing: .14em; }
+h1 span { font-weight: 400; letter-spacing: 0; color: var(--muted); margin-left: 8px; }
+
+/* ---------- page: three columns, board in the middle one ---------- */
+.page { flex: 1; width: 100%; max-width: 1720px; margin: 0 auto; display: grid; column-gap: 28px;
+  grid-template-columns: minmax(320px, 1fr) minmax(460px, 600px) minmax(320px, 1fr); grid-template-areas: "left hub right";
+  align-content: center; align-items: stretch; }
+.hub { grid-area: hub; display: flex; flex-direction: column; align-items: center; min-width: 0; position: relative; }
+/* The panel docks out of flow, its top edge on the case's top edge, so its
+   height never changes the row and the board never moves. */
+.side { min-width: 0; position: relative; }
+.side .panel { position: absolute; top: 34px; }
+#sideL { grid-area: left; } #sideL .panel { right: 0; }
+#sideR { grid-area: right; } #sideR .panel { left: 0; }
+
+@media (min-width: 1680px) { .page { column-gap: 40px; grid-template-columns: minmax(320px, 1fr) 660px minmax(320px, 1fr); } }
+
+/* ---------- the studio: light pool behind the board ---------- */
+.stage { width: 100%; position: relative; isolation: isolate; }
+.stage::before { content: ""; position: absolute; z-index: -1; left: -14%; right: -14%; top: -10%; bottom: 4%;
+  background: radial-gradient(50% 50% at 50% 46%, var(--stage) 0%, color-mix(in srgb, var(--stage) 55%, var(--bg)) 45%, transparent 100%);
+  pointer-events: none; }
+svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
+.floor { fill: url(#floorG); }
+.track { fill: none; stroke: color-mix(in srgb, var(--muted) 55%, transparent); stroke-width: 1.4; stroke-linecap: round; transition: stroke .4s ease, opacity .4s ease; }
+.track.live { stroke: var(--muted); }
+.track.wifi { stroke-dasharray: 1 5; }
+.track.wifi.live { stroke-dasharray: none; }
+.pulse { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 0 101; opacity: 0; }
+.pulse.run { opacity: 1; stroke-dasharray: 10 91; animation: travel 1.3s var(--out) infinite; }
+@keyframes travel { from { stroke-dashoffset: 10; } to { stroke-dashoffset: -91; } }
+.node { transition: opacity .4s ease; }
+.node.ghost .glyph { opacity: .55; }
+.node.ghost .node-label { fill: var(--muted); }
+.lamp { fill: var(--ok); }
+.node.ghost .lamp { fill: none; }
+.node-ink { fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.node-fill { fill: var(--panel); }
+.node.ghost .node-ink { stroke-dasharray: 2 3; }
+.node-label { font: 500 13px var(--sans); fill: var(--ink); }
+.node-sub { font: 400 12px var(--sans); fill: var(--muted); }
+.lock { opacity: 0; transition: opacity .4s ease; }
+.lock.on { opacity: 1; }
+.lock circle { fill: var(--panel); stroke: var(--ok); stroke-width: 1.4; }
+.lock path { fill: none; stroke: var(--ok); stroke-width: 1.5; }
+.lock rect { fill: var(--ok); }
+@keyframes flow { to { stroke-dashoffset: -24; } }
+#scr .dash { animation: flow 1.2s linear infinite; }
+
+/* ---------- name, status, controls ---------- */
+.ident { display: flex; flex-direction: column; align-items: center; gap: 4px; margin-top: 4px; text-align: center; min-height: 52px; }
+.devname { font: 500 20px/1.3 var(--sans); letter-spacing: -.005em; }
+.status { font-size: 14px; color: var(--muted); display: inline-flex; align-items: center; gap: 8px; }
+.status svg { width: 13px; height: 13px; color: var(--ok); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+.dot.bad { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent); }
+.hs { display: inline-flex; align-items: center; gap: 12px; font-size: 14px; color: var(--ink); }
+.hs ol { list-style: none; margin: 0; padding: 0; display: flex; gap: 4px; }
+.hs li { width: 18px; height: 3px; border-radius: 2px; background: var(--line); transition: background .3s ease; }
+.hs li.active { background: var(--accent); }
+.hs li.done { background: var(--ok); }
+.hs li.fail { background: var(--danger); }
+
+.chips { display: inline-flex; gap: 2px; padding: 4px; margin-top: 20px; border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 70%, transparent); box-shadow: inset 0 0 0 1px var(--line); }
+.chips button { min-height: 44px; min-width: 104px; padding: 0 18px; border: 0; border-radius: 10px; background: none;
+  color: var(--muted); font-weight: 500; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  transition: background .2s ease, color .2s ease, box-shadow .2s ease; }
+.chips svg { width: 16px; height: 16px; flex: none; }
+.chips button:hover { color: var(--ink); }
+.chips button[aria-pressed="true"] { background: var(--raise); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px var(--line); }
+.chips button[aria-pressed="true"] svg { color: var(--accent-ink); }
+
+/* ---------- panels ---------- */
+.panel { width: 100%; max-width: 372px; max-height: max(360px, calc(100dvh - 210px)); overflow: auto; overscroll-behavior: contain;
+  background: var(--panel); border-radius: 18px; padding: 24px; box-shadow: var(--shadow), 0 0 0 1px color-mix(in srgb, var(--line) 60%, transparent);
+  display: flex; flex-direction: column; gap: 20px; scrollbar-width: thin; }
+#sideL .panel { animation: inL .32s var(--out) both; }
+#sideR .panel { animation: inR .32s var(--out) both; }
+@keyframes inL { from { opacity: 0; transform: translateX(14px); } }
+@keyframes inR { from { opacity: 0; transform: translateX(-14px); } }
+.panel h2 { font: 600 17px/1.3 var(--sans); }
+.rows { display: flex; flex-direction: column; gap: 20px; }
+.rows > * + * { border-top: 1px solid var(--line); padding-top: 20px; }
+.stack { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.line { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; }
+
+.btn { min-height: 44px; padding: 0 18px; border-radius: 10px; border: 0; background: var(--field); font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: filter .2s ease, background .2s ease, transform .1s ease; }
+.btn:hover { filter: brightness(1.04); }
+.btn:active { transform: translateY(1px); }
+.btn.primary { width: 100%; background: var(--accent); color: var(--on-accent); box-shadow: inset 0 1px 0 rgba(255,255,255,.25), 0 1px 2px rgba(120,40,0,.25); }
+.btn[disabled] { cursor: progress; filter: saturate(.6); }
+.btn.danger { background: none; color: var(--danger); box-shadow: inset 0 0 0 1px currentColor; }
+.btn.danger.solid { background: var(--danger); color: var(--panel); box-shadow: none; }
+.link { min-height: 44px; border: 0; background: none; padding: 0; color: var(--muted); font-weight: 500; display: inline-flex; align-items: center; gap: 8px; align-self: flex-start; transition: color .2s ease; }
+.link:hover { color: var(--ink); }
+.link svg { width: 12px; height: 12px; transition: transform .25s var(--out); }
+.link[aria-expanded="true"] svg { transform: rotate(180deg); }
+
+/* look: an editor in two halves either side of the board. Themes on the left,
+   Customise on the right; the board between them is the live preview. */
+.panel.wide { max-width: 452px; gap: 20px; }
+.phead { display: flex; flex-direction: column; gap: 4px; }
+.phead p { font-size: 14px; color: var(--muted); }
+.tap { display: none; }
+@media (hover: none) { .hov { display: none; } .tap { display: inline; } }
+.phead p b { color: var(--ink); font-weight: 500; }
+.sec { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.sec + .sec { border-top: 1px solid var(--line); padding-top: 20px; }
+.sec > .label, .sec-h { font: 600 14px/1.3 var(--sans); color: var(--ink); }
+.sec-h { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+
+.themes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 12px; }
+.th { border: 0; background: none; padding: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; text-align: left; color: var(--muted); border-radius: 10px; }
+.th .scr { position: relative; display: block; aspect-ratio: 4 / 3; border-radius: 8px; overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(127,127,127,.25), 0 1px 2px rgba(0,0,0,.08); transition: box-shadow .2s ease, transform .25s var(--out); }
+.th .scr svg { width: 100%; height: 100%; display: block; }
+.th .nm { font-size: 13px; line-height: 1.3; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 2px; transition: color .2s ease; }
+.th:hover .scr { transform: translateY(-2px); box-shadow: 0 0 0 1px rgba(127,127,127,.35), 0 8px 18px -8px rgba(0,0,0,.35); }
+.th:hover .nm { color: var(--ink); }
+.th:focus-visible { outline: none; }
+.th:focus-visible .scr { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--ink); }
+.th[aria-pressed="true"] .scr { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--accent); }
+.th[aria-pressed="true"] .nm { color: var(--ink); font-weight: 600; }
+.th .tick { position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: var(--on-accent);
+  display: grid; place-items: center; opacity: 0; transform: scale(.6); transition: opacity .2s ease, transform .25s var(--out); }
+.th .tick svg { width: 12px; height: 12px; }
+.th[aria-pressed="true"] .tick { opacity: 1; transform: none; }
+.hint { font-size: 13px; color: var(--muted); }
+
+.crow { display: grid; grid-template-columns: 48px minmax(0, 1fr) 96px; align-items: center; gap: 14px; min-height: 56px; padding: 6px; border-radius: 12px; background: var(--field); }
+.crow + .crow { margin-top: 6px; }
+.crow .pick { position: relative; width: 48px; height: 44px; border-radius: 9px; overflow: hidden; cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(127,127,127,.35); }
+.crow .pick:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.crow .pick input { position: absolute; inset: -8px; width: calc(100% + 16px); height: calc(100% + 16px); border: 0; padding: 0; cursor: pointer; background: none; }
+.crow .txt { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.crow .txt b { font-weight: 500; font-size: 14px; }
+.crow .txt span { font-size: 13px; color: var(--muted); }
+.crow .hex { width: 100%; min-height: 44px; border: 0; border-radius: 9px; padding: 0 10px; background: var(--panel); font: 400 13px var(--mono);
+  text-transform: uppercase; box-shadow: inset 0 0 0 1px var(--line); outline: none; transition: box-shadow .2s ease; }
+.crow .hex:focus-visible { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.crow .hex[aria-invalid="true"] { box-shadow: inset 0 0 0 1.5px var(--danger); }
+
+.seg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 3px; border-radius: 12px; background: var(--field); }
+.seg button { min-height: 44px; border: 0; border-radius: 9px; background: none; color: var(--muted); font-weight: 500; transition: background .2s ease, color .2s ease;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 10px 4px 8px; }
+.seg button svg { width: 40px; height: 26px; }
+.seg button:hover { color: var(--ink); }
+.seg button[aria-pressed="true"] { background: var(--raise); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px var(--line); }
+.seg button[aria-pressed="true"] svg .on { stroke: var(--accent); }
+
+.try { display: flex; flex-direction: column; gap: 2px; }
+.try output { font: 500 20px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+.try input { -webkit-appearance: none; appearance: none; width: 100%; height: 44px; margin: 0; background: transparent; cursor: pointer; }
+.try input::-webkit-slider-runnable-track { height: 8px; border-radius: 4px;
+  background: linear-gradient(90deg, var(--lo) 0 60%, var(--mi) 60% 90%, var(--hi) 90% 100%); box-shadow: inset 0 0 0 1px rgba(127,127,127,.25); }
+.try input::-moz-range-track { height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--lo) 0 60%, var(--mi) 60% 90%, var(--hi) 90% 100%); }
+.try input::-webkit-slider-thumb { -webkit-appearance: none; width: 26px; height: 26px; margin-top: -9px; border-radius: 50%; background: #fff;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.18), 0 2px 6px rgba(0,0,0,.28); }
+.try input::-moz-range-thumb { width: 26px; height: 26px; border: 0; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.18), 0 2px 6px rgba(0,0,0,.28); }
+.try input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+.marks { position: relative; height: 18px; margin: 0 13px; font: 400 12px/1 var(--mono); color: var(--muted); }
+.marks span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.marks span::before { content: ""; position: absolute; left: 50%; top: -9px; width: 1px; height: 5px; background: currentColor; opacity: .6; }
+.marks span:first-child { transform: none; } .marks span:first-child::before { left: 0; }
+.tryrow { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 14px; align-items: start; }
+.play { width: 44px; height: 44px; border: 0; border-radius: 50%; background: var(--field); color: var(--ink); display: grid; place-items: center;
+  box-shadow: inset 0 0 0 1px var(--line); transition: background .2s ease, color .2s ease; }
+.play:hover { background: var(--accent); color: var(--on-accent); box-shadow: none; }
+.play svg { width: 16px; height: 16px; }
+.link.sm { min-height: 44px; margin-block: -12px; font-size: 13px; font-weight: 500; color: var(--accent-ink); }
+.link.sm:hover { color: var(--ink); }
+.range { display: grid; grid-template-columns: auto minmax(0, 1fr) 44px; align-items: center; gap: 14px; min-height: 44px; }
+.range input { width: 100%; min-width: 0; accent-color: var(--accent); height: 28px; margin: 0; }
+.range output { text-align: right; }
+
+/* tabs inside a panel: one panel per side, sub-tabs rather than a longer scroll */
+.tabs { display: flex; gap: 2px; padding: 3px; border-radius: 12px; background: var(--field); }
+.tabs button { flex: 1; min-height: 44px; border: 0; border-radius: 9px; background: none; color: var(--muted); font-weight: 500; transition: background .2s ease, color .2s ease; }
+.tabs button:hover { color: var(--ink); }
+.tabs button[aria-selected="true"] { background: var(--raise); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px var(--line); }
+.tabpanel { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.tabpanel:focus-visible { outline: none; }
+.new { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font: 600 11px/1.5 var(--sans); vertical-align: 2px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-ink); }
+.note2 { font-size: 13px; color: var(--muted); }
+
+/* main-screen views, each a little drawing of its layout */
+.views { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.vw { border: 0; border-radius: 12px; background: var(--field); padding: 6px 6px 8px; display: flex; flex-direction: column; gap: 8px; align-items: stretch; text-align: left; color: var(--muted); min-height: 44px;
+  box-shadow: inset 0 0 0 1px transparent; transition: box-shadow .2s ease, color .2s ease; }
+.vw svg { width: 100%; height: auto; display: block; border-radius: 6px; }
+.vw b { font-weight: 500; font-size: 12px; line-height: 1.3; color: var(--ink); text-align: center; }
+.vw:hover { color: var(--ink); }
+.vw[aria-pressed="true"] { box-shadow: inset 0 0 0 1.5px var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--field)); }
+.vw[aria-pressed="true"] .lit { stroke: var(--accent); }
+.vw[aria-pressed="true"] .litf { fill: var(--accent); }
+
+/* on/off rows */
+.sw2 { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; min-height: 56px; }
+.sw2 + .sw2 { border-top: 1px solid var(--line); padding-top: 12px; margin-top: -4px; }
+.sw2 b { display: block; font-weight: 500; }
+.sw2 span { display: block; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.sw2 span.new { display: inline-block; font-size: 11px; color: var(--accent-ink); line-height: 1.5; }
+.sw2 > div { padding-block: 6px; }
+.switch { width: 52px; height: 44px; border: 0; padding: 0; background: none; display: grid; place-items: center; }
+.switch i { width: 44px; height: 26px; border-radius: 13px; background: var(--line); position: relative; transition: background .2s ease; display: block; }
+.switch i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .2s var(--out); }
+.switch[aria-checked="true"] i { background: var(--accent); }
+.switch[aria-checked="true"] i::after { transform: translateX(18px); }
+
+/* brightness levels: the five the board stores */
+.seg5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.onboard { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px; border-radius: 12px; background: var(--field); }
+.onboard p { font-size: 13px; color: var(--muted); }
+.onboard .btn { background: var(--panel); box-shadow: inset 0 0 0 1px var(--line); font-weight: 500; }
+.onboard .btn[aria-pressed="true"] { box-shadow: inset 0 0 0 1.5px var(--accent); }
+
+/* logo */
+.dropzone { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; min-height: 150px; padding: 20px; border-radius: 14px; text-align: center;
+  border: 1.5px dashed color-mix(in srgb, var(--muted) 55%, transparent); background: var(--field); cursor: pointer; transition: border-color .2s ease, background .2s ease; }
+.dropzone svg { width: 28px; height: 28px; color: var(--muted); margin-bottom: 4px; }
+.dropzone b { font-weight: 500; }
+.dropzone span { font-size: 13px; color: var(--muted); }
+.dropzone u { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.dropzone.over, .dropzone:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--field)); }
+#logoFile:focus-visible + .dropzone { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lfile { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 8px; border-radius: 12px; background: var(--field); }
+.lfile .thumb { width: 56px; height: 42px; border-radius: 6px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(127,127,127,.3); display: grid; place-items: center; }
+.lfile .thumb img { max-width: 90%; max-height: 90%; display: block; }
+.lfile b { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lfile span { font-size: 13px; color: var(--muted); }
+.lfile .link { align-self: center; }
+.facts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+.facts li { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 8px; }
+.facts li::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; margin: 7px 0 0 4px; opacity: .7; }
+.lrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 44px; }
+.bgpick { display: flex; gap: 8px; align-items: center; }
+.bgpick .pick { position: relative; width: 44px; height: 44px; border-radius: 9px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(127,127,127,.35); cursor: pointer; }
+.bgpick .pick:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.bgpick .pick input { position: absolute; inset: -8px; width: calc(100% + 16px); height: calc(100% + 16px); border: 0; padding: 0; cursor: pointer; }
+select.mini { min-height: 44px; border: 0; border-radius: 10px; background: var(--field); padding: 0 34px 0 12px; box-shadow: inset 0 0 0 1px var(--line); appearance: none; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+.sendrow { display: flex; flex-direction: column; gap: 6px; }
+.btnrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.btnrow .btn.primary { width: 100%; }
+.progress { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s linear; }
+
+/* connect */
+.linkcard { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.linkcard .ic { width: 40px; height: 40px; border-radius: 10px; background: var(--field); display: grid; place-items: center; flex: none; }
+.linkcard .ic svg { width: 20px; height: 20px; color: var(--ink); }
+.linkcard > div { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.linkcard b { font-weight: 600; }
+.state { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; color: var(--ok); white-space: nowrap; }
+.state svg { width: 13px; height: 13px; }
+.problem { display: flex; flex-direction: column; gap: 10px; }
+.problem b { color: var(--danger); font-weight: 600; }
+.nets { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.net { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 14px; align-items: center; min-height: 54px; padding: 8px 14px; border-radius: 10px; background: var(--field); cursor: pointer; transition: box-shadow .2s ease, background .2s ease; }
+.net:hover { background: color-mix(in srgb, var(--field) 70%, var(--line)); }
+.net:has(input:checked) { box-shadow: inset 0 0 0 1.5px var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--field)); }
+.net:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.net:has(input:disabled) { cursor: not-allowed; background: none; box-shadow: inset 0 0 0 1px var(--line); }
+.net input { appearance: none; width: 16px; height: 16px; margin: 0; border: 1.5px solid var(--muted); border-radius: 50%; display: grid; place-items: center; cursor: inherit; outline: none; }
+.net input:checked { border-color: var(--accent); }
+.net input:checked::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.net input:disabled { border-style: dashed; }
+.net b { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.net small { display: block; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.net small.no { color: var(--danger); }
+.bars { width: 20px; height: 14px; }
+.bars rect { fill: var(--ink); } .bars rect.off { fill: var(--line); }
+.pw { display: flex; border-radius: 10px; background: var(--field); min-width: 0; box-shadow: inset 0 0 0 1px var(--line); transition: box-shadow .2s ease; }
+.pw:focus-within { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.pw[aria-invalid="true"] { box-shadow: inset 0 0 0 1.5px var(--danger); }
+.pw input { flex: 1; min-width: 0; border: 0; background: none; padding: 0 14px; min-height: 46px; font: 400 14px var(--mono); outline: none; }
+.pw button { border: 0; background: none; min-width: 64px; min-height: 46px; color: var(--muted); font-weight: 500; border-radius: 10px; }
+.pw button:hover { color: var(--ink); }
+.note { display: flex; gap: 8px; font-size: 13px; color: var(--muted); }
+.note svg { width: 14px; height: 14px; flex: none; margin-top: 2px; }
+.msg { font-size: 14px; }
+.msg:empty { display: none; }
+.msg.ok { color: var(--ok); } .msg.bad { color: var(--danger); }
+.actions { display: flex; flex-direction: column; gap: 4px; }
+.actions .link { align-self: center; }
+
+/* board */
+.name { min-height: 44px; border: 0; border-radius: 10px; background: var(--field); padding: 0 14px; font-size: 14px; font-weight: 500; width: 100%; min-width: 0; box-shadow: inset 0 0 0 1px var(--line); outline: none; transition: box-shadow .2s ease; }
+.name:focus-visible { box-shadow: inset 0 0 0 1.5px var(--accent); }
+select.name { appearance: none; padding-right: 40px; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 20px) 50%, calc(100% - 15px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+.quiet { font-size: 14px; color: var(--muted); }
+.fw { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fw .tag { font-size: 13px; color: var(--ok); display: inline-flex; align-items: center; gap: 6px; }
+.fw .tag svg { width: 13px; height: 13px; }
+.confirm { display: flex; flex-direction: column; gap: 14px; padding: 14px; border-radius: 12px; background: color-mix(in srgb, var(--danger) 7%, var(--field)); }
+.confirm .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.foot { width: 100%; max-width: 720px; margin: 0 auto; text-align: center; font-size: 12px; color: var(--muted); }
+
+/* ---------- narrow: board, name, status and controls stick; nodes go ---------- */
+@media (max-width: 1199px) {
+  /* The stuck board covers the top of the viewport; keep a focused field clear of it. */
+  html { scroll-padding-top: calc(min(34vh, 300px) + 150px); }
+  body { padding-top: 12px; }
+  .page { display: block; max-width: 600px; }
+  .hub { position: sticky; top: 0; z-index: 2; background: var(--bg); padding-block: 8px 16px;
+    margin-inline: calc(-1 * max(16px, env(safe-area-inset-left, 0px))); padding-inline: max(16px, env(safe-area-inset-left, 0px));
+    box-shadow: 0 12px 16px -12px color-mix(in srgb, var(--bg) 100%, transparent); }
+  .side { margin-top: 16px; }
+  .side .panel { position: static; }
+  .panel.wide { max-width: none; }
+  #pCust { margin-top: 16px; }
+  .views { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .panel { max-width: none; max-height: none; overflow: visible; }
+  #sideL .panel, #sideR .panel { animation-name: inUp; }
+  @keyframes inUp { from { opacity: 0; transform: translateY(10px); } }
+  svg.hero { height: min(34vh, 300px); width: 100%; }
+  .stage::before { inset: -6% -4% 0; }
+  .track, .pulse, .node, .lock { display: none; }
+  .ident { min-height: 0; }
+  .devname { font-size: 17px; }
+  .chips { display: flex; width: 100%; margin-top: 14px; }
+  .chips button { min-width: 0; flex: 1; padding: 0 8px; }
+  .foot { margin-top: 24px; }
+}
+@media (max-width: 420px) {
+  .themes { gap: 12px 8px; }
+  .crow { grid-template-columns: 44px minmax(0, 1fr) 92px; gap: 10px; }
+  .crow .pick { width: 44px; }
+  .panel { padding: 20px; }
+  .status { font-size: 13px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .pulse.run { stroke-dasharray: none; opacity: .9; }
+}
+</style>
+
+<header class="top">
+  <svg viewBox="0 0 120 92" aria-hidden="true"><rect x="4" y="4" width="112" height="84" rx="17" fill="none" stroke="currentColor" stroke-width="8"/><rect x="24" y="34" width="24" height="24" rx="7" fill="currentColor"/><path d="M92 34 L73 46 L92 58" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  <h1 translate="no">BLINK<span translate="yes">Settings</span></h1>
+</header>
+
+<main class="page">
+  <!-- ====================== hub: the board, always centred ====================== -->
+  <section class="hub" aria-label="Your board">
+    <div class="stage">
+      <svg class="hero" id="hero" viewBox="0 0 600 470" role="img" aria-labelledby="heroTitle">
+        <title id="heroTitle">Board preview</title>
+        <defs>
+          <clipPath id="scrClip"><rect x="0" y="0" width="320" height="240"/></clipPath>
+          <!-- Matte PLA under a lamp above: lighter at the top, falling off toward the desk. -->
+          <linearGradient id="faceG" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#ff8a45"/><stop offset=".35" stop-color="#ff7425"/><stop offset="1" stop-color="#ee600f"/>
+          </linearGradient>
+          <linearGradient id="sheenG" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#000" stop-opacity=".07"/><stop offset=".22" stop-color="#fff" stop-opacity=".05"/>
+            <stop offset=".6" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".09"/>
+          </linearGradient>
+          <linearGradient id="wallG" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#b9480a"/><stop offset=".12" stop-color="#d8590d"/><stop offset="1" stop-color="#f77026"/>
+          </linearGradient>
+          <linearGradient id="earL" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#c94f08"/><stop offset="1" stop-color="#e2600f"/></linearGradient>
+          <linearGradient id="earR" x1="1" y1="0" x2="0" y2="0"><stop offset="0" stop-color="#c94f08"/><stop offset="1" stop-color="#e2600f"/></linearGradient>
+          <linearGradient id="legG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a94006"/><stop offset=".3" stop-color="#d4580c"/><stop offset="1" stop-color="#e5651a"/></linearGradient>
+          <linearGradient id="glassG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#17181a"/><stop offset=".5" stop-color="#0b0c0d"/><stop offset="1" stop-color="#060607"/></linearGradient>
+          <!-- FDM layer lines, 0.2 mm apart on the real case; drawn at a scale the eye can just find. -->
+          <pattern id="layers" width="8" height="3" patternUnits="userSpaceOnUse"><rect width="8" height=".7" fill="#5a1e00" opacity=".09"/></pattern>
+          <radialGradient id="floorG" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="var(--floor)" style="stop-color: var(--floor)"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+        </defs>
+
+        <!-- desk: the contact shadow that grounds the case -->
+        <ellipse class="floor" cx="300" cy="412" rx="236" ry="20"/>
+        <ellipse class="floor" cx="58" cy="412" rx="44" ry="6"/>
+        <ellipse class="floor" cx="542" cy="412" rx="44" ry="6"/>
+
+        <!-- links: PC on the left, the router on the right -->
+        <path class="track" id="usbTrack" d="M80 252 C48 268 52 330 62 374"/>
+        <path class="pulse" id="usbBeam" pathLength="100" d="M80 252 C48 268 52 330 62 374"/>
+        <path class="track wifi" id="wifiTrack" d="M520 252 C552 268 548 330 540 378"/>
+        <path class="pulse" id="wifiBeam" pathLength="100" d="M540 378 C548 330 552 268 520 252"/>
+        <g class="lock" id="lock" transform="translate(553 318)">
+          <circle r="13"/><path d="M-4 -1 v-3 a4 4 0 0 1 8 0 v3"/><rect x="-6" y="-1" width="12" height="8.5" rx="1.5"/>
+        </g>
+
+        <g class="node" id="nodePc">
+          <g class="glyph">
+            <rect class="node-fill" x="36" y="376" width="50" height="32" rx="3"/>
+            <rect class="node-ink" x="36" y="376" width="50" height="32" rx="3"/>
+            <path class="node-ink" d="M26 410 h70"/>
+          </g>
+          <text class="node-label" x="61" y="440" text-anchor="middle">Studio PC</text>
+          <text class="node-sub" x="61" y="456" text-anchor="middle">USB cable</text>
+        </g>
+        <g class="node ghost" id="nodeRouter">
+          <g class="glyph">
+            <rect class="node-fill" x="516" y="392" width="52" height="18" rx="5"/>
+            <rect class="node-ink" x="516" y="392" width="52" height="18" rx="5"/>
+            <path class="node-ink" d="M528 378 v14 M556 378 v14"/>
+            <circle cx="530" cy="401" r="1.6" class="lamp"/>
+          </g>
+          <text class="node-label" x="542" y="440" text-anchor="middle" id="routerName">WiFi</text>
+          <text class="node-sub" x="542" y="456" text-anchor="middle" id="routerSub">Not set up</text>
+        </g>
+
+        <g id="case">
+          <!-- feet, set back behind the case -->
+          <g fill="url(#legG)">
+            <rect x="152" y="336" width="30" height="74" rx="4"/><rect x="204" y="336" width="30" height="74" rx="4"/>
+            <rect x="366" y="336" width="30" height="74" rx="4"/><rect x="418" y="336" width="30" height="74" rx="4"/>
+          </g>
+          <!-- side ears -->
+          <rect x="74" y="148" width="40" height="122" rx="6" fill="url(#earL)"/>
+          <rect x="486" y="148" width="40" height="122" rx="6" fill="url(#earR)"/>
+          <!-- shell: thickness, face, light falloff, layer lines -->
+          <rect x="100" y="46" width="400" height="320" rx="24" fill="#b94707"/>
+          <rect x="100" y="38" width="400" height="320" rx="24" fill="url(#faceG)"/>
+          <rect x="100" y="38" width="400" height="320" rx="24" fill="url(#sheenG)"/>
+          <rect x="100" y="38" width="400" height="320" rx="24" fill="url(#layers)"/>
+          <path d="M124 39.5 H476" stroke="#ffc49e" stroke-width="1.5" stroke-linecap="round" opacity=".75"/>
+          <!-- screen opening: inner wall shaded by the lip above it -->
+          <rect x="126" y="66" width="348" height="268" rx="9" fill="url(#wallG)"/>
+          <path d="M136 333.5 H464" stroke="#ffa36a" stroke-width="1" opacity=".55"/>
+          <!-- the panel: black glass, then the 320x240 active area -->
+          <rect x="133" y="73" width="334" height="254" rx="3" fill="url(#glassG)"/>
+          <g transform="translate(140 80)">
+            <g clip-path="url(#scrClip)">
+              <g id="scr"></g>
+              <rect id="dim" x="0" y="0" width="320" height="240" fill="#000" opacity="0"/>
+            </g>
+          </g>
+        </g>
+      </svg>
+    </div>
+
+    <div class="ident">
+      <p class="devname" id="devLabel" translate="no">Studio BLINK</p>
+      <p class="status" id="status" aria-live="polite"></p>
+      <div class="hs" id="hs" hidden>
+        <ol aria-hidden="true"><li></li><li></li><li></li><li></li></ol>
+        <span id="hsText" aria-live="polite"></span>
+      </div>
+    </div>
+
+    <div class="chips" role="group" aria-label="Settings">
+      <button type="button" data-panel="pLook" aria-controls="pLook pCust" aria-pressed="false">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 12.2A6 6 0 1 1 12.8 12.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3.2 12.2A6 6 0 0 1 4 4.4" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>Look</button>
+      <button type="button" data-panel="pConn" aria-controls="pConn" aria-pressed="false">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6.2a8.5 8.5 0 0 1 12 0M4.4 8.8a5 5 0 0 1 7.2 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="8" cy="12" r="1.5" fill="currentColor"/></svg>Connect</button>
+      <button type="button" data-panel="pBoard" aria-controls="pBoard" aria-pressed="false">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.8" y="3" width="12.4" height="9.4" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 14.5v-2M11 14.5v-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Board</button>
+    </div>
+  </section>
+
+  <div class="side" id="sideL">
+  <!-- ====================== Look, left half: themes and logo ====================== -->
+  <section class="panel wide" id="pLook" aria-labelledby="hLook" hidden>
+    <div class="phead">
+      <h2 id="hLook">Look</h2>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Look"><button type="button" role="tab" id="tThemes-t" aria-controls="tThemes" aria-selected="true" tabindex="0">Themes</button><button type="button" role="tab" id="tLogo-t" aria-controls="tLogo" aria-selected="false" tabindex="-1">Logo</button></div>
+    <div class="tabpanel" role="tabpanel" id="tThemes" aria-labelledby="tThemes-t" tabindex="0">
+      <p class="note2"><span class="hov">Point at a theme to preview it on the board.</span><span class="tap">Tap a theme to put it on the board.</span></p>
+      <div class="themes" id="swatches" role="group" aria-label="Themes"></div>
+    </div>
+    <div class="tabpanel" role="tabpanel" id="tLogo" aria-labelledby="tLogo-t" tabindex="0" hidden>
+      <p class="note2">Your company logo, shown each time the board starts.</p>
+      <div id="logoEmpty">
+        <input type="file" id="logoFile" class="sr" accept=".png,.svg,.jpg,.jpeg,image/png,image/svg+xml,image/jpeg">
+        <label class="dropzone" for="logoFile" id="drop"><svg viewBox="0 0 28 28" aria-hidden="true"><rect x="3" y="5" width="22" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M14 18V10M10.5 13.5 14 10l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><b>Drop a logo here</b><span>or <u>choose a file</u>. PNG, SVG or JPEG.</span></label>
+      </div>
+      <div class="stack" id="logoOn" hidden style="gap:16px">
+        <div class="lfile"><span class="thumb" id="lThumb"></span><div style="min-width:0"><b id="lName"></b><span id="lSize"></span></div><button type="button" class="link" id="lReplace">Replace</button></div>
+        <div class="stack">
+          <span class="label" id="lScaleL">Size on the screen</span>
+          <div class="seg" role="group" aria-labelledby="lScaleL" id="lScale">
+            <button type="button" data-s="1">Fill</button><button type="button" data-s=".8">Large</button><button type="button" data-s=".6">With margin</button>
+          </div>
+        </div>
+        <div class="lrow">
+          <div><span class="label" id="lBgL">Background</span><p class="note2" id="lBgNote">From the picture's corner</p></div>
+          <div class="bgpick"><label class="pick" title="Pick a background"><input type="color" id="lBg" aria-labelledby="lBgL"></label><button type="button" class="link sm" id="lBgAuto" style="margin:0">Auto</button></div>
+        </div>
+        <div class="lrow">
+          <label class="label" for="lHold">Stays up for</label>
+          <select class="mini" id="lHold"><option value="3">3 seconds</option><option value="5">5 seconds</option><option value="10">10 seconds</option><option value="30">30 seconds</option></select>
+        </div>
+        <div class="sendrow">
+          <div class="btnrow"><button type="button" class="btn primary" id="lSend">Send to board</button><button type="button" class="btn danger" id="lRemove">Remove</button></div>
+          <div class="progress" id="lProg" hidden><i></i></div>
+          <p class="msg" id="lMsg" role="status"></p>
+        </div>
+        <div class="confirm" id="lConfirm" role="group" aria-labelledby="lConfirmQ" hidden>
+          <p id="lConfirmQ">Remove the logo from the board? It starts with the BLINK animation only.</p>
+          <div class="btns"><button type="button" class="btn danger solid" id="lRemoveYes">Remove it</button><button type="button" class="btn" id="lRemoveNo">Keep</button></div>
+        </div>
+      </div>
+      <ul class="facts" aria-label="What the board can show">
+        <li>Fitted inside 320 by 240 pixels, 65,536 colours, up to 512 KB.</li>
+        <li>Shown after the BLINK animation, for up to 60 seconds.</li>
+        <li><span>Sending a logo over USB<span class="new">New</span> Until now a logo was written at the factory. Animated logos still are.</span></li>
+      </ul>
+    </div>
+  </section>
+  </div>
+
+  <div class="side" id="sideR">
+  <!-- ====================== Look, right half: customise ====================== -->
+  <section class="panel wide" id="pCust" aria-labelledby="hCust" hidden>
+    <div class="phead">
+      <h2 id="hCust">Customise</h2>
+      <p aria-live="polite" id="themeName">Starting from <b>Dark</b></p>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Customise"><button type="button" role="tab" id="tColours-t" aria-controls="tColours" aria-selected="true" tabindex="0">Colours</button><button type="button" role="tab" id="tScreen-t" aria-controls="tScreen" aria-selected="false" tabindex="-1">Screen</button><button type="button" role="tab" id="tTry-t" aria-controls="tTry" aria-selected="false" tabindex="-1">Try it</button></div>
+    <div class="tabpanel" role="tabpanel" id="tColours" aria-labelledby="tColours-t" tabindex="0">
+    <div class="sec">
+      <div class="sec-h"><span>Colours</span><button type="button" class="link sm" id="resetBtn" hidden>Reset to Dark</button></div>
+      <div>
+        <div class="crow"><label class="pick" title="Pick a colour"><input type="color" id="cBg" aria-labelledby="cBgN" aria-describedby="cBgH"></label><div class="txt"><b id="cBgN">Background</b><span id="cBgH">Behind everything</span></div><input class="hex" type="text" id="cBgX" maxlength="7" spellcheck="false" autocomplete="off" aria-label="Background, hex value"></div>
+        <div class="crow"><label class="pick" title="Pick a colour"><input type="color" id="cLow" aria-labelledby="cLowN" aria-describedby="cLowH"></label><div class="txt"><b id="cLowN">Low</b><span id="cLowH">Under 60%</span></div><input class="hex" type="text" id="cLowX" maxlength="7" spellcheck="false" autocomplete="off" aria-label="Low, hex value"></div>
+        <div class="crow"><label class="pick" title="Pick a colour"><input type="color" id="cMid" aria-labelledby="cMidN" aria-describedby="cMidH"></label><div class="txt"><b id="cMidN">Middle</b><span id="cMidH">60% to 90%</span></div><input class="hex" type="text" id="cMidX" maxlength="7" spellcheck="false" autocomplete="off" aria-label="Middle, hex value"></div>
+        <div class="crow"><label class="pick" title="Pick a colour"><input type="color" id="cHigh" aria-labelledby="cHighN" aria-describedby="cHighH"></label><div class="txt"><b id="cHighN">High</b><span id="cHighH">90% and above</span></div><input class="hex" type="text" id="cHighX" maxlength="7" spellcheck="false" autocomplete="off" aria-label="High, hex value"></div>
+      </div>
+    </div>
+    <div class="sec">
+      <span class="label" id="lW">Arc thickness</span>
+      <div class="seg" role="group" aria-labelledby="lW" id="segW">
+        <button type="button" data-w="5"><svg viewBox="0 0 40 26" aria-hidden="true"><path d="M6 22 A15 15 0 0 1 34 22" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="2" stroke-linecap="round"/><path class="on" d="M6 22 A15 15 0 0 1 20 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Thin</button><button type="button" data-w="12"><svg viewBox="0 0 40 26" aria-hidden="true"><path d="M6 22 A15 15 0 0 1 34 22" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="4.5" stroke-linecap="round"/><path class="on" d="M6 22 A15 15 0 0 1 20 7" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round"/></svg>Medium</button><button type="button" data-w="22"><svg viewBox="0 0 40 26" aria-hidden="true"><path d="M6 22 A15 15 0 0 1 34 22" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="8" stroke-linecap="round"/><path class="on" d="M6 22 A15 15 0 0 1 20 7" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"/></svg>Bold</button>
+      </div>
+    </div>
+    </div>
+    <div class="tabpanel" role="tabpanel" id="tScreen" aria-labelledby="tScreen-t" tabindex="0" hidden>
+      <div class="sec">
+        <span class="label" id="vL">Main screen</span>
+        <div class="views" role="group" aria-labelledby="vL" id="views"><button type="button" class="vw" data-v="two" aria-pressed="false"><svg viewBox="0 0 80 60" aria-hidden="true"><rect x=".5" y=".5" width="79" height="59" rx="5" fill="none" stroke="currentColor" stroke-opacity=".35"/><path d="M16.2 35.8 A11 11 0 1 1 31.8 35.8" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="3" stroke-linecap="round"/><path class="lit" d="M16.2 35.8 A11 11 0 0 1 19.0 18.2" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><path d="M48.2 35.8 A11 11 0 1 1 63.8 35.8" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="3" stroke-linecap="round"/><path class="lit" d="M48.2 35.8 A11 11 0 1 1 64.9 21.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><rect x="14" y="44" width="20" height="2" rx="1" fill="currentColor" opacity=".4"/><rect x="46" y="44" width="20" height="2" rx="1" fill="currentColor" opacity=".4"/></svg><b>Two gauges</b></button><button type="button" class="vw" data-v="session" aria-pressed="false"><svg viewBox="0 0 80 60" aria-hidden="true"><rect x=".5" y=".5" width="79" height="59" rx="5" fill="none" stroke="currentColor" stroke-opacity=".35"/><path d="M29.4 37.6 A15 15 0 1 1 50.6 37.6" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="4" stroke-linecap="round"/><path class="lit" d="M29.4 37.6 A15 15 0 0 1 33.2 13.6" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><rect x="24" y="48" width="32" height="2" rx="1" fill="currentColor" opacity=".4"/></svg><b>Session big</b></button><button type="button" class="vw" data-v="weekly" aria-pressed="false"><svg viewBox="0 0 80 60" aria-hidden="true"><rect x=".5" y=".5" width="79" height="59" rx="5" fill="none" stroke="currentColor" stroke-opacity=".35"/><path d="M29.4 37.6 A15 15 0 1 1 50.6 37.6" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="4" stroke-linecap="round"/><path class="lit" d="M29.4 37.6 A15 15 0 1 1 52.1 18.2" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><rect x="24" y="48" width="32" height="2" rx="1" fill="currentColor" opacity=".4"/></svg><b>Weekly big</b></button><button type="button" class="vw" data-v="burn" aria-pressed="false"><svg viewBox="0 0 80 60" aria-hidden="true"><rect x=".5" y=".5" width="79" height="59" rx="5" fill="none" stroke="currentColor" stroke-opacity=".35"/><rect x="12" y="13" width="18" height="4" rx="1" fill="currentColor" opacity=".5"/><rect class="litf" x="9" y="36" width="2" height="4" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="12" y="34" width="2" height="6" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="15" y="35" width="2" height="5" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="18" y="32" width="2" height="8" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="21" y="33" width="2" height="7" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="24" y="30" width="2" height="10" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="27" y="31" width="2" height="9" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="30" y="28" width="2" height="12" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="33" y="26" width="2" height="14" fill="currentColor" stroke="none" opacity="1"/><rect class="litf" x="36" y="27" width="2" height="13" fill="currentColor" stroke="none" opacity="1"/><rect class="litf" x="39" y="23" width="2" height="17" fill="currentColor" stroke="none" opacity="1"/><rect class="litf" x="42" y="20" width="2" height="20" fill="currentColor" stroke="none" opacity="1"/><rect x="8" y="40" width="37" height="1" fill="currentColor" opacity=".5"/><path d="M50.9 35.1 A10 10 0 1 1 65.1 35.1" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="3" stroke-linecap="round"/><path class="lit" d="M50.9 35.1 A10 10 0 1 1 66.1 22.1" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg><b>Burn view</b></button></div>
+        <p class="note2" id="vNote" aria-live="polite"></p>
+      </div>
+      <div class="sec">
+        <span class="label" id="mainL">Main provider</span>
+        <div class="seg" role="group" aria-labelledby="mainL" id="segMain" style="grid-template-columns: repeat(2, minmax(0, 1fr))"><button type="button" data-m="Claude">Claude</button><button type="button" data-m="Codex">Codex</button></div>
+        <p class="note2">Its gauges come first when the board shows both.</p>
+      </div>
+    </div>
+    <div class="tabpanel" role="tabpanel" id="tTry" aria-labelledby="tTry-t" tabindex="0" hidden>
+      <p class="note2">Move the gauges to see every colour. This changes only the preview.</p>
+    <div class="sec try">
+      <div class="sec-h"><label for="tryP">Try session at</label><output id="tryO" for="tryP">17%</output></div>
+      <div class="tryrow">
+        <div><input type="range" id="tryP" min="0" max="100" value="17">
+        <div class="marks" aria-hidden="true"><span style="left:0">0</span><span style="left:60%">60%</span><span style="left:90%">90%</span></div></div>
+        <button type="button" class="play" id="sweepBtn" aria-label="Sweep both arcs from 0 to 100%" title="Sweep 0 to 100%"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.2v9.6l7.6-4.8z" fill="currentColor"/></svg></button>
+      </div>
+    </div>
+    <div class="sec try">
+      <div class="sec-h"><label for="tryW">Try weekly at</label><output id="tryWO" for="tryW">24%</output></div>
+      <div class="tryrow">
+        <div><input type="range" id="tryW" min="0" max="100" value="24">
+        <div class="marks" aria-hidden="true"><span style="left:0">0</span><span style="left:60%">60%</span><span style="left:90%">90%</span></div></div>
+        <span aria-hidden="true"></span>
+      </div>
+    </div>
+    </div>
+  </section>
+
+  <!-- ====================== Connect ====================== -->
+  <section class="panel" id="pConn" aria-labelledby="hConn" hidden>
+    <h2 id="hConn">Connect</h2>
+    <div class="problem" id="problem" hidden>
+      <b>Can't reach the board</b>
+      <p>Check the USB cable, or that the board is switched on. BLINK keeps trying.</p>
+      <button type="button" class="btn primary" id="retry">Try again</button>
+    </div>
+    <div class="rows" id="connMain">
+      <div class="linkcard">
+        <span class="ic"><svg id="linkIcon" viewBox="0 0 24 24" aria-hidden="true"></svg></span>
+        <div><b id="linkTitle">Over USB</b><span class="quiet" id="linkSub">Studio PC</span></div>
+        <span class="state" id="linkState"></span>
+      </div>
+      <div class="stack">
+        <button type="button" class="btn primary" id="move" aria-expanded="false" aria-controls="picker">Move to WiFi</button>
+        <div class="stack" id="picker" hidden>
+          <fieldset style="border:0;margin:0;padding:0;min-width:0" class="stack">
+            <legend class="label" style="padding:0;margin-bottom:8px">Networks the board can hear</legend>
+            <ul class="nets" id="nets"></ul>
+          </fieldset>
+          <p class="note">2.4 GHz networks only</p>
+          <div class="stack" style="margin-top:12px">
+            <label class="label" for="pw" id="pwLabel">Password for Home-2G</label>
+            <div class="pw" id="pwBox">
+              <input id="pw" type="password" autocomplete="off" spellcheck="false" aria-describedby="pwNote">
+              <button type="button" id="pwToggle" aria-pressed="false" aria-label="Show password">Show</button>
+            </div>
+            <p class="note" id="pwNote"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 7V5a3.5 3.5 0 0 1 7 0v2" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="3" y="7" width="10" height="7" rx="1.5" fill="currentColor"/></svg><span>Sent to the board over USB only, never saved on this computer.</span></p>
+          </div>
+          <div class="actions" style="margin-top:4px">
+            <button type="button" class="btn primary" id="go">Connect</button>
+            <button type="button" class="link" id="cancel">Cancel</button>
+          </div>
+        </div>
+        <p class="msg" id="msg" role="status"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====================== Board ====================== -->
+  <section class="panel wide" id="pBoard" aria-labelledby="hBoard" hidden>
+    <h2 id="hBoard">Board</h2>
+    <div class="tabs" role="tablist" aria-label="Board"><button type="button" role="tab" id="tDevice-t" aria-controls="tDevice" aria-selected="true" tabindex="0">This board</button><button type="button" role="tab" id="tComputer-t" aria-controls="tComputer" aria-selected="false" tabindex="-1">This computer</button></div>
+    <div class="tabpanel rows" role="tabpanel" id="tDevice" aria-labelledby="tDevice-t" tabindex="0">
+      <div class="stack">
+        <label class="label" for="devName">Name</label>
+        <input class="name" type="text" id="devName" value="Studio BLINK" maxlength="24" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="stack">
+        <span class="label" id="brL">Brightness</span>
+        <div class="seg seg5" role="group" aria-labelledby="brL" id="segBr">
+          <button type="button" data-b="20">20%</button><button type="button" data-b="40">40%</button><button type="button" data-b="60">60%</button><button type="button" data-b="80">80%</button><button type="button" data-b="100">100%</button>
+        </div>
+      </div>
+      <div class="fw">
+        <span class="quiet">Firmware <span class="val">1.4.1</span></span>
+        <span class="tag"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Up to date</span>
+      </div>
+      <div class="onboard">
+        <b style="font-weight:500">On the board<span class="new">New</span></b>
+        <p>The board's Settings screen swaps its Theme button for Open on PC, which opens this page on your computer.</p>
+        <button type="button" class="btn" id="showSet" aria-pressed="false">Show it on the board</button>
+      </div>
+      <div class="stack">
+        <button type="button" class="link" id="detBtn" aria-expanded="false" aria-controls="det">
+          Details <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+        </button>
+        <div class="stack" id="det" hidden style="gap:14px">
+          <div class="line"><span class="label">Address</span><span class="val" id="devAddr">USB, COM5</span></div>
+          <div class="line"><span class="label">Saved WiFi</span><span class="quiet" id="savedNet">None</span></div>
+          <button type="button" class="btn danger" id="forgetBtn" hidden>Forget WiFi</button>
+          <div class="confirm" id="forgetConfirm" role="group" aria-labelledby="forgetQ" hidden>
+            <p id="forgetQ">Forget <b id="forgetNet"></b>? The board deletes the password and its key, and goes back to USB only.</p>
+            <div class="btns">
+              <button type="button" class="btn danger solid" id="forgetYes">Forget it</button>
+              <button type="button" class="btn" id="forgetNo">Keep</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="tabpanel" role="tabpanel" id="tComputer" aria-labelledby="tComputer-t" tabindex="0" hidden>
+      <div class="stack">
+        <label class="label" for="env">Usage comes from</label>
+        <select class="name" id="env"><option>This Windows PC</option><option>WSL: Ubuntu</option></select>
+      </div>
+      <div>
+        <div class="sw2"><div><b id="cfgStatusL">Service incidents</b><span id="cfgStatusH">Show outages from status.claude.com and status.openai.com on the board</span></div><button type="button" class="switch" role="switch" id="cfgStatus" aria-checked="false" aria-labelledby="cfgStatusL" aria-describedby="cfgStatusH"><i></i></button></div>
+        <div class="sw2"><div><b id="cfgUpdateL">Update the app by itself</b><span id="cfgUpdateH">New versions install when the board is idle</span></div><button type="button" class="switch" role="switch" id="cfgUpdate" aria-checked="true" aria-labelledby="cfgUpdateL" aria-describedby="cfgUpdateH"><i></i></button></div>
+        <div class="sw2"><div><b id="cfgRefreshL">Keep figures fresh<span class="new">New</span></b><span id="cfgRefreshH">Runs Claude Code's own /usage now and then. Sends no messages.</span></div><button type="button" class="switch" role="switch" id="cfgRefresh" aria-checked="false" aria-labelledby="cfgRefreshL" aria-describedby="cfgRefreshH"><i></i></button></div>
+        <div class="sw2"><div><b id="cfgDozeL">Doze when nobody's around<span class="new">New</span></b><span id="cfgDozeH">Dims the board after 4 hours with nothing running</span></div><button type="button" class="switch" role="switch" id="cfgDoze" aria-checked="true" aria-labelledby="cfgDozeL" aria-describedby="cfgDozeH"><i></i></button></div>
+      </div>
+    </div>
+  </section>
+  </div>
+</main>
+
+<p class="foot">Example data. This page is served by your computer. Add #unreachable to the address to see a missing board.</p>
+
+<script>
+(function () {
+  'use strict';
+  // pc/theme_builtins.py, colour order: bg, text, gauge1, gauge2, low, mid, high.
+  var BUILTINS = [
+    ['Dark',        ['0e1116','e6e8eb','4387df','0da243','0da243','ba8107','ff1900'], 12, 'round', 1],
+    ['Neon',        ['05060a','f5f7ff','00f0ff','b26bff','00f0ff','ffe600','ff2e88'], 5,  'round', 0],
+    ['Bold',        ['000000','ffffff','60a5fa','22c55e','22c55e','facc15','ef4444'], 22, 'flat',  0],
+    ['Mono',        ['000000','ffffff','ffffff','bdbdbd','9c9c9c','ffffff','ff3b30'], 5,  'flat',  0],
+    ['Ocean',       ['0a1a2f','e8f1fa','7fb2ff','2ec4b6','2ec4b6','ffb347','ff6b6b'], 12, 'round', 1],
+    ['Synthwave',   ['1a0b2e','fbeaff','01cdfe','ff71ce','ff71ce','ffb86b','ff3860'], 8,  'round', 1],
+    ['Forest',      ['0f1a14','eef3e9','a3c4bc','8fbf7f','8fbf7f','d9a441','d9643a'], 12, 'round', 1],
+    ['Retro LCD',   ['9bbc0f','0f380f','306230','0f380f','306230','3d3000','6e0f0f'], 12, 'flat',  0],
+    ['Colour-blind',['0e1116','e6e8eb','0072b2','d69400','0072b2','d69400','f0e442'], 12, 'round', 1],
+    ['Light',       ['ffffff','111418','2f6fcb','0e9f48','0e9f48','976100','cc2000'], 12, 'round', 1],
+    ['Light soft',  ['eff3f7','1b2027','3d7bd9','2e9e68','2e9e68','875b0c','b3301e'], 8,  'round', 0],
+    ['Light ink',   ['ffffff','000000','000000','555555','555555','000000','d00600'], 5,  'flat',  0]
+  ];
+  var NETS = [
+    { id: 'Home-2G', sec: 'WPA2/WPA3', rssi: 4 },
+    { id: 'Guest-2G', sec: 'WPA2', rssi: 3 },
+    { id: 'Neighbour 2.4', sec: 'WPA3', rssi: 1 },
+    { id: 'Office-Corp', sec: '802.1X, not supported', rssi: 2, no: true }
+  ];
+  var STEPS = ['Pairing over the cable', 'Board sends a challenge', 'Both prove their keys', 'Encrypting the link'];
+  var PC = "Studio PC", SIG = ['', 'weak', 'fair', 'good', 'strong'];
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  var st = { p1: 17, p2: 24, view: 'gauges', vw: 'two', screen: 'main', main: 'Claude', logo: null, link: 'usb', net: 'Home-2G', saved: null, bright: 80,
+             reach: location.hash !== '#unreachable', busy: false };
+  function loadPreset(i) {
+    var b = BUILTINS[i], c = b[1];
+    st.preset = i; st.bg = c[0]; st.text = c[1]; st.g1 = c[2]; st.low = c[4]; st.mid = c[5]; st.high = c[6];
+    st.w = b[2]; st.ends = b[3]; st.dot = b[4];
+  }
+  loadPreset(0);
+  function $(id) { return document.getElementById(id); }
+  function themeLabel() { return st.preset >= 0 ? BUILTINS[st.preset][0] : 'Custom'; }
+
+  // ---------------------------------------------------------------- colour helpers (as pc/theme_builder.html)
+  function rgb(h) { return [0, 2, 4].map(function (i) { return parseInt(h.slice(i, i + 2), 16); }); }
+  function hex(c) { return c.map(function (v) { return Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0'); }).join(''); }
+  function mix(a, b, t) { var x = rgb(a), y = rgb(b); return hex(x.map(function (v, i) { return v + (y[i] - v) * t; })); }
+  function lum(h) { return rgb(h).map(function (v) { v /= 255; return v <= .03928 ? v / 12.92 : Math.pow((v + .055) / 1.055, 2.4); }).reduce(function (s, v, i) { return s + v * [.2126, .7152, .0722][i]; }, 0); }
+  function contrast(a, b) { var l1 = lum(a), l2 = lum(b); return (Math.max(l1, l2) + .05) / (Math.min(l1, l2) + .05); }
+  // firmware/src/theme.c custom_dim(), simplified: least bg mixed into text that still reads at 4.5:1.
+  function dimOf(tx, bg) {
+    var card = mix(bg, tx, .06), want = Math.min(4.5, contrast(tx, bg)), wantC = Math.min(4.5, contrast(tx, card));
+    for (var p = 25; p > 0; p--) { var d = mix(tx, bg, p / 100); if (contrast(d, bg) >= want && contrast(d, card) >= wantC) return d; }
+    return tx;
+  }
+  // firmware/src/theme.c theme_dot_colours(): [sound, stale].
+  function dotCols() {
+    var grey = function (h) { var c = rgb(h); return c[0] === c[1] && c[1] === c[2]; };
+    return (grey(st.low) && grey(st.mid) && contrast(st.mid, st.bg) > contrast(st.low, st.bg)) ? [st.mid, st.low] : [st.low, st.mid];
+  }
+  function lvl(p) { return p >= 90 ? st.high : p >= 60 ? st.mid : st.low; }
+
+  // ---------------------------------------------------------------- board screen (320x240: arcs, labels, rects, lines)
+  var NS = 'http://www.w3.org/2000/svg', F = 'Montserrat, sans-serif';
+  function el(tag, a, txt) { var e = document.createElementNS(NS, tag); for (var k in a) e.setAttribute(k, a[k]); if (txt != null) e.textContent = txt; return e; }
+  function pt(cx, cy, r, d) { var a = d * Math.PI / 180; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
+  function arc(cx, cy, r, a0, a1) { var p0 = pt(cx, cy, r, a0), p1 = pt(cx, cy, r, a1); return 'M' + p0[0].toFixed(2) + ' ' + p0[1].toFixed(2) + ' A' + r + ' ' + r + ' 0 ' + (a1 - a0 > 180 ? 1 : 0) + ' 1 ' + p1[0].toFixed(2) + ' ' + p1[1].toFixed(2); }
+  function txt(g, x, y, size, col, s, extra) { var a = { x: x, y: y, 'text-anchor': 'middle', 'font-family': F, 'font-size': size, fill: '#' + col }; for (var k in extra) a[k] = extra[k]; g.appendChild(el('text', a, s)); }
+  function gauge(g, cx, cy, p, track) {
+    var r = 60 - st.w / 2, cap = st.ends === 'round' ? 'round' : 'butt', end = 135 + 270 * p / 100;
+    g.appendChild(el('path', { d: arc(cx, cy, r, 135, 405), fill: 'none', stroke: '#' + track, 'stroke-width': st.w, 'stroke-linecap': cap }));
+    if (p > 0) g.appendChild(el('path', { d: arc(cx, cy, r, 135, Math.max(end, 135.5)), fill: 'none', stroke: '#' + lvl(p), 'stroke-width': st.w, 'stroke-linecap': cap }));
+    if (st.dot) { var k = pt(cx, cy, r, end); g.appendChild(el('circle', { cx: k[0], cy: k[1], r: Math.max(5, st.w / 2 + 2), fill: '#' + st.text, stroke: '#' + st.bg, 'stroke-width': 2 })); }
+    txt(g, cx, cy + 7, 20, st.text, Math.round(p) + '%', { 'font-weight': 500 });
+  }
+  // The link mark in the status bar, about 19 px wide. USB is drawn as a
+  // USB-C cable end lying flat. The classic trident read as a fork at this
+  // size, and a plug standing up read as a padlock -- the "Encrypted" mark.
+  function linkMark(g, x, y, col) {
+    var c = '#' + col;
+    if (st.link === 'wifi') {
+      var s = { fill: 'none', stroke: c, 'stroke-width': 1.6, 'stroke-linecap': 'round' };
+      g.appendChild(el('path', Object.assign({ d: 'M' + (x - 7) + ' ' + (y - 1) + ' a10 10 0 0 1 14 0' }, s)));
+      g.appendChild(el('path', Object.assign({ d: 'M' + (x - 4) + ' ' + (y + 2) + ' a5.5 5.5 0 0 1 8 0' }, s)));
+      g.appendChild(el('circle', { cx: x, cy: y + 5, r: 1.6, fill: c }));
+    } else {
+      // cable from the left, the moulded grip (solid), the metal shell
+      // (an open pill, USB-C's own outline) pointing right.
+      g.appendChild(el('path', { d: 'M' + (x - 9.5) + ' ' + y + ' H' + (x - 6), stroke: c, 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
+      g.appendChild(el('rect', { x: x - 6.5, y: y - 3.6, width: 7, height: 7.2, rx: 1.6, fill: c }));
+      g.appendChild(el('rect', { x: x + .9, y: y - 2.5, width: 8, height: 5, rx: 2.5, fill: 'none', stroke: c, 'stroke-width': 1.4 }));
+    }
+  }
+  function header(g, dim) {
+    txt(g, 160, 18, 11.5, dim, 'BLINK', { 'letter-spacing': 3 });
+    var warn = Math.max(st.p1, st.p2) >= 95;
+    txt(g, 160, 34, 12, warn ? st.high : dim, warn ? (st.p1 >= st.p2 ? 'Session almost used up' : 'Weekly almost used up') : '14:05');
+    linkMark(g, 284, 14, dim);
+    g.appendChild(el('circle', { cx: 302, cy: 14, r: 5, fill: '#' + dotCols()[st.reach ? 0 : 1] }));
+  }
+  function chevrons(g, dim) {
+    g.appendChild(el('path', { d: 'M9 114 L4 119 L9 124', fill: 'none', stroke: '#' + dim, 'stroke-width': 1.6 }));
+    g.appendChild(el('path', { d: 'M311 114 L316 119 L311 124', fill: 'none', stroke: '#' + dim, 'stroke-width': 1.6 }));
+  }
+  function pillTag(g, pill) {
+    g.appendChild(el('rect', { x: 132, y: 205, width: 56, height: 18, rx: 9, fill: '#' + pill }));
+    txt(g, 160, 218, 12, st.text, st.main);
+  }
+  function wordPct(p) { return Math.round(p) + '%'; }
+
+  // The five-hour burn view (feat/ultra-burn, usage_view.c burn_draw_cb and
+  // usage_layout.h BURN_*): twenty quarter-hour bars, 5 px on a 6 px pitch
+  // from x = 20, standing on a baseline at y = 148; the last hour's four
+  // drawn hot, the rest cold; hour ticks and numbers under it; the total and
+  // its arrow over it; "BURN 5h" and the rate where the session's caption
+  // and countdown sit. Inks as theme_burn_inks(): Dark has its own four.
+  var BURN = [3.1, 4.2, 2.8, 5.0, 6.4, 5.9, 4.1, 7.2, 8.8, 7.5, 9.6, 11.0, 8.4, 10.2, 12.9, 11.8, 14.6, 17.3, 15.9, 19.4];
+  function fmtTok(k) { return k >= 1000 ? (k / 1000).toFixed(1) + 'M' : k >= 10 ? Math.round(k) + 'k' : k.toFixed(1) + 'k'; }
+  function burnHalf(g, dim) {
+    var dark = st.preset === 0, k = dark ? { hot: '7fb2f0', cold: '2d5c99', base: '3a414b', tick: '5c636b' } : {
+      hot: mix(st.g1, st.text, .35), cold: mix(st.g1, st.bg, .35), base: mix(mix(st.bg, st.text, .15), dim, .3), tick: mix(mix(st.bg, st.text, .15), dim, .77) };
+    var max = Math.max.apply(null, BURN), total = BURN.reduce(function (a, b) { return a + b; }, 0);
+    BURN.forEach(function (v, i) {
+      var h = Math.max(2, Math.round(v / max * 56));
+      g.appendChild(el('rect', { x: 20 + i * 6, y: 148 - h, width: 5, height: h, fill: '#' + (i >= 16 ? k.hot : k.cold) }));
+    });
+    g.appendChild(el('rect', { x: 20, y: 148, width: 120, height: 1, fill: '#' + k.base }));
+    [[3, '10'], [7, '11'], [11, '12'], [15, '13'], [19, '14']].forEach(function (t) {
+      var x = 20 + t[0] * 6;
+      g.appendChild(el('rect', { x: x, y: 149, width: 1, height: 3, fill: '#' + k.tick }));
+      txt(g, x + .5, 164, 11, dim, t[1]);
+    });
+    var tot = fmtTok(total);
+    txt(g, 74, 63, 20, st.text, tot, { 'font-weight': 500 });
+    var gx = 74 + tot.length * 6.2 + 8;
+    g.appendChild(el('path', { d: 'M' + gx + ' 61 V51 M' + (gx - 4.5) + ' 55.5 L' + gx + ' 51 L' + (gx + 4.5) + ' 55.5', fill: 'none', stroke: '#' + st.g1, 'stroke-width': 2.2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+    txt(g, 80, 81, 12, dim, 'tokens \u2022 5h');
+    var last = BURN.slice(16).reduce(function (a, b) { return a + b; }, 0);
+    txt(g, 80, 180, 12, dim, 'BURN 5h');
+    txt(g, 80, 196, 12, dim, Math.round(last) + 'k/h \u2022 rising');
+  }
+  function drawMain(g, dim, track, pill) {
+    header(g, dim);
+    var v = st.vw;
+    if (v === 'session' || v === 'weekly') {
+      // Focus (usage_layout.h FOCUS_*): one ring 156 across at y 44, the
+      // figure in the hollow, caption and countdown in the open quarter,
+      // the other window as a dim line at y 184.
+      var p = v === 'session' ? st.p1 : st.p2, cx = 160, cy = 122, r = 78 - st.w / 2, cap = st.ends === 'round' ? 'round' : 'butt', end = 135 + 270 * p / 100;
+      g.appendChild(el('path', { d: arc(cx, cy, r, 135, 405), fill: 'none', stroke: '#' + track, 'stroke-width': st.w, 'stroke-linecap': cap }));
+      if (p > 0) g.appendChild(el('path', { d: arc(cx, cy, r, 135, Math.max(end, 135.5)), fill: 'none', stroke: '#' + lvl(p), 'stroke-width': st.w, 'stroke-linecap': cap }));
+      if (st.dot) { var kk = pt(cx, cy, r, end); g.appendChild(el('circle', { cx: kk[0], cy: kk[1], r: Math.max(5, st.w / 2 + 2), fill: '#' + st.text, stroke: '#' + st.bg, 'stroke-width': 2 })); }
+      txt(g, cx, 129, 36, st.text, wordPct(p), { 'font-weight': 500 });
+      txt(g, cx, 152, 12, dim, v === 'session' ? 'SESSION 5h' : 'WEEKLY 7d');
+      txt(g, cx, 170, 12, dim, v === 'session' ? '3h 12m' : '4d 17h');
+      txt(g, cx, 196, 12, dim, v === 'session' ? 'Weekly ' + wordPct(st.p2) + ' \u2022 4d 17h' : 'Session ' + wordPct(st.p1) + ' \u2022 3h 12m');
+    } else {
+      if (v === 'burn') burnHalf(g, dim);
+      else { gauge(g, 80, 104, st.p1, track); txt(g, 80, 180, 12, dim, 'SESSION 5h'); txt(g, 80, 196, 12, dim, '3h 12m'); }
+      gauge(g, 240, 104, st.p2, track);
+      txt(g, 240, 180, 12, dim, 'WEEKLY 7d'); txt(g, 240, 196, 12, dim, '4d 17h');
+    }
+    pillTag(g, pill);
+    chevrons(g, dim);
+  }
+  // The board's own Settings screen (ui_settings.c): back button, title,
+  // a rule at y 40 and six 94 x 91 tiles (gap 7) from (12, 46), three
+  // across (2026-11-07: it was four 144 x 71 tiles and a two-line footer).
+  function icon(g, kind, cx, cy, c) {
+    var s = { fill: 'none', stroke: '#' + c, 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
+    function P(d) { g.appendChild(el('path', Object.assign({ d: d }, s))); }
+    if (kind === 'sun') { g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 4.5 }, s))); for (var i = 0; i < 8; i++) { var a = i * Math.PI / 4; P('M' + (cx + 7.5 * Math.cos(a)).toFixed(1) + ' ' + (cy + 7.5 * Math.sin(a)).toFixed(1) + ' L' + (cx + 10 * Math.cos(a)).toFixed(1) + ' ' + (cy + 10 * Math.sin(a)).toFixed(1)); } }
+    if (kind === 'open') { P('M' + (cx - 10) + ' ' + (cy + 6) + ' h20 M' + (cx - 8) + ' ' + (cy + 4) + ' v-11 h16 v11'); P('M' + (cx - 2) + ' ' + (cy + 1) + ' l5 -5 M' + (cx - .5) + ' ' + (cy - 4) + ' h3.5 v3.5'); }
+    if (kind === 'focus') { g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 9 }, s))); g.appendChild(el('circle', { cx: cx, cy: cy, r: 3.5, fill: '#' + c })); }
+    if (kind === 'info') { g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 9 }, s))); P('M' + cx + ' ' + (cy - 5) + ' v.1 M' + cx + ' ' + (cy - 1.5) + ' v6'); }
+    if (kind === 'link') { P('M' + (cx - 1) + ' ' + (cy + 3) + ' l4 -4 a3.5 3.5 0 0 1 5 5 l-3 3 a3.5 3.5 0 0 1 -5 0'); P('M' + (cx + 1) + ' ' + (cy - 3) + ' l-4 4 a3.5 3.5 0 0 1 -5 -5 l3 -3 a3.5 3.5 0 0 1 5 0'); }
+    if (kind === 'update') { P('M' + (cx + 8) + ' ' + (cy - 2) + ' A8.5 8.5 0 1 0 ' + (cx + 7) + ' ' + (cy + 5)); P('M' + (cx + 9) + ' ' + (cy - 8) + ' V' + (cy - 2) + ' H' + (cx + 3)); }
+  }
+  function drawSettings(g, dim) {
+    var card = mix(st.bg, st.text, .06), line = mix(st.bg, st.text, .1);
+    g.appendChild(el('rect', { x: 6, y: 4, width: 60, height: 32, rx: 6, fill: '#' + card, stroke: '#' + line }));
+    g.appendChild(el('path', { d: 'M39 14 L33 20 L39 26', fill: 'none', stroke: '#' + st.text, 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
+    txt(g, 160, 26, 14, st.text, 'Settings', { 'font-weight': 600 });
+    g.appendChild(el('rect', { x: 0, y: 40, width: 320, height: 1, fill: '#' + line }));
+    [['sun', 'Brightness', st.bright + '%'], ['open', 'Open on PC', 'In browser'], ['focus', 'Focus', { two: 'Off', burn: 'Off', session: 'Session', weekly: 'Weekly' }[st.vw]], ['update', 'Update', 'Up to date'], ['link', 'Connection', 'USB'], ['info', 'About', '1.4.1']].forEach(function (t, k) {
+      var x = 12 + (k % 3) * 101, y = 46 + Math.floor(k / 3) * 98, hi = k === 1;
+      g.appendChild(el('rect', { x: x + .5, y: y + .5, width: 93, height: 90, rx: 8, fill: '#' + card, stroke: '#' + (hi ? st.g1 : line), 'stroke-width': hi ? 1.5 : 1 }));
+      icon(g, t[0], x + 47, y + 24, hi ? st.g1 : st.text);
+      txt(g, x + 47, y + 55, 13, st.text, t[1], { 'font-weight': 500 });
+      txt(g, x + 47, y + 75, 11.5, dim, t[2]);
+    });
+  }
+  // The start-up screen: the company logo (logo_parse.h: one 320 x 240
+  // frame, centred and fitted, on its background colour), or without one,
+  // the BLINK mark the boot animation ends on.
+  function drawBoot(g, dim) {
+    var L = st.logo;
+    g.appendChild(el('rect', { x: 0, y: 0, width: 320, height: 240, fill: '#' + (L ? L.bg : '000000') }));
+    if (L) {
+      var k = Math.min(320 / L.w, 240 / L.h) * L.scale, w = L.w * k, h = L.h * k;
+      g.appendChild(el('image', { href: L.url, x: (160 - w / 2).toFixed(1), y: (120 - h / 2).toFixed(1), width: w.toFixed(1), height: h.toFixed(1), preserveAspectRatio: 'none' }));
+    } else {
+      g.appendChild(el('rect', { x: 112, y: 84, width: 96, height: 72, rx: 15, fill: 'none', stroke: '#ffffff', 'stroke-width': 6 }));
+      g.appendChild(el('rect', { x: 130, y: 110, width: 20, height: 20, rx: 6, fill: '#ffffff' }));
+      g.appendChild(el('path', { d: 'M190 110 L174 120 L190 130', fill: 'none', stroke: '#ffffff', 'stroke-width': 7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+      txt(g, 160, 192, 12, '8a9199', 'No logo yet');
+    }
+  }
+  function drawScreen() {
+    var g = $('scr'); while (g.firstChild) g.removeChild(g.firstChild);
+    var dim = dimOf(st.text, st.bg), track = mix(st.bg, st.text, .15), pill = mix(st.bg, st.text, .1);
+    g.appendChild(el('rect', { x: 0, y: 0, width: 320, height: 240, fill: '#' + st.bg }));
+    var title;
+    if (st.view === 'connection') {
+      // Connection screen: circles, a dashed line (offset shift is cheap in LVGL), two labels.
+      g.appendChild(el('circle', { cx: 160, cy: 92, r: 70, fill: 'none', stroke: '#' + track, 'stroke-dasharray': '2 6' }));
+      g.appendChild(el('line', { 'class': 'dash', x1: 86, y1: 92, x2: 234, y2: 92, stroke: '#' + st.low, 'stroke-width': 3, 'stroke-dasharray': '6 6' }));
+      g.appendChild(el('circle', { cx: 70, cy: 92, r: 16, fill: '#' + pill, stroke: '#' + st.text, 'stroke-width': 2 }));
+      g.appendChild(el('rect', { x: 62, y: 86, width: 16, height: 11, rx: 2, fill: 'none', stroke: '#' + st.text, 'stroke-width': 1.6 }));
+      g.appendChild(el('line', { x1: 59, y1: 100, x2: 81, y2: 100, stroke: '#' + st.text, 'stroke-width': 1.6 }));
+      g.appendChild(el('circle', { cx: 250, cy: 92, r: 16, fill: '#ff6a13' }));
+      g.appendChild(el('rect', { x: 242, y: 86, width: 16, height: 12, rx: 1.5, fill: '#' + st.bg }));
+      txt(g, 160, 190, 17, st.text, 'Linked to ' + PC, { 'font-weight': 600 });
+      txt(g, 160, 212, 13, dim, 'WiFi \u2022 ' + st.saved + ' \u2022 encrypted');
+      title = 'Board preview: connection screen. Linked to ' + PC + ', WiFi, ' + st.saved + ', encrypted.';
+    } else if (st.screen === 'boot') {
+      drawBoot(g, dim);
+      title = st.logo ? 'Board preview: start-up screen with your logo.' : 'Board preview: start-up screen, no logo yet.';
+    } else if (st.screen === 'settings') {
+      drawSettings(g, dim);
+      title = "Board preview: the board's Settings screen, with Brightness, Open on PC, Focus, Update, Connection and About.";
+    } else {
+      drawMain(g, dim, track, pill);
+      title = st.vw === 'burn' ? 'Board preview: burn view, ' + fmtTok(BURN.reduce(function (a, b) { return a + b; }, 0)) + ' tokens in five hours, rising; weekly ' + wordPct(st.p2) + '.'
+        : 'Board preview: ' + st.main + ', session ' + wordPct(st.p1) + ', resets in 3h 12m; weekly ' + wordPct(st.p2) + ', resets in 4d 17h.';
+    }
+    $('dim').setAttribute('opacity', ((100 - st.bright) / 100 * 0.82).toFixed(3));
+    $('heroTitle').textContent = title;
+  }
+
+  // ---------------------------------------------------------------- status line and hero links
+  var ICON = {
+    usb: '<path d="M1.5 12H5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><rect x="5" y="7.5" width="8.5" height="9" rx="2" fill="currentColor"/><rect x="14.5" y="9" width="8" height="6" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/>',
+    wifi: '<path d="M3 9.5a13 13 0 0 1 18 0M6.5 13a8 8 0 0 1 11 0M10 16.5a3 3 0 0 1 4 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="19.5" r="1.5" fill="currentColor"/>',
+    lock: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 7V5a3.5 3.5 0 0 1 7 0v2" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="3" y="7" width="10" height="7" rx="1.5" fill="currentColor"/></svg>'
+  };
+  function esc(s) { return s.replace(/[&<>"']/g, function (c) { return '&#' + c.charCodeAt(0) + ';'; }); }
+  function sync() {
+    var w = st.link === 'wifi', S = $('status');
+    if (!st.reach) S.innerHTML = '<span class="dot bad"></span>Board not found, check the USB cable';
+    else S.innerHTML = '<span class="dot"></span>' + (w ? 'Live over WiFi, ' + esc(st.saved) + ', encrypted' : 'Live over USB from ' + esc(PC));
+    S.hidden = st.busy;
+    $('linkIcon').innerHTML = w ? ICON.wifi : ICON.usb;
+    $('linkTitle').textContent = w ? 'Over WiFi' : 'Over USB';
+    $('linkSub').textContent = w ? st.saved : PC;
+    $('linkState').innerHTML = !st.reach ? '' : w ? ICON.lock + 'Encrypted' : '<span class="dot"></span>Live';
+    $('problem').hidden = st.reach; $('connMain').hidden = !st.reach;
+    $('move').textContent = w ? 'Change network' : 'Move to WiFi';
+    $('devAddr').textContent = w ? '192.168.1.47' : 'USB, COM5';
+    $('savedNet').textContent = st.saved || 'None';
+    $('forgetBtn').hidden = !st.saved || !$('forgetConfirm').hidden;
+    if (!st.saved) $('forgetConfirm').hidden = true;
+    $('forgetNet').textContent = st.saved || '';
+    if (!st.busy) {
+      $('usbTrack').setAttribute('class', 'track' + (!w && st.reach ? ' live' : ''));
+      $('wifiTrack').setAttribute('class', 'track wifi' + (w ? ' live' : ''));
+      $('nodeRouter').setAttribute('class', 'node' + (w ? '' : ' ghost'));
+      $('routerName').textContent = w ? st.saved : 'WiFi';
+      $('routerSub').textContent = w ? 'WiFi router' : 'Not set up';
+      $('lock').setAttribute('class', 'lock' + (w ? ' on' : ''));
+    }
+    drawScreen();
+  }
+
+  // ---------------------------------------------------------------- chips: one panel at a time
+  var chips = document.querySelectorAll('.chips button');
+  function open(id) {
+    chips.forEach(function (c) {
+      var on = c.dataset.panel === id;
+      c.setAttribute('aria-pressed', String(on)); $(c.dataset.panel).hidden = !on;
+    });
+    $('pCust').hidden = id !== 'pLook';
+    hero();
+  }
+  // What the big board shows follows what is being edited: the start-up
+  // screen while the Logo tab is open, the board's Settings screen while
+  // "Show it on the board" is on, the usage screen otherwise.
+  function hero() {
+    var look = !$('pLook').hidden, board = !$('pBoard').hidden;
+    st.screen = look && !$('tLogo').hidden ? 'boot' : board && $('showSet').getAttribute('aria-pressed') === 'true' ? 'settings' : 'main';
+    drawScreen();
+  }
+  // Sub-tabs: one tablist per panel, arrow keys move between tabs.
+  document.querySelectorAll('[role="tablist"]').forEach(function (list) {
+    var tabs = Array.prototype.slice.call(list.querySelectorAll('[role="tab"]'));
+    function pick(t, focus) {
+      tabs.forEach(function (x) { var on = x === t; x.setAttribute('aria-selected', String(on)); x.tabIndex = on ? 0 : -1; $(x.getAttribute('aria-controls')).hidden = !on; });
+      if (focus) t.focus();
+      hero();
+    }
+    tabs.forEach(function (t, i) {
+      t.addEventListener('click', function () { pick(t); });
+      t.addEventListener('keydown', function (e) {
+        var d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+        if (d) { e.preventDefault(); pick(tabs[(i + d + tabs.length) % tabs.length], true); }
+      });
+    });
+  });
+  chips.forEach(function (c) {
+    c.addEventListener('click', function () { open(c.getAttribute('aria-pressed') === 'true' ? null : c.dataset.panel); });
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    var on = document.querySelector('.chips button[aria-pressed="true"]');
+    if (on) { open(null); on.focus(); }
+  });
+
+  // ---------------------------------------------------------------- look: each theme is its own screen in miniature
+  var sw = $('swatches');
+  function mini(b) {
+    var c = b[1], w = b[2] / 2, cap = b[3] === 'round' ? 'round' : 'butt', dim = dimOf(c[1], c[0]), tr = mix(c[0], c[1], .15);
+    var s = '<svg viewBox="0 0 160 120" aria-hidden="true"><rect width="160" height="120" fill="#' + c[0] + '"/>';
+    s += '<text x="80" y="13" text-anchor="middle" font-family="' + F + '" font-size="7" letter-spacing="1.6" fill="#' + dim + '">BLINK</text>';
+    [[42, 58, 38, c[4]], [118, 58, 74, c[5]]].forEach(function (g) {
+      var r = 27 - w / 2, end = 135 + 270 * g[2] / 100;
+      s += '<path d="' + arc(g[0], g[1], r, 135, 405) + '" fill="none" stroke="#' + tr + '" stroke-width="' + w + '" stroke-linecap="' + cap + '"/>';
+      s += '<path d="' + arc(g[0], g[1], r, 135, end) + '" fill="none" stroke="#' + g[3] + '" stroke-width="' + w + '" stroke-linecap="' + cap + '"/>';
+      if (b[4]) { var k = pt(g[0], g[1], r, end); s += '<circle cx="' + k[0].toFixed(1) + '" cy="' + k[1].toFixed(1) + '" r="' + Math.max(2.5, w / 2 + 1) + '" fill="#' + c[1] + '" stroke="#' + c[0] + '"/>'; }
+      s += '<text x="' + g[0] + '" y="' + (g[1] + 4) + '" text-anchor="middle" font-family="' + F + '" font-size="11" font-weight="500" fill="#' + c[1] + '">' + g[2] + '%</text>';
+    });
+    s += '<rect x="62" y="98" width="36" height="11" rx="5.5" fill="#' + mix(c[0], c[1], .1) + '"/>';
+    s += '<rect x="70" y="102.5" width="20" height="2" rx="1" fill="#' + c[6] + '"/>';
+    return s + '</svg>';
+  }
+  // Pointing at a theme (or tabbing to it) shows it on the big board; leaving puts the current look back.
+  var LOOK = ['preset', 'g1', 'bg', 'text', 'low', 'mid', 'high', 'w', 'ends', 'dot'], saved = null;
+  function preview(i) { if (!saved) { saved = {}; LOOK.forEach(function (k) { saved[k] = st[k]; }); } loadPreset(i); drawScreen(); }
+  function unpreview() { if (saved) { LOOK.forEach(function (k) { st[k] = saved[k]; }); saved = null; drawScreen(); } }
+  BUILTINS.forEach(function (b, i) {
+    var btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'th'; btn.dataset.p = i;
+    btn.innerHTML = '<span class="scr">' + mini(b) + '<span class="tick"><svg viewBox=\"0 0 12 12\" aria-hidden=\"true\"><path d=\"M2.5 6.2l2.3 2.3 4.7-4.8\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg></span></span><span class="nm"></span>';
+    btn.querySelector('.nm').textContent = b[0];
+    btn.addEventListener('pointerenter', function (e) { if (e.pointerType === 'mouse') preview(i); });
+    btn.addEventListener('pointerleave', unpreview);
+    btn.addEventListener('focus', function () { if (btn.matches(':focus-visible')) preview(i); });
+    btn.addEventListener('blur', unpreview);
+    btn.addEventListener('click', function () { saved = null; loadPreset(i); st.base = i; syncLook(); });
+    sw.appendChild(btn);
+  });
+  st.base = 0;
+  var CIN = { cBg: 'bg', cLow: 'low', cMid: 'mid', cHigh: 'high' };
+  function custom() { st.preset = -1; }
+  Object.keys(CIN).forEach(function (id) {
+    $(id).addEventListener('input', function (e) { st[CIN[id]] = e.target.value.slice(1).toLowerCase(); custom(); syncLook(id); });
+    $(id + 'X').addEventListener('input', function (e) {
+      var v = e.target.value.trim().replace(/^#?/, '#'), ok = /^#[0-9a-fA-F]{6}$/.test(v);
+      if (ok) { e.target.removeAttribute('aria-invalid'); st[CIN[id]] = v.slice(1).toLowerCase(); custom(); syncLook(id + 'X'); }
+      else e.target.setAttribute('aria-invalid', 'true');
+    });
+    $(id + 'X').addEventListener('blur', function (e) { e.target.removeAttribute('aria-invalid'); e.target.value = '#' + st[CIN[id]].toUpperCase(); });
+  });
+  document.querySelectorAll('#segW button').forEach(function (b) {
+    b.addEventListener('click', function () { st.w = +b.dataset.w; custom(); syncLook(); });
+  });
+  $('tryP').addEventListener('input', function (e) { st.p1 = +e.target.value; $('tryO').textContent = st.p1 + '%'; drawScreen(); });
+  $('resetBtn').addEventListener('click', function () { loadPreset(st.base); syncLook(); $('cBgX').focus(); });
+  function syncLook(from) {
+    sw.querySelectorAll('.th').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.p === st.preset)); });
+    Object.keys(CIN).forEach(function (id) {
+      if (from !== id) $(id).value = '#' + st[CIN[id]];
+      if (from !== id + 'X') $(id + 'X').value = '#' + st[CIN[id]].toUpperCase();
+    });
+    var near = [5, 12, 22].reduce(function (a, x) { return Math.abs(x - st.w) < Math.abs(a - st.w) ? x : a; });
+    document.querySelectorAll('#segW button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.w === near)); });
+    var t = $('tryP').style; t.setProperty('--lo', '#' + st.low); t.setProperty('--mi', '#' + st.mid); t.setProperty('--hi', '#' + st.high);
+    var base = BUILTINS[st.base][0];
+    $('themeName').innerHTML = st.preset >= 0 ? 'Starting from <b>' + base + '</b>' : '<b>Custom</b>, changed from ' + base;
+    $('resetBtn').hidden = st.preset >= 0; $('resetBtn').textContent = 'Reset to ' + base;
+    sync();
+  }
+  // Sweep both arcs 0 -> 100% once, so every level colour shows on the board.
+  var sweeping = false;
+  function sweep() {
+    if (sweeping) return;
+    var a = st.p1, b = st.p2;
+    if (reduce.matches) { st.p1 = st.p2 = 95; drawScreen(); setTimeout(function () { st.p1 = a; st.p2 = b; drawScreen(); }, 1600); return; }
+    sweeping = true;
+    var t0 = performance.now(), D = 2200;
+    (function step(now) {
+      var t = Math.min(1, (now - t0) / D), up = t < .75 ? t / .75 : 1 - (t - .75) / .25;
+      var e = up * up * (3 - 2 * up);
+      st.p1 = t < .75 ? 100 * e : a + (100 - a) * e; st.p2 = t < .75 ? 100 * e : b + (100 - b) * e;
+      drawScreen();
+      if (t < 1) requestAnimationFrame(step); else { st.p1 = a; st.p2 = b; drawScreen(); sweeping = false; }
+    })(t0);
+  }
+  $('sweepBtn').addEventListener('click', sweep);
+
+  // ---------------------------------------------------------------- screen: main view, main provider, weekly window
+  var VNOTE = {
+    two: 'Both windows, side by side.',
+    session: 'Session big, weekly as a line.',
+    weekly: 'Weekly big, session as a line.',
+    burn: 'The board shows this by itself when an account has no five-hour window. Picking it here only previews it.'
+  };
+  function syncViews() {
+    document.querySelectorAll('#views .vw').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.v === st.vw)); });
+    $('vNote').textContent = VNOTE[st.vw];
+    document.querySelectorAll('#segMain button').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.m === st.main)); });
+    drawScreen();
+  }
+  document.querySelectorAll('#views .vw').forEach(function (b) { b.addEventListener('click', function () { st.vw = b.dataset.v; syncViews(); }); });
+  document.querySelectorAll('#segMain button').forEach(function (b) { b.addEventListener('click', function () { st.main = b.dataset.m; syncViews(); }); });
+  $('tryW').addEventListener('input', function (e) { st.p2 = +e.target.value; $('tryWO').textContent = st.p2 + '%'; drawScreen(); });
+
+  // ---------------------------------------------------------------- logo: read locally, fitted as tools/encode_logo.py does
+  var LIMIT = 512 * 1024, lHold = 3;
+  function kb(n) { return n < 1024 ? n + ' B' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+  // A rough size, the way the encoder's own notes put it: each run of one
+  // colour along a row costs about three bytes.
+  function measure(L) {
+    try {
+      var c = document.createElement('canvas'); c.width = 320; c.height = 240;
+      var x = c.getContext('2d'), k = Math.min(320 / L.w, 240 / L.h) * L.scale, w = L.w * k, h = L.h * k;
+      x.fillStyle = '#' + L.bg; x.fillRect(0, 0, 320, 240); x.drawImage(L.img, 160 - w / 2, 120 - h / 2, w, h);
+      var d = x.getImageData(0, 0, 320, 240).data, runs = 0;
+      for (var r = 0; r < 240; r++) {
+        var prev = -1;
+        for (var q = 0; q < 320; q++) {
+          var i = (r * 320 + q) * 4, v = ((d[i] >> 3) << 11) | ((d[i + 1] >> 2) << 5) | (d[i + 2] >> 3);
+          if (v !== prev) { runs++; prev = v; }
+        }
+      }
+      return 32 + runs * 3;
+    } catch (e) { return 0; }
+  }
+  function cornerBg(img, w, h) {
+    try {
+      var c = document.createElement('canvas'); c.width = w; c.height = h;
+      var x = c.getContext('2d'); x.drawImage(img, 0, 0, w, h);
+      var p = x.getImageData(0, 0, 1, 1).data;
+      return p[3] < 128 ? 'ffffff' : hex([p[0], p[1], p[2]]);
+    } catch (e) { return 'ffffff'; }
+  }
+  function syncLogo() {
+    var L = st.logo;
+    $('logoEmpty').hidden = !!L; $('logoOn').hidden = !L;
+    if (L) {
+      $('lName').textContent = L.name;
+      L.bytes = measure(L);
+      $('lSize').textContent = L.bytes ? 'About ' + kb(L.bytes) + ' of 512 KB on the board' : 'Ready';
+      $('lBg').value = '#' + L.bg;
+      $('lBgNote').textContent = L.auto ? "From the picture's corner" : '#' + L.bg.toUpperCase();
+      $('lBgAuto').hidden = L.auto;
+      document.querySelectorAll('#lScale button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.s === L.scale)); });
+      $('lThumb').style.background = '#' + L.bg;
+      var tooBig = L.bytes > LIMIT;
+      $('lSend').disabled = tooBig || L.sending;
+      if (tooBig) say2('Too big for the board. Pick a plainer background or a smaller size.', 'bad');
+    }
+    drawScreen();
+  }
+  function say2(t, cls) { $('lMsg').textContent = t; $('lMsg').className = 'msg' + (cls ? ' ' + cls : ''); }
+  function take(file) {
+    if (!file) return;
+    if (!/^image\/(png|jpeg|svg\+xml)$/.test(file.type) && !/\.(png|jpe?g|svg)$/i.test(file.name)) { say2(''); alertBad('Pick a PNG, SVG or JPEG file.'); return; }
+    var fr = new FileReader();
+    fr.onload = function () {
+      var img = new Image();
+      img.onload = function () {
+        var w = img.naturalWidth || 300, h = img.naturalHeight || 150;
+        st.logo = { name: file.name, url: fr.result, img: img, w: w, h: h, scale: .8, bg: cornerBg(img, w, h), auto: true, sent: false };
+        $('lThumb').innerHTML = ''; var t = new Image(); t.src = fr.result; t.alt = ''; $('lThumb').appendChild(t);
+        say2(''); syncLogo();
+      };
+      img.onerror = function () { alertBad('That file could not be read as a picture.'); };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  }
+  function alertBad(t) { $('drop').querySelector('span').textContent = t; $('drop').querySelector('span').style.color = 'var(--danger)'; }
+  $('logoFile').addEventListener('change', function (e) { take(e.target.files[0]); e.target.value = ''; });
+  $('lReplace').addEventListener('click', function () { $('logoFile').click(); });
+  ['dragenter', 'dragover'].forEach(function (ev) { $('drop').addEventListener(ev, function (e) { e.preventDefault(); $('drop').classList.add('over'); }); });
+  ['dragleave', 'drop'].forEach(function (ev) { $('drop').addEventListener(ev, function (e) { e.preventDefault(); $('drop').classList.remove('over'); }); });
+  $('drop').addEventListener('drop', function (e) { take(e.dataTransfer && e.dataTransfer.files[0]); });
+  document.querySelectorAll('#lScale button').forEach(function (b) { b.addEventListener('click', function () { st.logo.scale = +b.dataset.s; syncLogo(); }); });
+  $('lBg').addEventListener('input', function (e) { st.logo.bg = e.target.value.slice(1); st.logo.auto = false; syncLogo(); });
+  $('lBgAuto').addEventListener('click', function () { var L = st.logo; L.bg = cornerBg(L.img, L.w, L.h); L.auto = true; syncLogo(); $('lBg').focus(); });
+  $('lHold').addEventListener('change', function (e) { lHold = +e.target.value; });
+  $('lSend').addEventListener('click', function () {
+    var L = st.logo; if (!L || L.sending) return;
+    L.sending = true; syncLogo(); $('lProg').hidden = false; say2('Sending over the USB cable\u2026');
+    var bar = $('lProg').querySelector('i'), t = 0;
+    (function step() {
+      t += 12; bar.style.width = Math.min(100, t) + '%';
+      if (t < 100) { setTimeout(step, 120); return; }
+      L.sending = false; L.sent = true; $('lProg').hidden = true; bar.style.width = '0';
+      syncLogo(); say2('On the board. It shows for ' + lHold + ' seconds each time the board starts.', 'ok');
+    })();
+  });
+  $('lRemove').addEventListener('click', function () {
+    if (st.logo && st.logo.sent) { $('lRemove').hidden = true; $('lConfirm').hidden = false; $('lRemoveNo').focus(); return; }
+    st.logo = null; syncLogo(); $('logoFile').focus();
+  });
+  $('lRemoveNo').addEventListener('click', function () { $('lConfirm').hidden = true; $('lRemove').hidden = false; $('lRemove').focus(); });
+  $('lRemoveYes').addEventListener('click', function () { $('lConfirm').hidden = true; $('lRemove').hidden = false; st.logo = null; say2(''); syncLogo(); $('logoFile').focus(); });
+
+  // ---------------------------------------------------------------- board: brightness levels, its own settings screen, computer switches
+  function syncBr() { document.querySelectorAll('#segBr button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.b === st.bright)); }); drawScreen(); }
+  document.querySelectorAll('#segBr button').forEach(function (b) { b.addEventListener('click', function () { st.bright = +b.dataset.b; syncBr(); }); });
+  $('showSet').addEventListener('click', function () {
+    var on = this.getAttribute('aria-pressed') !== 'true';
+    this.setAttribute('aria-pressed', String(on)); this.textContent = on ? 'Show the usage screen' : 'Show it on the board'; hero();
+  });
+  document.querySelectorAll('.switch').forEach(function (b) {
+    b.addEventListener('click', function () { b.setAttribute('aria-checked', String(b.getAttribute('aria-checked') !== 'true')); });
+  });
+
+  // ---------------------------------------------------------------- connect
+  function bars(n) {
+    var s = '<svg class="bars" viewBox="0 0 20 14" aria-hidden="true">';
+    for (var i = 0; i < 4; i++) s += '<rect x="' + (i * 5.5) + '" y="' + (10.5 - i * 3.5) + '" width="3.5" height="' + (3.5 + i * 3.5) + '" rx="1"' + (i < n ? '' : ' class="off"') + '/>';
+    return s + '</svg>';
+  }
+  NETS.forEach(function (n, i) {
+    var li = document.createElement('li'), lab = document.createElement('label');
+    lab.className = 'net';
+    lab.innerHTML = '<input type="radio" name="net"' + (n.no ? ' disabled' : '') + (i === 0 ? ' checked' : '') + '><span style="min-width:0"><b></b><small' + (n.no ? ' class="no"' : '') + '></small></span>' + bars(n.rssi);
+    lab.querySelector('input').value = n.id;
+    lab.querySelector('b').textContent = n.id;
+    lab.querySelector('small').textContent = n.no ? n.sec : n.sec + ', ' + SIG[n.rssi] + ' signal';
+    lab.querySelector('input').addEventListener('change', function () { st.net = n.id; $('pwLabel').textContent = 'Password for ' + n.id; say(''); });
+    li.appendChild(lab); $('nets').appendChild(li);
+  });
+  function say(t, cls) { $('msg').textContent = t; $('msg').className = 'msg' + (cls ? ' ' + cls : ''); }
+  function showPicker(on) { $('picker').hidden = !on; $('move').hidden = on; $('move').setAttribute('aria-expanded', String(on)); }
+  $('move').addEventListener('click', function () { showPicker(true); say(''); var c = document.querySelector('#nets input:checked'); if (c) c.focus(); });
+  $('cancel').addEventListener('click', function () { showPicker(false); $('pw').value = ''; clearErr(); say(''); $('move').focus(); });
+  $('pwToggle').addEventListener('click', function () {
+    var on = this.getAttribute('aria-pressed') !== 'true';
+    this.setAttribute('aria-pressed', String(on)); $('pw').type = on ? 'text' : 'password';
+    this.textContent = on ? 'Hide' : 'Show'; this.setAttribute('aria-label', on ? 'Hide password' : 'Show password');
+  });
+  function clearErr() { $('pwBox').removeAttribute('aria-invalid'); }
+  $('pw').addEventListener('input', clearErr);
+  $('pw').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('go').click(); });
+  $('retry').addEventListener('click', function () { st.reach = true; sync(); $('move').focus(); });
+
+  var hs = document.querySelectorAll('#hs li');
+  function mark(i, cls) {
+    hs[i].className = cls || '';
+    if (cls === 'active') $('hsText').textContent = STEPS[i];
+    if (cls === 'fail') $('hsText').textContent = 'The board could not join';
+  }
+  function beams(usb, wifi) { $('usbBeam').setAttribute('class', 'pulse' + (usb ? ' run' : '')); $('wifiBeam').setAttribute('class', 'pulse' + (wifi ? ' run' : '')); }
+  function later(ms, fn) { setTimeout(fn, ms); }
+  function finish() { st.busy = false; $('hs').hidden = true; $('go').disabled = false; $('go').textContent = 'Connect'; beams(false, false); sync(); }
+
+  $('go').addEventListener('click', function () {
+    if (st.busy) return;
+    var pw = $('pw').value, net = st.net;
+    if (pw.length < 8 && pw !== 'wrong') {
+      say(pw ? 'A WiFi password has at least 8 characters.' : 'Enter the password for ' + net + '.', 'bad');
+      $('pwBox').setAttribute('aria-invalid', 'true'); $('pw').focus(); return;
+    }
+    st.busy = true; say(''); $('go').disabled = true; $('go').textContent = 'Connecting\u2026';
+    hs.forEach(function (li) { li.className = ''; }); $('hs').hidden = false; $('status').hidden = true;
+    $('nodeRouter').setAttribute('class', 'node'); $('routerName').textContent = net; $('routerSub').textContent = 'WiFi router';
+    $('wifiTrack').setAttribute('class', 'track wifi'); $('lock').setAttribute('class', 'lock');
+    var T = 1300;
+    mark(0, 'active'); beams(true, false);
+    later(T, function () {
+      mark(0, 'done'); mark(1, 'active'); beams(false, true);
+      if (pw === 'wrong') {
+        later(T, function () {
+          mark(1, 'fail'); beams(false, false);
+          later(900, function () {
+            finish(); $('pw').value = '';
+            say('The board could not join ' + net + '. Check the password and try again.', 'bad');
+            $('pwBox').setAttribute('aria-invalid', 'true');
+          });
+        });
+        return;
+      }
+      later(T, function () {
+        mark(1, 'done'); mark(2, 'active'); beams(true, true);
+        later(T, function () {
+          mark(2, 'done'); mark(3, 'active'); beams(false, true);
+          later(T * .8, function () {
+            mark(3, 'done');
+            st.link = 'wifi'; st.saved = net; $('pw').value = ''; showPicker(false);
+            later(400, function () {
+              finish(); st.view = 'connection'; drawScreen();
+              say('Connected. You can unplug the cable.', 'ok');
+              later(4200, function () { st.view = 'gauges'; drawScreen(); });
+            });
+          });
+        });
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------- board
+  $('devName').addEventListener('input', function (e) { $('devLabel').textContent = e.target.value.trim() || 'BLINK'; });
+  $('detBtn').addEventListener('click', function () {
+    var on = this.getAttribute('aria-expanded') !== 'true';
+    this.setAttribute('aria-expanded', String(on)); $('det').hidden = !on;
+  });
+  $('forgetBtn').addEventListener('click', function () { $('forgetBtn').hidden = true; $('forgetConfirm').hidden = false; $('forgetNo').focus(); });
+  $('forgetNo').addEventListener('click', function () { $('forgetConfirm').hidden = true; $('forgetBtn').hidden = false; $('forgetBtn').focus(); });
+  $('forgetYes').addEventListener('click', function () {
+    st.saved = null; st.link = 'usb'; st.view = 'gauges'; $('forgetConfirm').hidden = true; say(''); sync();
+    $('detBtn').focus();
+  });
+
+  // ---------------------------------------------------------------- narrow: crop the hero to the case and its shadow
+  var narrow = window.matchMedia('(max-width: 1199px)');
+  function crop() { $('hero').setAttribute('viewBox', narrow.matches ? '40 28 520 400' : '0 0 600 470'); }
+  if (narrow.addEventListener) narrow.addEventListener('change', crop);
+  crop();
+
+  syncLook(); syncViews(); syncBr();
+  if (!st.reach) open('pConn'); else open(null);
+})();
+</script>

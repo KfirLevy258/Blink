@@ -140,6 +140,11 @@ void usage_view_set_status(enum usage_status status);
 
 void usage_view_set_activity(enum usage_activity a);
 
+/* The link icon top-right (S5.7), which is also the health indicator: 2 is a
+ * WiFi glyph, anything else (0 none, 1 USB) the USB glyph. Never hidden. Main
+ * thread. */
+void usage_view_set_link(uint8_t kind);
+
 /*
  * The board has closed its eyes, or opened them again.
  *

@@ -266,7 +266,10 @@ def _fw_line(name, buf_name="buf"):
             fmt += macros[tok.group(2)]
         pos = tok.end()
     assert call[pos:].lstrip().startswith(","), call
-    widest = {"d": str(protocol.VERSION), "x": "f" * 8, "s": "f" * 32}
+    # %d at three digits: pref's bright reaches 100, and the protocol
+    # version is shorter, so this over-measures it and never under.
+    widest = {"d": max(str(protocol.VERSION), "100", key=len), "x": "f" * 8,
+              "s": "f" * 32}
     line = re.sub(r"%([dxs])", lambda m: widest[m.group(1)], fmt)
     # Any other conversion (%u, %02x, %lu...) would stay in the line as
     # literal text, under-measure it, and still parse inside a JSON string,
@@ -285,7 +288,10 @@ def _fw_line(name, buf_name="buf"):
 # "ask" is the touch prompt that asks someone already running BLINK whether
 # to keep the figures fresh with /usage (docs/plans/usage-refresh.md, 1b):
 # the daemon sends `ask` only to a board that lists it.
-FW_CAPS = {"svc", "theme", "edit_done", "burn", "plan", "spendburn", "ask"}
+# "wifi", "logo" and "pref" are the WiFi branch's: the network link, the
+# start-up logo and pref_set (spec S15.2, S15.3).
+FW_CAPS = {"svc", "theme", "edit_done", "burn", "plan", "spendburn", "ask",
+           "wifi", "logo", "pref"}
 
 
 def test_the_boards_hello_carries_its_caps_and_fits_its_buffer():
@@ -307,21 +313,27 @@ def test_the_boards_pref_carries_its_caps_and_fits_its_buffer():
     assert protocol.board_caps(msg) == FW_CAPS
     # snprintf truncates silently, and a truncated pref is not JSON.
     assert len(line) + 1 <= size, (len(line), size)
-    # Measured 151 B in the 160 B buffer (hello: 180 in 192) with "ask";
-    # 145 (174) with "spendburn"; 133 (162) with "plan" alone, and 126 in 128 (155 in 160)
-    # before it, which is why both buffers grew. A cap costs its name's
-    # length plus 3 B. The daemon reads
-    # 512 and the board itself drops a longer inbound line whole; a pref
-    # anywhere near that is a mistake.
-    assert len(line) <= 160, len(line)
-    assert len(line) == 151, len(line)
+    # focus, bright and view are what pref_set sets (spec S15.3); ok says
+    # whether the pref_set it answers was refused.
+    assert {"focus", "bright", "view", "ok"} <= set(msg)
+    # Measured 217 B in the 256 B buffer (hello: 203 in 256) once
+    # develop merged into the WiFi branch, with all ten caps. On develop
+    # alone it was 151 in 160 (hello 180 in 192) with "ask", 145 (174) with
+    # "spendburn", 133 (162) with "plan", 126 in 128 (155 in 160) before;
+    # on the WiFi branch alone 185 in 224 (hello 171 in 192), after the
+    # logo and pref caps, the three preferences and ok. A cap costs its
+    # name's length plus 3 B. The daemon reads 512 and the board itself
+    # drops a longer inbound line whole; a pref anywhere near that is a
+    # mistake.
+    assert len(line) <= 256, len(line)
+    assert len(line) == 217, len(line)
 
 
 def test_the_boards_hello_is_measured_at_its_widest():
     """The figure the comment in send_hello quotes, held to it: a cap that
     grows the hello moves this number and the comment with it."""
     line, size = _fw_line("send_hello")
-    assert (len(line), size) == (180, 192)
+    assert (len(line), size) == (203, 256)
 
 
 def test_the_caps_are_appended_never_reordered():
@@ -332,7 +344,7 @@ def test_the_caps_are_appended_never_reordered():
     assert caps, "BOARD_CAPS is gone from proto.c"
     names = re.findall(r'\\"([a-z_]+)\\"', caps.group(1))
     assert names == ["svc", "theme", "edit_done", "burn", "plan",
-                     "spendburn", "ask"], names
+                     "spendburn", "ask", "wifi", "logo", "pref"], names
 
 
 def test_the_boards_pref_names_the_board_as_hello_does():

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draw the four Settings tile icons and write them out as LVGL A8 images.
+"""Draw the six Settings tile icons and write them out as LVGL A8 images.
 
     PYTHONDONTWRITEBYTECODE=1 python3 tools/gen_settings_icons.py
 
@@ -19,8 +19,8 @@ renderer blends an A8 image as a mask filled with the object's
 image_recolor colour (lv_draw_sw_img.c), so the tiles set that to the
 theme's text colour and the icons follow all twelve themes and a custom one,
 light grounds included, with nothing stored per theme. 28 x 28 x 1 byte is
-784 B an icon, 3136 B for the four; the whole Settings redesign measured
-+3.2 KB on the ESP32 image.
+784 B an icon, 4704 B for the six (the redesign's first four measured
++3.2 KB on the ESP32 image).
 
 Colour emoji were the other way to get pictures on the tiles, and are not
 one: LVGL draws no colour font, so each would be a 28 x 28 RGB565A8 image
@@ -73,13 +73,27 @@ def sun(x, y):
     return d
 
 
-def contrast(x, y):
-    """Theme: a ring with its left half filled -- the usual appearance
-    mark, and it says light-and-dark without naming either."""
-    r = math.hypot(x - C, y - C)
-    ring = abs(r - 11.0) - STROKE
-    half = max(r - 11.0, x - C)
-    return min(ring, half)
+def laptop(x, y):
+    """Open on PC: a laptop, and an arrow leaving its screen for the
+    top right -- "this opens over there"."""
+    lo, hi, top, bot = 4.0, 24.0, 3.0, 19.0
+    d = min(seg(x, y, lo, top, hi, top), seg(x, y, hi, top, hi, bot),
+            seg(x, y, hi, bot, lo, bot), seg(x, y, lo, bot, lo, top))
+    d = min(d, seg(x, y, 2.5, 23.0, SIZE - 2.5, 23.0)) - STROKE
+    # The arrow: a 45 degree shaft to a corner, and the corner's two arms.
+    # Inside the lid, in the lid's own stroke.
+    d = min(d, seg(x, y, 10.5, 14.0, 17.5, 8.0 - 0.3) - STROKE,
+            seg(x, y, 13.5, 8.0 - 0.3, 17.5, 8.0 - 0.3) - STROKE,
+            seg(x, y, 17.5, 8.0 - 0.3, 17.5, 12.0) - STROKE)
+    return d
+
+
+def info(x, y):
+    """About: an "i" in a circle."""
+    d = abs(math.hypot(x - C, y - C) - 11.0) - STROKE
+    d = min(d, math.hypot(x - C, y - 8.7) - 1.7,
+            seg(x, y, C, 12.7, C, 19.7) - STROKE)
+    return d
 
 
 def focus(x, y):
@@ -104,8 +118,22 @@ def update(x, y):
     return d
 
 
-ICONS = (("bright", sun), ("theme", contrast), ("focus", focus),
-         ("update", update))
+def link(x, y):
+    """Connection: a dot and three arcs opening upward -- the WiFi mark,
+    which also reads as "signal" for the USB cable the same tile reports.
+    The 0.3 in the cone keeps every sample off the cone's edge (the apex
+    sits on a grid line of 0.25 steps), which the edge test insists on."""
+    ax, ay = C, 22.1
+    d = math.hypot(x - ax, y - ay) - 2.2
+    r = math.hypot(x - ax, y - ay)
+    cone = abs(x - ax) + (y - ay) + 0.3
+    for rad in (7.0, 12.0, 17.0):
+        d = min(d, max(abs(r - rad) - STROKE, cone))
+    return d
+
+
+ICONS = (("bright", sun), ("laptop", laptop), ("focus", focus),
+         ("update", update), ("link", link), ("info", info))
 
 
 def render(fn):

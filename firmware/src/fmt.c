@@ -529,3 +529,46 @@ const char *fmt_spend_hint(double pct)
 	}
 	return NULL;
 }
+
+void fmt_uptime(int64_t secs, char *buf, size_t buflen)
+{
+	int64_t min = secs < 0 ? 0 : secs / 60;
+	int64_t h = min / 60;
+
+	if (h >= 24) {
+		snprintf(buf, buflen, "%lld day%s %lld h", (long long)(h / 24),
+			 h / 24 == 1 ? "" : "s", (long long)(h % 24));
+	} else if (h >= 1) {
+		snprintf(buf, buflen, "%lld h %lld min", (long long)h,
+			 (long long)(min % 60));
+	} else {
+		snprintf(buf, buflen, "%lld min", (long long)min);
+	}
+}
+
+void fmt_board_name(const char *id, char *buf, size_t buflen)
+{
+	size_t n = strlen(id);
+	char tail[5] = "";
+
+	if (n >= 4) {
+		for (int i = 0; i < 4; i++) {
+			char c = id[n - 4 + i];
+
+			if (c >= 'a' && c <= 'f') {
+				c -= 'a' - 'A';
+			}
+			if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'))) {
+				tail[0] = '\0';
+				break;
+			}
+			tail[i] = c;
+			tail[i + 1] = '\0';
+		}
+	}
+	if (strlen(tail) == 4) {
+		snprintf(buf, buflen, "Blink-%s", tail);
+	} else {
+		snprintf(buf, buflen, "Blink");
+	}
+}

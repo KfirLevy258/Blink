@@ -361,6 +361,16 @@ def test_the_sandbox_clears_every_variable_it_lists(tmp_path, monkeypatch):
     assert left == []
 
 
+def test_force_wifi_is_cleared_by_the_sandbox(tmp_path, monkeypatch):
+    """BLINK_FORCE_WIFI makes the daemon skip the USB link for WiFi
+    (spec 7.2). Exported in a developer's shell it would send every daemon
+    test down the WiFi path, which CI never takes."""
+    assert "BLINK_FORCE_WIFI" in conftest.CLEARED
+    monkeypatch.setenv("BLINK_FORCE_WIFI", "1")
+    conftest.sandbox_environment(monkeypatch, tmp_path)
+    assert "BLINK_FORCE_WIFI" not in os.environ
+
+
 def test_every_blink_variable_the_code_reads_is_in_the_sandbox():
     """A new BLINK_* environment variable in pc/ or the entry points has to
     be cleared for the tests (conftest.CLEARED) or set by a fixture, or a
@@ -613,6 +623,22 @@ def test_a_run_started_inside_tests_pc_still_loads_the_sandbox():
         cwd=ROOT / "tests" / "pc", env=env, capture_output=True, text=True,
         timeout=120)
     assert out.returncode == 0, out.stdout + out.stderr
+
+
+def test_udp_sendto_off_loopback_is_refused():
+    # Discovery is a broadcast and never calls connect(), so connect-only
+    # guarding let it straight onto a developer's LAN.
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        with pytest.raises(conftest.RealNetworkRefused):
+            s.sendto(b"x", ("255.255.255.255", 49731))
+        if hasattr(s, "sendmsg"):
+            with pytest.raises(conftest.RealNetworkRefused):
+                s.sendmsg([b"x"], [], 0, ("255.255.255.255", 49731))
+        s.sendto(b"x", ("127.0.0.1", 1))      # loopback stays open
+    finally:
+        s.close()
 
 
 # --- the claude / wsl.exe guard -------------------------------------------

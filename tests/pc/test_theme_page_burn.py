@@ -51,8 +51,12 @@ const drawn = () => $('scr').children.map(n => ({
   h: n.attrs.height === undefined ? null : +n.attrs.height,
   fs: n.attrs['font-size'] === undefined ? null : +n.attrs['font-size'],
   text: n.textContent === '' ? null : n.textContent }));
-const left = () => document.querySelectorAll('[data-l]');
-const pressed = () => Object.fromEntries(left().map(b => [b.dataset.l, b.getAttribute('aria-pressed')]));
+// The left half's control is the settings page's Screen cards since the
+// merge into feat/wifi-transport: Two gauges is the session gauge, the
+// Burn view card the burn view; each previews only, as the Left half
+// buttons of the old page did.
+const left = () => document.querySelectorAll('.vw').filter(b => b.dataset.card === 'burn' || (b.dataset.v === 'gauges' && !b.dataset.f));
+const pressed = () => Object.fromEntries(left().map(b => [b.dataset.card === 'burn' ? 'burn' : 'gauge', b.getAttribute('aria-pressed')]));
 await advance(10);
 """
 
@@ -78,7 +82,7 @@ def test_the_session_gauge_is_the_default():
 
 def test_the_control_is_labelled_in_sentence_case():
     r = _run("return left().map(b => b.textContent);")
-    assert r == ["Session gauge", "Burn view"]
+    assert r == ["Two gauges", "Burn view"]
 
 
 def test_the_control_switches_the_left_half_and_back():
@@ -106,15 +110,18 @@ def test_choosing_either_half_leaves_focus_mode_for_the_gauges():
     # Focus keeps today's screen on the board, burn view or not, so the
     # choice has nothing to show there: it brings back the screen it is for.
     r = _run("""
-    document.querySelectorAll('[data-v]')[1].click();   // Focus mode
+    document.querySelectorAll('[data-v]')[1].click();   // Session big
     const inFocus = drawn().map(n => n.text);
     left()[1].click();
-    return { inFocus, after: drawn().map(n => n.text),
+    return { inFocus, after: drawn().map(n => n.text), pressed: pressed(),
              v: document.querySelectorAll('[data-v]').map(b => b.getAttribute('aria-pressed')) };
     """)
     assert "BURN 5h" not in r["inFocus"]
     assert "BURN 5h" in r["after"]
-    assert r["v"] == ["true", "false"]
+    # Two gauges, Session big, Weekly big: none, the Burn view card is the
+    # one pressed (its own card on the settings page's Screen tab).
+    assert r["v"] == ["false", "false", "false"]
+    assert r["pressed"] == {"gauge": "false", "burn": "true"}
 
 
 def test_the_burn_view_is_not_part_of_the_theme_and_sends_nothing():
@@ -531,9 +538,8 @@ def test_the_ported_decisions_match_burn5h_c_line_for_line(tmp_path):
     """Total, rate, direction, bar heights and the hour of each bucket, run
     through burn5h.c compiled for the host and through the page's functions
     on the same inputs. The ports are exact or this fails."""
+    builder_page.need("cc", "node")
     cc, node = shutil.which("cc"), shutil.which("node")
-    if cc is None or node is None:
-        pytest.skip("needs a C compiler and node")
     vectors = _burn_vectors()
     lines = [f'\tburn5h_fmt_tokens({k}u, n, sizeof n);'
              f' printf("fmt %u %s\\n", {k}u, n);' for k in _FMT_KS]

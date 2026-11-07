@@ -178,3 +178,112 @@ blink_refuse_pilot() {
 	fi
 	return 0
 }
+
+# blink_refuse_standalone_net <.config> <image>
+#
+# An image with a radio may carry the WiFi link to the daemon and nothing
+# else (spec section 9, D-series): the board never opens a connection of its
+# own. CONFIG_WIFI=y is allowed only together with CONFIG_BLINK_WIFI_LINK=y,
+# and the symbols that would let it reach the internet by itself (name
+# lookup, HTTP, SNTP, TLS sockets, the AP+STA mode) are refused outright. The
+# image look is for the strings the deleted on-device path carried; "could
+# not look" refuses, like the others.
+blink_refuse_standalone_net() {
+	if [ ! -f "$1" ]; then
+		echo "FATAL: no $1 -- cannot tell what network code this build has." >&2
+		return 1
+	fi
+	if [ ! -f "$2" ]; then
+		echo "FATAL: no image at $2 to inspect." >&2
+		return 1
+	fi
+	if grep -q '^CONFIG_WIFI=y' "$1" && ! grep -q '^CONFIG_BLINK_WIFI_LINK=y' "$1"; then
+		echo "FATAL: CONFIG_WIFI=y without CONFIG_BLINK_WIFI_LINK=y in $1." >&2
+		echo "       A radio is allowed only as the link to the daemon." >&2
+		return 1
+	fi
+	for sym in CONFIG_DNS_RESOLVER CONFIG_HTTP_CLIENT CONFIG_SNTP \
+		CONFIG_NET_SOCKETS_SOCKOPT_TLS CONFIG_ESP32_WIFI_AP_STA_MODE; do
+		if grep -q "^$sym=y" "$1"; then
+			echo "FATAL: $sym=y in $1. The board must not reach the" >&2
+			echo "       internet on its own; only the daemon link may use the radio." >&2
+			return 1
+		fi
+	done
+	for pat in api.anthropic.com console.anthropic.com claude.ai \
+		/releases/latest/download/; do
+		if grep -aqF -- "$pat" "$2"; then
+			echo "FATAL: $2 contains '$pat' -- a standalone network path is" >&2
+			echo "       linked in." >&2
+			return 1
+		fi
+	done
+	return 0
+}
+
+# blink_refuse_oversize <image> <max>
+#
+# The board refuses an OTA stream past OTA_IMAGE_MAX (firmware/src/ota_parse.h:
+# slot 1 minus the swap-move padding sector minus the aligned trailer), so a
+# larger image would ship as an update no desk can take over WiFi. Measured by
+# Phase 0; keep the number in release.sh in step with the header.
+blink_refuse_oversize() {
+	if [ ! -f "$1" ]; then
+		echo "FATAL: no image at $1 to measure." >&2
+		return 1
+	fi
+	_sz=$(wc -c < "$1" | tr -d ' ')
+	# "could not measure" must not read as "fits".
+	if ! [ "$_sz" -le "$2" ] 2>/dev/null; then
+		echo "FATAL: $1 is $_sz bytes, above the OTA bound $2 (OTA_IMAGE_MAX)." >&2
+		echo "       The board would refuse it over WiFi." >&2
+		return 1
+	fi
+	return 0
+}
+
+# blink_refuse_test_knobs <.config> <image>
+#
+# The three CONFIG_BLINK_TEST_* knobs force a failed health check, a failed
+# confirm and a hang after boot, to prove the revert on a bench. Each prints a
+# "[test] " boot line. Any of them in a shipped image is a desk that reverts
+# or hangs; like the selftest, one -D in a build directory's CMake cache
+# carries it into every later build there.
+blink_refuse_test_knobs() {
+	if [ ! -f "$1" ]; then
+		echo "FATAL: no $1 -- cannot tell whether this is a test-knob build." >&2
+		return 1
+	fi
+	if [ ! -f "$2" ]; then
+		echo "FATAL: no image at $2 to inspect." >&2
+		return 1
+	fi
+	if grep -Eq '^CONFIG_BLINK_TEST_[A-Z_]+=y' "$1"; then
+		echo "FATAL: a CONFIG_BLINK_TEST_* knob is set in $1." >&2
+		echo "       Rebuild pristine (west build -p always) without it." >&2
+		return 1
+	fi
+	if grep -aqF '[test] ' "$2"; then
+		echo "FATAL: $2 contains a [test] boot line, though the" >&2
+		echo "       .config says otherwise." >&2
+		return 1
+	fi
+	return 0
+}
+
+# blink_refuse_wifi_mode <.config>
+#
+# The deleted on-device sign-in switch (release.sh's old inline tripwire, now
+# a function so a test can run it). A missing .config refuses.
+blink_refuse_wifi_mode() {
+	if [ ! -f "$1" ]; then
+		echo "FATAL: no $1 -- cannot tell whether WIFI_MODE is on." >&2
+		return 1
+	fi
+	if grep -q "^CONFIG_BLINK_WIFI_MODE=y" "$1"; then
+		echo "FATAL: CONFIG_BLINK_WIFI_MODE=y in a release build." >&2
+		echo "       That ships the on-device sign-in and the token store." >&2
+		return 1
+	fi
+	return 0
+}

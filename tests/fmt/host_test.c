@@ -609,6 +609,56 @@ static void test_fmt_spend_page(void)
 		   strlen(FMT_SPEND_USAGE_HINT) <= 47);
 }
 
+static void test_fmt_about(void)
+{
+	char b[FMT_UPTIME_MAX];
+	char n[FMT_BOARD_NAME_MAX];
+	static const struct { int64_t s; const char *want; } up[] = {
+		{ -5, "0 min" }, { 0, "0 min" }, { 59, "0 min" },
+		{ 60, "1 min" }, { 12 * 60 + 59, "12 min" },
+		{ 3599, "59 min" }, { 3600, "1 h 0 min" },
+		{ 4 * 3600 + 12 * 60, "4 h 12 min" },
+		{ 86399, "23 h 59 min" }, { 86400, "1 day 0 h" },
+		{ 3 * 86400 + 4 * 3600 + 59 * 60, "3 days 4 h" },
+		{ 400LL * 86400, "400 days 0 h" },
+	};
+
+	for (unsigned i = 0; i < sizeof(up) / sizeof(up[0]); i++) {
+		fmt_uptime(up[i].s, b, sizeof(b));
+		if (strcmp(b, up[i].want) == 0) {
+			printf("PASS: uptime %lld -> \"%s\"\n", (long long)up[i].s, b);
+		} else {
+			printf("FAIL: uptime %lld -> \"%s\" (want \"%s\")\n",
+			       (long long)up[i].s, b, up[i].want);
+			failures++;
+		}
+	}
+	/* The widest: a year of uptime in days cannot overflow the buffer. */
+	/* snprintf always NUL-terminates, so "strlen < size" passes for any
+	 * size: fill a buffer of exactly FMT_UPTIME_MAX and compare the whole
+	 * string, so a macro that is too small cuts it and fails. */
+	fmt_uptime(999999LL * 86400 + 23 * 3600 + 59 * 60, b, FMT_UPTIME_MAX);
+	check_true("widest uptime is whole in FMT_UPTIME_MAX",
+		   strcmp(b, "999999 days 23 h") == 0);
+
+	static const struct { const char *id; const char *want; } nm[] = {
+		{ "a4cf12d3b07e", "Blink-B07E" }, { "A4CF12D3B07E", "Blink-B07E" },
+		{ "3f7a", "Blink-3F7A" }, { "7a", "Blink" }, { "", "Blink" },
+		{ "unknown", "Blink" }, { "a4cf12d3b0zz", "Blink" },
+	};
+
+	for (unsigned i = 0; i < sizeof(nm) / sizeof(nm[0]); i++) {
+		fmt_board_name(nm[i].id, n, sizeof(n));
+		if (strcmp(n, nm[i].want) == 0) {
+			printf("PASS: board name -> \"%s\"\n", n);
+		} else {
+			printf("FAIL: board name \"%s\" -> \"%s\" (want \"%s\")\n",
+			       nm[i].id, n, nm[i].want);
+			failures++;
+		}
+	}
+}
+
 int main(void)
 {
 	check("unknown", -1, "--");
@@ -685,6 +735,7 @@ int main(void)
 	test_fmt_focus_line();
 	test_fmt_spend();
 	test_fmt_spend_page();
+	test_fmt_about();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILURES" : "ALL TESTS PASSED",
 	       failures, failures == 1 ? "" : "s");

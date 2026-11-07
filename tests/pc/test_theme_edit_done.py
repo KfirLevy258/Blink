@@ -490,7 +490,7 @@ def test_an_older_tab_with_a_draft_never_closes_itself():
     return { closed: window.closed, status: $('status-text').textContent,
              ocean: $('presets').querySelectorAll('button')
                       .filter(b => b.getAttribute('aria-pressed') === 'true')
-                      .map(b => b.querySelector('.pn').textContent),
+                      .map(b => b.querySelector('.nm').textContent),
              keep: $('notice-keep-text').textContent,
              offer: $('notice-copy').getAttribute('hidden') === null,
              copy: $('copy-code').disabled, copyCmd: $('copy-cmd').disabled };
@@ -572,7 +572,7 @@ def test_a_newer_tab_opens_on_the_draft():
     return { status: $('status-text').textContent,
              pressed: $('presets').querySelectorAll('button')
                         .filter(b => b.getAttribute('aria-pressed') === 'true')
-                        .map(b => b.querySelector('.pn').textContent),
+                        .map(b => b.querySelector('.nm').textContent),
              previews: requests.filter(q => q.path === '/api/preview').length };
     """, {"/api/state": {"status": 200, "body": {"saved": {"id": 0},
                                                  "draft": {"id": 1}}}})

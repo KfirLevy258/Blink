@@ -68,6 +68,7 @@
 #include "ui_settings.h"
 #include "usage_view.h"
 #include "ui_sleep.h"
+#include "proto.h"
 
 #if !DT_NODE_EXISTS(DT_NODELABEL(xpt2046))
 #error "touch_inject reports through the xpt2046 node, as the panel does"
@@ -390,7 +391,7 @@ static void ui_state_line(void)
 	const char *scr;
 	const char *focus = !cfg_get_focus_on() ? "off" :
 			    cfg_get_focus_win() ? "weekly" : "session";
-	char buf[256];
+	char buf[288];
 
 	ui_settings_bench_state(&b);
 	if (ui_anim_showing()) {
@@ -406,7 +407,7 @@ static void ui_state_line(void)
 		 "{\"t\":\"ui_state\",\"v\":%d,\"scr\":\"%s\",\"ov\":\"%s\","
 		 "\"modal\":\"%s\",\"busy\":%d,\"theme\":%d,\"stored\":%d,"
 		 "\"tp\":%d,\"focus\":\"%s\",\"bl\":%d,\"edit\":\"%s\","
-		 "\"slp\":%d,\"nt\":\"%s\",\"gf\":\"%s\"}",
+		 "\"slp\":%d,\"nt\":\"%s\",\"gf\":\"%s\",\"ln\":\"%s\"}",
 		 BLINK_PROTO_VERSION, scr, b.open ? b.sub : "none", b.modal,
 		 /* A screen load still animating is busy too: tw_click_parse
 		  * refuses a click then, so wait_state must be able to wait it
@@ -416,7 +417,11 @@ static void ui_state_line(void)
 		 theme_active_id(),
 		 ui_theme_stored_id(), b.theme_page, focus,
 		 (int)backlight_get(), b.edit, ui_sleep_bench_dozing() ? 1 : 0,
-		 b.nt, usage_view_bench_focus());
+		 b.nt, usage_view_bench_focus(),
+		 /* The link the panel reports, for the bench's WiFi session
+		  * run: the Connection row's value is not a widget label. */
+		 proto_link_kind() == 2 ? "wifi" :
+		 proto_link_kind() == 1 ? "usb" : "none");
 	printk("%s\n", buf);
 	TI_LOG_KICK();		/* see touch_inject_service */
 }

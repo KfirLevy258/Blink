@@ -320,4 +320,21 @@ const char *fmt_spend_caption(const char *period);
  */
 const char *fmt_spend_hint(double pct);
 
+/* Longest is "999999 days 23 h" plus NUL; round up. */
+#define FMT_UPTIME_MAX 24
+
+/*
+ * How long the board has been up, for Settings > About: "3 days 4 h",
+ * "4 h 12 min", "12 min". Whole minutes, never seconds: the screen is
+ * read, not watched. A negative count reads as "0 min".
+ */
+void fmt_uptime(int64_t secs, char *buf, size_t buflen);
+
+/* "Blink-" and the LAST four hex digits of the board id, upper case:
+ * "Blink-3F7A". An id that is shorter than four digits, or holds anything
+ * but hex ("unknown" is what proto answers with no id), is no name to give
+ * a board, so it reads plain "Blink". */
+#define FMT_BOARD_NAME_MAX 12
+void fmt_board_name(const char *id, char *buf, size_t buflen);
+
 #endif /* FMT_H */

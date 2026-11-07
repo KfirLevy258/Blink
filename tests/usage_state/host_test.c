@@ -169,8 +169,20 @@ static void test_toast_change(void)
 	      "a NULL out is refused, not dereferenced");
 }
 
+static void test_health_colour(void)
+{
+	CHECK(usage_health_colour(USAGE_STATUS_OK, false) == USAGE_HC_LIVE, "ok is live");
+	CHECK(usage_health_colour(USAGE_STATUS_OK, true) == USAGE_HC_LIVE, "ok is live even if stale_here");
+	CHECK(usage_health_colour(USAGE_STATUS_STALE, true) == USAGE_HC_STALE, "stale on this page is amber");
+	CHECK(usage_health_colour(USAGE_STATUS_STALE, false) == USAGE_HC_LIVE, "stale on the other page is live");
+	CHECK(usage_health_colour(USAGE_STATUS_ERROR, false) == USAGE_HC_RED, "error is red");
+	CHECK(usage_health_colour(USAGE_STATUS_DISCONNECTED, false) == USAGE_HC_GREY, "disconnected is grey");
+	CHECK(usage_health_colour((enum usage_status)99, false) == USAGE_HC_LIVE, "unknown status is live, as before");
+}
+
 int main(void)
 {
+	test_health_colour();
 	CHECK(usage_activity_from_state("running") == USAGE_ACTIVITY_RUNNING,
 	      "running -> RUNNING");
 	CHECK(usage_activity_from_state("idle") == USAGE_ACTIVITY_IDLE,

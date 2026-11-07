@@ -110,7 +110,8 @@ def test_console_output_is_reassembled_across_chunk_boundaries(tmp_path):
     lines = _lines(tmp_path / "tap.jsonl")
     assert len(lines) == 1
     assert lines[0]["dir"] == "console"
-    assert lines[0]["line"] == "[usage] session 50% (12s)"
+    # The line is the allowlisted form, not the board's figures (D49).
+    assert lines[0]["line"] == "[usage] session applied"
 
 
 def test_a_partial_console_line_waits_for_its_newline(tmp_path):
@@ -127,7 +128,8 @@ def test_undecodable_console_bytes_do_not_raise(tmp_path):
 
     lines = _lines(tmp_path / "tap.jsonl")
     assert len(lines) == 1
-    assert lines[0]["line"].startswith("boot ")
+    # Noise is "(board line)": the transcript keeps nothing it cannot name.
+    assert lines[0]["line"] == "(board line)"
 
 
 def test_scenario_env_selects_the_scripted_provider(tmp_path, monkeypatch):
@@ -313,8 +315,9 @@ def test_open_tap_follows_the_env(tmp_path, monkeypatch):
     monkeypatch.setenv("BLINK_TAP", str(tmp_path / "tap.jsonl"))
     tap = cub.open_tap()
     assert tap is not None
-    tap.console(b"hello\n")
-    assert _lines(tmp_path / "tap.jsonl")[0]["line"] == "hello"
+    tap.console(b"[usage] firmware boot OK\n")
+    assert (_lines(tmp_path / "tap.jsonl")[0]["line"]
+            == "[usage] firmware boot OK")
 
 
 def test_an_unwritable_tap_is_reported_but_never_reaches_the_read_loop(

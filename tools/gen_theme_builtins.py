@@ -189,6 +189,8 @@ def builtins(h_src=None, c_src=None):
         out.append({
             "id": tid, "key": key.lower(), "name": names[key],
             "c": [p[r] for r in ROLES], "w": p["arc_w"],
+            # grey is the board's COL_GREY, which the page's link icon draws
+            # when the link is down (owner, 2026-11-07).
             "track": p["track"], "grey": p["grey"],
             # Omitted from a palette means false, as C initialisers do.
             "ends": "flat" if p.get("flat", False) else "round",

@@ -101,28 +101,29 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**5074 passing, 2 skipped** (os.startfile and one other platform test) as
-of 2026-11-06, on macOS, on PR #8's tree at fbdcd8d (the /usage version
-floor; 5076 collected; 344d3a0 after it adds one test, 5075 there). The
-same tree the same day, each its own count: Ubuntu (Docker, x86_64) 4874
-passed and 202 skipped; Windows (ARM64 VM, a git-archive zip) 4590 passed
-and 475 skipped, with one failure, `test_theme_server.py`'s loopback
-WinError 10053 reset, as on 2026-11-01 below; across five Windows runs that
-day it failed on a different case each time, and this branch does not
-touch it. Earlier that day the Windows run also caught the merge of PR #3:
-its once-per-change `[ingest] Desktop data folder` line, Windows only,
-landed in a spend test that required an empty stderr (fixed). Windows
-collects 10 fewer tests (5066), all in `tests/pc/test_desktop_paths.py`, by
-design: parametrize lists filter at collection on what that filesystem lets
-a fixture create (6 unsafe marker names, 4 glob-hostile profile names). The
-VM full run took 631 s against 162 s on the Mac and 486 s on Ubuntu.
-Two one-off failures were seen on 2026-11-01 on earlier trees
-and passed on every re-run:
-`test_sandbox.py::test_ordinary_commands_are_untouched` on Ubuntu (the child
-Python printed nothing) and `test_theme_server.py::test_an_oversize_body_is_refused`
-on Windows (a connection reset). The skips are platform tests and,
-on Windows, the builder-page tests that need Node. Re-run Ubuntu and Windows
-before claiming them for a new number. Everything in
+**2026-11-07, after origin/develop (4fcc3e4) merged into the WiFi branch,
+each platform its own count, all on one tree and none failing:** macOS 5628
+passed, 6 skipped (run in the foreground: `tests/test_dev_sh.py` and
+`tests/pc/test_theme_cli.py` have Ctrl-C tests that fail when pytest is
+started in the background, where SIGINT is ignored); Ubuntu (Docker, x86_64,
+Python 3.12) 5364 passed, 270 skipped; Ubuntu under Python 3.9 (python:3.9-slim) 5152 passed, 275 skipped; Windows
+(ARM64 VM, x64 Python 3.11) 5029 passed, 595 skipped. `host-tests` and `check_factory.sh` pass.
+Python 3.9 matters beyond its count: before 3.12 a comprehension is a nested
+function, so a test that searches for a value in one makes that value a
+closure cell of the test itself (the WiFi password check fell into it).
+Before the merge the WiFi branch alone was macOS 3819 passed, 5 skipped, and
+develop alone (PR #8's tree, 2026-11-06) macOS 5074 passed, 2 skipped. Two
+one-off failures were seen on 2026-11-01 on earlier trees and passed on every
+re-run: `test_sandbox.py::test_ordinary_commands_are_untouched` on Ubuntu
+(the child Python printed nothing) and
+`test_theme_server.py::test_an_oversize_body_is_refused` on Windows (a
+connection reset); `test_theme_server.py`'s loopback WinError 10053 reset
+has failed a different case on some Windows runs since. The skips are
+platform tests and, on Windows, the builder-page tests that need Node, and
+Windows collects 10 fewer tests in `tests/pc/test_desktop_paths.py` by
+design (parametrize lists filter on what that filesystem lets a fixture
+create). Re-run Ubuntu and Windows before claiming them for a new number.
+Everything in
 `pc/requirements.txt` is pinned on purpose, bitstring included, though
 nothing in `pc/` imports it; `numpy` and `Pillow` are only
 needed by the logo and boot-animation encoder tests. CI runs the same
@@ -189,10 +190,24 @@ its own and wrote a test theme into a real desk's `theme.json`.
 `tests/pc/__init__.py` now refuses a script import while HOME is the real
 one, but nothing else under `tests/` is guarded.
 
+## The network
+
+The board can also be reached over WiFi (TCP and UDP 49731; `docs/README-full.md`,
+"WiFi"). The rules that came with it: **the firmware never calls `connect()`**;
+the board only listens and answers, and the daemon dials. **A network buffer is
+a serial buffer** for the never-log rule: no bytes, slices, lengths, SSIDs,
+passwords, keys, nonces, tags or addresses in any log line, exception or
+stderr, at any level. The board's console is read with `tools/console_tail.py`,
+never `tools/passive_log.py` (it pre-sets DTR/RTS and reboots the board). And
+there is one console line policy: `logbook.tap_console_line` is the allowlist
+for BLINK_TAP and `console_tail` alike, so a line is a constant, a bare tag or
+`(board line)`, with no raw mode anywhere. The pairing file lives in
+`~/.blink/private` and only `pc/private_file.py` writes it.
+
 ## Hardware
 
 **Zephyr 4.3.x, SDK 0.17.4 — not 4.4.0**, which cannot build this firmware:
-its mbedTLS 4.x dropped `mbedtls/sha256.h` (`src/ota.c`) and its LVGL moved
+its mbedTLS 4.x dropped `mbedtls/sha256.h` (`src/proto.c`, `src/wl_crypto_mbedtls.c`) and its LVGL moved
 `gesture_limit` out of the public headers (`src/ui_settings.c`). The scripts
 locate the workspace via `tools/lib_zephyr.sh`; `BLINK_ZEPHYR` overrides.
 

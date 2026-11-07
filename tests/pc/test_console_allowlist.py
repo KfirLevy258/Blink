@@ -13,7 +13,9 @@ that stops being the start of a real printk, or a tag the firmware starts
 using that the list does not know, fails here instead of quietly turning a
 support-relevant line into a bare tag.
 """
+import json
 import pathlib
+import random
 import re
 
 import pytest
@@ -76,12 +78,38 @@ LINES = [
     ("[bl] 73%", "[bl]", ["73"]),
     # ui_sleep.c:183
     ("[sleep] dozing (night)", "[sleep] dozing", ["night"]),
+    # net_link.c -- the radio's four fixed lines (spec S5.8). The board never
+    # prints a network name, but a line that carried one must still lose it.
+    ("[wifi] radio up", "[wifi] radio up", []),
+    ("[wifi] joined MyNet", "[wifi] joined", ["MyNet"]),
+    ("[wifi] join failed: Wrong WiFi password", "[wifi] join failed",
+     ["Wrong", "password"]),
+    ("[wifi] lost the network", "[wifi] lost the network", []),
+    ("[wifi] paired", "[wifi] paired", []),
+    ("[wifi] forgotten MyNet", "[wifi] forgotten", ["MyNet"]),
+    ("[wifi] forget failed", "[wifi] forget failed", []),
+    # net_link.c join_run: the radio refused the request; the errno is cut
+    ("[wifi] connect refused: -12", "[wifi] connect refused", ["-12"]),
+    # wl_server.c -- the session lines; a peer's address riding on one is cut
+    ("[wifi] session open", "[wifi] session open", []),
+    ("[wifi] session closed 192.168.1.9", "[wifi] session closed",
+     ["192.168.1.9"]),
+    ("[wifi] handshake refused: bad tag", "[wifi] handshake refused",
+     ["bad", "tag"]),
+    ("[wifi] verified", "[wifi] verified", []),
+    ("[wifi] heap low, restarting", "[wifi] heap low, restarting", []),
+    ("[wifi] heap free=31244", "[wifi] heap free", ["31244"]),
+    ("[logo] remove failed: -5", "[logo] remove failed", ["-5"]),
+    ("[wifi] listen failed: -23", "[wifi] listen failed", ["-23"]),
+    ("[wifi] discovery socket failed: -23", "[wifi] discovery socket failed",
+     ["-23"]),
+    ("[wifi] scan failed: -16", "[wifi] scan failed", ["-16"]),
     # a known stem with something riding on the end of it
     ("[theme] saved SECRET-TAIL", "[theme] saved", ["SECRET-TAIL"]),
     # no tag the firmware uses: the bootloader, Zephyr, the touch tracer,
     # line noise, or a tag nobody prints
-    ("*** Booting Zephyr OS build v4.3.0 ***", logbook.BOARD_LINE,
-     ["Zephyr", "4.3.0"]),
+    ("*** Booting Zephyr OS build v4.3.0 ***", "*** Booting Zephyr OS",
+     ["4.3.0"]),
     ("[esp32] [INF] Image index: 0, Swap type: none", logbook.BOARD_LINE,
      ["esp32", "Swap"]),
     ("#TT 12,3456,100,200,1", logbook.BOARD_LINE, ["3456"]),
@@ -176,3 +204,118 @@ def test_the_tag_set_is_exactly_the_firmwares():
         "firmware/src printk tags and pc/logbook.CONSOLE_TAGS differ: "
         f"only in firmware {sorted(used - logbook.CONSOLE_TAGS)}, "
         f"only in the list {sorted(logbook.CONSOLE_TAGS - used)}")
+
+
+# --- the lines that are not ours (CONSOLE_EXTERNAL, D49) ----------------------
+
+@pytest.mark.parametrize("stem", logbook.CONSOLE_EXTERNAL)
+def test_external_stems_are_their_own_list(stem):
+    assert logbook.console_line(stem) == stem
+    assert logbook.console_line(stem + ",boot:0x13 (SPI_FAST_FLASH_BOOT)"
+                                ) == stem
+    assert stem not in logbook.CONSOLE_MESSAGES
+
+
+def test_external_list_keeps_the_roms_reset_reasons():
+    line = "rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)"
+    assert logbook.console_line(line) == "rst:0x1 (POWERON_RESET)"
+    assert not set(logbook.CONSOLE_EXTERNAL) & set(logbook.CONSOLE_MESSAGES)
+
+
+# --- the transcript allowlist (tap_console_line) -----------------------------
+
+TAP_LINES = [
+    ('{"t":"usage","session_pct":41}', '{"t":"usage","session_pct":41}'),
+    ('{"t":"ping","k":"SECRET"}', '{"t":"ping"}'),
+    ('{"t":"wifi_state","st":"up","s":"6e6574","ip":"192.168.1.2"}',
+     '{"t":"wifi_state","st":"up"}'),
+    ('{"t":"wifi_stat","s":"6e6574"}', logbook.BOARD_LINE),
+    ('{"t":"wifi_state","st":"up","s":"6e6574"', logbook.BOARD_LINE),
+    ('[usage] sess{"t":"wifi_state","s":"6e6574"}', "[usage]"),
+    ('"s":"6e6574"', logbook.BOARD_LINE),
+    # an unhashable or non-string t is not a protocol object
+    ('{"t":[1]}', logbook.BOARD_LINE),
+    ('{"t":{}}', logbook.BOARD_LINE),
+    ('{"t":7,"s":"6e6574"}', logbook.BOARD_LINE),
+    ('[1,2]', logbook.BOARD_LINE),
+    ("[cfg] mode=1 ssid=home-net-SECRET token=present", "[cfg]"),
+    ("[proto] ota failed: anything", "[proto] ota failed"),
+    ("[usage] session 3", logbook.APPLIED_LINE),
+    ("[usage] session 7 STALE", logbook.APPLIED_LINE + " STALE"),
+    ("[usage] session 7 NOTSTALE", logbook.APPLIED_LINE),
+    ("[usage] session 50% (12s)  weekly 4% (9s)  STALE +state",
+     logbook.APPLIED_LINE + " STALE"),
+    ("rst:0xf (BROWNOUT_RESET),boot:0x13", "rst:0xf (BROWNOUT_RESET)"),
+    ("garbage \x00\xff 6e6574", logbook.BOARD_LINE),
+]
+
+
+@pytest.mark.parametrize("line,want", TAP_LINES,
+                         ids=[l[0][:40] for l in TAP_LINES])
+def test_tap_console_line_is_an_allowlist(line, want):
+    assert logbook.tap_console_line(line) == want
+
+
+# A literal copy of protocol.TAP_FIELDS, so a field added there without a
+# decision here fails this test rather than passing it.
+_FIELDS = {
+    "hello": "t", "ping": "t", "pref": "t", "ota_query": "t",
+    "ota_flash": "t", "theme_now": "t", "widgets": "t",
+    "theme_edit": "t ok done", "touch_done": "t op ok", "touch_refused": "t",
+    "ui_state": "t scr ov modal busy theme stored tp focus bl edit slp nt gf",
+    "wifi_net": "t i n sec", "wifi_state": "t st link kid why",
+    "ota_ack": "t off err", "logo_ack": "t", "logo_state": "t",
+    "welcome": "t app app_ver editing", "bye": "t", "pong": "t",
+    "time": "t epoch utc_offset_min",
+    "usage": "t session_pct session_resets_in_s weekly_pct "
+             "weekly_resets_in_s stale fable_pct sonnet_pct opus_pct "
+             "provider src state n_sess n_run n_wait n_stuck n_agents p2 "
+             "p2_session_pct p2_weekly_pct p2_s_in_s p2_w_in_s p2_stale "
+             "burn_pph age_s p2_age_s active_age_s",
+    "edition": "t edition", "session": "t n", "status": "t state",
+    "svc": "t provider level", "theme": "t op id",
+    "ota_avail": "t version size", "ota_begin": "t version",
+    "ota_resume": "t version", "ota_none": "t", "ota_error": "t",
+    "edit_state": "t editing", "wifi_scan": "t", "wifi_set": "t",
+    "wifi_forget": "t", "ota_end": "t", "logo_begin": "t", "logo_chunk": "t",
+    "logo_end": "t", "logo_remove": "t", "pref_set": "t",
+    "verify": "t", "verified": "t",
+}
+
+
+def _allowed(out):
+    if out == logbook.BOARD_LINE or out in (
+            logbook.CONSOLE_RENDERED + logbook.CONSOLE_MESSAGES
+            + logbook.CONSOLE_EXTERNAL):
+        return True
+    if out in (logbook.APPLIED_LINE, logbook.APPLIED_LINE + " STALE"):
+        return True
+    m = re.fullmatch(r"\[([a-z_]+)\]", out)
+    if m and m.group(1) in logbook.CONSOLE_TAGS:
+        return True
+    obj = json.loads(out)       # anything else must be redacted JSON
+    assert obj["t"] in _FIELDS, out
+    assert set(obj) <= set(_FIELDS[obj["t"]].split()), out
+    return all(v is None or isinstance(v, (str, int, float, bool))
+               for v in obj.values())
+
+
+def test_every_output_is_in_the_allowlist_or_redacted_json():
+    rng = random.Random(20261106)
+    for _ in range(10000):
+        raw = bytes(rng.randrange(256) for _ in range(rng.randrange(0, 80)))
+        out = logbook.tap_console_line(raw.decode("utf-8", errors="replace"))
+        assert _allowed(out), out
+    pool = ["s", "p", "k", "ip", "port", "r", "x", "kid", "why", "st", "link",
+            "sec", "v", "i", "n", "err", "off", "label", "name"]
+    values = ["6e6574", "192.168.1.2", "home-net-SECRET", 7, -50, 2.5, None,
+              True, {"nested": "SECRET"}, ["SECRET"], "x" * 90, "up", "wifi",
+              "0a1b2c3d", ""]
+    types = sorted(_FIELDS) + ["wifi_stat", "x"]
+    for _ in range(1000):
+        obj = {k: rng.choice(values)
+               for k in rng.sample(pool, rng.randrange(0, 8))}
+        obj["t"] = rng.choice(types + [[1], {}, 7, None, True, 2.5])
+        out = logbook.tap_console_line(json.dumps(obj))
+        assert _allowed(out), out
+        assert "nested" not in out

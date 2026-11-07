@@ -133,9 +133,9 @@ A 3D-printable case gives the bare board a home on your desk. The files are on *
 
 ## Connecting it
 
-Blink reads your usage over the **USB cable**, from Claude Code itself. Plug the board into your computer and run the setup below; your usage streams over the cable, and the same connection handles updates.
+Blink reads your usage from Claude Code itself and sends it to the board over the **USB cable**, which is the default. Plug the board into your computer and run the setup below; the same connection handles updates. The cable can be swapped for **WiFi**, an opt-in second link you set up from the settings page (see "WiFi"); the board then keeps working on a phone charger.
 
-The device never joins your network, never signs in to anything, and never holds a credential - the numbers come from the Claude Code already running on your machine.
+The device never signs in to anything and never holds a credential for Claude or Codex - the numbers come from the Claude Code already running on your machine. Unless you set up WiFi, it never joins a network at all; if you do, it joins only the one you give it, and talks only to your computer, encrypted.
 
 **Which port, and what if you have two boards.** It does not scan. The daemon
 writes down the board it connected to, so every later start opens that port
@@ -390,6 +390,25 @@ firmware slots and the settings partition are exactly where they were.
 Edition and logo are independent - a company unit is still a Claude or a
 Codex one.
 
+### Your own logo, from the settings page
+
+Any board can show a logo, set without opening the case: the settings page's
+**Look > Logo** tab takes a picture or an animation and sends it to the board
+over the cable or WiFi, with a preview of how it will sit (Fill, Large or
+With margin) on a background colour you pick, or **Auto** to take it from the
+picture's corner. **Replace** and **Clear** work on the file you picked:
+**Clear** drops that choice and never talks to the board. A logo already on
+the board is taken off with **Remove**, which asks first.
+
+| Format | Limits |
+|---|---|
+| PNG, JPG, SVG | A still, shown for 3, 5 or 10 s (3 s by default); the file up to 20 MB, since the page redraws it to 320x240 before sending |
+| GIF (animated) | The file up to 2 MB, up to 180 frames, 15 s long and 2048 px on a side |
+
+Whatever the format, the encoded logo has to fit the board's 512 KB logo
+partition; the page says so when it does not, and the board keeps the logo it
+had.
+
 ### Tested without a board
 
 `tests/ci/check_factory.sh` runs both scripts, unmodified, on every push: it
@@ -440,7 +459,10 @@ Blink is two halves that ship as one release: the firmware on the board, and the
 
 Blink checks for a new release as soon as it starts up, and if it finds one it asks you - **Update now** or **Later** - right on the gauge screen. One tap installs both halves. If the release also carries a newer app, the screen says so, and that half goes first: the new app is what knows how to drive the new firmware.
 
-The board has no network of its own, so the app does the work. It downloads the release, checks it against the hash the release publishes, and writes it over the same cable - then reads it back off the chip to confirm what landed there. The screen goes dark for about four minutes while that happens; it tells you first, and comes back on the new version. Because this route writes the running slot directly it has no automatic rollback, which is a fair trade when the machine that can reflash it is the one already plugged in.
+The board never downloads anything, so the app does the work. It downloads the release and checks it against the hash the release publishes. What happens next depends on the link the board is on.
+
+- **Cable.** The app writes the image over USB straight into the running slot, then reads it back off the chip to confirm what landed there. The screen goes dark for about four minutes while that happens; it tells you first, and comes back on the new version. Because this route writes the running slot directly it has no automatic rollback, which is a fair trade when the machine that can reflash it is the one already plugged in.
+- **Encrypted WiFi.** The app sends the image over the link and the board writes it to the spare slot, checks the hash itself and asks the bootloader to test-boot it. The new version must confirm it is healthy within 90 seconds; if it does not, MCUboot reverts to the version that was running. There is no read-back over WiFi. The four-minute figure above was measured for the cable route only. See `docs/research/2026-11-wifi-ota-proof.md` for what has been proved on a board and what is still owed.
 
 You get a confirmation on screen once the new version is up.
 
@@ -451,7 +473,7 @@ You get a confirmation on screen once the new version is up.
 ~/.blink/bin/blink status     # which versions are you on?
 ```
 
-The settings screen shows both versions, and says **App is old** when the half on your computer is the one that is behind.
+The **About** screen shows both versions, and the **Update** screen says **App is old** when the half on your computer is the one that is behind.
 
 Automatic app updates are off unless a release turns them on. To keep them off whatever a release says, `touch ~/.blink/no-auto-update`.
 
@@ -510,20 +532,82 @@ no hook interface, so its state comes from its own session log: a turn that
 started, finished or was interrupted. Codex permission prompts are not in that
 log, so a prompt shows as "working" until you answer it.
 
+## WiFi
+
+The board can talk to your computer over WiFi instead of the cable. It is
+the same display and the same daemon; only the link changes. The cable still
+wins: plug it in and the board uses it within seconds.
+
+Set it up from the settings page: **Settings > Open on PC** on the board, or
+`blink settings` in a terminal. Open the **Connect** tab and press **Move to
+WiFi** (it reads **Change network** once a network is saved), pick the network
+from the list the board finds and type its password. The cable is needed once,
+to give the board the network name and password and to pair it with this
+computer (pairing makes a key that only this computer and this board hold).
+After that the board finds the computer on its own, the link is encrypted, and
+firmware updates go over it too (see "Updates"). The page also holds the
+display and board settings, and the logo.
+
+**Forget WiFi** makes the board delete the network and the key. It is on the
+page's Connect tab, and on the board itself: **Settings > Connection**, then
+**Forget WiFi**, then **Forget** to confirm.
+
+**Plugging the cable into a WiFi board.** The cable wins and the board uses
+it within seconds. Known fault: on the owner's desk the board restarted about
+4 s after the daemon opened the port, four times in five. It comes back on its
+own and nothing is lost; the measurements are in
+[docs/open-bugs/usb-plug-restarts-a-wifi-board.md](open-bugs/usb-plug-restarts-a-wifi-board.md).
+
+Limits:
+
+- 2.4 GHz networks only (ESP32). A router with one combined name usually
+  offers 2.4 GHz as well.
+- WPA2 and WPA2/WPA3 mixed networks. Not WPA3-only, not enterprise/802.1X,
+  not open networks, not captive portals.
+- Networks that isolate clients from each other (many guest and office
+  networks) cannot work: the computer cannot reach the board.
+- Changing networks needs the cable once.
+- The board shows HOST LOST when the computer sleeps or leaves the network,
+  as it does today when the cable is pulled.
+- Someone holding the board can read the WiFi password and the pairing key
+  from its flash (on every board), and with the key can read any session they
+  recorded earlier: there is no forward secrecy. Forget WiFi before giving a
+  board away; pairing again from the computer makes a new key.
+- WSL2 in NAT mode cannot receive the discovery answer (broadcast does not
+  cross the NAT); it relies on the remembered address.
+- A board with flash encryption (a fused unit) that is already on a desk
+  cannot get the WiFi feature by itself: its firmware has no radio and the
+  app refuses to write an encrypted chip over USB. It needs the factory
+  tool once.
+
 ## Settings on the board
 
 Settings is the screen beside the dials: swipe across from them to reach it,
-and back to return. It is four tiles, each with an icon:
+and back to return. It is six tiles, three by two, each with an icon:
 
 | Tile | What it does |
 |---|---|
 | **Brightness** | Tap a level. It is kept across a power cycle |
-| **Theme** | The panel's colours: twelve built-in themes and one of your own (below) |
+| **Open on PC** | Opens the settings page on your computer, where the theme, the logo and WiFi are set (below) |
 | **Focus** | One window big instead of two side by side: **Off**, **Session** or **Weekly**. The other window stays on screen as a single dim line under the big dial. Off remembers which window was big |
-| **Update** | The software update: **Up to date**, an offer to install, or **App is old** when the half on your computer is behind (see "Updates") |
+| **Update** | The software update: **Up to date**, **Available** when there is something to install, or **App is old** when the half on your computer is behind (see "Updates") |
+| **Connection** | How the board is reaching your computer now, **USB**, **WiFi** or **None**; tap it for the network, address and signal, and to forget the WiFi (see "WiFi") |
+| **About** | The board's name (**Blink-** and the last four characters of its id), the firmware version, the app version on your computer, and how long the board has been on |
 
-Theme and Focus need board firmware 1.4.0 or later. A board on 1.3.4 or
-earlier shows its old settings screen; update it to see these.
+<table>
+  <tr>
+    <td width="50%"><img src="img/screen-settings.png" alt="The board's Settings screen: six tiles, Brightness, Open on PC, Focus, Update, Connection and About."></td>
+    <td width="50%"><img src="img/screen-about.png" alt="The About screen: board name, firmware version, app version on the computer and time up."></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Settings</b></sub>&nbsp;</td>
+    <td align="center"><sub><b>About</b></sub>&nbsp;</td>
+  </tr>
+</table>
+
+Focus needs board firmware 1.4.0 or later; Open on PC, Connection and About
+come with the WiFi firmware (a 1.4.0 board still shows a Theme tile). A board on
+1.3.4 or earlier shows its old settings screen; update it to see these.
 
 ### Themes
 
@@ -574,24 +658,35 @@ were apart, the board's choice wins - it is the one in front of you - and
 other than the last one the computer talked to is sent the computer's
 theme.
 
+### The settings page
+
+<img src="img/settings-page.png" alt="The settings page: the board drawn in the middle, linked to this computer by USB cable, with WiFi not set up, and Look, Connect and Board tabs under it.">
+
+The page has three tabs: **Look** (themes, the theme builder and the logo),
+**Connect** (WiFi) and **Board** (board id, brightness, firmware, the screen shown, WiFi details and the computer-side settings). Focus and the main screen are under **Look > Customise > Screen**.
+
+<img src="img/settings-page-look.png" alt="The Look tab: twelve built-in themes on the left, the board preview in the middle, colour pickers and arc settings on the right.">
+
 ### Making a theme on your computer
 
-On the board, **Settings > Theme > Edit on computer** opens the theme builder
-in your computer's browser. While the builder is open the button reads
-**Editing on your computer**, dimmed, and does nothing when pressed, so one
-edit stays in one tab; it reads **Edit on computer** again, ready to press,
-a moment after the builder closes (about 2 s after its tab does). It
-also comes back while the board has lost its connection to the computer,
-and is held again when the connection returns with the builder still
-open. (With an app from before this, the board says
-**Opened on your computer** for a few seconds and the button comes straight
-back.) On a computer with no browser to open (a server, or an SSH session),
-it says **On your computer, run: blink theme** instead, for 8 seconds.
-Running that yourself does the same thing:
+On the board, **Settings > Open on PC** opens the settings page in your
+computer's browser; its **Look** tab holds the built-in themes (**Look > Themes**) and the theme builder (**Look > Customise**). While the page
+is open the tile reads **Editing on your computer**, dimmed, and does nothing
+when pressed, so one page stays in one tab; it reads **Open on PC** again,
+ready to press, a moment after the page closes (about 2 s after its tab
+does). It also comes back while the board has lost its connection to the
+computer, and is held again when the connection returns with the page still
+open. On a computer with no browser to open (a server, or an SSH session),
+the board says **On your computer, run: blink settings** instead, for 8
+seconds. Running that yourself does the same thing:
 
 ```bash
-~/.blink/bin/blink theme
+~/.blink/bin/blink settings
 ```
+
+`blink theme` still opens the theme builder alone, from a terminal, for
+people who only want colours. It is a smaller page: the board's own tile
+never opens it, and it has no WiFi, logo or brightness controls.
 
 The builder is a page served by the app to your own browser and nobody else:
 it listens on 127.0.0.1 only, on a link that works once, and fetches nothing
@@ -602,11 +697,11 @@ theme it has not seen. Every change shows on the board as you make it, as a
 preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
 without a change puts the board back on the theme it had. When it cannot
 be so, it says that instead of "Preview sent": a board still on firmware
-1.3.4 shows no preview (the builder and `blink theme` say so, and a saved
+1.3.4 shows no preview (the page and `blink theme` say so, and a saved
 theme is sent once the board is updated), and a preview that nothing has
 picked up after a few seconds, because the app is not running or the board
 is not plugged in, is named as not on the board. Once it has
-closed, **Edit on computer** opens a new one. On Windows, and on some Linux
+closed, **Open on PC** opens a new one. On Windows, and on some Linux
 desktops, the builder's tab may open behind your other windows, with only
 the browser's taskbar button flashing. If a second tab does open on the same
 builder - from a board whose firmware predates the held button - only the
@@ -622,7 +717,7 @@ says what follows:
 |---|---|---|
 | You pressed Save to board | **Saved.** | Your board keeps *name*. |
 | You pressed Cancel | **Cancelled.** | Your board is back on its saved theme. |
-| The builder stopped (ten minutes idle, or the app quit) | **The builder stopped.** | Run blink theme on your computer to start it again. |
+| The builder stopped (ten minutes idle, or the app quit) | **The builder stopped.** | Run blink settings on your computer to start it again (blink theme, if you started it that way). |
 | A newer tab took over | **Continued in a newer tab.** | This tab has handed over to the newer one. |
 
 After **Save to board** or **Cancel** the popup counts down (**This tab closes

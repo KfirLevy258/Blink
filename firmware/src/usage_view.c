@@ -175,7 +175,6 @@ static bool is_focus_line(const struct gauge *g)
  * owns what the row says -- mode, order, overflow -- and everything here only
  * positions and colours its answer.
  */
-static lv_obj_t *dot;		/* data health, top-right */
 static lv_obj_t *pip[PIP_MAX];		/* execution state, one per session */
 static lv_obj_t *pip_num[PIP_MAX];	/* its tally, in counts mode only */
 /*
@@ -187,6 +186,13 @@ static int pip_n_sess, pip_n_run, pip_n_wait, pip_n_stuck;
 static enum usage_status data_health = USAGE_STATUS_DISCONNECTED;
 static lv_obj_t *hint;
 static lv_obj_t *age_lbl;
+/* The link icon, top-right: the host-link glyph (USB, or WiFi) coloured by
+ * data health. It replaced the health dot (owner, 2026-11-07), so it is always
+ * shown. Kept across a rebuild of the screen in link_kind, as the counts are:
+ * it is the last thing said, not a widget. */
+static lv_obj_t *link_lbl;
+static uint8_t link_kind;
+#define LINK_MARK_W 22		/* icon width plus gap: where the age sits left of it */
 static lv_obj_t *clock_lbl;
 static enum usage_activity activity = USAGE_ACTIVITY_NONE;
 /*
@@ -1103,17 +1109,17 @@ void usage_view_deinit(void)
 	/*
 	 * Both header indicators the same way, and for the same reason:
 	 * usage_view_set_counts() and usage_view_set_status() both arrive on
-	 * the protocol thread and both call refresh_dots(), whose `if (dot)`
+	 * the protocol thread and both call refresh_dots(), whose `if (link_lbl)`
 	 * and `if (!pip[0])` guards are only guards if the pointers they test
-	 * are nulled here. `dot` was missed when this list was written -- it
+	 * are nulled here. `link_lbl` was missed when this list was written -- it
 	 * hangs off gauge_scr like everything else above and dies with it.
 	 *
 	 * The counts themselves survive: they are the last thing the daemon
 	 * said, not a widget. Nothing repaints the row at init -- it comes
 	 * back on the next refresh_dots(), which is the next set_counts or
-	 * set_status, the same way the health dot does.
+	 * set_status, the same way the link icon does.
 	 */
-	dot = NULL;
+	link_lbl = NULL;
 	title_lbl = chev_r = chev_l = NULL;
 	/* The burn view's object dies with the screen too; its lines do not,
 	 * they are data (usage_view_set_burn5h). */
@@ -1141,6 +1147,27 @@ void usage_view_deinit(void)
 	}
 }
 
+static void link_paint(void)
+{
+	if (link_lbl == NULL) {
+		return;
+	}
+	/* USB is also the answer for no link at all: a USB-only board is the
+	 * common case and the icon is never hidden. */
+	lv_label_set_text(link_lbl, link_kind == 2 ? LV_SYMBOL_WIFI : LV_SYMBOL_USB);
+}
+
+void usage_view_set_link(uint8_t kind)
+{
+	if (kind == link_kind) {
+		return;
+	}
+	link_kind = kind;
+	if (built) {
+		link_paint();
+	}
+}
+
 void usage_view_init(void)
 {
 	gauge_scr = lv_obj_create(NULL);
@@ -1154,7 +1181,7 @@ void usage_view_init(void)
 	lv_scr_load(scr);
 
 	/* Header: brand dead-center, quiet data in the corners -- clock left,
-	 * age + dot right, everything at the same small size (the 20 px clock
+	 * age + link icon right, everything at the same small size (the 20 px clock
 	 * shouted over the gauges; user feedback 2026-07-16). */
 	lv_obj_t *title = lv_label_create(scr);
 
@@ -1163,16 +1190,6 @@ void usage_view_init(void)
 	lv_obj_set_style_text_color(title, COL_DIM, 0);
 	lv_obj_set_style_text_letter_space(title, 2, 0);
 	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
-
-	dot = lv_obj_create(scr);
-	lv_obj_set_size(dot, DOT_SZ, DOT_SZ);
-	lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-	lv_obj_set_style_border_width(dot, 0, 0);
-	lv_obj_set_style_bg_color(dot, COL_GREY, 0);
-	lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -12, HDR_ROW_Y);
-	/* A swipe starting on this dot must still reach the screen below it,
-	 * or the settings gesture goes dead whenever the touch lands here. */
-	lv_obj_add_flag(dot, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
 	/*
 	 * The execution-state row, in the gap between the clock and the brand.
@@ -1269,7 +1286,16 @@ void usage_view_init(void)
 	age_lbl = lv_label_create(scr);
 	lv_label_set_text(age_lbl, "");
 	lv_obj_set_style_text_color(age_lbl, COL_DIM, 0);
-	lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -30, HDR_ROW_Y);
+	lv_obj_align(age_lbl, LV_ALIGN_TOP_RIGHT, -12 - LINK_MARK_W, HDR_ROW_Y);
+
+	/* Where the health dot was. Its colour is data health (refresh_dots).
+	 */
+	link_lbl = lv_label_create(scr);
+	lv_obj_set_style_text_color(link_lbl, COL_GREY, 0);
+	lv_obj_align(link_lbl, LV_ALIGN_TOP_RIGHT, -12, HDR_ROW_Y);
+	lv_obj_add_flag(link_lbl, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_clear_flag(link_lbl, LV_OBJ_FLAG_CLICKABLE);
+	link_paint();
 
 	/* Wall clock. Blank until a time source and timezone are known -- an
 	 * empty label beats a confidently wrong one. */
@@ -3002,37 +3028,30 @@ static void refresh_dots(void)
 	int n;
 	int x;
 
-	if (dot) {
+	if (link_lbl) {
 		uint32_t live, stale;
 
 		/* Low and mid, unless both are neutral: theme.h says why. */
 		theme_dot_colours(theme_pal(), &live, &stale);
-		switch (data_health) {
-		case USAGE_STATUS_ERROR:
+		/* Only the page in front of you can be stale-amber: proto.c arms
+		 * STALE when EITHER provider is old, and a fresh page must not
+		 * wear the other's amber (usage_health_colour). */
+		switch (usage_health_colour(data_health, stale_here())) {
+		case USAGE_HC_RED:
 			hc = COL_RED;
 			break;
-		case USAGE_STATUS_STALE:
-			/*
-			 * Only the page in front of you can be stale-amber.
-			 * proto.c arms STALE when EITHER provider is old
-			 * (`stale = stale || p2stale`), so on a two-provider
-			 * desk a Codex reading last touched this morning must
-			 * not put amber over a Claude page that is fresh --
-			 * this page's numbers really are sound. What the tool
-			 * is doing is the other dot's business now.
-			 */
-			hc = lv_color_hex(stale_here() ? stale : live);
+		case USAGE_HC_STALE:
+			hc = lv_color_hex(stale);
 			break;
-		case USAGE_STATUS_DISCONNECTED:
+		case USAGE_HC_GREY:
 			hc = COL_GREY;
 			break;
-		case USAGE_STATUS_OK:
+		case USAGE_HC_LIVE:
 		default:
 			hc = lv_color_hex(live);
 			break;
 		}
-		lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-		lv_obj_set_style_bg_color(dot, hc, 0);
+		lv_obj_set_style_text_color(link_lbl, hc, 0);
 	}
 
 	if (!pip[0]) {
@@ -3921,7 +3940,7 @@ void usage_view_apply_theme(void)
 
 	render_gauges();	/* arcs, and refresh_provider1() with them */
 	refresh_rail();
-	usage_view_set_status(last_status);	/* hint, dot, pips */
+	usage_view_set_status(last_status);	/* hint, link icon, pips */
 	lv_obj_invalidate(gauge_scr);
 }
 

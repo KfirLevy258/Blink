@@ -2,13 +2,19 @@
 liveness. I/O (serial) is injected so this is unit-testable without hardware."""
 import datetime
 import hashlib
+import json
 import queue
 import sys
 import threading
 import time
 
+from pc import logo_stream
 from pc import ota as ota_mod
+from pc import wifi_ota
+from pc import private_file
 from pc import protocol
+from pc import settings_ops
+from pc import wifi_pair
 from pc import status_page
 from pc.version import PROTO_VERSION, RELEASE_VERSION
 
@@ -99,6 +105,31 @@ def _proto_for_log(proto) -> str:
     return "a newer protocol"
 
 
+# How long a join's key is kept for a late `up` (the board's verify window).
+JOIN_LATE_S = 60.0
+# net_link_why_text(NL_WHY_FORGET) in firmware/src/net_link.c, byte for byte.
+FORGET_FAIL_WHY = "Could not forget WiFi. Try again."
+# The two reasons a scan can fail with, from net_link_why_text(NL_WHY_SCAN)
+# and (NL_WHY_SELFTEST) in firmware/src/net_link.c, byte for byte. A board
+# whose cipher self-test failed refuses every scan for good, and used to say
+# "Could not scan. Try again." (and "Network not found" to a join), so the
+# owner retried forever; now it says the real reason, and the page shows it
+# at once instead of waiting out the 15 s scan timeout.
+SCAN_FAIL_WHYS = ("Could not scan. Try again.", "WiFi self-test failed")
+
+
+class _UsbLogoLink:
+    """LogoStream's link over the cable: its encode_checked lines go out
+    through the Bridge's own writer, which owns the serial port."""
+    kind = "usb"
+
+    def __init__(self, write_msg):
+        self._write = write_msg
+
+    def write(self, raw):
+        self._write(json.loads(raw))
+
+
 class Bridge:
     def __init__(self, write_msg, fetch_usage, now=time.monotonic,
                  set_preferred=None,
@@ -109,8 +140,12 @@ class Bridge:
                  status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
                  edit_answers=None, builder_ended=None, builder_open=None,
-                 sleep=time.sleep, refresh_ask=None, idle=None):
+                 sleep=time.sleep, board_ops=None, home=None, verify=None,
+                 flash_refusal=None, link=None, refresh_ask=None, idle=None):
         self._write = write_msg          # callable(dict)
+        self._logo = None                # (LogoStream, link) while one runs
+        self.logo_result = None          # (ok, why) of the last stream
+        self._logo_state = None          # the board's last logo_state
         # Seconds since the last keyboard or mouse input, or None: asked
         # only by greet's blank with no earlier line (_send_blank). None
         # here is pc/idle.seconds_idle, looked up when asked.
@@ -129,6 +164,13 @@ class Bridge:
         self._fetch_firmware = fetch_firmware or ota_mod.fetch_firmware
         self._manifest = None            # release offered to the board
         self._flash = flash_image        # callable(blob, version); owns the port
+        # Why a flash cannot happen on this link (esptool needs the cable),
+        # said before anything is downloaded or ota_begin is sent.
+        self._flash_refusal = flash_refusal
+        # The WifiLink when this connection is WiFi, else None. A flash then
+        # is a stream pumped from pump(), not a call that owns the port.
+        self._link = link
+        self._ota_stream = None
         # What the board says it is. Set from hello; None until it speaks.
         self._board_proto = None
         self._board_fw = None
@@ -240,6 +282,19 @@ class Bridge:
         self._quiet_until = None
         self._sleep = sleep
         self._store_until = None         # see THEME_SAVE_HOLD_S
+        # Settings-page ops (pc/settings_ops.py). `home` is ~/.blink, where
+        # the pairing file lives. _op is the one op in flight; _pending is
+        # the join waiting for its wifi_state. Only this thread touches them.
+        self._ops = board_ops
+        self._home = home
+        self._verify = verify or settings_ops.verify_board
+        self._op = None
+        self._join = None
+        self._scan = []
+        self._wifi_link = None
+        self._said_kid = False
+        if board_ops is not None:
+            board_ops.clear()
         # The burn line (see BURN_MIN_GAP_S), kept per page: provider ->
         # ((p, q, b) last put on the wire, when by self._now). A page with
         # nothing since the last greeting, or since its line stopped, has no
@@ -410,6 +465,12 @@ class Bridge:
                     self._resume_pending()
         if t in ("hello", "pref"):
             self._board_caps = protocol.board_caps(msg)
+            if self._ops is not None:
+                self._ops.note_device(
+                    id=self._wire_id(msg) or self._board_id,
+                    fw=msg.get("fw", self._board_fw),
+                    edition=msg.get("edition"),
+                    caps=sorted(self._board_caps), app=self._app_ver)
         if t == "pref":
             # The board's id, from firmware that puts it on pref (Addendum
             # 5). One without it says nothing either way: older firmware
@@ -422,9 +483,28 @@ class Bridge:
             # that restarts picks the choice back up without the user
             # touching anything.
             want = msg.get("provider")
+            # What the board holds, for the settings page's first paint
+            # (GET /api/device "pref"). Not from a refused pref_set (ok 0):
+            # that line carries the values the board kept, but the page
+            # hears the refusal through the op and need not be told twice.
+            if self._ops is not None and msg.get("ok") != 0:
+                self._ops.note_device(pref={k: msg[k] for k in (
+                    "provider", "focus", "bright", "view") if k in msg})
             if self._set_preferred and isinstance(want, str):
                 if self._set_preferred(want):
                     print(f"[bridge] main source: {want}", file=sys.stderr)
+            # The next pref answers the pref_set in flight: the protocol
+            # carries no request id, so a pref crossing it (a welcome's
+            # answer) can be taken for it. Harmless: it holds the board's
+            # values all the same. ok 0 is the board refusing a field.
+            if self._op is not None and self._op.kind == "pref":
+                if msg.get("ok") == 0:
+                    self._finish(self._op, error=(
+                        "The board did not accept that setting."))
+                else:
+                    self._finish(self._op, result={
+                        k: msg.get(k) for k in ("provider", "focus",
+                                                "bright", "view")})
             return
         if t == "hello":
             self._note_board(msg)
@@ -450,6 +530,23 @@ class Bridge:
             self._on_ota_query(cur)
         elif t == "ota_flash":
             self._on_ota_flash()
+        elif t == "ota_ack":
+            if self._ota_stream is not None:
+                self._ota_stream.ack(msg.get("off"), msg.get("err"))
+        elif t == "logo_ack":
+            if self._logo is not None:
+                self._logo[0].ack(msg.get("off"), msg.get("err"))
+        elif t == "logo_state":
+            if self._logo is not None:
+                self._logo[0].state(msg.get("present"))
+            state = {k: msg.get(k) for k in ("present", "bytes", "frames")}
+            if "err" in msg:
+                state["err"] = msg["err"]    # a failed erase (firmware review)
+            self._logo_state = state
+            if self._ops is not None:
+                self._ops.note_device(logo=state)
+            if self._op is not None and self._op.kind == "logo_remove":
+                self._finish(self._op, result=state)
         elif t == "theme_now":
             # Recorded, never answered here: whatever it makes owed goes out
             # on the next tick (see THEME_QUIET_S).
@@ -459,6 +556,10 @@ class Bridge:
                 self._theme.board_now(msg, board_id=self._board_id)
         elif t == "theme_edit":
             self._on_theme_edit()
+        elif t == "wifi_net":
+            self._on_wifi_net(msg)
+        elif t == "wifi_state":
+            self._on_wifi_state(msg)
         elif t == "answer":
             self._on_answer(msg)
         # unknown types ignored
@@ -756,6 +857,11 @@ class Bridge:
         drive the new firmware, and installing them the other way round would
         leave the newest firmware being driven by the oldest app.
         """
+        if self._ota_stream is not None:
+            return              # a second tap while the image is on its way
+        if self._logo is not None:
+            self._write(protocol.ota_error("a logo is being sent"))
+            return
         if self._manifest and self._app_update and self._self_update:
             version, artifact = self._app_update
             self._app_update = None
@@ -777,8 +883,11 @@ class Bridge:
         if not self._manifest:
             self._write(protocol.ota_error("nothing staged"))
             return
-        if self._flash is None:
+        if self._flash is None and self._link is None:
             self._write(protocol.ota_error("no flasher configured"))
+            return
+        if self._flash_refusal:
+            self._write(protocol.ota_error(self._flash_refusal))
             return
         try:
             blob = self._fetch_firmware()
@@ -820,8 +929,48 @@ class Bridge:
               file=sys.stderr)
         # Tell the board to remember what it is about to become, now that
         # nothing else can come between this and esptool taking it away.
+        if self._link is not None:
+            # Over WiFi the board writes its own slot 1 and acks as it goes;
+            # the image follows the ready ack, from pump() (spec S9.3-4). The
+            # board took its size from the ota_avail it consented to.
+            self._ota_stream = wifi_ota.WifiOtaStream(
+                blob, version, now=self._now)
+            self._write(protocol.ota_begin(version))
+            return
         self._write(protocol.ota_begin(version))
         self._flash(blob, version)
+
+    def ota_streaming(self) -> bool:
+        return self._ota_stream is not None
+
+    def ota_sealing(self) -> bool:
+        """ota_end is out and the board has not said no: it is verifying,
+        and its reboot drops the session. A reconnect then polls for it
+        (wait_for_link after_ota). False again if its verdict is an err."""
+        s = self._ota_stream
+        return s is not None and s.end_sent
+
+    def _pump_ota(self):
+        s = self._ota_stream
+        if s is None:
+            return
+        s.pump(self._link, self._write)     # a dead session raises: the loop reconnects
+        if s.went_quiet:
+            # End the session as a drop, with the stream left in sealing so the
+            # reconnect polls for the new image (after_ota); no failure said.
+            self._link.close()
+            raise OSError("link lost")
+        res = s.done()
+        if res is None:
+            return
+        self._ota_stream = None
+        why = res[1]
+        print(f"[bridge] ota: FAILED: {why}", file=sys.stderr)
+        self._write(protocol.ota_error(why))
+        if s.refused:
+            # The board holds no offer (it was reset since): say it again, so
+            # the row returns to "Install". Not a retry -- the owner taps.
+            self._on_ota_query(self._board_fw or "0.0.0")
 
     # --- themes ---
 
@@ -906,6 +1055,252 @@ class Bridge:
         self._run_async(work)
         self.pump()
 
+    # --- settings-page ops, on the serial thread ---
+
+    def _drain_ops(self):
+        if self._ops is None:
+            return
+        if self._op is not None and self._op.abandoned:
+            self._op = None             # a late `up` can still be saved
+        while self._op is None:
+            try:
+                op = self._ops.queue.get_nowait()
+            except queue.Empty:
+                return
+            if not op.abandoned:
+                self._start_op(op)
+
+    def _finish(self, op, result=None, error=None):
+        op.args = None
+        op.result, op.error = result, error
+        op.done.set()
+        if self._op is op:
+            self._op = None
+
+    def _start_op(self, op):
+        if op.kind in ("logo", "logo_remove", "pref"):
+            return self._start_board_op(op)
+        if not self._board_can(protocol.BOARD_CAP_WIFI):
+            return self._finish(op, error="This board cannot join WiFi.")
+        # Pairing is for the cable (S5.3). Fail closed: until the board has
+        # said which link it is on, it is not known to be USB.
+        if self._wifi_link != "usb":
+            return self._finish(op, error=(
+                "Plug the board in with the cable to change its WiFi."))
+        if op.kind == "join" and self._board_id is None:
+            return self._finish(op, error=(
+                "The board has not said which one it is yet. Try again."))
+        self._op = op
+        if op.kind == "scan":
+            self._scan = []
+            self._write(protocol.wifi_scan())
+        elif op.kind == "join":
+            ssid, password = op.args
+            key = wifi_pair.new_key()
+            # Outlives the op by the verify window (D65): an `up` after the
+            # page stopped waiting must still save the key the board holds.
+            self._join = {"op": op, "key": key, "kid": wifi_pair.kid(key),
+                          "steps": [], "joining": False,
+                          "board_id": self._board_id,
+                          "until": self._now() + JOIN_LATE_S}
+            self._write(protocol.wifi_set(ssid, password, key))
+            op.args = ssid = password = None
+        else:
+            self._write(protocol.wifi_forget())
+
+    def _start_board_op(self, op):
+        """The logo and the preferences: either link, the board's caps
+        decide (S15.2, S15.3). Each holds the op slot until the board's
+        answer: logo_state for the logo ops, pref for pref_set."""
+        if op.kind == "pref":
+            if not self._board_can(protocol.BOARD_CAP_PREF):
+                return self._finish(op, error=(
+                    "This board's firmware cannot take preferences from"
+                    " here. Update it first."))
+            self._op = op
+            self._write(op.args)
+            return
+        if not self._board_can(protocol.BOARD_CAP_LOGO):
+            return self._finish(op, error=(
+                "This board's firmware cannot change its logo. Update it"
+                " first."))
+        if self._logo is not None:
+            return self._finish(op, error="A logo is already being sent.")
+        if self.ota_streaming():
+            # Two flash writers on one WiFi session, on the board's tightest
+            # heap (final review, daemon minor 4).
+            return self._finish(op, error="An update is being installed.")
+        if op.kind == "logo_remove":
+            self._op = op
+            self._write(protocol.logo_remove())
+            return
+        link = self._link if self._link is not None else _UsbLogoLink(
+            self._write)
+        try:
+            self.start_logo(op.args, link)
+        except ValueError as e:
+            return self._finish(op, error=str(e))
+        op.args = None
+        self._op = op
+
+    def _on_wifi_net(self, msg):
+        op = self._op
+        if op is None or op.kind != "scan":
+            return
+        try:
+            # The board ends an empty scan with i=0, n=0 and no network.
+            n = int(msg["n"])
+            last = int(msg["i"]) + 1 >= n
+            if n > 0:
+                self._scan.append({"s": msg["s"], "r": msg["r"],
+                                   "sec": msg["sec"]})
+        except (KeyError, TypeError, ValueError):
+            return
+        if last:
+            self._finish(op, result=self._scan)
+
+    def _on_wifi_state(self, msg):
+        self._wifi_link = msg.get("link")
+        if self._ops is not None:
+            self._ops.note_state(msg)
+        op, st = self._op, msg.get("st")
+        usb = msg.get("link") == "usb"
+        if (op is not None and op.kind == "scan" and st == "fail"
+                and msg.get("why") in SCAN_FAIL_WHYS):
+            # The radio refused the scan and the board sends no wifi_net at
+            # all; without this the page waited out 15 s and said "did not
+            # answer", or showed an empty list as "no networks". The text
+            # is one of the two fixed sentences above, never the wire's own.
+            return self._finish(op, error=msg["why"])
+        if op is not None and op.kind == "forget":
+            # Only the board's "off" answers a forget: an earlier state still
+            # in flight is not the answer, and the pairing goes with it.
+            if st == "off":
+                wifi_pair.remove(self._home)
+                self._finish(op, result=dict(self._ops.state()))
+            elif st == "fail" and msg.get("why") == FORGET_FAIL_WHY:
+                # Only the firmware's forget failure (NL_WHY_FORGET): a stored
+                # rejoin failing ("not found") can already be on the wire when
+                # wifi_forget is written, and must not end the op early.
+                # cfg_clear_pairing failed on the board: its sector may still
+                # hold the password and key. Say so now rather than let the
+                # page time out and blame a silent board. The PC pairing
+                # stays: the board may still hold the matching key.
+                print("[wifi] the board could not erase its WiFi settings",
+                      file=sys.stderr)
+                self._finish(op, error=(
+                    "The board could not erase its WiFi settings. Try again."))
+            return
+        j = self._join
+        if j is not None and self._now() >= j["until"]:
+            j = self._join = None
+        if j is not None:
+            jop = j["op"] if j["op"] is op else None
+            if st == "joining":
+                j["joining"] = True
+                if "sent" not in j["steps"]:
+                    j["steps"].append("sent")
+            elif st == "fail" and j["joining"] and jop is not None:
+                self._join = None
+                self._finish(jop, result={"state": self._ops.state(),
+                                          "steps": j["steps"]})
+            elif st == "up" and usb and msg.get("kid") == j["kid"]:
+                self._joined(j, jop, msg)
+            return
+        if not usb or self._home is None or self._board_id is None:
+            return
+        if "kid" not in msg and st != "off":
+            return
+        pair = wifi_pair.load(self._home)
+        # Another board on the cable is not this one forgetting us.
+        if (pair is not None and pair["board_id"] == self._board_id
+                and msg.get("kid") != pair["kid"]):
+            wifi_pair.remove(self._home)
+            if not self._said_kid:
+                self._said_kid = True
+                print("[wifi] the board was set up from another computer or"
+                      " forgot this one; plug it in and tap Open on PC on the board",
+                      file=sys.stderr)
+
+    def _joined(self, j, op, msg):
+        key = j["key"]
+        ip, port = msg.get("ip"), msg.get("port")
+        self._join = None
+        if op is not None:
+            self._op = None             # the verify below answers the op
+        if "sent" not in j["steps"]:
+            j["steps"].append("sent")
+        j["steps"].append("joined")
+        err = None
+        if not (isinstance(ip, str) and ip and type(port) is int
+                and 0 < port < 65536):
+            err = "The board gave an address this computer cannot use."
+        else:
+            try:
+                wifi_pair.save(self._home, j["board_id"], key, ip, port)
+            except private_file.NotPrivate:
+                err = "Could not save the pairing safely."
+            except (OSError, ValueError, TypeError):
+                err = "Could not save the pairing."
+        if err:
+            print("[wifi] could not save the pairing", file=sys.stderr)
+            if op is not None:
+                op.args = None
+                op.result, op.error = None, err
+                op.done.set()
+            return
+        if op is None:
+            return                      # saved late; the page gave up
+        state = self._ops.state()
+
+        def work():
+            try:
+                self._verify(ip, port, key)
+                steps = j["steps"] + ["proved", "encrypted"]
+                res = {"state": state, "steps": steps}
+            except Exception as e:
+                # Any failure, not only OSError: this thread has no one to
+                # re-raise to, and an op left unanswered costs the page 30 s.
+                # The class only; an OSError's text can carry the address.
+                print("[wifi] the board joined but did not answer over WiFi"
+                      f" ({type(e).__name__})", file=sys.stderr)
+                res = {"state": state, "steps": j["steps"], "problem": (
+                    "The board joined, but this computer could not reach it"
+                    " over WiFi.")}
+            op.result = res
+            op.args = None
+            op.done.set()
+        self._run_async(work)
+
+    def start_logo(self, blob, link):
+        """Stream a logo image (pc/logo_stream.py) over `link`, pumped from
+        pump() like an OTA. ValueError before anything is sent when the image
+        is over the board's limit. `link` is the WifiLink, or whatever has
+        write(raw) for a serial port (kind defaults to usb)."""
+        self._logo = (logo_stream.LogoStream(
+            blob, getattr(link, "kind", "usb"), now=self._now), link)
+        self.logo_result = None
+
+    def logo_streaming(self) -> bool:
+        return self._logo is not None
+
+    def _pump_logo(self):
+        if self._logo is None:
+            return
+        stream, link = self._logo
+        stream.pump(link)           # a dead link raises: the stream is dropped
+        res = stream.done()         # with the connection, never sealed
+        if res is not None:
+            self._logo, self.logo_result = None, res
+            print("[bridge] logo: " + ("sent" if res[0] else "FAILED: " + res[1]),
+                  file=sys.stderr)
+            op = self._op
+            if op is not None and op.kind == "logo":
+                if res[0]:
+                    self._finish(op, result=self._logo_state)
+                else:
+                    self._finish(op, error=res[1])
+
     def pump(self):
         """Write any theme_edit answers that are ready, and an ask a look
         on run_async's thread found due. Called by the daemon
@@ -917,6 +1312,9 @@ class Bridge:
             except queue.Empty:
                 break
             self._write(protocol.theme_edit_reply(ok))
+        self._drain_ops()
+        self._pump_ota()
+        self._pump_logo()
         # After any answer, so a board that asked again as the old builder
         # ended hears "ok" for the new one before "done" for the old: its
         # done is ignored while an ask is in flight, never the other way.

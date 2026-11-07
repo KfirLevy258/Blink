@@ -185,6 +185,7 @@ def test_bare_theme_serves_the_builder_and_opens_it(monkeypatch, capsys):
             r.read()
             c.request("POST", "/api/save", body=json.dumps({"id": 9}),
                       headers={"Cookie": cookie,
+                               "Origin": f"http://127.0.0.1:{link.port}",
                                "Content-Type": "application/json"})
             c.getresponse().read()
             c.close()
@@ -211,7 +212,8 @@ def test_bare_theme_with_no_browser_prints_the_link(monkeypatch, capsys):
             cookie = r.getheader("Set-Cookie").split(";", 1)[0]
             r.read()
             c.request("POST", "/api/cancel", body=b"",
-                      headers={"Cookie": cookie})
+                      headers={"Cookie": cookie,
+                               "Origin": f"http://127.0.0.1:{link.port}"})
             c.getresponse().read()
             c.close()
         threading.Timer(0.2, cancel).start()
@@ -316,7 +318,8 @@ def test_bare_theme_says_it_is_opening_and_gives_the_link(monkeypatch,
             cookie = r.getheader("Set-Cookie").split(";", 1)[0]
             r.read()
             c.request("POST", "/api/cancel", body=b"",
-                      headers={"Cookie": cookie})
+                      headers={"Cookie": cookie,
+                               "Origin": f"http://127.0.0.1:{link.port}"})
             c.getresponse().read()
             c.close()
         threading.Timer(0.2, cancel).start()
@@ -452,7 +455,8 @@ def test_an_old_board_is_named_before_the_builder_opens(monkeypatch, capsys):
             cookie = r.getheader("Set-Cookie").split(";", 1)[0]
             r.read()
             c.request("POST", "/api/cancel", body=b"",
-                      headers={"Cookie": cookie})
+                      headers={"Cookie": cookie,
+                               "Origin": f"http://127.0.0.1:{link.port}"})
             c.getresponse().read()
             c.close()
         threading.Timer(0.2, cancel).start()

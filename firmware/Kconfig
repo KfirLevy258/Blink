@@ -86,6 +86,77 @@ config BLINK_FATAL_SELFTEST_AT_S
 	help
 	  Under 30 to test the halt, over 30 to test the reboot.
 
+config BLINK_TEST_NEVER_HEALTHY
+	bool "Never report the image healthy (bench builds only)"
+	help
+	  BENCH BUILDS ONLY. NEVER SHIP THIS.
+
+	  Never sets ota_health, so a test boot reaches its 90 s deadline and reverts.
+	  Prints "[test] never healthy" at boot, so tools/lib_selftest.sh can refuse a release
+	  that carries it (spec S9; the failure windows of a WiFi update that
+	  nothing else can reach).
+
+	  Set it on the command line, in a build directory of its own -- a -D
+	  value stays in that directory's CMake cache, and a later plain build
+	  there would still carry it. A bare -DBLINK_TEST_...=1 is a CMake
+	  variable that reaches no CONFIG_ symbol:
+
+	    west build --sysbuild -d build-test -b esp32_devkitc/esp32/procpu . -- \
+	      -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
+	      -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.blink/ota_signing_key_p256.pem\"" \
+	      -Dfirmware_CONFIG_BLINK_TEST_NEVER_HEALTHY=y
+
+	  Grep the build's .config for the symbol and the console for the line
+	  before every trial. release.sh refuses it.
+
+config BLINK_TEST_CONFIRM_FAILS
+	bool "Make the confirm call fail (bench builds only)"
+	help
+	  BENCH BUILDS ONLY. NEVER SHIP THIS.
+
+	  boot_write_img_confirmed() reports failure, so the board logs [ota] confirm failed,
+	  keeps the watchdog and retries until the deadline reverts it.
+	  Prints "[test] confirm fails" at boot, so tools/lib_selftest.sh can refuse a release
+	  that carries it (spec S9; the failure windows of a WiFi update that
+	  nothing else can reach).
+
+	  Set it on the command line, in a build directory of its own -- a -D
+	  value stays in that directory's CMake cache, and a later plain build
+	  there would still carry it. A bare -DBLINK_TEST_...=1 is a CMake
+	  variable that reaches no CONFIG_ symbol:
+
+	    west build --sysbuild -d build-test -b esp32_devkitc/esp32/procpu . -- \
+	      -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
+	      -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.blink/ota_signing_key_p256.pem\"" \
+	      -Dfirmware_CONFIG_BLINK_TEST_CONFIRM_FAILS=y
+
+	  Grep the build's .config for the symbol and the console for the line
+	  before every trial. release.sh refuses it.
+
+config BLINK_TEST_HANG_AFTER_BOOT
+	bool "Hang after the first panel (bench builds only)"
+	help
+	  BENCH BUILDS ONLY. NEVER SHIP THIS.
+
+	  Spins with interrupts off once the first panel is up, so the watchdog
+	  revert of an unconfirmed image is exercised.
+	  Prints "[test] hang after boot" at boot, so tools/lib_selftest.sh can refuse a release
+	  that carries it (spec S9; the failure windows of a WiFi update that
+	  nothing else can reach).
+
+	  Set it on the command line, in a build directory of its own -- a -D
+	  value stays in that directory's CMake cache, and a later plain build
+	  there would still carry it. A bare -DBLINK_TEST_...=1 is a CMake
+	  variable that reaches no CONFIG_ symbol:
+
+	    west build --sysbuild -d build-test -b esp32_devkitc/esp32/procpu . -- \
+	      -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0 \
+	      -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.blink/ota_signing_key_p256.pem\"" \
+	      -Dfirmware_CONFIG_BLINK_TEST_HANG_AFTER_BOOT=y
+
+	  Grep the build's .config for the symbol and the console for the line
+	  before every trial. release.sh refuses it.
+
 config BLINK_TOUCH_INJECT
 	bool "Let the PC drive the touch panel (bench builds only)"
 	depends on INPUT_XPT2046
@@ -122,6 +193,23 @@ config BLINK_TOUCH_INJECT
 	  (or --edition codex: the edition is stamped on the unit as on any
 	  burn). burn.sh refuses this build without --bench, and release.sh and
 	  flash_encrypted.sh refuse it outright (tools/lib_selftest.sh).
+
+config BLINK_WIFI_LINK
+	bool "The WiFi link: the station half of the radio"
+	depends on WIFI_ESP32 && NET_DHCPV4 && NET_MGMT_EVENT
+	default y
+	help
+	  Scan, join and take the radio down again (src/net_link.c, spec
+	  S5.1), for the encrypted WiFi link to the daemon. In every image:
+	  the Phase 0 RAM gate passed with one image for all boards
+	  (docs/research/2026-11-wifi-ram-spike.md, Verdict). The driver
+	  initialises at boot either way; an unpaired board never brings the
+	  interface up (D42).
+
+	  Deliberately NOT the deleted BLINK_WIFI_MODE, the standalone mode
+	  that fetched usage over the air. tools/release.sh still refuses a
+	  build with that symbol set, and a new name keeps that guard meaning
+	  what it says.
 
 endmenu
 

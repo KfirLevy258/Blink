@@ -53,7 +53,8 @@
  *   PC    {"t":"ui_state"}
  *   board {"t":"ui_state","scr":..,"ov":..,"modal":..,"busy":0|1,
  *          "theme":N,"stored":N,"tp":N,"focus":..,"bl":N,"edit":..,
- *          "slp":0|1,"nt":none|sleep|ota|other,"gf":off|session|weekly}
+ *          "slp":0|1,"nt":none|sleep|ota|other,"gf":off|session|weekly,
+ *          "ln":wifi|usb|none}
  *
  * Screen coordinates throughout, 320 x 240, origin top left.
  */

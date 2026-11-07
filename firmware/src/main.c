@@ -25,11 +25,16 @@
 #include "ui_settings.h"
 #include "ui_anim.h"
 #include "ota.h"
+#include "logo_write.h"
 #include "upd_tap.h"
 #include "whatsnew.h"
 #include "ui_touchfx.h"
 #include "version.h"
 #include "mem_stats.h"
+#include "wl_crypto.h"
+#include "net_link.h"
+#include "wl_heap.h"
+#include "wl_server.h"
 
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
@@ -111,13 +116,41 @@ static void panel_fix_madctl(void)
 /* ---- OTA boot-side: test-boot self-confirm, else MCUboot reverts ---- */
 
 static bool ota_test_boot;
-static bool ota_health;		/* set once usage has arrived over USB */
+static bool ota_health;		/* set once usage has arrived, over either link */
+static int64_t ota_confirm_log_ms;
 static int64_t ota_confirm_deadline;
 static const struct device *wdt;
 static int wdt_chan = -1;
 
+/* The running image has not confirmed itself: slot 1 holds the only way back
+ * and a WiFi update would erase it (D38). ota_net_begin refuses on this. */
+bool ota_unconfirmed(void)
+{
+	return ota_test_boot;
+}
+
+/* usage_view_have_data() is link-agnostic, so usage over WiFi counts. */
+static void ota_mark_healthy(void)
+{
+	if (!IS_ENABLED(CONFIG_BLINK_TEST_NEVER_HEALTHY)) {
+		ota_health = true;
+	}
+}
+
 static void ota_boot_begin(void)
 {
+	/* Bench builds only (firmware/Kconfig). A fixed line each, so the
+	 * binary carries a marker tools/lib_selftest.sh can refuse a release
+	 * for, and the console says which failure window is being exercised. */
+	if (IS_ENABLED(CONFIG_BLINK_TEST_NEVER_HEALTHY)) {
+		printk("[test] never healthy\n");
+	}
+	if (IS_ENABLED(CONFIG_BLINK_TEST_CONFIRM_FAILS)) {
+		printk("[test] confirm fails\n");
+	}
+	if (IS_ENABLED(CONFIG_BLINK_TEST_HANG_AFTER_BOOT)) {
+		printk("[test] hang after boot\n");
+	}
 	if (boot_is_img_confirmed()) {
 		return;
 	}
@@ -151,14 +184,32 @@ static void ota_boot_pump(void)
 		wdt_feed(wdt, wdt_chan);	/* alive != healthy; deadline judges health */
 	}
 	if (ota_health) {
-		boot_write_img_confirmed();
-		ota_test_boot = false;
-		if (wdt_chan >= 0) {
-			wdt_disable(wdt);
-			wdt_chan = -1;
+		/* The return value was never looked at, so a confirm that did
+		 * not land still printed "image confirmed", disarmed the
+		 * watchdog and stopped trying -- and MCUboot reverted at the
+		 * next reset with nothing on the console saying why. On failure:
+		 * say so (once a second, not once a pass), keep the watchdog and
+		 * try again on the next pump. A confirm that never lands then
+		 * ends in the revert it would have ended in anyway. */
+		int rc = IS_ENABLED(CONFIG_BLINK_TEST_CONFIRM_FAILS) ?
+			 -EIO : boot_write_img_confirmed();
+
+		if (rc != 0) {
+			int64_t now = k_uptime_get();
+
+			if (now - ota_confirm_log_ms >= 1000) {
+				ota_confirm_log_ms = now;
+				printk("[ota] confirm failed\n");
+			}
+		} else {
+			ota_test_boot = false;
+			if (wdt_chan >= 0) {
+				wdt_disable(wdt);
+				wdt_chan = -1;
+			}
+			printk("[ota] image confirmed\n");
+			return;
 		}
-		printk("[ota] image confirmed\n");
-		return;
 	}
 	if (k_uptime_get() > ota_confirm_deadline) {
 		printk("[ota] not healthy within 90 s -- rebooting to revert\n");
@@ -260,7 +311,7 @@ static void usb_anim_pump(void)
 {
 	proto_service();
 	if (usage_view_have_data()) {
-		ota_health = true;	/* daemon delivered usage */
+		ota_mark_healthy();	/* daemon delivered usage */
 	}
 	ota_boot_pump();
 }
@@ -300,6 +351,20 @@ static bool reading_moved_again(void)
 				       usage_freshness_activity());
 }
 
+/* The leak mitigation (wl_heap.h): one clean restart, when the WiFi blob has
+ * eaten the heap and nothing would notice. */
+static void heap_restart_if_due(void)
+{
+	if (IS_ENABLED(CONFIG_BLINK_WIFI_LINK) &&
+	    wl_heap_reboot_due(net_link_heap_free(), wl_server_session_up(),
+			       ota_blocks_sleep() || logo_write_active(),
+			       ui_settings_busy())) {
+		printk("[wifi] heap low, restarting\n");
+		k_msleep(50);	/* let the console drain */
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+}
+
 static void run_usb(void)
 {
 	int64_t last_tick = k_uptime_get();
@@ -315,11 +380,22 @@ static void run_usb(void)
 	 * stale by now; ui_settings.h explains. Throw it away. */
 	ui_settings_drop_pending();
 
+	/* The first panel is up. Spin with interrupts off and the watchdog fed
+	 * by nobody: the unconfirmed image must be reverted by the watchdog, the
+	 * one failure the 90 s deadline cannot reach (bench builds only, and only on
+	 * a test boot: on a confirmed image there is no watchdog to revert it). */
+	if (IS_ENABLED(CONFIG_BLINK_TEST_HANG_AFTER_BOOT) && ota_test_boot) {
+		(void)irq_lock();
+		for (;;) {
+		}
+	}
+
 	while (1) {
 		proto_service();
+		heap_restart_if_due();
 
 		if (usage_view_have_data()) {
-			ota_health = true;	/* daemon delivered usage */
+			ota_mark_healthy();	/* daemon delivered usage */
 		}
 		ota_boot_pump();
 		fatal_pump();
@@ -390,12 +466,13 @@ static void run_usb(void)
 		}
 
 		/*
-		 * OTA, via the daemon. The board has no network of its own, so
-		 * ota_check()/ota_install() cannot run and the update row used
-		 * to do nothing at all when tethered (user-reported
-		 * 2026-08-20). The daemon has both an
-		 * internet connection and this link, so it does the fetching and
-		 * pushes the image down; see the OTA block in proto.c.
+		 * OTA, via the daemon. The board never fetches anything itself
+		 * (the HTTPS updater is deleted), and the update row used to do
+		 * nothing at all when tethered (user-reported 2026-08-20). The
+		 * daemon has both an internet connection and this link, so it
+		 * does the fetching: over USB it writes slot 0 with esptool, over
+		 * WiFi it streams the image and ota_net.c writes slot 1; see the
+		 * OTA blocks in proto.c.
 		 *
 		 * Gated on the daemon TALKING, not on it having delivered
 		 * usage. Those are unrelated: the usage endpoint is
@@ -552,6 +629,8 @@ static void run_usb(void)
 		if (now - last_tick >= 1000) {
 			usage_view_tick_1s();
 			last_tick = now;
+			/* Which glyph the header icon draws (S5.7). */
+			usage_view_set_link(cfg_paired() ? proto_link_kind() : 0);
 
 			int hh = -1, mm = 0;
 
@@ -585,6 +664,21 @@ int main(void)
 		return -1;
 	}
 
+	/* The WiFi link's cipher against RFC 8439 2.8.2 and RFC 5869 case 1,
+	 * once, before the network thread exists and after the allocator above
+	 * (HMAC and HKDF allocate). A build whose mbedTLS port or configuration
+	 * got the cipher wrong would otherwise look like a pairing that never
+	 * works, the same symptom as a wrong key; this names it on the console
+	 * instead, and net_link refuses every scan and join from then on, so a
+	 * board that fails never brings the radio up and its Connection screen
+	 * says why (spec S5.4, D47). Nothing can ask for the radio before this:
+	 * every request comes from proto, which starts below. The USB panel is
+	 * unaffected either way. */
+	if (IS_ENABLED(CONFIG_BLINK_WIFI_LINK) && wl_crypto_selftest() != 0) {
+		printk("[wifi] selftest failed\n");
+		net_link_refuse_selftest();
+	}
+
 	if (!device_is_ready(display_dev)) {
 		printk("[usage] display not ready\n");
 		return -1;
@@ -594,6 +688,13 @@ int main(void)
 	ui_touchfx_init();	/* light touch-echo feedback on every press */
 
 	cfg_init();
+	/* The network thread, after cfg_init (it reads the pairing) and only
+	 * when the self-test passed (D24). It owns the boot join and every
+	 * rejoin, paired or not (D47: an unpaired board's thread still serves a
+	 * scan or a join the page asks for). */
+	if (IS_ENABLED(CONFIG_BLINK_WIFI_LINK)) {
+		(void)wl_server_start();	/* -EPERM after a failed self-test */
+	}
 	/* The stored theme, before a single screen exists, so every screen is
 	 * born in it and nothing has to be repainted at boot. */
 	ui_theme_init();

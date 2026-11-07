@@ -66,6 +66,7 @@ uint8_t fake_flash[FAKE_FLASH_SIZE];
 long fake_write_budget = -1;
 int fake_writes;
 int fake_erase_rc;
+int fake_erase_pass;
 
 static int stored_id(void)
 {

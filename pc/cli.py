@@ -34,7 +34,7 @@ from typing import NamedTuple
 from pc import (claude_home, install_codex_hooks, install_hooks,
                 install_statusline, ota, protocol, status_page,
                 statusline_source, update, usage_refresh, user_config,
-                win_driver, wsl)
+                wifi_pair, win_driver, wsl)
 from pc import theme as theme_mod
 from pc import theme_server
 # Eagerly, unlike the other providers, which are imported inside the functions
@@ -4302,6 +4302,9 @@ def _install_steps_run(home, rec, named, kept_wsl, step, down):
     _note_if_no_claude_code(desk)
     _warn_if_claude_too_old(desk)
     _hint_wsl(desk)
+    # Nothing opens here (D4): the page opens from the board or this command.
+    print("To set up WiFi and the display, press Open on PC on the board"
+          " or run: blink settings")
     return 0
 
 
@@ -5256,6 +5259,14 @@ def cmd_uninstall(_args) -> int:
     # above is the single-slot file this replaced; it is still on the list so
     # an install that predates the directory leaves nothing behind.
     _rm_state_dir()
+    # The WiFi pairing key: a reinstall starts unpaired, and an uninstalled
+    # Blink leaves no secret behind. Then the private directory, if that
+    # left it empty (it is the only thing in it today).
+    wifi_pair.remove(blink_home())
+    try:
+        os.rmdir(os.path.join(blink_home(), "private"))
+    except OSError:
+        pass
     if wsl_home is not None and not wsl_left:
         _rm_wsl_drop(wsl_home)
     elif wsl_left:
@@ -5715,6 +5726,9 @@ def cmd_status(args) -> int:
         print("Bridge      " + bridge_status)
         bridge_running = bridge_status.startswith("running")
 
+    from pc import link_status, wifi_pair
+    print(link_status.status_line(link_status.read(blink_home()),
+                                  wifi_pair.load(blink_home()) is not None))
     print(f"App         {RELEASE_VERSION}")
     for line in _board_lines():
         print(line)
@@ -6919,21 +6933,10 @@ def cmd_config(args) -> int:
             # reason (cost, or a day of failures) that is on disk as well,
             # and the watch would otherwise stay off for it.
             try:
-                native = claude_home.current().kind == claude_home.NATIVE
-            except Exception:
-                native = False
-            try:
-                lost = native and usage_refresh.locate_claude(
-                    home, _home()) is None
-            except Exception:
-                lost = False
-            try:
-                usage_refresh.clear_off(home, missing=lost)
+                usage_refresh.switch_on(home, _home())
             except OSError as e:
                 print(f"Could not clear the earlier reason it was off: {e}")
                 return 1
-            if native:
-                _remember_claude()
     print(f"{name}: {state(setting)}")
     if value is not None:
         for line in (setting.said_on if value == "on" else setting.said_off):
@@ -7043,7 +7046,7 @@ def _theme_builder(home) -> int:
               " app or from another blink theme. Use its tab, or close it"
               " first; it stops by itself after ten minutes with no change."
               " If it is the app's, the board shows Editing on your"
-              " computer while it is open, and Edit on computer comes back"
+              " computer while it is open, and Open on PC comes back"
               " once its tab is closed.")
         return 1
     try:
@@ -7056,7 +7059,7 @@ def _theme_builder(home) -> int:
         print(f"The theme builder could not start: {e}")
         return 1
     server.start()
-    url = server.new_link()
+    url = server.new_link(panel="look")
     # The link is printed only here, to the person's own terminal: it is the
     # one-time key to the server, and the daemon never prints it.
     print("Opening the theme builder in your browser.")
@@ -7171,6 +7174,55 @@ def cmd_theme(args) -> int:
     return 0
 
 
+SETTINGS_WAIT_S = 10
+
+
+def cmd_settings(args, opener=None, clock=time.monotonic,
+                 sleep=time.sleep) -> int:
+    """`blink settings`: ask the daemon for the page, then open it from here.
+
+    The daemon only registers the one-time token and records its port with
+    our request id (D37, D50); the browser is opened by this process, where
+    a stuck opener stalls the person watching and not the serial loop."""
+    from pc import private_file, settings_request
+    home = blink_home()
+    panel = getattr(args, "panel", None) or "connect"
+    try:
+        token, rid = settings_request.write_request(home, panel)
+    except (OSError, private_file.NotPrivate) as e:
+        print(f"Could not leave the request for the app: {e}")
+        return 1
+    start = clock()
+    while True:
+        # The id, not the port record alone: a builder the board opened
+        # earlier leaves a record before this token is registered.
+        if theme_mod.read_builder_ack(home) == rid:
+            port = theme_mod.read_builder(home)
+            if port is not None:
+                break
+        if clock() - start >= SETTINGS_WAIT_S:
+            try:
+                untouched = private_file.remove_private(
+                    home, settings_request.REQUEST_FILE)
+            except OSError:
+                untouched = True
+            if untouched:
+                print("The app is not running. Run blink install, or blink"
+                      " run in another terminal.")
+            else:
+                # Taken but never answered: a running app that is busy.
+                print("The app did not answer. Try blink settings again in"
+                      " a moment.")
+            return 1
+        sleep(0.2)
+    url = f"http://127.0.0.1:{port}/open?k={token}&panel={panel}"
+    print("Opening the settings in your browser.")
+    print(f"If it does not open, go to this link on this computer: {url}")
+    if not (opener or theme_server.open_url)(url):
+        print("No browser opened here, so use the link above.")
+    return 0
+
+
 def cmd_run(args) -> int:
     """The daemon. This is what the login service starts.
 
@@ -7245,6 +7297,11 @@ def main(argv=None) -> int:
                               " blink theme list, a BT1. share code, or"
                               " key=value pairs (bg text gauge1 gauge2 low"
                               " mid high width ends dot arcs)")
+    settings_p = sub.add_parser(
+        "settings", help="Open the settings page (WiFi, display, board)")
+    settings_p.add_argument("panel", nargs="?",
+                            choices=["look", "connect", "board"],
+                            help="Which panel to open (default: connect)")
     run_p = sub.add_parser("run", help="Run the bridge in the foreground")
     run_p.add_argument("--port", default=None,
                        help="Serial port (default: find the board)")
@@ -7266,6 +7323,7 @@ def main(argv=None) -> int:
         "provision": cmd_provision,
         "config": cmd_config,
         "theme": cmd_theme,
+        "settings": cmd_settings,
         "run": cmd_run,
     }[args.cmd](args)
 

@@ -10,6 +10,7 @@ tests/support/builder_dom.js, and each was checked to fail on the code the
 review read.
 """
 import re
+from pathlib import Path
 
 import pytest
 
@@ -141,9 +142,9 @@ def test_every_control_rule_is_at_least_44_px_tall():
     page = theme_server.page()
     css = page[page.index("<style>"):page.index("</style>")]
     rules = _rules(css)
-    for control in (".btn", ".seg button", ".slot input[type=color]",
-                    ".slot input[type=text]", ".paste input",
-                    ".slider input", ".preset"):
+    for control in (".btn", ".seg button", ".chips button", ".tabs button",
+                    ".crow .pick", ".crow .hex", ".paste input", ".try input",
+                    ".link", ".th"):
         heights = [max(_px(d.get("min-height")) or 0, _px(d.get("height")) or 0)
                    for sels, d in rules if control in sels]
         assert heights and max(heights) >= 44, (control, heights)
@@ -884,15 +885,15 @@ def test_nothing_is_previewed_before_the_state_answers():
     the form is off and says it is waiting until the state is here."""
     r = builder_page.run("""
     await advance(10);
-    const off = """ + _FORM + """.every(e => e.disabled);
+    const off = """ + _FORM + """.filter(e => e.id !== 'cancel').every(e => e.disabled);
     const busy = document.querySelector('main').getAttribute('aria-busy');
-    const ocean = document.querySelectorAll('#presets button').find(b => b.querySelector('.pn').textContent === 'Ocean');
+    const ocean = document.querySelectorAll('#presets button').find(b => b.querySelector('.nm').textContent === 'Ocean');
     ocean.fire('click');         // arriving past disabled, as Save's does
     $('t-low').value = '#123456'; $('t-low').fire('input');
     await advance(300);
     const early = requests.filter(q => q.path === '/api/preview').length;
     """ + _RELEASE_SYNTHWAVE + """
-    const on = """ + _FORM + """.every(e => !e.disabled);
+    const on = """ + _FORM + """.every(e => !e.disabled || e.dataset.soon);
     const busyAfter = document.querySelector('main').getAttribute('aria-busy');
     const bar = $('status-text').textContent;
     preset('Ocean'); await advance(300);
@@ -954,7 +955,7 @@ def test_a_handler_dispatched_past_disabled_before_the_state_does_nothing():
     r = builder_page.run(f"""
     await advance(10);
     const by = (sel, key, v) => document.querySelectorAll(sel).find(b => b.dataset[key] === v);
-    document.querySelectorAll('#presets button').find(b => b.querySelector('.pn').textContent === 'Ocean').fire('click');
+    document.querySelectorAll('#presets button').find(b => b.querySelector('.nm').textContent === 'Ocean').fire('click');
     $('c-low').value = '#123456'; $('c-low').fire('input');
     $('t-mid').value = '#654321'; $('t-mid').fire('input');
     by('[data-m]', 'm', 'gauge').fire('click');
@@ -1287,3 +1288,1316 @@ def test_the_dim_line_wears_the_severity_colour_from_60(pct, slot):
     else:
         assert line[1].lower() == {"high": "#ff1900", "mid": "#ba8107"}[slot]
     assert colours["high"].lower() == "#ff1900"
+
+
+# ----------------------------------------------- the approved page (Task 4.2)
+#
+# One test per line of the design spec's section 4 (docs/design/settings-page.md).
+
+PERSISTENT = {"/api/state": {"status": 200, "body": {
+    "saved": {"id": 0}, "draft": None, "persistent": True}}}
+_CHIPS = "document.querySelectorAll('[data-panel]')"
+_SHOWN = "(id) => $(id).getAttribute('hidden') === null"
+
+
+def test_opening_state_is_board_status_and_three_controls():
+    markup, _ = builder_page.page_parts()
+    r = builder_page.run(f"""
+    await advance(300);
+    const shown = {_SHOWN};
+    const ctl = document.querySelectorAll('[aria-controls][aria-pressed]');
+    return {{ h1: document.querySelectorAll('h1').length,
+             ctl: ctl.map(b => [b.textContent, b.getAttribute('aria-pressed'), b.getAttribute('aria-controls')]),
+             open: ['pLook', 'pCust', 'pConn', 'pBoard'].filter(shown),
+             role: $('hero').getAttribute('role'), title: $('heroTitle').textContent }};
+    """, SAVED_DARK)
+    assert r["h1"] == 1
+    assert r["ctl"] == [["Look", "false", "pLook pCust"],
+                        ["Connect", "false", "pConn"],
+                        ["Board", "false", "pBoard"]]
+    assert r["open"] == [] and r["role"] == "img"
+    assert r["title"].startswith("Board preview, Dark theme: Claude, session 42%")
+
+
+def test_one_panel_at_a_time():
+    r = builder_page.run(f"""
+    await advance(300);
+    const shown = {_SHOWN}, c = {_CHIPS};
+    const open = () => ['pLook', 'pCust', 'pConn', 'pBoard'].filter(shown);
+    const out = [];
+    c[0].click(); out.push(open());
+    c[1].click(); out.push(open());
+    c[2].click(); out.push(open());
+    return {{ out, pressed: c.map(b => b.getAttribute('aria-pressed')) }};
+    """, SAVED_DARK)
+    assert r["out"] == [["pLook", "pCust"], ["pConn"], ["pBoard"]]
+    assert r["pressed"] == ["false", "false", "true"]
+
+
+def test_control_toggles_and_escape_closes_and_returns_focus():
+    r = builder_page.run(f"""
+    await advance(300);
+    const shown = {_SHOWN}, c = {_CHIPS};
+    c[1].click(); const a = shown('pConn');
+    c[1].click(); const b = shown('pConn');
+    c[0].click(); $('t-low').focus();
+    document.fire('keydown', {{ key: 'Escape' }});
+    return {{ a, b, look: shown('pLook'), focus: document.activeElement === c[0],
+             pressed: c[0].getAttribute('aria-pressed') }};
+    """, SAVED_DARK)
+    assert r == {"a": True, "b": False, "look": False, "focus": True,
+                 "pressed": "false"}
+
+
+def test_look_takes_both_sides_and_subtabs_roving_tabindex():
+    r = builder_page.run(f"""
+    await advance(300);
+    const shown = {_SHOWN};
+    {_CHIPS}[0].click();
+    const tabs = $('tThemes-t').parentNode.querySelectorAll('[role=tab]');
+    const state = () => tabs.map(t => [t.getAttribute('aria-selected'), t.getAttribute('tabindex')]);
+    const first = state();
+    $('tThemes-t').fire('keydown', {{ key: 'ArrowRight' }});
+    const second = state();
+    $('tLogo-t').fire('keydown', {{ key: 'ArrowRight' }});
+    return {{ both: [shown('pLook'), shown('pCust')], first, second, back: state(),
+             panels: [shown('tThemes'), shown('tLogo')],
+             roles: ['tThemes', 'tLogo'].map(i => $(i).getAttribute('role')),
+             screen: $('heroTitle').textContent }};
+    """, SAVED_DARK)
+    assert r["both"] == [True, True]
+    assert r["first"] == [["true", "0"], ["false", "-1"]]
+    assert r["second"] == [["false", "-1"], ["true", "0"]]
+    assert r["back"] == r["first"]
+    assert r["roles"] == ["tabpanel", "tabpanel"]
+    assert r["panels"] == [True, False]
+
+
+def test_logo_tab_shows_the_startup_screen_on_the_board():
+    r = builder_page.run(f"""
+    await advance(300);
+    {_CHIPS}[0].click();
+    $('tLogo-t').click();
+    return $('heroTitle').textContent;
+    """, SAVED_DARK)
+    assert "start-up screen, no logo yet" in r
+
+
+def test_theme_hover_and_focus_preview_and_click_commits():
+    r = builder_page.run("""
+    await advance(300);
+    const tiles = document.querySelectorAll('#presets button');
+    const ocean = tiles.find(b => b.querySelector('.nm').textContent === 'Ocean');
+    const before = $('heroTitle').textContent;
+    ocean.fire('pointerenter', { pointerType: 'mouse' });
+    const hover = $('heroTitle').textContent;
+    ocean.fire('pointerleave');
+    const left = $('heroTitle').textContent;
+    ocean.focus();
+    const focus = $('heroTitle').textContent;
+    $('t-low').focus();
+    const blurred = $('heroTitle').textContent;
+    ocean.fire('pointerenter', { pointerType: 'mouse' });
+    ocean.click();
+    ocean.fire('pointerleave');
+    await advance(300);
+    return { before, hover, left, focus, blurred, after: $('heroTitle').textContent,
+             pressed: ocean.getAttribute('aria-pressed'),
+             sent: requests.filter(q => q.path === '/api/preview').map(q => q.body) };
+    """, SAVED_DARK)
+    assert "Dark theme" in r["before"] and "Ocean theme" in r["hover"]
+    assert r["left"] == r["before"] and r["blurred"] == r["before"]
+    assert "Ocean theme" in r["focus"] and "Ocean theme" in r["after"]
+    assert r["pressed"] == "true"
+    # Pointing sent nothing; the click sent the one preview.
+    assert r["sent"] == [{"id": 4}]
+
+
+def test_settings_page_click_on_a_theme_saves_and_stays():
+    r = builder_page.run("""
+    await advance(300);
+    const out = { done: $('done').getAttribute('hidden'), cancel: $('cancel').getAttribute('hidden') };
+    preset('Ocean'); await advance(300);
+    return Object.assign(out, {
+      saves: requests.filter(q => q.path === '/api/save').map(q => q.body),
+      previews: requests.filter(q => q.path === '/api/preview').length,
+      popup: $('notice').getAttribute('hidden'), bar: $('status-text').textContent,
+      save: $('save').disabled });
+    """, PERSISTENT)
+    assert r["done"] is None and r["cancel"] == ""
+    assert r["saves"] == [{"id": 4}] and r["previews"] == 0
+    assert r["popup"] == "" and r["bar"] == "Saved: Ocean. Your board keeps it."
+    assert r["save"] is False
+
+
+def test_blink_theme_page_keeps_its_save_and_cancel():
+    r = builder_page.run("""
+    await advance(300);
+    preset('Ocean'); await advance(300);
+    return { done: $('done').getAttribute('hidden'), cancel: $('cancel').getAttribute('hidden'),
+             saves: requests.filter(q => q.path === '/api/save').length,
+             previews: requests.filter(q => q.path === '/api/preview').length };
+    """, SAVED_DARK)
+    assert r == {"done": "", "cancel": None, "saves": 0, "previews": 1}
+
+
+def test_done_ends_the_settings_session():
+    r = builder_page.run("""
+    await advance(300);
+    $('done').click(); await advance(10);
+    return { reqs: requests.filter(q => q.path === '/api/done').length,
+             title: $('notice-title').textContent, shown: $('notice').getAttribute('hidden') };
+    """, PERSISTENT)
+    assert r == {"reqs": 1, "title": "Done.", "shown": None}
+
+
+def test_customise_header_says_custom_changed_from_dark():
+    r = builder_page.run("""
+    await advance(300);
+    const start = $('themeName').textContent;
+    const resetHidden = $('resetBtn').getAttribute('hidden');
+    pick('c-low', '#123456'); await advance(10);
+    const edited = $('themeName').textContent;
+    const reset = [$('resetBtn').getAttribute('hidden'), $('resetBtn').textContent];
+    $('resetBtn').click(); await advance(10);
+    return { start, resetHidden, edited, reset, after: $('themeName').textContent };
+    """, SAVED_DARK)
+    assert r["start"] == "Starting from Dark" and r["resetHidden"] == ""
+    assert r["edited"] == "Custom, changed from Dark"
+    assert r["reset"] == [None, "Reset to Dark"]
+    assert r["after"] == "Starting from Dark"
+
+
+def test_hex_field_invalid_outline_and_revert_on_blur():
+    r = builder_page.run("""
+    await advance(300);
+    type('t-low', '#12345G');
+    const bad = [$('t-low').getAttribute('aria-invalid'), $('m-low').textContent];
+    $('t-mid').focus();
+    return { bad, after: [$('t-low').getAttribute('aria-invalid'), $('t-low').value, $('m-low').textContent],
+             accepted: (type('t-high', 'ABCDEF'), $('themeName').textContent) };
+    """, SAVED_DARK)
+    assert r["bad"] == ["true", "Use six hex digits, 0 to 9 and A to F."]
+    assert r["after"] == ["false", "#0DA243", ""]
+    assert r["accepted"] == "Custom, changed from Dark"
+
+
+@pytest.mark.parametrize("panel", ["look", "connect", "board"])
+def test_panel_query_opens_that_control(panel):
+    r = builder_page.run(f"""
+    await advance(300);
+    const shown = {_SHOWN};
+    return ['pLook', 'pCust', 'pConn', 'pBoard'].filter(shown);
+    """, SAVED_DARK, search=f"?panel={panel}")
+    assert r == {"look": ["pLook", "pCust"], "connect": ["pConn"],
+                 "board": ["pBoard"]}[panel]
+
+
+def test_an_unknown_panel_query_opens_nothing():
+    r = builder_page.run("""
+    await advance(300);
+    return document.querySelectorAll('[aria-controls][aria-pressed]').map(b => b.getAttribute('aria-pressed'));
+    """, SAVED_DARK, search="?panel=%3Cb%3E")
+    assert r == ["false"] * 3
+
+
+def test_settings_preview_draws_the_boards_six_tiles():
+    r = builder_page.run("""
+    await advance(300);
+    const api = window.blinkSettings;
+    api.board.show({ screen: 'settings', link: 'wifi' });
+    const names = [...document.querySelectorAll('svg text')].map(t => t.textContent);
+    return names;
+    """, SAVED_DARK)
+    for want in ("Brightness", "Open on PC", "In browser", "Focus", "Update",
+                 "Connection", "WiFi", "About"):
+        assert want in r
+    assert "Open settings" not in r and "Keep the cable connected" not in r
+
+
+def test_board_show_moves_the_board_and_status_says_its_steps():
+    r = builder_page.run("""
+    await advance(300);
+    const api = window.blinkSettings, title = () => $('heroTitle').textContent;
+    api.board.show({ screen: 'settings' }); const settings = title();
+    api.board.show({ screen: 'usage', view: 'focus', focus: 'weekly', session_pct: 10, weekly_pct: 77 });
+    const focus = title();
+    api.board.show({ link: 'wifi' });
+    api.status.say('Live over WiFi, encrypted', 'live');
+    const line = [$('board-status-text').textContent, $('board-status').getAttribute('hidden'), $('board-dot').className];
+    api.status.say('Board not found, check the USB cable', 'danger');
+    const bad = $('board-dot').className;
+    api.status.steps(1, 'active');
+    const ticks = document.querySelectorAll('#hs li').map(li => li.className);
+    const step = [$('hs-text').textContent, $('hs').getAttribute('hidden'), $('board-status').getAttribute('hidden')];
+    api.status.steps(4, 'done');
+    const all = [document.querySelectorAll('#hs li').map(li => li.className), $('hs-text').textContent];
+    api.status.steps(null);
+    return { settings, focus, line, bad, ticks, step, all, back: $('hs').getAttribute('hidden'),
+             track: $('wifiTrack').getAttribute('class'), lock: $('lock').getAttribute('class') };
+    """, SAVED_DARK)
+    assert "Settings screen" in r["settings"]
+    assert "weekly 77%" in r["focus"]
+    assert r["line"] == ["Live over WiFi, encrypted", None, "dot"]
+    assert r["bad"] == "dot danger"
+    assert r["ticks"] == ["done", "active", "", ""]
+    assert r["step"] == ["Board joins the network", None, ""]
+    assert r["all"] == [["done"] * 4, "Connected. You can unplug the cable."]
+    assert r["back"] == ""
+    assert r["track"] == "track wifi live" and r["lock"] == "lock on"
+
+
+def _css():
+    page = theme_server.page()
+    return re.sub(r"/\*.*?\*/", "",
+                  page[page.index("<style>"):page.index("</style>")], flags=re.S)
+
+
+def test_dark_override_and_color_scheme():
+    css = _css()
+    assert re.search(r"@media \(prefers-color-scheme: dark\)\s*\{\s*:root:not\(\[data-theme=\"light\"\]\)", css)
+    assert ':root[data-theme="dark"]' in css
+    assert css.count("color-scheme: dark") >= 2 and "color-scheme: light" in css
+    for token, light, dark in (("--bg", "#e6e5e2", "#121110"),
+                               ("--panel", "#fbfbfa", "#1b1a18"),
+                               ("--accent", "#ff6a13", "#ff6a13"),
+                               ("--accent-ink", "#a8400a", "#ff9152"),
+                               ("--muted", "#5b5853", "#a29e97")):
+        assert f"{token}: {light}" in css and f"{token}: {dark}" in css
+
+
+def test_reduced_motion_disables_transitions():
+    css = _css()
+    m = re.search(r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*?)\}\s*\}",
+                  css, re.S)
+    assert m
+    assert "animation: none !important" in m.group(1)
+    assert "transition: none !important" in m.group(1)
+    assert "stroke-dasharray: none" in m.group(1)       # the pulse is a solid line
+
+
+def test_no_browser_dialogs_in_script():
+    _, script = builder_page.page_parts()
+    for call in ("alert(", "confirm(", "prompt("):
+        assert not re.search(r"(?<![\w.])" + re.escape(call), script), call
+
+
+def test_confirm_replaces_the_button_with_keep_focused():
+    r = builder_page.run("""
+    await advance(300);
+    const host = document.createElement('button'); host.textContent = 'Forget WiFi';
+    const wrap = document.createElement('div'); wrap.appendChild(host);
+    $('connect-body').appendChild(wrap);
+    let ran = 0;
+    const box = window.blinkSettings.confirm.ask(host, 'Forget it?', 'Forget it', () => { ran++; });
+    const [yes, keep] = box.querySelectorAll('button');
+    const open = { hostHidden: host.getAttribute('hidden'), focusKeep: document.activeElement === keep,
+                   labels: [yes.textContent, keep.textContent], inPage: wrap.children.length };
+    keep.click();
+    const kept = { hostHidden: host.getAttribute('hidden'), ran, focusHost: document.activeElement === host,
+                   inPage: wrap.children.length };
+    const box2 = window.blinkSettings.confirm.ask(host, 'Forget it?', 'Forget it', () => { ran++; });
+    box2.querySelectorAll('button')[0].click();
+    return { open, kept, ran };
+    """, SAVED_DARK)
+    assert r["open"] == {"hostHidden": "", "focusKeep": True,
+                         "labels": ["Forget it", "Keep"], "inPage": 2}
+    assert r["kept"] == {"hostHidden": None, "ran": 0, "focusHost": True,
+                         "inPage": 1}
+    assert r["ran"] == 1
+
+
+# The old renderer, moved and not rewritten: these three functions are the
+# board's own drawing, reviewed as such, and their texts are pinned by hash
+# of the commit before this page (24163b7). customDim and readableMix are
+# develop's text as merged (1fb07bf put customDim on readableMix for the
+# burn view's custom grey): the same bytes as on develop, not rewritten here.
+_RENDERER_HASHES = {
+    "gauge": "22f85fbb33ca5f32ca9ae11877596645ac4eb0571c3f67d5138fac1afc84a1f0",
+    "arcPath": "6b59b7039f1e84f813f324414e46d7d2f79bc7a3ff4d89e9d13dea63d65cebb4",
+    "customDim": "17ed250d247d12f0bd5c7ebff341f900045dd40831fe93cc2411dfd58b621ad0",
+    "readableMix": "dfa30dcab19fb017dc139f8781b02b2520a8f9742315234b156c9ccb0bbade16",
+}
+
+
+def _function_text(script, name):
+    i = script.index(f"function {name}(")
+    depth = 0
+    for k in range(script.index("{", i), len(script)):
+        depth += script[k] == "{"
+        depth -= script[k] == "}"
+        if depth == 0:
+            return script[i:k + 1]
+
+
+def test_board_renderer_is_the_old_one():
+    import hashlib
+    _, script = builder_page.page_parts()
+    for name, want in _RENDERER_HASHES.items():
+        got = hashlib.sha256(_function_text(script, name).encode()).hexdigest()
+        assert got == want, name
+
+
+def test_every_target_in_the_markup_is_named():
+    """Icon-only controls carry a label; decorative svg is hidden."""
+    markup, _ = builder_page.page_parts()
+
+    def walk(n):
+        if isinstance(n, str):
+            return
+        yield n
+        for c in n["children"]:
+            yield from walk(c)
+    for n in walk(markup):
+        if n["tag"] == "svg" and n["attrs"].get("role") != "img":
+            assert n["attrs"].get("aria-hidden") == "true", n["attrs"]
+        if n["tag"] == "button":
+            text = "".join(c if isinstance(c, str) else "x" for c in n["children"])
+            assert text.strip() or n["attrs"].get("aria-label"), n["attrs"]
+
+
+# ---------------------------------------------------------------- Connect (Task 4.4)
+# The page as `blink settings` serves it: persistent, so it asks /api/wifi.
+
+def _hex(s):
+    return s.encode().hex()
+
+
+EVIL = "<img src=x onerror=alert(1)>"
+
+
+def _wifi(state=None, nets=None, join=None, scan=None):
+    a = {"/api/state": {"status": 200, "body": {
+             "saved": {"id": 0}, "draft": None, "persistent": True}},
+         "/api/wifi": {"status": 200, "body": state or {
+             "link": "usb", "usb": True}}}
+    if nets is not None:
+        a["/api/wifi/scan"] = {"status": 200, "body": {"nets": nets}}
+    if scan is not None:
+        a["/api/wifi/scan"] = scan
+    if join is not None:
+        a["/api/wifi/join"] = join
+    return a
+
+
+NETS = [{"s": _hex("Home-2G"), "r": -50, "sec": "wpa2"},
+        {"s": _hex(EVIL), "r": -70, "sec": "mixed"},
+        {"s": _hex("Office"), "r": -60, "sec": "eap"}]
+
+OPEN_PICKER = """
+await advance(300);
+$('c-move').click(); await advance(10);
+"""
+
+
+def _enter(pw, ssid="Home-2G"):
+    return f"""
+    document.querySelectorAll('#c-nets input').find(i => i.getAttribute('value') === '{_hex(ssid)}').click();
+    $('c-pw').value = {pw!r}; $('c-go').click(); await advance(10);
+    """
+
+
+def test_connect_disabled_without_usb():
+    r = builder_page.run("""
+    await advance(300);
+    return [$('c-move').disabled, $('c-need').getAttribute('hidden'), $('c-need').textContent,
+            $('c-title').textContent, $('c-state').textContent];
+    """, _wifi({"link": "wifi", "s": _hex("Home-2G"), "usb": False}),
+        search="?panel=connect")
+    assert r == [True, None, "Plug the board in with its USB cable to set up WiFi.",
+                 "Over WiFi", "Encrypted"]
+
+
+def test_scan_list_renders_hex_ssids_as_text_safely():
+    r = builder_page.run(OPEN_PICKER + """
+    const rows = document.querySelectorAll('#c-nets label');
+    const names = document.querySelectorAll('#c-nets b').map(b => b.textContent);
+    const subs = document.querySelectorAll('#c-nets small').map(b => [b.textContent, b.className]);
+    const ins = document.querySelectorAll('#c-nets input');
+    return { names, subs, disabled: ins.map(i => i.disabled), types: ins.map(i => i.getAttribute('type')),
+             imgs: document.querySelectorAll('#c-nets img').length, rows: rows.length,
+             label: $('c-pwl').textContent };
+    """, _wifi(nets=NETS), search="?panel=connect")
+    # Strongest first; the 802.1X row is last of the listed, disabled, in danger text.
+    assert r["names"] == ["Home-2G", "Office", EVIL]
+    assert r["subs"][0] == ["WPA2, strong signal", ""]
+    assert r["subs"][1] == ["802.1X, not supported", "no"]
+    assert r["subs"][2] == ["WPA2/WPA3, fair signal", ""]
+    assert r["disabled"] == [False, True, False] and set(r["types"]) == {"radio"}
+    assert r["imgs"] == 0 and r["rows"] == 3
+    assert r["label"] == "Password for Home-2G"
+
+
+def test_a_name_that_is_not_utf8_is_shown_as_bytes_and_posted_as_hex():
+    r = builder_page.run(OPEN_PICKER + """
+    const b = document.querySelectorAll('#c-nets b').map(x => x.textContent);
+    answer('/api/wifi/join', () => ({ status: 200, body: { state: {}, steps: [] , problem: 'x'} }));
+    $('c-pw').value = 'longenough'; $('c-go').click(); await advance(10);
+    return { b, body: requests.find(q => q.path === '/api/wifi/join').body };
+    """, _wifi(nets=[{"s": "41ff42", "r": -40, "sec": "wpa2"}]),
+        search="?panel=connect")
+    assert r["b"] == ["A\\xff" + "B"]
+    assert r["body"] == {"s": "41ff42", "p": "longenough"}
+
+
+def test_an_empty_scan_says_so():
+    r = builder_page.run(OPEN_PICKER + "return [$('c-nets').children.length, $('c-msg').textContent];",
+                         _wifi(nets=[]), search="?panel=connect")
+    assert r == [0, "The board heard no networks. Move it closer to the router and scan again."]
+
+
+def test_password_field_is_mono_with_show_hide_and_not_autocompleted():
+    markup, _ = builder_page.page_parts()
+
+    def find(n, id):
+        if isinstance(n, str):
+            return None
+        if n["attrs"].get("id") == id:
+            return n
+        for c in n["children"]:
+            f = find(c, id)
+            if f:
+                return f
+    pw = find(markup, "c-pw")
+    assert pw["attrs"]["type"] == "password"
+    assert pw["attrs"]["autocomplete"] == "off"
+    assert pw["attrs"]["spellcheck"] == "false"
+    assert re.search(r"\.pw input \{[^}]*font:[^}]*var\(--mono\)", _css())
+    r = builder_page.run(OPEN_PICKER + """
+    const t = $('c-show'); const a = [t.textContent, t.getAttribute('aria-pressed'), t.getAttribute('aria-label'), $('c-pw').getAttribute('type')];
+    t.click();
+    return [a, [t.textContent, t.getAttribute('aria-pressed'), t.getAttribute('aria-label'), $('c-pw').getAttribute('type')]];
+    """, _wifi(nets=NETS), search="?panel=connect")
+    assert r[0][:3] == ["Show", "false", "Show password"]
+    assert r[1] == ["Hide", "true", "Hide password", "text"]
+
+
+def test_password_validation_sentences():
+    r = builder_page.run(OPEN_PICKER + """
+    $('c-go').click(); const a = [$('c-msg').textContent, $('c-pwbox').getAttribute('aria-invalid')];
+    const input = $('c-pw').getAttribute('aria-invalid');
+    $('c-pw').value = 'short'; $('c-go').click(); const b = $('c-msg').textContent;
+    $('c-pw').fire('input'); const cleared = $('c-pwbox').getAttribute('aria-invalid');
+    return { a, input, b, cleared, joins: requests.filter(q => q.path === '/api/wifi/join').length };
+    """, _wifi(nets=NETS), search="?panel=connect")
+    assert r["a"] == ["Enter the password for Home-2G.", "true"]
+    assert r["input"] == "true"       # the input is what a screen reader names
+    assert r["b"] == "A WiFi password has at least 8 characters."
+    assert r["cleared"] is None and r["joins"] == 0
+
+
+def test_password_cleared_after_connect():
+    ok = {"status": 200, "body": {"state": {"link": "usb"}, "steps": ["sent", "joined", "proved", "encrypted"]}}
+    bad = {"status": 200, "body": {"state": {"link": "usb", "why": "Wrong WiFi password"}, "steps": ["sent"]}}
+    scen = OPEN_PICKER + """
+    $('c-pw').value = 'correct horse'; $('c-go').click();
+    const during = $('c-pw').value; await advance(10);
+    return [during, $('c-pw').value, JSON.stringify(window.localStorage || null)];
+    """
+    for join in (ok, bad, {"status": 409, "body": {"why": "The board did not answer."}}):
+        r = builder_page.run(scen, _wifi(nets=NETS, join=join), search="?panel=connect")
+        assert r[0] == "" and r[1] == ""
+
+
+def test_the_password_is_in_the_one_join_body_only():
+    r = builder_page.run(OPEN_PICKER + """
+    $('c-pw').value = 'correct horse'; $('c-go').click(); await advance(10);
+    const seen = JSON.stringify(requests.filter(q => q.path !== '/api/wifi/join'));
+    return [seen.includes('correct horse'), requests.filter(q => JSON.stringify(q).includes('correct horse')).length,
+            document.querySelectorAll('input').filter(i => i.value.includes('correct')).length];
+    """, _wifi(nets=NETS, join={"status": 200, "body": {"state": {}, "steps": ["sent"]}}),
+        search="?panel=connect")
+    assert r == [False, 1, 0]
+    _, script = builder_page.page_parts()
+    assert not re.search(r"(localStorage|sessionStorage|console\.)", script)
+
+
+FOUR = ["Pairing over the cable", "Board joins the network",
+        "Both prove their keys over WiFi", "Encrypting the link"]
+
+
+def test_handshake_steps_replace_the_status_line():
+    full = {"status": 200, "body": {"state": {"link": "usb", "s": _hex("Home-2G")},
+                                    "steps": ["sent", "joined", "proved", "encrypted"]}}
+    r = builder_page.run(OPEN_PICKER + """
+    const ticks = () => document.querySelectorAll('#hs li').map(li => li.className);
+    const h = hold(); answer('/api/wifi/join', () => h.p);
+    $('c-pw').value = 'correct horse'; $('c-go').click(); await advance(10);
+    const during = [ticks(), $('hs-text').textContent, $('board-status').getAttribute('hidden'), $('c-go').textContent];
+    h.release(%s); await advance(10);
+    const after = [ticks(), $('hs-text').textContent, $('c-msg').textContent, $('heroTitle').textContent];
+    await advance(4300);
+    return { during, after, line: [$('hs').getAttribute('hidden'), $('board-status-text').textContent] };
+    """ % __import__("json").dumps(full), _wifi(nets=NETS), search="?panel=connect")
+    assert r["during"] == [["active", "", "", ""], FOUR[0], "", "Connecting…"]
+    assert r["after"][0] == ["done"] * 4
+    assert r["after"][1] == "Connected. You can unplug the cable."
+    assert r["after"][2] == "Connected. You can unplug the cable."
+    assert "connection screen" in r["after"][3]
+    assert r["line"] == ["", "Live over WiFi, Home-2G, encrypted"]
+
+
+@pytest.mark.parametrize("steps,ticks,text", [
+    (["sent", "joined"], ["done", "done", "fail", ""], FOUR[2]),
+    (["sent"], ["done", "fail", "", ""], FOUR[1])])
+def test_a_short_steps_list_stops_at_the_step_that_failed(steps, ticks, text):
+    body = {"state": {"link": "usb"}, "steps": steps}
+    if len(steps) == 2:
+        body["problem"] = "The board joined, but this computer could not reach it over WiFi."
+    r = builder_page.run(OPEN_PICKER + _enter("correct horse") + """
+    return [document.querySelectorAll('#hs li').map(li => li.className), $('hs-text').textContent, $('c-msg').textContent,
+            $('c-pwbox').getAttribute('aria-invalid')];
+    """, _wifi(nets=NETS, join={"status": 200, "body": body}), search="?panel=connect")
+    assert r[0] == ticks and r[1] == text
+    if len(steps) == 2:
+        assert r[2] == ("The board joined Home-2G but could not be reached over WiFi. "
+                        "Check that the network lets devices talk to each other.")
+    else:
+        assert r[2] == "The board could not join Home-2G. Check the password and try again."
+        assert r[3] == "true"
+
+
+def test_unreachable_card():
+    r = builder_page.run("""
+    await advance(300);
+    const a = [$('c-problem').getAttribute('hidden'), $('connect-body').getAttribute('hidden'), $('c-retry').textContent,
+               $('c-problem').textContent];
+    answer('/api/wifi', () => ({ status: 200, body: { link: 'usb', usb: true } }));
+    $('c-retry').click(); await advance(10);
+    return [a, $('c-problem').getAttribute('hidden'), $('connect-body').getAttribute('hidden')];
+    """, _wifi({"link": "none"}), search="?panel=connect")
+    assert r[0][0] is None and r[0][1] == "" and r[0][2] == "Try again"
+    assert "Can't reach the board" in r[0][3]
+    assert r[1:] == ["", None]
+
+
+def test_forget_uses_the_in_page_confirm():
+    r = builder_page.run("""
+    await advance(300);
+    const f = $('c-forget'); f.click();
+    const box = document.querySelector('.confirm');
+    const [yes, keep] = box.querySelectorAll('button');
+    const asked = [box.querySelector('p').textContent, yes.textContent, document.activeElement === keep,
+                   requests.filter(q => q.path === '/api/wifi/forget').length];
+    answer('/api/wifi/forget', () => ({ status: 200, body: { link: 'usb', usb: true } }));
+    yes.click(); await advance(10);
+    return [asked, requests.filter(q => q.path === '/api/wifi/forget').length, $('c-forget').getAttribute('hidden'),
+            $('board-status-text').textContent];
+    """, _wifi({"link": "usb", "usb": True, "s": _hex("Home-2G")}), search="?panel=connect")
+    assert r[0] == ["Forget Home-2G? The board deletes the password and its key, and goes back to USB only.",
+                    "Forget it", True, 0]
+    assert r[1] == 1 and r[2] == "" and r[3] == "Live over USB"
+    _, script = builder_page.page_parts()
+    assert "confirm(" not in re.sub(r"confirm\.ask\(|function confirm|var confirm", "", script)
+
+
+def test_status_line_sentences():
+    cases = [({"link": "usb", "usb": True}, "Live over USB"),
+             ({"link": "wifi", "s": _hex("Home-2G")}, "Live over WiFi, Home-2G, encrypted"),
+             ({"link": "none"}, "Board not found, check the USB cable")]
+    for state, want in cases:
+        r = builder_page.run("await advance(300); return $('board-status-text').textContent;",
+                             _wifi(state), search="?panel=connect")
+        assert r == want
+
+
+@pytest.mark.parametrize("join,want", [
+    ({"status": 409, "body": {"why": "The board did not answer."}},
+     "The board has not answered yet. If it joins the network late, the pairing is still saved. "
+     "Give it a minute, then check the status line."),
+    ({"status": 409, "body": {"why": "Plug the board in with the cable to change its WiFi."}},
+     "Plug the board in with the cable to change its WiFi."),
+    ({"status": 400, "body": {"why": "The password can only use ASCII characters."}},
+     "The password can only use ASCII characters.")])
+def test_refusals_are_said_in_the_boards_own_words(join, want):
+    r = builder_page.run(OPEN_PICKER + _enter("correct horse") + """
+    return [$('c-msg').textContent, $('hs').getAttribute('hidden'), $('c-go').disabled];
+    """, _wifi(nets=NETS, join=join), search="?panel=connect")
+    assert r == [want, "", False]
+
+
+def test_board_shows_connection_screen_after_join():
+    full = {"status": 200, "body": {"state": {"link": "usb"}, "steps": ["sent", "joined", "proved", "encrypted"]}}
+    r = builder_page.run(OPEN_PICKER + _enter("correct horse") + """
+    const now = $('heroTitle').textContent; await advance(4100);
+    const still = $('heroTitle').textContent; await advance(200);
+    return [now, still, $('heroTitle').textContent];
+    """, _wifi(nets=NETS, join=full), search="?panel=connect")
+    assert "connection screen" in r[0] and "connection screen" in r[1]
+    assert "connection screen" not in r[2] and "Claude, session" in r[2]
+
+
+# ---------------------------------------------------------------- Connect, review round
+def test_zero_width_and_bidi_marks_in_a_name_show_as_question_marks():
+    marks = "​‎‏؜﻿‮ "
+    r = builder_page.run(OPEN_PICKER + "return document.querySelectorAll('#c-nets b').map(b => b.textContent);",
+                         _wifi(nets=[{"s": _hex("A" + marks + "B"), "r": -40, "sec": "wpa2"}]),
+                         search="?panel=connect")
+    assert r == ["A" + "?" * len(marks) + "B"]
+
+
+def test_a_refused_join_for_another_reason_does_not_mark_the_password():
+    body = {"state": {"link": "usb", "why": "Network not found"}, "steps": ["sent"]}
+    r = builder_page.run(OPEN_PICKER + _enter("correct horse") + "return [$('c-pwbox').getAttribute('aria-invalid'), $('c-msg').textContent];",
+                         _wifi(nets=NETS, join={"status": 200, "body": body}), search="?panel=connect")
+    assert r == [None, "The board could not join Home-2G. Network not found."]
+
+
+def test_scanning_during_a_join_keeps_connect_disabled():
+    r = builder_page.run(OPEN_PICKER + """
+    const h = hold(); answer('/api/wifi/join', () => h.p);
+    $('c-pw').value = 'correct horse'; $('c-go').click(); await advance(10);
+    $('c-scan').click(); await advance(10);
+    const during = $('c-go').disabled;
+    h.release({ status: 200, body: { state: {}, steps: ['sent'] } }); await advance(10);
+    return [during, $('c-go').disabled];
+    """, _wifi(nets=NETS), search="?panel=connect")
+    assert r == [True, False]
+
+
+def test_show_toggle_returns_to_hidden_after_join_and_cancel():
+    r = builder_page.run(OPEN_PICKER + """
+    const st = () => [$('c-show').getAttribute('aria-pressed'), $('c-pw').getAttribute('type')];
+    $('c-show').click(); const shown = st();
+    $('c-pw').value = 'correct horse'; $('c-go').click(); await advance(10);
+    const afterJoin = st();
+    $('c-show').click(); $('c-cancel').click();
+    return [shown, afterJoin, st()];
+    """, _wifi(nets=NETS, join={"status": 200, "body": {"state": {}, "steps": ["sent"]}}),
+        search="?panel=connect")
+    assert r[0] == ["true", "text"]
+    assert r[1] == ["false", "password"] and r[2] == ["false", "password"]
+
+
+def _typed(name, pw="correct horse"):
+    return f"""
+    $('c-other').click(); const box = $('c-other-box').getAttribute('hidden');
+    $('c-name').value = {name!r}; $('c-pw').value = {pw!r}; $('c-go').click(); await advance(10);
+    return [box, requests.filter(q => q.path === '/api/wifi/join').map(q => q.body), $('c-msg').textContent];
+    """
+
+
+def test_a_hand_typed_name_is_sent_as_hex_like_a_scanned_one():
+    r = builder_page.run(OPEN_PICKER + _typed("Café <b>"), _wifi(nets=[]), search="?panel=connect")
+    assert r[0] is None
+    assert r[1] == [{"s": "Café <b>".encode().hex(), "p": "correct horse"}]
+    assert "Café <b>" in r[2] and "<b>" in r[2]       # said back as text, via textContent
+
+
+@pytest.mark.parametrize("name,want", [
+    ("x" * 33, "The network name can be at most 32 bytes."),
+    ("é" * 17, "The network name can be at most 32 bytes."),    # 34 bytes
+    ("", "Enter the network name.")])
+def test_a_bad_hand_typed_name_is_refused_before_sending(name, want):
+    r = builder_page.run(OPEN_PICKER + _typed(name), _wifi(nets=[]), search="?panel=connect")
+    assert r[1] == [] and r[2] == want
+
+
+def test_picking_a_listed_network_closes_the_name_field():
+    r = builder_page.run(OPEN_PICKER + """
+    $('c-other').click();
+    document.querySelectorAll('#c-nets input')[0].click();
+    return [$('c-other-box').getAttribute('hidden'), $('c-other').getAttribute('hidden')];
+    """, _wifi(nets=NETS), search="?panel=connect")
+    assert r == ["", None]
+
+
+def test_save_shows_only_while_look_is_open():
+    """Owner change 2026-11-07: Save theme to board sits under the tabs and
+    is there only on Look; closed, Connect and Board hide it."""
+    r = builder_page.run(f"""
+    await advance(300);
+    const c = {_CHIPS}, vis = () => $('save').getAttribute('hidden') === null;
+    const out = [vis()];
+    c[0].click(); out.push(vis());
+    c[1].click(); out.push(vis());
+    c[2].click(); out.push(vis());
+    c[0].click(); out.push(vis());
+    c[0].click(); out.push(vis());
+    return {{ out, label: $('save').textContent }};
+    """, SAVED_DARK)
+    assert r["out"] == [False, True, False, False, True, False]
+    assert r["label"] == "Save theme to board"
+
+
+def test_the_drawn_link_icon_takes_glyph_and_colour_from_the_link_and_its_state():
+    """Review of 19d432e. The mark is always drawn (USB unless the link is
+    WiFi) and its stroke or fill is the theme's live colour, its stale
+    colour, its high (the board's COL_RED) or its grey (COL_GREY): a swapped
+    stale and live, or a red that is not the theme's high, fails here.
+    Dark's colours: live 0DA243, stale BA8107, high FF1900, grey 6B7280."""
+    r = builder_page.run("""
+    await advance(300);
+    const api = window.blinkSettings, out = {};
+    const mark = () => {
+      const all = [];
+      const walk = (n) => { for (const c of n.children || []) { if (typeof c === 'string') continue; all.push(c); walk(c); } };
+      walk($('scr'));
+      const wifi = all.filter(n => n.tagName === 'PATH' && /a13 13/.test(n.getAttribute('d') || ''));
+      const usb = all.filter(n => n.tagName === 'CIRCLE' && n.getAttribute('r') === '2.2');
+      const m = wifi[0] || usb[0];
+      return { glyph: wifi.length ? 'wifi' : usb.length ? 'usb' : 'none',
+               colour: m ? (m.tagName === 'PATH' ? m.getAttribute('stroke') : m.getAttribute('fill')) : null };
+    };
+    out.fresh = mark();
+    for (const link of ['usb', 'wifi'])
+      for (const state of ['live', 'stale', 'error', 'none']) {
+        api.board.show({ link, linkState: state });
+        out[link + '-' + state] = mark();
+      }
+    return out;
+    """, SAVED_DARK)
+    assert r["fresh"] == {"glyph": "usb", "colour": "#6B7280"}
+    want = {"live": "#0DA243", "stale": "#BA8107", "error": "#FF1900",
+            "none": "#6B7280"}
+    for link in ("usb", "wifi"):
+        for state, col in want.items():
+            assert r[f"{link}-{state}"] == {"glyph": link, "colour": col}, (link, state)
+
+
+# ------------------------------------- Look's Customise and Logo, the Board panel
+#
+# Task 6.4. The page's own state is driven against a fake server (answers by
+# path); the real handler is covered by tests/pc/test_settings_server.py.
+
+def _live(**more):
+    a = {"/api/state": {"status": 200, "body": {
+             "saved": {"id": 0}, "draft": None, "persistent": True}},
+         "/api/wifi": {"status": 200, "body": {"link": "usb", "usb": True}},
+         "/api/device": {"status": 200, "body": {"id": "ab12", "fw": "1.5.0",
+                                                 "app": "1.5.0"}},
+         "/api/computer": {"status": 200, "body": {"status_page": False,
+                                                   "auto_update": True}}}
+    a.update(more)
+    return a
+
+
+_POSTS = "requests.filter(q => q.method === 'POST' && q.path !== '/api/ping')"
+_PNG = "[137, 80, 78, 71, 1, 2, 3, 4]"
+_GIF = "[71, 73, 70, 56, 57, 97, 1, 2, 3, 4, 5, 6]"
+_PICK = """
+    await advance(300);
+    picture.w = 200; picture.h = 100;
+    const pick = async (name, type, bytes) => {
+      $('logoFile').files = [fakeFile(name, type, bytes)];
+      $('logoFile').fire('change');
+      await advance(400);
+    };
+"""
+
+
+def test_screen_subtab_lists_view_focus_provider_and_no_weekly_scope():
+    r = builder_page.run("""
+    await advance(300);
+    const cards = document.querySelectorAll('.vw');
+    const names = cards.map(b => b.querySelector('b').textContent);
+    const main = document.querySelectorAll('#segMain button').map(b => b.textContent);
+    const click = (n) => cards.find(b => b.querySelector('b').textContent === n).click();
+    click('Session big'); await advance(10);
+    click('Weekly big'); await advance(10);
+    click('Two gauges'); await advance(10);
+    document.querySelectorAll('#segMain button')[1].click(); await advance(10);
+    return { names, main, pressed: cards.map(b => b.getAttribute('aria-pressed')),
+             posts: """ + _POSTS + """.map(q => [q.path, q.body]),
+             text: $('tScreen').textContent };
+    """, _live(**{"/api/pref": {"status": 200, "body": {"pref": {
+        "provider": "codex", "focus": 0, "bright": 60, "view": 0}}}}))
+    assert r["names"] == ["Two gauges", "Session big", "Weekly big", "Burn view"]
+    assert r["main"] == ["Claude", "Codex"]
+    # Weekly big is a preview: no pref goes out for it, and nothing anywhere
+    # on the tab or the wire names a weekly scope (D61).
+    assert r["posts"] == [["/api/pref", {"focus": 1}],
+                          ["/api/pref", {"focus": 0}],
+                          ["/api/pref", {"main_src": "codex"}]]
+    assert "scope" not in r["text"].lower()
+    assert r["pressed"] == ["true", "false", "false", "false"]
+
+
+def test_burn_view_card_previews_and_sends_nothing():
+    """develop's burn view is the board's own choice, made when the account
+    has no five-hour window (docs/plans/burn-5h.md); there is no view enum
+    for pref_set to carry. So the card is live but previews only, like
+    Weekly big, and Two gauges takes the preview back."""
+    r = builder_page.run("""
+    await advance(300);
+    const card = n => document.querySelectorAll('.vw').find(b => b.querySelector('b').textContent === n);
+    const burn = card('Burn view');
+    burn.click(); await advance(10);
+    const on = { off: burn.disabled, pressed: burn.getAttribute('aria-pressed'),
+                 posts: """ + _POSTS + """.length, title: $('heroTitle').textContent,
+                 note: $('vNote').textContent,
+                 words: $('scr').children.map(n => n.textContent) };
+    card('Two gauges').click(); await advance(10);
+    return { on, back: burn.getAttribute('aria-pressed'),
+             words: $('scr').children.map(n => n.textContent) };
+    """, _live())
+    on = r["on"]
+    assert on["off"] is False and on["pressed"] == "true" and on["posts"] == 0
+    assert "BURN 5h" in on["words"] and "SESSION 5h" not in on["words"]
+    assert "burn view" in on["title"].lower()
+    assert "two-gauge screen by itself" in on["note"]
+    assert r["back"] == "false"
+    assert "SESSION 5h" in r["words"] and "BURN 5h" not in r["words"]
+
+
+def test_preview_sliders_send_nothing():
+    r = builder_page.run("""
+    await advance(300);
+    $('p1').value = '70'; $('p1').fire('input');
+    $('p2').value = '12'; $('p2').fire('input');
+    const slid = [$('o1').textContent, $('o2').textContent];
+    $('sweep').click(); await advance(2000);
+    return { slid, end: [$('p1').value, $('p2').value, $('o1').textContent],
+             posts: """ + _POSTS + """.length, label: $('sweep').getAttribute('aria-label'),
+             title: $('heroTitle').textContent };
+    """, _live())
+    assert r["slid"] == ["70%", "12%"]
+    assert r["end"] == ["100", "100", "100%"] and r["posts"] == 0
+    assert r["label"] == "Sweep both arcs from 0 to 100%"
+    assert "session 100%" in r["title"]
+
+
+def test_logo_picker_draws_to_canvas_and_posts_rgba():
+    r = builder_page.run(_PICK + """
+    await pick('mark.png', 'image/png', """ + _PNG + """);
+    const sent = $('lSend').disabled;
+    $('lSend').click(); await advance(10);
+    const q = requests.find(x => x.path === '/api/logo');
+    return { sent, bytes: q.bytes, h: q.headers, type: q.raw.constructor.name,
+             drawn: canvasLog.drawn[canvasLog.drawn.length - 1], msg: $('lMsg').textContent };
+    """, _live(**{"/api/logo?check=1": {"status": 200, "body": {"bytes": 51200}},
+                  "/api/logo": {"status": 200, "body": {
+                      "logo": {"present": 1}, "bytes": 51200}}}))
+    assert r["sent"] is False and r["bytes"] == 320 * 240 * 4
+    assert r["h"]["X-Blink-Logo"] == "rgba"
+    assert r["h"]["Content-Type"] == "application/octet-stream"
+    assert r["h"]["X-Blink-Hold-Ms"] == "3000" and r["h"]["X-Blink-Fit"] == "fill"
+    assert r["h"]["X-Blink-Bg"] == "0a141e"          # the canvas corner's pixel
+    # 200x100 fitted to 320x240 at scale 1: 320 wide, 160 high, centred.
+    assert r["drawn"] == [320, 240, 0, 40, 320, 160]
+    assert "on the board" in r["msg"]
+
+
+def test_logo_picker_posts_a_gif_as_bytes():
+    r = builder_page.run(_PICK + """
+    await pick('spin.gif', 'image/gif', """ + _GIF + """);
+    $('lHold').value = '10000'; $('lHold').fire('change');
+    document.querySelectorAll('#lScale button').find(b => b.dataset.s === 'margin').click();
+    await advance(400);
+    $('lSend').click(); await advance(10);
+    const q = requests.filter(x => x.path === '/api/logo').pop();
+    return { n: q.bytes, h: q.headers, first: Array.from(q.raw.slice(0, 4)),
+             canvasUsedForSend: canvasLog.drawn.some(d => d[0] === 320 && d[1] === 240) };
+    """, _live(**{"/api/logo?check=1": {"status": 200, "body": {"bytes": 30000}},
+                  "/api/logo": {"status": 200, "body": {"logo": {"present": 1}}}}))
+    assert r["n"] == 12 and r["first"] == [71, 73, 70, 56]
+    assert r["h"]["X-Blink-Logo"] == "gif"
+    assert r["h"]["X-Blink-Hold-Ms"] == "10000" and r["h"]["X-Blink-Fit"] == "margin"
+    assert r["canvasUsedForSend"] is False
+
+
+def test_stays_up_for_offers_3_5_10_only():
+    r = builder_page.run("""
+    await advance(300);
+    return document.querySelectorAll('#lHold option').map(o => [o.getAttribute('value'), o.textContent]);
+    """, _live())
+    assert r == [["3000", "3 seconds"], ["5000", "5 seconds"], ["10000", "10 seconds"]]
+
+
+def test_logo_tab_shows_the_startup_screen_on_the_board():
+    r = builder_page.run(_PICK + """
+    document.querySelectorAll('[data-panel]')[0].click();
+    $('tLogo-t').click();
+    const empty = $('heroTitle').textContent;
+    await pick('mark.png', 'image/png', """ + _PNG + """);
+    const withLogo = $('heroTitle').textContent;
+    $('tThemes-t').click();
+    return { empty, withLogo, back: $('heroTitle').textContent,
+             facts: $('tLogo').textContent };
+    """, _live(**{"/api/logo?check=1": {"status": 200, "body": {"bytes": 2048}}}))
+    assert "start-up screen, no logo yet" in r["empty"]
+    assert "start-up screen with your logo" in r["withLogo"]
+    assert "usage" not in r["back"] and "session" in r["back"]
+    assert "for up to 15 seconds" in r["facts"]
+    assert "30 seconds" not in r["facts"]
+
+
+def test_logo_size_comes_from_the_real_encoder():
+    r = builder_page.run(_PICK + """
+    let n = 0;
+    answer('/api/logo?check=1', () => ({ status: 200, body: { bytes: [40960, 70000][n++] } }));
+    await pick('mark.png', 'image/png', """ + _PNG + """);
+    const one = $('lSize').textContent;
+    document.querySelectorAll('#lScale button').find(b => b.dataset.s === 'large').click();
+    await advance(400);
+    const two = $('lSize').textContent;
+    answer('/api/logo?check=1', () => ({ status: 400, body: { why: 'The logo is too big for the board.' } }));
+    document.querySelectorAll('#lScale button').find(b => b.dataset.s === 'margin').click();
+    await advance(400);
+    return { one, two, big: $('lMsg').textContent, off: $('lSend').disabled,
+             checks: requests.filter(q => q.path === '/api/logo?check=1').length };
+    """, _live())
+    assert r["one"] == "About 40 KB of 512 KB on the board"
+    assert r["two"] == "About 68 KB of 512 KB on the board"
+    assert r["big"] == "Too big for the board. Pick a plainer background or a smaller size."
+    assert r["off"] is True and r["checks"] == 3
+
+
+def test_remove_logo_uses_the_in_page_confirm():
+    r = builder_page.run("""
+    await advance(300);
+    const have = $('lHave').getAttribute('hidden');
+    $('lRemoveB').click();
+    const box = document.querySelector('.confirm');
+    const asked = box.querySelector('p').textContent;
+    const keep = document.activeElement.textContent;
+    const none = requests.filter(q => q.path === '/api/logo/remove').length;
+    box.querySelectorAll('button')[0].click(); await advance(10);
+    return { have, asked, keep, none, sent: requests.filter(q => q.path === '/api/logo/remove').length,
+             gone: $('lHave').getAttribute('hidden') };
+    """, _live(**{"/api/device": {"status": 200, "body": {
+        "id": "ab12", "fw": "1.5.0", "app": "1.5.0", "logo": {"present": 1}}},
+        "/api/logo/remove": {"status": 200, "body": {"logo": {"present": 0}}}}))
+    assert r["have"] is None
+    assert r["asked"].startswith("Remove the logo from the board?")
+    assert r["keep"] == "Keep" and r["none"] == 0 and r["sent"] == 1
+    assert r["gone"] == ""
+
+
+def test_board_show_it_on_the_board_switches_the_preview():
+    r = builder_page.run("""
+    await advance(300);
+    const title = () => $('heroTitle').textContent;
+    const before = title();
+    $('showSet').click();
+    const on = [title(), $('showSet').textContent, $('showSet').getAttribute('aria-pressed')];
+    $('showSet').click();
+    return { before, on, off: [title(), $('showSet').textContent] };
+    """, _live(), search="?panel=board")
+    assert "Settings screen" not in r["before"]
+    assert "Settings screen" in r["on"][0]
+    # One name, so a screen reader does not hear it flip under "pressed".
+    assert r["on"][1:] == ["Show it on the board", "true"]
+    assert "Settings screen" not in r["off"][0] and r["off"][1] == "Show it on the board"
+
+
+def test_board_this_board_shows_id_firmware_and_details():
+    r = builder_page.run("""
+    await advance(300);
+    $('detBtn').click();
+    return [$('devId').textContent, $('devFw').textContent, $('devTagT').textContent,
+            $('devAddr').textContent, $('savedNet').textContent, $('forgetBtn').getAttribute('hidden'),
+            $('det').getAttribute('hidden')];
+    """, _live(**{"/api/wifi": {"status": 200, "body": {
+        "link": "usb", "usb": True, "s": _hex("Home-2G")}}}), search="?panel=board")
+    assert r == ["ab12", "1.5.0", "Up to date", "USB", "Home-2G", None, None]
+
+
+def test_brightness_posts_a_board_level():
+    r = builder_page.run("""
+    await advance(300);
+    document.querySelectorAll('[data-b]').find(b => b.dataset.b === '40').click(); await advance(10);
+    const ok = document.querySelectorAll('[data-b]').map(b => b.getAttribute('aria-pressed'));
+    answer('/api/pref', () => ({ status: 409, body: { why: 'The board did not accept that setting.' } }));
+    document.querySelectorAll('[data-b]').find(b => b.dataset.b === '80').click(); await advance(10);
+    return { ok, posts: """ + _POSTS + """.map(q => q.body), msg: $('b-msg').textContent,
+             pressed: document.querySelectorAll('[data-b]').map(b => b.getAttribute('aria-pressed')) };
+    """, _live(**{"/api/pref": {"status": 200, "body": {"pref": {
+        "provider": "claude", "focus": 0, "bright": 40, "view": 0}}}}),
+        search="?panel=board")
+    assert r["posts"] == [{"bright": 40}, {"bright": 80}]
+    assert r["ok"] == ["false", "true", "false", "false", "false"]
+    assert r["msg"] == "The board did not accept that setting."
+    assert r["pressed"] == r["ok"]          # a refused level is not marked
+
+
+
+def test_a_board_setting_on_a_theme_only_page_says_why():
+    # It returned without a word: the owner's brightness click on the page
+    # the board opened (not persistent, 2026-11-07) changed nothing and
+    # said nothing.
+    r = builder_page.run("""
+    await advance(300);
+    document.querySelectorAll('[data-b]').find(b => b.dataset.b === '40').click(); await advance(10);
+    return { posts: """ + _POSTS + """.map(q => q.path), msg: $('b-msg').textContent };
+    """, _live(**{"/api/state": {"status": 200, "body": {
+        "saved": {"id": 0}, "draft": None, "persistent": False}}}),
+        search="?panel=board")
+    assert "/api/pref" not in r["posts"]
+    assert r["msg"] == "Open this with blink settings while the app is running."
+
+def test_computer_switches_round_trip():
+    r = builder_page.run("""
+    await advance(300);
+    const sw = () => [$('cfgStatus').getAttribute('aria-checked'), $('cfgUpdate').getAttribute('aria-checked')];
+    const first = sw();
+    answer('/api/computer', (q) => q.method === 'POST'
+      ? { status: 200, body: { status_page: true, auto_update: true } }
+      : { status: 200, body: { status_page: false, auto_update: true } });
+    $('cfgStatus').click(); await advance(10);
+    const after = sw();
+    answer('/api/computer', () => ({ status: 500, body: { why: 'This computer could not save that setting.' } }));
+    $('cfgUpdate').click(); await advance(10);
+    return { first, after, kept: sw(), msg: $('k-msg').textContent,
+             posts: """ + _POSTS + """.map(q => q.body) };
+    """, _live(), search="?panel=board")
+    assert r["first"] == ["false", "true"] and r["after"] == ["true", "true"]
+    assert r["kept"] == ["true", "true"]
+    assert r["posts"] == [{"status_page": True}, {"auto_update": False}]
+    assert r["msg"] == "This computer could not save that setting."
+
+
+def test_refresh_row_is_live_and_doze_is_disabled_with_their_sentences():
+    r = builder_page.run("""
+    await advance(300);
+    const row = (id) => [$(id).disabled, $(id).getAttribute('aria-checked'), $($(id).getAttribute('aria-describedby')).textContent];
+    return { refresh: row('cfgRefresh'), doze: row('cfgDoze'),
+             posts: """ + _POSTS + """.length };
+    """, _live(), search="?panel=board")
+    # Keep figures fresh is live since develop's usage refresh merged:
+    # the usage_refresh key of /api/computer. Doze still waits.
+    assert r["refresh"] == [False, "false", "Runs Claude Code's own /usage now and then. Sends no messages."]
+    assert r["doze"] == [True, "false", "Dims the board after 4 hours with nothing running"]
+    assert r["posts"] == 0
+
+
+def test_the_boards_current_pref_is_marked_at_load():
+    r = builder_page.run("""
+    await advance(300);
+    return { b: document.querySelectorAll('[data-b]').map(x => x.getAttribute('aria-pressed')),
+             src: document.querySelectorAll('[data-src]').map(x => x.getAttribute('aria-pressed')),
+             cards: document.querySelectorAll('.vw').map(x => x.getAttribute('aria-pressed')),
+             posts: """ + _POSTS + """.length };
+    """, _live(**{"/api/device": {"status": 200, "body": {
+        "id": "ab12", "fw": "1.5.0", "app": "1.5.0", "pref": {
+            "provider": "codex", "focus": 1, "bright": 60, "view": 0}}}}))
+    assert r["b"] == ["false", "false", "true", "false", "false"]
+    assert r["src"] == ["false", "true"]
+    assert r["cards"][1] == "true" and r["posts"] == 0
+
+
+def test_a_newer_size_check_aborts_the_older_and_prefs_wait_for_a_logo_send():
+    r = builder_page.run(_PICK + """
+    await pick('mark.png', 'image/png', """ + _PNG + """);
+    const fits = document.querySelectorAll('#lScale button');
+    fits[1].click(); await advance(300);
+    fits[2].click(); await advance(10);
+    const aborted = requests.filter(q => q.path === '/api/logo?check=1' && q.limited).length;
+    await advance(400);
+    answer('/api/logo', () => 'hold');
+    $('lSend').click(); await advance(10);
+    document.querySelectorAll('[data-b]')[1].click(); await advance(10);
+    return { aborted, msg: $('b-msg').textContent,
+             prefs: requests.filter(q => q.path === '/api/pref').length };
+    """, _live(**{"/api/logo?check=1": {"status": 200, "body": {"bytes": 2048}}}))
+    assert r["aborted"] >= 2
+    assert r["msg"] == "Wait for the logo to finish." and r["prefs"] == 0
+
+
+def test_done_with_a_draft_nothing_was_saved_says_the_plain_line():
+    r = builder_page.run("""
+    await advance(300);
+    pick('c-high', '#ff0000'); await advance(10);
+    $('done').click(); await advance(10);
+    return { keep: $('notice-keep-text').textContent };
+    """, _live())
+    assert r["keep"] == "Your changes here are not saved. Copy the share code to keep them."
+
+
+# --- settings page fixes: pips on the drawing, Clear a chosen logo, scan spinner
+
+def test_the_board_drawing_has_a_running_finished_and_stuck_pip_in_theme_colours():
+    r = builder_page.run("""
+    await advance(10);
+    const pips = () => $('scr').children.filter(n => n.className === 'pip')
+        .map(n => [+n.attrs.cx, +n.attrs.cy, +n.attrs.r, n.attrs.fill]);
+    const first = pips();
+    preset('Ocean'); await advance(10);
+    return { first, second: pips(),
+             legend: !!$('pipkey') };
+    """, SAVED_DARK)
+    first, second = r["first"], r["second"]
+    # usage_layout.h: 8 px pips, 11 px apart from x 10, centred on y 14.
+    assert [p[:3] for p in first] == [[14, 14, 4], [25, 14, 4], [36, 14, 4]]
+    assert len({p[3] for p in first}) == 3                   # green, amber, red: three tones
+    assert second[0][3] != first[0][3]                      # a new theme recolours them
+    assert r["legend"] is False         # no word key beside the drawing, only the pips
+
+
+def test_clear_drops_a_chosen_logo_without_touching_the_board():
+    r = builder_page.run(_PICK + """
+    await pick('mark.png', 'image/png', """ + _PNG + """);
+    const had = [$('logoOn').hidden, $('logoOn').getAttribute('hidden')];
+    const before = requests.length;
+    $('lClear').click(); await advance(10);
+    // The chosen image must really be gone: Send does nothing, and the name
+    // is not left behind for the next paint.
+    $('lSend').click(); await advance(10);
+    return { had, on: $('logoOn').getAttribute('hidden'), empty: $('logoEmpty').getAttribute('hidden'),
+             tag: $('lClear').tagName, name: $('lName').textContent,
+             sends: requests.slice(before).filter(x => x.method === 'POST' && x.path === '/api/logo').length,
+             removes: requests.slice(before).filter(x => x.path === '/api/logo/remove').length };
+    """, _live(**{"/api/logo?check=1": {"status": 200, "body": {"bytes": 51200}}}))
+    assert r["had"][1] is None and r["tag"] == "BUTTON"
+    assert r["on"] == "" and r["empty"] is None and r["removes"] == 0
+    assert r["sends"] == 0
+
+
+def test_the_scan_shows_a_spinner_until_the_list_arrives():
+    r = builder_page.run("""
+    await advance(300);
+    const h = hold(); answer('/api/wifi/scan', () => h.p);
+    $('c-move').click(); await advance(10);
+    const during = [$('c-scanning').getAttribute('hidden'), $('c-nets').getAttribute('aria-busy'), $('c-scanning').textContent];
+    h.release({ status: 200, body: { nets: [] } }); await advance(10);
+    return { during, after: [$('c-scanning').getAttribute('hidden'), $('c-nets').getAttribute('aria-busy')] };
+    """, _wifi(nets=NETS), search="?panel=connect")
+    assert r["during"] == [None, "true", "Looking for networks…"]
+    assert r["after"] == ["", None]
+
+
+def test_the_scan_spinner_goes_when_the_scan_fails():
+    r = builder_page.run("""
+    await advance(300);
+    const h = hold(); answer('/api/wifi/scan', () => h.p);
+    $('c-move').click(); await advance(10);
+    const during = [$('c-scanning').getAttribute('hidden'), $('c-nets').getAttribute('aria-busy')];
+    h.release({ status: 500, body: { why: 'The board did not answer.' } }); await advance(10);
+    return { during, after: [$('c-scanning').getAttribute('hidden'), $('c-nets').getAttribute('aria-busy')],
+             msg: $('c-msg').textContent };
+    """, _wifi(scan={"status": 500, "body": {"why": "The board did not answer."}}), search="?panel=connect")
+    # Shown while it waited, gone when it failed, and the reason on the page.
+    assert r["during"] == [None, "true"]
+    assert r["after"] == ["", None]
+    assert "The board did not answer." in r["msg"]
+
+
+def test_the_spinner_stops_for_reduced_motion_and_is_a_live_region():
+    assert re.search(r'id="c-scanning" role="status" aria-live="polite"', theme_server.page())
+    css = _css()
+    assert "@keyframes spin" in css and "animation: spin" in css
+    assert "animation: none !important" in re.search(
+        r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*?)\}\s*\}", css, re.S).group(1)
+
+
+def _on_board(**more):
+    return _live(**{"/api/device": {"status": 200, "body": {
+        "id": "ab12", "fw": "1.5.0", "app": "1.5.0",
+        "logo": {"present": 1, "bytes": 2048, "frames": 1}}}, **more})
+
+
+def test_the_page_has_no_session_legend_words():
+    html = (Path(__file__).resolve().parents[2] / "pc" / "theme_builder.html").read_text()
+    assert "pipkey" not in html
+    assert "<li><i></i>" not in html
+
+
+def test_the_board_logo_shows_in_the_editor_and_on_the_start_up_screen():
+    r = builder_page.run("""
+    await advance(300);
+    document.querySelectorAll('[data-panel]')[0].click();
+    $('tLogo-t').click(); await advance(10);
+    return { imgs: $('lBoardThumb').querySelectorAll('img').length,
+             text: $('lBoardText').textContent, title: $('heroTitle').textContent,
+             asked: requests.filter(q => q.path === '/api/logo/preview').length };
+    """, _on_board(**{"/api/logo/preview": {"status": 200, "body": {}}}))
+    assert r["imgs"] == 1 and r["asked"] == 1
+    assert r["text"] == "The logo on the board."
+    assert "start-up screen with your logo" in r["title"]
+
+
+def test_a_logo_without_a_matching_copy_says_there_is_no_preview():
+    r = builder_page.run("""
+    await advance(300);
+    document.querySelectorAll('[data-panel]')[0].click();
+    $('tLogo-t').click(); await advance(10);
+    return { imgs: $('lBoardThumb').querySelectorAll('img').length,
+             text: $('lBoardText').textContent, hidden: $('lHave').getAttribute('hidden') };
+    """, _on_board(**{"/api/logo/preview": {"status": 404, "body": {}}}))
+    assert r["imgs"] == 0 and r["hidden"] is None
+    assert "no preview of it on this computer" in r["text"]
+    assert "another computer" not in r["text"]
+
+
+def test_the_remove_confirm_sits_below_the_logo_note_not_beside_it():
+    # The confirm is inserted into the .lhave flex row; unwrapped it took a
+    # share of the row and squeezed the note to one word per line.
+    html = (Path(__file__).resolve().parents[2] / "pc" / "theme_builder.html").read_text()
+    assert re.search(r"\.lhave \{[^}]*flex-wrap: wrap", html)
+    assert re.search(r"\.lhave \.confirm \{ flex: 1 0 100%", html)
+
+
+# --- PR 9 review: a failed load says so; a changed logo is not left on show
+
+def test_a_failed_computer_or_device_load_says_why_not_defaults():
+    r = builder_page.run("""
+    await advance(300);
+    return { k: $('k-msg').textContent, b: $('b-msg').textContent,
+             kc: $('k-msg').className, bc: $('b-msg').className };
+    """, _live(**{"/api/computer": {"status": 500, "body": {
+        "why": "This computer's settings file could not be read."}},
+        "/api/device": {"status": 500, "body": {}}}), search="?panel=board")
+    assert r["k"] == "This computer's settings file could not be read."
+    assert r["b"] == "The app did not answer." and "bad" in r["kc"] + r["bc"]
+
+
+def test_switches_ignore_taps_until_a_computer_load_succeeds():
+    # M3: a failed /api/computer left the switches in their HTML defaults and
+    # a tap posted the inverse of the owner's real value.
+    r = builder_page.run("""
+    await advance(300);
+    const before = $('cfgStatus').getAttribute('aria-checked');
+    $('cfgStatus').click(); await advance(10);
+    return { before, posts: """ + _POSTS + """.length };
+    """, _live(**{"/api/computer": {"status": 500, "body": {}}}),
+        search="?panel=board")
+    assert r["posts"] == 0
+
+
+def test_a_load_error_goes_when_a_later_load_succeeds():
+    # M4: the first /api/device timed out; coming back to the tab painted the
+    # device but b-msg still said the app did not answer.
+    r = builder_page.run("""
+    await advance(300);
+    const had = $('b-msg').textContent;
+    answer('/api/device', () => ({ status: 200, body: { fw: '1.5.0', app: '1.5.0' } }));
+    """ + _SEE_AGAIN + """
+    return { had, now: $('b-msg').textContent };
+    """, _live(**{"/api/device": {"status": 500, "body": {}}}),
+        search="?panel=board")
+    assert r["had"] == "The app did not answer." and r["now"] == ""
+
+
+_SEE_AGAIN = """
+    document.hidden = false;
+    (document.listeners.visibilitychange || []).forEach(f => f()); await advance(10);
+"""
+
+
+def test_a_logo_removed_elsewhere_clears_the_preview():
+    r = builder_page.run("""
+    await advance(300);
+    const had = $('lHave').getAttribute('hidden');
+    answer('/api/device', () => ({ status: 200, body: { fw: '1.5.0', app: '1.5.0',
+                                   logo: { present: 0 } } }));
+    """ + _SEE_AGAIN + """
+    return { had, now: $('lHave').getAttribute('hidden'),
+             imgs: $('lBoardThumb').querySelectorAll('img').length };
+    """, _on_board(**{"/api/logo/preview": {"status": 200, "body": {}}}))
+    assert r["had"] is None and r["now"] == "" and r["imgs"] == 0
+
+
+def test_a_logo_changed_elsewhere_refetches_the_preview():
+    r = builder_page.run("""
+    await advance(300);
+    const asks = () => requests.filter(q => q.path === '/api/logo/preview').length;
+    const first = asks();
+    answer('/api/device', () => ({ status: 200, body: { fw: '1.5.0', app: '1.5.0',
+                                   logo: { present: 1, bytes: 4096, frames: 1 } } }));
+    """ + _SEE_AGAIN + """
+    const second = asks();
+    """ + _SEE_AGAIN + """
+    return { first, second, third: asks() };
+    """, _on_board(**{"/api/logo/preview": {"status": 200, "body": {}}}))
+    # Refetched when the size changed, not again when it did not.
+    assert (r["first"], r["second"], r["third"]) == (1, 2, 2)

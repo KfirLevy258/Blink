@@ -24,6 +24,7 @@ mkdir -p "$WORK"
 CC="${CC:-cc}"
 SRC="$ROOT/firmware/src"
 failures=0
+ran=" "
 
 # name | extra sources (space separated, relative to firmware/src) | extra cflags
 run_one() {
@@ -31,6 +32,7 @@ run_one() {
 	extra=$2
 	cflags=$3
 	src="$ROOT/tests/$name/host_test.c"
+	ran="$ran$name "
 
 	if [ ! -f "$src" ]; then
 		echo "MISSING: tests/$name/host_test.c" >&2
@@ -40,7 +42,14 @@ run_one() {
 
 	objs=""
 	for e in $extra; do
-		objs="$objs $SRC/$e"
+		# An absolute path is a source outside firmware/src (mbedTLS's).
+		# shortcut: $extra and $cflags are word-split, so a path with a
+		# space in it (an mbedTLS checkout under "My Projects") breaks the
+		# build line; quote through arrays if a machine ever needs one.
+		case $e in
+		/*) objs="$objs $e" ;;
+		*) objs="$objs $SRC/$e" ;;
+		esac
 	done
 
 	# -Wall -Werror: these compile in seconds and a warning in firmware
@@ -96,11 +105,32 @@ run_one cfg_store    "cfg_store.c"     "-I$ROOT/tests/cfg_store/stub -DCFG_STUB_
 run_one edit_hold    "edit_hold.c theme.c msg_parse.c" "-lm"
 run_one fatal_policy "fatal_policy.c"  ""
 run_one fmt          "fmt.c"           ""
+# Which link protocol lines go to: USB wins, backoff, the verify window.
+run_one link         "link.c"          ""
 run_one logo         "logo_parse.c bootanim_dec.c" ""
+# The strict walk and the caps (spec S15.2): every limit broken alone.
+run_one logo_parse   "logo_parse.c bootanim_dec.c" ""
+# The partition written from a stream, on a RAM partition.
+run_one logo_write   "logo_write.c logo_parse.c bootanim_dec.c $ROOT/tests/support/flash_area_fake.c" ""
 run_one msg_parse    "msg_parse.c burn5h.c" ""
+# The WiFi scan table: one entry a name, strongest first, at most 20.
+# net_link.c unchanged (the test #includes it) on a fake radio: the scan table,
+# and the join and rejoin scheduler (backoff, lost network, a requested join
+# over a rejoin, cancel, a refused board, the 60 s idle down).
+run_one net_link     ""                "-I$ROOT/tests/net_link/stub"
 run_one ota_parse    "ota_parse.c"     ""
+# The image over the session: ota_net.c unchanged, on a RAM slot 1 and the toy
+# hash. Every abort is driven through ota_net_service, the production trigger.
+run_one ota_net      "ota_net.c ota_parse.c $ROOT/tests/support/flash_img_fake.c $ROOT/tests/support/wl_crypto_fake.c" ""
 run_one sleep_gate   "sleep_gate.c usage_freshness.c" ""
 run_one theme        "theme.c msg_parse.c" "-lm"
+# wl_server.c unchanged (the test #includes it) on fake sockets, with the real
+# link.c, wl_hs.c and wl_frame.c over the toy cipher: D29, the verify-only
+# candidate, a bad frame, the discovery rules, the failure backoff.
+run_one wl_server    "link.c wl_hs.c wl_frame.c $ROOT/tests/support/wl_crypto_fake.c" \
+	"-I$ROOT/tests/wl_server/stub"
+# When a leaking WiFi blob may cost the board one clean restart.
+run_one wl_heap      ""                ""
 # ui_theme.c and cfg_store.c unchanged, on cfg_store's RAM flash; the test
 # file stands in for proto, the screens and LVGL's timer.
 run_one ui_theme     "ui_theme.c cfg_store.c theme.c msg_parse.c" \
@@ -124,6 +154,77 @@ run_one usage_freshness "usage_freshness.c" ""
 run_one usage_layout "fmt.c"           ""
 run_one usage_state  "usage_state.c"   ""
 run_one svc_state    "svc_state.c fmt.c" ""
+run_one wifi_msg     "wifi_msg.c msg_parse.c" ""
+
+# The handshake and the frame, on the toy cipher in tests/support (an
+# absolute path is a source outside firmware/src, as run_one allows).
+run_one wl_hs    "wl_hs.c $ROOT/tests/support/wl_crypto_fake.c"    ""
+run_one wl_frame "wl_frame.c $ROOT/tests/support/wl_crypto_fake.c" ""
+
+# The board's cipher (wl_crypto_mbedtls.c, unchanged) against the PC's
+# (pc/wifi_crypto.py, through tests/wl_crypto_real/vectors.h) at every
+# plaintext length, on mbedTLS's own sources: the library files the wrapper
+# reaches, built with tests/wl_crypto_real/mbedtls_config.h. The sources are
+# the module Zephyr 4.3.1 pins (west.yml:318, 3.6.6): BLINK_MBEDTLS_SRC when
+# set (CI fetches the pinned tarball, .github/workflows/installer.yml), else
+# the workspace's modules/crypto/mbedtls, else its mbedtls-3.6 copy. A
+# machine with none skips this one suite and every other runs as before;
+# BLINK_REQUIRE_MBEDTLS=1 makes that a failure, so CI cannot skip it quietly.
+mbedtls_src() {
+	if [ -n "${BLINK_MBEDTLS_SRC:-}" ]; then
+		printf '%s\n' "$BLINK_MBEDTLS_SRC"
+		return 0
+	fi
+	# Not followed: the CI shellcheck run lists tests/ci/*.sh only, and
+	# lib_zephyr.sh is bash-aware (shopt) and sources the workspace's own
+	# scripts, so it is not sh-clean input. Same reason the tools/ scripts
+	# that source it are checked with -e SC1091 (installer.yml).
+	# shellcheck disable=SC1091
+	. "$ROOT/tools/lib_zephyr.sh"
+	ws=$(blink_zephyr_ws) || return 1
+	for d in "$ws/modules/crypto/mbedtls" "$ws/modules/crypto/mbedtls-3.6"; do
+		if [ -f "$d/library/chachapoly.c" ]; then
+			printf '%s\n' "$d"
+			return 0
+		fi
+	done
+	return 1
+}
+if MBEDTLS=$(mbedtls_src); then
+	mbed_objs="wl_crypto_mbedtls.c"
+	for f in chachapoly.c chacha20.c poly1305.c hkdf.c md.c sha256.c \
+		platform_util.c constant_time.c; do
+		mbed_objs="$mbed_objs $MBEDTLS/library/$f"
+	done
+	run_one wl_crypto_real "$mbed_objs" \
+		"-I$MBEDTLS/include -I$ROOT -I$ROOT/tests/wl_crypto_real/stub -DMBEDTLS_CONFIG_FILE=\"tests/wl_crypto_real/mbedtls_config.h\""
+	# The handshake and frame code on that same real cipher, against the
+	# PC's session bytes (tools/gen_wire_vectors.py).
+	run_one wl_wire_real "wl_hs.c wl_frame.c $mbed_objs" \
+		"-I$MBEDTLS/include -I$ROOT -I$ROOT/tests/wl_crypto_real/stub -DMBEDTLS_CONFIG_FILE=\"tests/wl_crypto_real/mbedtls_config.h\""
+elif [ "${BLINK_REQUIRE_MBEDTLS:-}" = 1 ]; then
+	printf '  %-14s NO MBEDTLS SOURCE (BLINK_REQUIRE_MBEDTLS=1)\n' \
+		"wl_crypto_real, wl_wire_real"
+	failures=$((failures + 1))
+else
+	echo "  SKIP wl_crypto_real, wl_wire_real (no mbedTLS source; set BLINK_MBEDTLS_SRC)"
+	ran="${ran}wl_crypto_real wl_wire_real "
+fi
+
+# A suite with no row above is a suite CI never runs, and the table is
+# explicit on purpose (see the top), so it cannot find a new one by itself.
+# The WiFi branch added thirteen; each was listed by hand, and this makes
+# forgetting the next one a failure rather than a silence.
+for f in "$ROOT"/tests/*/host_test.c; do
+	name=$(basename "$(dirname "$f")")
+	case $ran in
+	*" $name "*) ;;
+	*)
+		printf '  %-14s NOT IN check_host_tests.sh\n' "$name"
+		failures=$((failures + 1))
+		;;
+	esac
+done
 
 if [ "$failures" -ne 0 ]; then
 	printf '\n%d host test(s) failed\n' "$failures" >&2

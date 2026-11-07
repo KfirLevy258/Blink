@@ -763,6 +763,33 @@ def clear_off(blink_home, now=None, missing=False):
     save_state(blink_home, state)
 
 
+def switch_on(blink_home, home):
+    """What turning the refresh on does besides the setting itself, for
+    `blink config usage-refresh on` and the settings page's "Keep figures
+    fresh" switch alike: a fresh start (clear_off), and, for a native home,
+    where claude is now, for the daemon (cli._remember_claude). One place,
+    because the page was added on feat/wifi-transport and a second copy of
+    these steps would drift from the command's. `home` is the user's home,
+    passed in (tests/test_sandbox.py). Raises the OSError of a clear_off
+    that could not write; the rest never fails the switch."""
+    try:
+        native = claude_home.current().kind == claude_home.NATIVE
+    except Exception:
+        native = False
+    try:
+        lost = native and locate_claude(blink_home, home) is None
+    except Exception:
+        lost = False
+    clear_off(blink_home, missing=lost)
+    if native:
+        try:
+            exe = find_claude(home)
+            if exe:
+                remember_claude(blink_home, exe)
+        except Exception:
+            pass
+
+
 def _cache_at(view):
     """When this login's /usage cache was fetched, or None: the cache's own
     fetchedAtMs, whatever it holds. A cache with both windows null and no

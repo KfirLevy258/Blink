@@ -28,7 +28,7 @@ keeps it.
   `BLINK_ZEPHYR` to override.
 
   **Not v4.4.0.** Measured 2026-09-09: its mbedTLS is 4.1.0, which removed the
-  legacy `mbedtls/sha256.h` that [`src/ota.c`](src/ota.c) includes, and the
+  legacy `mbedtls/sha256.h` that [`src/wl_crypto_mbedtls.c`](src/wl_crypto_mbedtls.c) includes, and the
   LVGL it pins moved `gesture_limit` out of the public `lv_indev` headers,
   which [`src/ui_settings.c`](src/ui_settings.c) reads. 4.3.1 has both
   (mbedTLS 3.6.6, `gesture_limit` in `lv_indev_private.h`) and wants SDK
@@ -160,8 +160,8 @@ release and writes slot0 with esptool. Roughly 75 s, and no swap, since the imag
 straight to the slot the bootloader boots. What that gives up is automatic rollback,
 which is tolerable only because whatever can reflash the board is already plugged into
 it. The machine running the daemon needs `pip install esptool`. (The removed Wi-Fi mode
-updated over HTTPS into slot 1 instead; that code path is still in `ota.c`, but nothing
-calls it.)
+updated over HTTPS into slot 1 instead; that code is deleted. Over WiFi the board now takes
+the daemon's image into slot 1 itself, `ota_net.c`, spec section 9.)
 
 The board checks for an update when it comes up and once a day after that. A newer
 release shows a prompt on the gauge screen, **Update now** or **Later**, and can also
@@ -260,7 +260,7 @@ Things worth knowing when hacking on the CYD:
 | Boot splash (streamed past LVGL) | `ui_boot.c`, `bootanim_dec.c` |
 | Gauge screen, hints and toasts | `usage_view.c` |
 | Settings + software-update UI | `ui_settings.c` |
-| OTA engine (check, install, verify) | `ota.c`, `ota_parse.c` |
+| OTA state and the image stream (WiFi) | `ota.c`, `ota_net.c`, `ota_parse.c` |
 | Clock (the daemon's `time` message) | `net_time.c` |
 | Persisted config (A/B, CRC-sealed) | `cfg_store.c` |
 | Serial NDJSON protocol | `proto.c`, `msg_parse.c` |

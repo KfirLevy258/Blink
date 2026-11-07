@@ -65,6 +65,17 @@ void ui_settings_service(void (*pump)(void));
  */
 bool ui_settings_busy(void);
 
+/* What the Focus and Brightness tiles do after their write, for pref_set
+ * (spec S15.3) and for the tiles themselves, so the page and a tap cannot
+ * drift apart.
+ *
+ * apply_focus: the gauge screen takes the stored Focus layout in place, then
+ * the tile's subtitle and the Focus screen follow, whenever they exist.
+ * apply_bright: backlight_set (which persists, and is a no-op at the same
+ * level), so the PWM changes now, then the tile's "60%" follows. */
+void ui_settings_apply_focus(void);
+void ui_settings_apply_bright(uint8_t pct);
+
 /* Repaint the settings panel, if it is open, in the active theme. */
 void ui_settings_apply_theme(void);
 
@@ -106,6 +117,9 @@ void ui_settings_dozing(bool dozing);
 /* The host went away (HOST LOST) or said bye: the hold goes. */
 void ui_settings_theme_edit_host_gone(void);
 
+/* Is the Connection screen up? Main thread only. */
+bool ui_settings_connection_open(void);
+
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 /*
  * What Settings is showing, for the bench injector's ui_state reply
@@ -115,7 +129,7 @@ void ui_settings_theme_edit_host_gone(void);
  */
 struct ui_settings_bench {
 	bool open;		/* the panel is up (or is the ground under one) */
-	const char *sub;	/* none|brightness|theme|focus|confirm */
+	const char *sub;	/* none|brightness|theme|focus|connection|confirm */
 	const char *modal;	/* none|notice|whatsnew|prompt|ask|download */
 	bool busy;		/* a transition is latched or a close queued */
 	int theme_page;		/* the theme screen's page, from 0 */

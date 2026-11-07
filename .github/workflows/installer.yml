@@ -51,7 +51,14 @@ jobs:
         # covered by the macos-system-python job below, on a better
         # interpreter than setup-python could have given us anyway.
         include:
-          - {os: ubuntu-latest, python: '3.9'}
+          # 24.04, not -latest: ubuntu-latest moved to 26.04 and setup-python
+          # has no 3.9 for it (PR #9's run failed in setup, "3.9 ... was not
+          # found for Ubuntu 26.04"). 3.9 is past end of life, so its last
+          # build (3.9.25) was published for 22.04 and 24.04 only, per
+          # actions/python-versions' versions-manifest.json, 2026-11-07. The
+          # floor install.sh enforces stays tested; move this to 22.04 when
+          # 24.04 runners go, and decide about the floor when both have.
+          - {os: ubuntu-24.04, python: '3.9'}
           - {os: ubuntu-latest, python: '3.13'}
           - {os: macos-latest, python: '3.13'}
           # The suite itself on Windows, not only the installed binary: the
@@ -70,8 +77,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # The settings page's script runs under node (tests/support/
+      # builder_page.py) and those tests skip without one. The images carry
+      # a node today, but which one is theirs to change; pinned, so the
+      # page's tests never quietly turn into skips.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - run: python -m pip install --quiet -r tests/requirements.txt
-      - run: python -m pytest tests/ -q
+      # -rs: every skip with its reason in the log, so "needs node" or a
+      # platform skip can be told apart from a test that stopped running.
+      - run: python -m pytest tests/ -q -rs
+        env:
+          # Linux only: the page tests fail, not skip, when node is gone,
+          # as the mbedTLS pin below fails on a wrong hash. The other
+          # runners have not been measured with it.
+          BLINK_REQUIRE_NODE: ${{ runner.os == 'Linux' && '1' || '' }}
 
   # The Python a Mac already has. This started as a macos-13 x py3.9 entry in
   # the matrix above, which never once got scheduled across four runs -- x86
@@ -251,7 +272,77 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The mbedTLS that Zephyr 4.3.1 pins (west.yml:318, version 3.6.6), so
+      # wl_crypto_real compiles the board's cipher wrapper against the exact
+      # library the firmware links. This job checks out only this
+      # repository, so it fetches that one module, pinned by commit and by
+      # the tarball's sha256 (measured 2026-11-06, two downloads alike).
+      # A checksum mismatch most likely means GitHub regenerated the archive
+      # (it has changed its tar/gzip output before), not tampering: download
+      # it again, check the extracted tree is commit 11c0f18a's, and record
+      # the new sum. Never drop the check to make the job pass.
+      # BLINK_REQUIRE_MBEDTLS=1 turns a missing source into a failure here;
+      # on a developer machine without one the suite skips with a line.
+      - name: fetch the pinned mbedTLS
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/mbedtls.tar.gz" \
+            https://github.com/zephyrproject-rtos/mbedtls/archive/11c0f18ab888fed4363eeeb43fd734246dc3c93b.tar.gz
+          echo "1d271dd84ec2e309e6e0152a953cb373dfb9c1eb24a39e792b909d88d3a36b33  $RUNNER_TEMP/mbedtls.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/mbedtls"
+          tar -xzf "$RUNNER_TEMP/mbedtls.tar.gz" -C "$RUNNER_TEMP/mbedtls" --strip-components=1
+          echo "BLINK_MBEDTLS_SRC=$RUNNER_TEMP/mbedtls" >> "$GITHUB_ENV"
+          echo "BLINK_REQUIRE_MBEDTLS=1" >> "$GITHUB_ENV"
       - run: sh tests/ci/check_host_tests.sh
+
+  # The touch-target harness: the firmware's real screens (ui_settings.c,
+  # usage_view.c, the popups) on the LVGL the board links, driven by the same
+  # bench scripts tools/board_touch.py plays against a board. It is the only
+  # check of where a finger lands that needs no board, and until this job it
+  # ran only on the owner's Mac. About seventy seconds a script there.
+  touch-harness:
+    name: touch harness (${{ matrix.script }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {script: full_touch}
+          - {script: popups_touch}
+          # The hold bound made short enough to wait out, as the script's
+          # own header asks.
+          - {script: edit_hold_bound, cflags: '-DEDIT_HOLD_MS=4000'}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # The LVGL Zephyr 4.3.1 pins (west.yml:316, zephyrproject-rtos/lvgl at
+      # b03edc8e), the tree touch.sh finds in a workspace, fetched alone and
+      # checked like the mbedTLS above: sha256 measured 2026-11-07 from two
+      # downloads alike, and its src/ and lv_conf_template.h compared equal
+      # to the west checkout's. A mismatch most likely means GitHub
+      # regenerated the archive; re-measure, never drop the check.
+      - name: fetch the pinned LVGL
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/lvgl.tar.gz" \
+            https://github.com/zephyrproject-rtos/lvgl/archive/b03edc8e6282a963cd312cd0b409eb5ce263ea75.tar.gz
+          echo "84f0284672291cde449b77b7873bf62127a23dee336d833c75895c5b37f541e6  $RUNNER_TEMP/lvgl.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/lvgl"
+          tar -xzf "$RUNNER_TEMP/lvgl.tar.gz" -C "$RUNNER_TEMP/lvgl" --strip-components=1
+      - name: run ${{ matrix.script }}
+        env:
+          LVGL_DIR: ${{ runner.temp }}/lvgl
+          BLINK_PYTHON: python
+          BLINK_TOUCH_CFLAGS: ${{ matrix.cflags }}
+        run: sh tools/panel_render/touch.sh "$RUNNER_TEMP/renders" "tools/bench/${{ matrix.script }}.txt"
+      # The PNGs of a failed run are the evidence: each stroke and the
+      # screen it led to.
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: touch-renders-${{ matrix.script }}
+          path: ${{ runner.temp }}/renders
+          retention-days: 7
 
   # The factory scripts -- tools/burn.sh and tools/flash_encrypted.sh -- run
   # for real against a scripted board and stub esptool/espefuse/espsecure

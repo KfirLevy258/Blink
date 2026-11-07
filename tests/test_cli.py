@@ -2221,6 +2221,16 @@ def test_launchd_not_loaded_names_the_frozen_service_from_a_checkout(
                     f"`{cli._quote_line(want)} install` to start it")
 
 
+def test_status_prints_the_link_line(tmp_path, monkeypatch, capsys):
+    from pc import link_status
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("BLINK_SKIP_SERVICE", "1")
+    os.makedirs(tmp_path / ".blink")
+    link_status.write(str(tmp_path / ".blink"), "usb", None)
+    cli.cmd_status(type("A", (), {})())
+    assert "Link        USB cable" in capsys.readouterr().out
+
+
 def _verdict(home, has_window, at, kind="statusline_sustained"):
     """The verdict the daemon leaves in ~/.blink (pc/session_verdict),
     inside the caller's `home` or not at all (tests/support/home.py)."""

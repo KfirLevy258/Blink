@@ -48,13 +48,15 @@ SET_UNDER_HOME = ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA")
 # PR #4, 2026-10-31); BLINK_RELEASE_PUBKEY_FILE replaces the shipped release
 # key; BLINK_OTA_DIR replaces the release feed; BLINK_TAP and BLINK_SCENARIO
 # make the daemon write a transcript or play a script; the rest switch the
-# poll interval, the watchdog and auto-update. A test that wants one sets it
+# poll interval, the watchdog and auto-update; BLINK_FORCE_WIFI (spec D31)
+# skips the serial link for WiFi. A test that wants one sets it
 # itself, after this. tests/test_sandbox.py fails if the code reads a BLINK_*
 # variable that is in neither this list nor SET_BY_FIXTURE.
 CLEARED = ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "BLINK_STATUS_DIR",
            "BLINK_STATUS_POLL_S", "BLINK_RELEASE_PUBKEY_FILE", "BLINK_OTA_DIR", "BLINK_TAP",
            "BLINK_SCENARIO", "BLINK_POLL_INTERVAL_S", "BLINK_NO_WATCHDOG",
-           "BLINK_NO_AUTO_UPDATE", "BLINK_ALLOW_FOREIGN_HOME")
+           "BLINK_NO_AUTO_UPDATE", "BLINK_ALLOW_FOREIGN_HOME",
+           "BLINK_FORCE_WIFI")
 # Set to a value for every test, by their own fixtures below.
 SET_BY_FIXTURE = ("BLINK_SKIP_SERVICE",)
 
@@ -118,6 +120,15 @@ def move_home(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _wifi_link_says_everything_again():
+    """wifi_link remembers the last failure it said, process-wide."""
+    from pc import wifi_link
+    wifi_link.reset_standing()
+    yield
+    wifi_link.reset_standing()
+
+
+@pytest.fixture(autouse=True)
 def _no_real_login_service(monkeypatch):
     """Nothing in a unit test may register or remove a real login service."""
     monkeypatch.setenv("BLINK_SKIP_SERVICE", "1")
@@ -130,6 +141,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "allow_browser: this test may start the real browser or"
                    " file opener (none does today)")
+    config.addinivalue_line(
+        "markers", "windows_real: runs the real Windows ACL calls; skipped"
+                   " off Windows, proved on the Windows VM")
     config.addinivalue_line(
         "markers", "allow_claude_launch: this test may start the real claude"
                    " or wsl.exe (none does today); allow_browser does not"
@@ -163,6 +177,9 @@ def _no_real_network(request, monkeypatch):
     address instead of timing out. Loopback stays open: the theme builder
     will serve on 127.0.0.1.
 
+    UDP too (sendto, sendmsg): the WiFi discovery query is a broadcast and
+    never passes through connect().
+
     Raised as a BaseException, not an AssertionError. The watch's reader
     catches Exception on purpose -- a status light must never take the daemon
     down -- and would have turned the refusal into an ordinary "unreadable
@@ -181,6 +198,8 @@ def _no_real_network(request, monkeypatch):
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
     real_getaddrinfo = socket.getaddrinfo
+    real_sendto = socket.socket.sendto
+    real_sendmsg = getattr(socket.socket, "sendmsg", None)
 
     def refuse(what):
         raise RealNetworkRefused(
@@ -194,6 +213,24 @@ def _no_real_network(request, monkeypatch):
             return real(self, address)
         return connect
 
+    def guarded_to(real):
+        # UDP never calls connect(): the address rides on every datagram.
+        # sendto(data, addr) or sendto(data, flags, addr); sendmsg's is the
+        # third after ancdata and flags, or None for a connected socket (which connect()
+        # already vetted). 255.255.255.255 is the WiFi discovery broadcast
+        # and must be refused here, not reach a developer's LAN.
+        def sendto(self, data, *rest):
+            if rest and not _loopback(rest[-1]):
+                refuse(rest[-1])
+            return real(self, data, *rest)
+        return sendto
+
+    def sendmsg(self, buffers, *rest):
+        addr = rest[2] if len(rest) > 2 else None
+        if addr is not None and not _loopback(addr):
+            refuse(addr)
+        return real_sendmsg(self, buffers, *rest)
+
     def getaddrinfo(host, *a, **k):
         if host is not None and not _loopback((host,)):
             refuse(host)
@@ -203,6 +240,9 @@ def _no_real_network(request, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex",
                         guarded(real_connect_ex))
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket.socket, "sendto", guarded_to(real_sendto))
+    if real_sendmsg is not None:       # not on Windows
+        monkeypatch.setattr(socket.socket, "sendmsg", sendmsg)
 
 
 class RealNetworkRefused(BaseException):
