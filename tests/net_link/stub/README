@@ -1,0 +1,4 @@
+Stand-ins for the Zephyr and ESP-IDF headers firmware/src/net_link.c includes,
+so tests/net_link/host_test.c can build the real file on a laptop and drive
+its join and rejoin scheduling. Never put this directory on a firmware
+include path. Everything the fakes do is in tests/net_link/host_test.c.

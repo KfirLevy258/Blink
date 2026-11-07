@@ -214,9 +214,11 @@ esac
 case "$(uname -s)" in
 MINGW* | MSYS* | CYGWIN*)
 	THEME_DATA="$(cygpath -w "$ROOT/pc/theme_builder.html");pc"
+	FONTS_DATA="$(cygpath -w "$ROOT/pc/fonts");pc/fonts"
 	;;
 *)
 	THEME_DATA="$ROOT/pc/theme_builder.html:pc"
+	FONTS_DATA="$ROOT/pc/fonts:pc/fonts"
 	;;
 esac
 
@@ -231,6 +233,7 @@ cd "$ROOT"
 	--add-data "$ROOT/tools/blink-statusline.sh:." \
 	--add-data "$ROOT/tools/blink-hook.sh:." \
 	--add-data "$THEME_DATA" \
+	--add-data "$FONTS_DATA" \
 	--collect-all esptool \
 	--collect-all bitstring \
 	--collect-all bitarray \
@@ -257,6 +260,12 @@ test -f "$OUT/blink/_internal/pc/theme_builder.html" || {
 	echo "FATAL: pc/theme_builder.html is missing from the bundle" >&2
 	exit 1
 }
+for font in Montserrat-Medium-latin.woff2 Montserrat-SemiBold-latin.woff2; do
+	test -f "$OUT/blink/_internal/pc/fonts/$font" || {
+		echo "FATAL: pc/fonts/$font is missing from the bundle" >&2
+		exit 1
+	}
+done
 [ -f "$BUILT" ] || { echo "FATAL: no executable under $OUT/blink" >&2; exit 1; }
 
 # --collect-all bitarray brings its own test suite and a C header along with

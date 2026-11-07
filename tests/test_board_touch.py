@@ -99,19 +99,15 @@ def test_the_default_script_parses_and_covers_the_whole_list():
     # Settings opened at least three times, by both routes.
     assert sum(t in ("settings.open", "settings.swipe") for t in taps) >= 3
     assert "settings.swipe" in taps
-    for name in ("brightness.open", "brightness.level3", "theme.open",
-                 "theme.light", "theme.dark", "theme.edit_on_computer",
+    for name in ("brightness.open", "brightness.level3",
                  "focus.open", "focus.session", "focus.weekly", "focus.off",
                  "eye.swipe", "eye.exit", "back.swipe", "settings.back"):
         assert name in taps, name
-    assert taps.index("theme.light") < taps.index("theme.dark")
-    # Ends with Focus off and then Theme Dark, and says so.
+    # Task 6.1: the Theme screen is not reachable from the board.
+    assert not [t for t in taps if t.startswith("theme.")]
     last_focus = max(i for i, t in enumerate(taps) if t.startswith("focus."))
     assert taps[last_focus] == "focus.off"
-    assert taps.index("theme.dark") > last_focus
     assert any(s.cmd == "mem" for s in steps)
-    assert any(s.cmd == "expect" and s.args[0] == "theme_now"
-               and s.args[1] == {"why": "user", "id": "9"} for s in steps)
     assert any(s.cmd == "expect" and s.args[0] == "theme_edit"
                for s in steps)
     # Focus is checked on the gauges, not only in the store.
@@ -154,8 +150,8 @@ def test_the_layout_literals_are_still_where_the_targets_assume():
     assert re.search(r"lv_obj_set_size\(pg, 60, 36\);\s*"
                      r"lv_obj_align\(pg, LV_ALIGN_TOP_RIGHT, -6, 2\);", c)
     assert "12 + i * (FOCUS_BTN_W + FOCUS_BTN_GAP), FOCUS_BTN_Y);" in c
-    assert "LV_ALIGN_TOP_LEFT, 12 + (k % 2) * (TILE_W + TILE_GAP)," in c
-    assert "TILE_TOP + (k / 2) * (TILE_H + TILE_GAP));" in c  # tiles
+    assert "LV_ALIGN_TOP_LEFT, 12 + (k % 3) * (TILE_W + TILE_GAP)," in c
+    assert "TILE_TOP + (k / 3) * (TILE_H + TILE_GAP));" in c  # tiles
 
 
 def test_the_theme_ids_match_theme_h():
@@ -168,16 +164,6 @@ def test_every_tap_target_lands_inside_the_panel():
     for name, t in bt.TARGETS.items():
         for x, y in t.points():
             assert 0 <= x < 320 and 0 <= y < 240, name
-
-
-def test_a_theme_is_found_on_its_page_and_slot():
-    # Five a page and the Edit slot sixth, when the app can open the builder.
-    assert bt.theme_slot(bt.THEME_IDS["dark"]) == (0, 0)
-    assert bt.theme_slot(bt.THEME_IDS["light"]) == (1, 4)
-    assert bt.theme_slot(bt.THEME_IDS["light_ink"]) == (2, 1)
-    assert bt.slot_center(0) == (84, 74)
-    assert bt.slot_center(4) == (84, 198)
-    assert bt.slot_center(5) == (236, 198)
 
 
 def test_strokes_on_the_wire_are_the_firmware_s_shape():
@@ -198,7 +184,7 @@ class FakeLink:
         self.bench_ref = bench_ref
         self.state = dict(scr="gauges", ov="none", modal="none", busy=0,
                           theme=0, stored=0, tp=0, focus="off", bl=60,
-                          edit="name", slp=0, nt="none", gf="off")
+                          edit="name", slp=0, nt="none", gf="off", ln="usb")
         if state:
             self.state.update(state)
 
@@ -263,12 +249,12 @@ def test_a_ui_state_line_keeps_only_known_fields_in_range():
                             "ov": "theme", "modal": "none", "busy": 0,
                             "theme": 9, "stored": 9, "tp": 1,
                             "focus": "off", "bl": 60, "edit": "opened",
-                            "slp": 0, "nt": "none", "gf": "off",
+                            "slp": 0, "nt": "none", "gf": "off", "ln": "usb",
                             "extra": "dropped"})
     assert st == {"scr": "settings", "ov": "theme", "modal": "none",
                   "busy": 0, "theme": 9, "stored": 9, "tp": 1,
                   "focus": "off", "bl": 60, "edit": "opened",
-                  "slp": 0, "nt": "none", "gf": "off"}
+                  "slp": 0, "nt": "none", "gf": "off", "ln": "usb"}
     assert bt.parse_ui_state({"t": "ui_state", "scr": "x" * 99}) is None
 
 
@@ -493,15 +479,12 @@ def test_a_custom_theme_goes_back_as_the_line_the_pc_would_send():
     assert plan == [("line", pc_theme.message("save", t))]
 
 
-def test_a_custom_theme_nobody_here_saved_is_reselected_on_the_panel():
-    """No theme.json to match the board's hash: the Custom tile reselects
-    the record the board itself still holds."""
+def test_a_custom_theme_nobody_here_saved_is_left_alone():
+    """No theme.json to match the board's hash: there is no Theme screen to
+    reselect it on (Task 6.1), so the plan holds nothing for it."""
     start = dict(START, theme=12, stored=12)
     now = dict(START, theme=0, stored=0)
-    plan = bt.restore_plan(start, now, start_h="deadbeef")
-    assert [n for k, n in plan if k == "target"] == [
-        "settings.open", "theme.open", "theme.custom", "settings.back",
-        "settings.back"]
+    assert bt.restore_plan(start, now, start_h="deadbeef") == []
 
 
 def test_restore_runs_after_a_failed_and_an_interrupted_script():
@@ -533,10 +516,8 @@ def test_the_tool_tells_the_operator_not_to_touch_the_panel():
     assert "do not touch the panel" in TOOL.read_text().lower()
 
 
-def test_the_custom_theme_has_a_target():
-    assert bt.THEME_IDS["custom"] == 12
-    assert "theme.custom" in bt.TARGETS
-    assert bt.theme_slot(12) == (2, 2)
+def test_no_theme_target_is_left_in_the_vocabulary():
+    assert not [n for n in bt.TARGETS if n.startswith("theme.")]
 
 
 def test_the_bench_notice_tag_is_cleared_wherever_a_notice_comes_or_goes():

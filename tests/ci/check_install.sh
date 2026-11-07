@@ -209,6 +209,22 @@ codex-only)
 	write_codex_log ;;                    # no ~/.claude, no Desktop
 home-wiped-uninstall)
 	write_settings '{"model": "opus"}' ;;
+refresh-unasked)
+	# A Claude Code on PATH that records every call. The opt-in /usage
+	# refresh spends nothing when it works, but it is still the owner's own
+	# Claude Code, run in the background: a non-interactive install must not
+	# turn it on, and nothing the binary does here may run /usage.
+	write_settings '{"model": "opus"}'
+	STUB_BIN="$WORK/stub-bin"
+	mkdir -p "$STUB_BIN"
+	cat >"$STUB_BIN/claude" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$WORK/claude-calls"
+case "\$1" in --version) echo "2.1.318 (Claude Code)" ;; esac
+EOF
+	chmod 755 "$STUB_BIN/claude"
+	PATH="$STUB_BIN:$PATH"
+	export PATH ;;
 unreadable-settings)
 	write_settings '{"model": "opus", "statusLine": {not json' ;;
 broken-data)
@@ -405,6 +421,34 @@ with-statusline | reinstall | spaced-home | install-uninstall-install)
 	ok "payload captured for the daemon"
 	;;
 esac
+
+if [ "$SCENARIO" = "refresh-unasked" ]; then
+	"$HOME/.blink/bin/$BINEXE" status >"$WORK/status.txt" 2>&1 || true
+	# Exactly what the daemon reads (usage_refresh.enabled): anything but a
+	# literal true is off, and a non-interactive install asks nothing, so
+	# the key must not be there at all.
+	py - "$HOME/.blink/config.json" <<-'EOF' || fail "a non-interactive install set the usage refresh"
+		import json, sys
+		try:
+		    d = json.load(open(sys.argv[1]))
+		except FileNotFoundError:
+		    d = {}
+		assert "usage-refresh" not in d, d
+	EOF
+	ok "a non-interactive install leaves the usage refresh unasked"
+	# Windows looks for claude.exe, which a script cannot stand in for, so
+	# the stub is reached on the other two only.
+	case "$(uname -s)" in
+	MINGW* | MSYS* | CYGWIN*) ;;
+	*)
+		[ -s "$WORK/claude-calls" ] ||
+			fail "the stub claude was never called: the scenario proves nothing"
+		! grep -q "/usage" "$WORK/claude-calls" ||
+			fail "install or status ran claude /usage: $(cat "$WORK/claude-calls")"
+		ok "install and status called claude, never /usage"
+		;;
+	esac
+fi
 
 if [ "$SCENARIO" = "no-statusline" ]; then
 	[ "$(json_get model)" = "opus" ] || fail "an unrelated key was lost"

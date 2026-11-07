@@ -16,13 +16,14 @@ address and name standing in for the fields the real file also holds, so
 a test can see they are not kept. Nothing is captured from a machine. The
 writing helpers take their home from the caller (tests/support/home.py).
 """
+import dataclasses
 import json
 import logging
 import os
 
 import pytest
 
-from pc import claude_plan, ingest, protocol, session_verdict
+from pc import claude_home, claude_plan, ingest, protocol, session_verdict
 from pc.providers import claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
 from tests.pc.test_claude_cli import write
@@ -58,7 +59,8 @@ def put_config(home, doc=None, raw=None, environ=None):
     """Write Claude Code's .claude.json where claude_plan.config_path()
     looks (under CLAUDE_CONFIG_DIR when `environ` sets it), inside the
     caller's `home` or not at all. `raw` is written as bytes instead."""
-    path = inside(home, claude_plan.config_path(environ))
+    path = inside(home, claude_plan.config_path(
+        None if environ is None else claude_home.from_environ(environ)))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     data = raw if raw is not None else json.dumps(doc).encode("utf-8")
     with open(path, "wb") as f:
@@ -332,7 +334,9 @@ def test_the_fallback_check_fails_on_a_misread_file(tmp_path, monkeypatch):
     """falls_back() must be able to fail: with the plan read as Ultra,
     the chain's first reply is an Ultra mark."""
     put_config(tmp_path, raw=b"{")
-    monkeypatch.setattr(claude_plan, "read", lambda p, st=None: True)
+    monkeypatch.setattr(claude_plan, "parse", lambda p, st=None:
+                        dataclasses.replace(claude_plan.EMPTY_VIEW,
+                                            ultra=True))
     p = tmp_path / "statusline.json"
     with pytest.raises(AssertionError):
         falls_back(ClaudeCliProvider(path=str(p)), p)
@@ -400,20 +404,22 @@ def test_a_refused_file_is_not_parsed_again_until_it_changes(
     """Corrupt, refused or misshapen is an answer, kept against the file's
     signature: re-parsing an 8 MB file once a minute on the serial thread
     to learn the same thing was the cost the cap was meant to bound."""
-    path = put_config(tmp_path, raw=b"{" + b" " * 1000)
+    # Valid JSON of the wrong shape: undecodable text is no longer an
+    # answer to cache but a retry (test_half_written_config_keeps_the_last_view).
+    path = put_config(tmp_path, raw=b"[1, 2" + b"]" + b" " * 1000)
     reads = []
-    real = claude_plan.read
-    monkeypatch.setattr(claude_plan, "read",
+    real = claude_plan.parse
+    monkeypatch.setattr(claude_plan, "parse",
                         lambda p, st=None: reads.append(1) or real(p, st))
     reader = claude_plan.PlanReader()
     assert reader.ultra(NOW) is False
-    assert reader.ultra(NOW + claude_plan.RECHECK_S) is False
-    assert reader.ultra(NOW + 2 * claude_plan.RECHECK_S) is False
+    assert reader.ultra(NOW + 60) is False
+    assert reader.ultra(NOW + 120) is False
     assert len(reads) == 1
 
     put_config(tmp_path, plan_doc())
     os.utime(path, (NOW + 500, NOW + 500))
-    assert reader.ultra(NOW + 3 * claude_plan.RECHECK_S) is True
+    assert reader.ultra(NOW + 180) is True
     assert len(reads) == 2
 
 
@@ -440,17 +446,19 @@ def test_a_read_that_raises_never_leaves_poll(tmp_path, monkeypatch):
 def test_the_file_is_beside_the_config_folder_by_default(tmp_path):
     assert claude_plan.config_path() == os.path.join(str(tmp_path),
                                                      ".claude.json")
-    assert claude_plan.config_path({}) == os.path.join(str(tmp_path),
-                                                       ".claude.json")
+    assert claude_plan.config_path(claude_home.from_environ({})) == (
+        os.path.join(str(tmp_path), ".claude.json"))
 
 
 def test_claude_config_dir_moves_the_file(tmp_path, monkeypatch):
-    """Claude Code 2.1.316: join(CLAUDE_CONFIG_DIR || homedir(),
-    ".claude.json"). An Ultra file there marks; a Pro file in the home
-    folder, which Claude Code is not using, does not get a say."""
+    """Claude Code 2.1.316 puts .claude.json in CLAUDE_CONFIG_DIR, or in
+    the home folder when the variable is unset. An Ultra file there marks;
+    a Pro file in the home folder, which Claude Code is not using, does not
+    get a say."""
     cfg = str(tmp_path / "work-config")
     env = {"CLAUDE_CONFIG_DIR": cfg}
-    assert claude_plan.config_path(env) == os.path.join(cfg, ".claude.json")
+    assert claude_plan.config_path(claude_home.from_environ(env)) == (
+        os.path.join(cfg, ".claude.json"))
     put_config(tmp_path, plan_doc(name="Pro", tier="default_claude_pro"))
     put_config(tmp_path, plan_doc(), environ=env)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", cfg)
@@ -463,7 +471,7 @@ def test_claude_config_dir_moves_the_file(tmp_path, monkeypatch):
                          ids=["home", "CLAUDE_CONFIG_DIR"])
 def test_a_non_empty_legacy_config_json_wins(tmp_path, monkeypatch,
                                              with_dir):
-    """Claude Code 2.1.316's y_(): a regular, non-empty .config.json in
+    """Claude Code's rule (2.1.316): a regular, non-empty .config.json in
     $CLAUDE_CONFIG_DIR, or in ~/.claude, is the global config, ahead of
     .claude.json (the review of PR #6, 2026-11-01)."""
     if with_dir:
@@ -508,12 +516,14 @@ def test_claude_config_dir_without_a_file_is_not_the_home_one(
 # --- how often, and what is kept ----------------------------------------------
 
 
-def test_the_file_is_looked_at_once_a_minute_and_read_on_change(
+def test_the_file_is_looked_at_every_time_and_read_on_change(
         tmp_path, monkeypatch):
+    """Stat'ed at every look since round 5 of the 2026-11-04 review
+    (ruling A), parsed only when it changed."""
     path = put_config(tmp_path, plan_doc())
     reads = []
-    real = claude_plan.read
-    monkeypatch.setattr(claude_plan, "read",
+    real = claude_plan.parse
+    monkeypatch.setattr(claude_plan, "parse",
                         lambda p, st=None: reads.append(1) or real(p, st))
     reader = claude_plan.PlanReader()
 
@@ -523,8 +533,7 @@ def test_the_file_is_looked_at_once_a_minute_and_read_on_change(
 
     put_config(tmp_path, plan_doc(name="Max", tier="default_claude_max_5x"))
     os.utime(path, (NOW + 40, NOW + 40))
-    assert reader.ultra(NOW + 59) is True       # not looked at yet
-    assert reader.ultra(NOW + 60) is False      # looked at, changed, read
+    assert reader.ultra(NOW + 41) is False      # looked at, changed, read
     assert len(reads) == 2
     assert reader.ultra(NOW + 200) is False     # looked at, unchanged
     assert len(reads) == 2
@@ -541,12 +550,13 @@ def test_a_clock_gone_back_looks_again(tmp_path):
 def test_a_failed_read_is_tried_again_at_the_next_look(tmp_path,
                                                        monkeypatch):
     put_config(tmp_path, plan_doc())
-    results = [None, True]
-    monkeypatch.setattr(claude_plan, "read",
+    results = [None, dataclasses.replace(claude_plan.EMPTY_VIEW,
+                                         ultra=True)]
+    monkeypatch.setattr(claude_plan, "parse",
                         lambda p, st=None: results.pop(0))
     reader = claude_plan.PlanReader()
     assert reader.ultra(NOW) is False
-    assert reader.ultra(NOW + claude_plan.RECHECK_S) is True
+    assert reader.ultra(NOW + 60) is True
 
 
 def test_nothing_but_the_answer_is_kept_or_said(tmp_path, capsys, caplog):
@@ -641,9 +651,10 @@ def test_the_readme_privacy_paragraph_names_the_plan_read():
     for said in ("it reads Claude Code's config, `~/.claude.json`: the whole"
                  " file is parsed in memory, and it can hold your MCP"
                  " servers' tokens",
-                 "only the plan name (`planDisplayName`) and rate-limit tier"
-                 " (`organizationRateLimitTier`) are looked at, only whether"
-                 " they say Ultra is kept",
+                 "only the plan name and rate-limit tier, the seat type"
+                 " (`oauthAccount.seatTier`, `billingType`), the account and"
+                 " organisation ids, and on a usage-billed seat the spend"
+                 " Claude Code saved at the last `/usage`, are looked at.",
                  "While the account is marked as having no five-hour limit"
                  " it also reads",
                  "the next five-hour figure Claude Code shows lifts the mark"):
@@ -661,10 +672,16 @@ def test_the_full_readme_has_a_reads_row_for_the_plan():
                  "`organizationRateLimitTier`", "legacy `.config.json`",
                  "The whole file is read and parsed in memory",
                  "which can include their tokens",
-                 "kept, logged, printed or saved",
+                 "kept, logged or printed",
                  "anything but a regular file, is not opened",
-                 "is not parsed again until it changes"):
+                 "is read again until it changes",
+                 "the last reading is kept and the file is tried again"
+                 " five seconds later"):
         assert said in row[0], said
+    # Untrue since 9aba323: text that does not parse is retried, keeping
+    # the last view (final review of 2026-11-04; five seconds later since
+    # round 6).
+    assert "does not parse is not parsed again" not in row[0]
     assert ("the first Claude Code reply with no five-hour figure is that"
             " proof") in full
     assert "never sees a credential" not in full

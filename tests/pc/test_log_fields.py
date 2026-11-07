@@ -103,6 +103,15 @@ _FW_SRC = ROOT / "firmware" / "src"
 # Received by the bench injector from tools/board_touch.py, never from the
 # daemon, so the daemon's log never has it to name.
 _BENCH_ONLY = {"touch"}
+# Named in WIRE_TYPES ahead of the firmware that speaks them, so the transcript
+# allowlist (protocol.TAP_FIELDS) is complete from the first commit of the WiFi
+# transport. Each leaves this set in the task that teaches the firmware the
+# line (1.3 for wifi_*, 6.2 for logo_* and pref_set; ota_end and ota_ack with
+# the WiFi OTA); the set empty, the staleness check below is whole again.
+_NOT_IN_FIRMWARE_YET = {
+    "wifi_scan", "wifi_set", "wifi_forget", "ota_end", "logo_begin",
+    "logo_chunk", "logo_end", "logo_remove", "pref_set", "wifi_net",
+    "wifi_state", "ota_ack", "logo_ack", "logo_state"}
 _SENT = re.compile(r'\\"t\\":\\"([a-z_]+)')
 _READ = re.compile(r'strcmp\(type,\s*"([a-z_]+)"\)')
 
@@ -130,7 +139,8 @@ def test_every_type_the_firmware_sends_or_reads_is_one_the_log_can_name():
 
 def test_wire_types_names_nothing_the_firmware_does_not_use():
     sent, received = _firmware_types()
-    stale = protocol.WIRE_TYPES - sent - received
+    stale = (protocol.WIRE_TYPES - sent - received
+             - _NOT_IN_FIRMWARE_YET)
     assert not stale, sorted(stale)
 
 
@@ -239,3 +249,17 @@ def test_an_unknown_provider_from_the_board_is_not_named(capsys):
     err = capsys.readouterr().err
     assert "PROVIDERSECRET" not in err and "\x1b" not in err
     assert "not reporting; keeping 'claude'" in err
+
+
+def test_a_deferred_bus_never_names_an_unknown_provider(capsys):
+    """Item 6 of the /code-review max of 277b81a..4003b0b: unbuilt, the
+    DeferredBus kept any non-empty name and said True, so Bridge logged the
+    board's raw `provider` as "main source: ...", newlines and escapes
+    included. It answers as the bus it stands on does."""
+    interim = ingest.IngestionBus(providers=[_Fixed()], now=lambda: 1_700_000_000)
+    bus = ingest.DeferredBus(interim, lambda: None)
+    assert bus.set_preferred("PROVIDERSECRET\x1b[2J\n[bridge] forged") is False
+    err = capsys.readouterr().err
+    assert "PROVIDERSECRET" not in err and "\x1b" not in err
+    assert "forged" not in err
+    assert bus.set_preferred("claude") is True

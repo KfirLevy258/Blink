@@ -130,3 +130,19 @@ bool usage_toast_change(const struct usage_counts *prev,
 	}
 	return false;
 }
+
+enum usage_health_colour usage_health_colour(enum usage_status status,
+					     bool stale_here)
+{
+	switch (status) {
+	case USAGE_STATUS_ERROR:
+		return USAGE_HC_RED;
+	case USAGE_STATUS_STALE:
+		return stale_here ? USAGE_HC_STALE : USAGE_HC_LIVE;
+	case USAGE_STATUS_DISCONNECTED:
+		return USAGE_HC_GREY;
+	case USAGE_STATUS_OK:
+	default:
+		return USAGE_HC_LIVE;
+	}
+}

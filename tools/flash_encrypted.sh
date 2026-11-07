@@ -20,7 +20,7 @@
 #   west build --sysbuild -d build-sb -b esp32_devkitc/esp32/procpu . \
 #     -- -DSB_CONFIG_BOOTLOADER_MCUBOOT=y -DUSE_CCACHE=0
 #
-# Usage: tools/flash_encrypted.sh [--logo FILE.bin | --keep-logo] [port]
+# Usage: tools/flash_encrypted.sh [--logo FILE.bin | --keep-logo | --app-only] [port]
 #   (port defaults to the first /dev/cu.usbserial*; opening it resets the
 #   board -- stop any logger first)
 #
@@ -29,17 +29,29 @@
 # with neither flag the partition is ERASED so the unit is an individual one,
 # same as tools/burn.sh. --keep-logo leaves it alone -- for a dev board that
 # is re-flashed many times a day and should keep the logo it has.
+#
+# --app-only encrypts and writes slot 0 (0x20000) alone: MCUboot at 0x1000 and
+# the logo partition are not touched. It is for a fused unit that already has
+# the right bootloader (an OTA-capable one), where a second 0x1000 write is
+# only a chance to lose the way in. Not combinable with --logo.
 set -euo pipefail
 
 LOGO=""
 KEEP_LOGO=0
+APP_ONLY=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--logo) LOGO="$2"; shift 2 ;;
 	--keep-logo) KEEP_LOGO=1; shift ;;
+	--app-only) APP_ONLY=1; shift ;;
+	-*) echo "FATAL: unknown option $1" >&2; exit 1 ;;
 	*) break ;;
 	esac
 done
+# One optional port, and nothing after it: an option placed after the port
+# used to be dropped silently and the FULL path ran (MCUboot write, logo
+# erase) on a unit whose caller asked for --app-only.
+[ $# -le 1 ] || { echo "FATAL: unexpected argument '$2' after the port; options go first" >&2; exit 1; }
 # Must match logo_partition in firmware/boards/esp32_devkitc_esp32_procpu.overlay.
 LOGO_OFF=0x330000
 LOGO_SIZE=0x80000
@@ -56,6 +68,7 @@ ETOOLS="${BLINK_ETOOLS:-/Library/Frameworks/Python.framework/Versions/3.10/bin}"
 [ -f "$KEY" ] || { echo "FATAL: flash key missing at $KEY -- no key, no flashing (see firmware/README security section)"; exit 1; }
 [ -n "${PORT}" ] || { echo "FATAL: no /dev/cu.usbserial* port found"; exit 1; }
 [ -f "$BUILD/mcuboot/zephyr/zephyr.bin" ] || { echo "FATAL: no sysbuild output in $BUILD -- build first (see header)"; exit 1; }
+[ "$APP_ONLY" = 0 ] || [ -z "$LOGO" ] || { echo "FATAL: --app-only does not write the logo; drop --logo"; exit 1; }
 [ -z "$LOGO" ] || [ -f "$LOGO" ] || { echo "FATAL: --logo $LOGO: no such file"; exit 1; }
 
 # Before the eFuse probe, not after it: the refusal reads only the build,
@@ -75,6 +88,9 @@ blink_refuse_selftest "$BUILD/firmware/zephyr/.config" \
 # injector belongs on a plaintext bench board (burn.sh --bench), and a fused
 # unit is the one most likely to be boxed.
 blink_refuse_inject "$BUILD/firmware/zephyr/.config" \
+	"$BUILD/firmware/zephyr/zephyr.signed.bin" || exit 1
+# Nor an image with a bench test knob (revert / hang on purpose).
+blink_refuse_test_knobs "$BUILD/firmware/zephyr/.config" \
 	"$BUILD/firmware/zephyr/zephyr.signed.bin" || exit 1
 
 # Refuse a chip that cannot boot what we are about to write. Detection is
@@ -132,11 +148,15 @@ rm -f "$APP_CONFIRMED"
 
 # Offsets match the sysbuild runners: MCUboot at 0x1000, signed app in slot0
 # at 0x20000. The address is part of the cipher tweak -- never shuffle these.
-enc 0x1000  "$BUILD/mcuboot/zephyr/zephyr.bin" "$TMP/mcuboot.enc"
+[ "$APP_ONLY" = 1 ] || enc 0x1000 "$BUILD/mcuboot/zephyr/zephyr.bin" "$TMP/mcuboot.enc"
 enc 0x20000 "$APP_CONFIRMED"                   "$TMP/app.enc"
 
 # 115200: 921600 fails on this CH340.
-if [ -n "$LOGO" ]; then
+if [ "$APP_ONLY" = 1 ]; then
+	"$ETOOLS/esptool.py" --port "$PORT" --baud 115200 write_flash \
+		0x20000 "$TMP/app.enc"
+	echo "Flashed encrypted, application only; bootloader and logo left as they were."
+elif [ -n "$LOGO" ]; then
 	enc "$LOGO_OFF" "$LOGO" "$TMP/logo.enc"
 	"$ETOOLS/esptool.py" --port "$PORT" --baud 115200 write_flash \
 		0x1000 "$TMP/mcuboot.enc" 0x20000 "$TMP/app.enc" \

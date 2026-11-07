@@ -10,14 +10,14 @@ at `--%` for most of a working day. Knowing the plan rules those Pro and Max
 cases out at the source: on a plan that is not Ultra, the fast path is never
 taken and the sustained rule is all there is.
 
-WHERE. Claude Code 2.1.316's rule (its y_(), read in the bundle on
-2026-11-01): a legacy `.config.json` in the config directory --
+WHERE. Claude Code's rule, in 2.1.316 (checked 2026-11-01, not yet
+measured on a desk): a legacy `.config.json` in the config directory --
 $CLAUDE_CONFIG_DIR when that is set, else ~/.claude -- wins when it is a
 regular file and not empty; otherwise the file is .claude.json in
 $CLAUDE_CONFIG_DIR, or in the home folder when the variable is unset. Not
 ~/.claude/.claude.json: with the variable unset the config directory and
-.claude.json sit side by side. No creator of a non-empty .config.json was
-found in 2.1.316, but a desk that kept one from an old release is read
+.claude.json sit side by side. 2.1.316 is not known to create a
+non-empty .config.json, but a desk that kept one from an old release is read
 there, as Claude Code reads it. Resolved when called, never at import
 (tests/test_sandbox.py fails on the other shape), and like
 burn_reader.transcripts_root a login service does not see a variable
@@ -48,17 +48,24 @@ from the file -- no value, no key, no path, no exception text -- is logged,
 printed, raised or saved, at any level (CLAUDE.md), and the parsed document
 is dropped before read() returns.
 
-WHAT IT COSTS. A stat at most once every RECHECK_S, and a read only when
-the file's signature -- inode, mtime and size -- has changed since the last
-look that got an answer. The file was 120 KB on the owner's desk. One over
-MAX_BYTES is not opened at all, and anything but a regular file (a FIFO
+WHAT IT COSTS. A stat once a poll (every two seconds; once a minute
+until round 5 of the 2026-11-04 review, which needed a /login seen within
+seconds), and a read only when the file's signature -- inode, mtime and
+size -- has changed since the last answer, at most once a
+FIRST_ANSWER_RETRY_S (ConfigFile). The file was 120 KB on the owner's
+desk; a generated 5.6 MB one parses in 11 ms there. One over MAX_BYTES is
+not opened at all, and anything but a regular file (a FIFO
 would block the open, and the serial thread with it) is not opened either.
-Each of those, and a file corrupt or of any other shape, reads as "not
-Ultra", and that answer is kept against the signature like any other, so
-it is not parsed again until the file changes. Only an OSError, or a file
-that changed between the stat and the read, is tried again at the next
-look. Not Ultra is the safe answer: it leaves the desk to the sustained
-rule, which is slower and was all there was before.
+Each of those, and JSON that is not an object, reads as "not Ultra", and
+that answer is kept against the signature like any other, so it is not
+read again until the file changes. Text that does not decode or parse is
+not an answer at all (since 9aba323): Claude Code rewrites the file all
+day, so it is most often a write caught half-done, and reading it as "not
+Ultra, no seat" flipped the page until the file next changed. It is
+treated like an OSError or a file that changed between the stat and the
+read: the last view is kept and the file is tried again
+FIRST_ANSWER_RETRY_S later. Not Ultra is the safe answer: it leaves the
+desk to the sustained rule, which is slower and was all there was before.
 
 THE RESIDUAL. One .claude.json vouches for every session in the shared
 statusline.json (the review of PR #6, 2026-11-01). The status line is
@@ -71,26 +78,39 @@ and lifts the mark, after which claude_cli refuses the fast path for a
 window. Not redesigned: it needs two accounts on one desk, one of them
 Ultra; docs/open-bugs/ultra-burn-followups.md keeps it.
 """
+import calendar
+import dataclasses
+import datetime
 import json
+import math
 import os
 import stat
+import time
 
-# How often the file is looked at, at most. The plan changes only on an
-# upgrade or a downgrade, and a minute late on either is nothing against
-# the five and a quarter hours this path saves. A minute late is not the
-# only lateness, though: the plan name in the file can be a day stale, or
-# stale for good under CLAUDE_CODE_OAUTH_TOKEN, because Claude Code
-# refreshes it only with a profile over a day old (the review of PR #6,
-# 2026-11-01). The tier, refreshed on nearly every launch, is what keeps a
-# stale name from vouching for a downgraded desk (is_ultra).
-RECHECK_S = 60
+from pc import claude_account, claude_home
+
+# A lateness no look can help: the plan name in the file can be a day
+# stale, or stale for good under CLAUDE_CODE_OAUTH_TOKEN, because Claude
+# Code refreshes it only with a profile over a day old (the review of PR
+# #6, 2026-11-01). The tier, refreshed on nearly every launch, is what
+# keeps a stale name from vouching for a downgraded desk (is_ultra).
+
+# The shortest gap between two parses of the file (ConfigFile.look): a
+# change that comes sooner, and a read that failed, wait for it. Not every
+# poll: a config Claude Code rewrites every poll, or one that never parses,
+# would then be read whole every two seconds on the serial thread. Five
+# seconds is how late a /login can be seen for it (round 6 of the
+# 2026-11-04 review, items 3 and 4). A source answers from memory and is
+# asked at every poll.
+FIRST_ANSWER_RETRY_S = 5
 
 # The largest file read. Claude Code's config grows with every project it
 # has been run in (a history and settings per folder); 120 KB on the owner's
 # desk after months of use. Eight megabytes is sixty times that, and bounds
-# what a poll on the serial thread can be made to parse: tens of
-# milliseconds, at most once a RECHECK_S and only when the file changed. A
-# file over it is not opened: its size is the stat's.
+# what a poll on the serial thread can be made to parse: 11 ms measured for
+# 5.6 MB on the owner's Mac (ConfigFile), and only when the file changed,
+# at most once a FIRST_ANSWER_RETRY_S. A file over it is not opened: its
+# size is the stat's.
 MAX_BYTES = 8 * 1024 * 1024
 
 # The plan's name, as planDisplayName gives it, and the tail of the
@@ -102,29 +122,21 @@ ULTRA_TIER_SUFFIX = "max_20x"
 LEGACY_NAME = ".config.json"
 
 
-def config_path(environ=None) -> str:
+def config_path(home=None) -> str:
     """Where Claude Code keeps its global config, worked out now, by
     Claude Code 2.1.316's rule (module docstring, WHERE): a non-empty
     regular `.config.json` in $CLAUDE_CONFIG_DIR, or in ~/.claude when that
     is unset; else `.claude.json` in $CLAUDE_CONFIG_DIR, or in the home
-    folder. `environ` is os.environ when None, as in
-    burn_reader.transcripts_root. Costs one stat."""
-    base = (os.environ if environ is None else environ).get(
-        "CLAUDE_CONFIG_DIR")
-    if base:
-        base = os.path.expanduser(base)
-        legacy_dir = base
-    else:
-        base = os.path.expanduser("~")
-        legacy_dir = os.path.join(base, ".claude")
-    legacy = os.path.join(legacy_dir, LEGACY_NAME)
-    try:
-        st = os.stat(legacy)
-        if stat.S_ISREG(st.st_mode) and st.st_size > 0:
-            return legacy
-    except (OSError, ValueError):
-        pass
-    return os.path.join(base, ".claude.json")
+    folder. The folder and whether the variable chose it are those of
+    `home` (claude_home.current() when None), so the rule is applied to
+    the folder `blink install` recorded; which file wins is decided here,
+    on every call, and never stored. Costs one stat."""
+    home = home or claude_home.current()
+    base = (home.config_dir if home.config_dir_set else home.user_dir())
+    legacy = home.join(home.config_dir, LEGACY_NAME)
+    if claude_home.regular_nonempty(legacy):
+        return legacy
+    return home.join(base, ".claude.json")
 
 
 def _tier_is_ultra(tier):
@@ -161,19 +173,252 @@ def signature(st):
     return (st.st_ino, st.st_mtime_ns, st.st_size)
 
 
-def read(path, st=None):
-    """True or False for the file at `path`, or None when it is worth
+# What the extra_usage cache is read for, and the seat fields that decide
+# the page (docs/plans/enterprise-spend.md, "Recognising a spend seat").
+SPEND_SEAT_TIER = "enterprise_usage_based"
+SPEND_BILLING_TYPE = "usage_based"
+
+
+@dataclasses.dataclass(frozen=True)
+class SpendAnchor:
+    """The spend Claude Code saved at the last /usage, in cents. Raw: not
+    adjusted for the month it was fetched in (the caller does that)."""
+    used_cents: int
+    limit_cents: "int | None"
+    enabled: bool
+    fetched_at: float
+
+
+@dataclasses.dataclass(frozen=True)
+class CacheWindows:
+    """The 5-hour and weekly figures Claude Code saved at the last /usage:
+    percent used and the reset as an epoch, each None when the cache has no
+    such window (a Max login showed a null five_hour on 2026-11-04, and the
+    week beside it was good). fetched_at is when /usage ran, epoch seconds."""
+    five_pct: "float | None"
+    five_resets_at: "float | None"
+    week_pct: "float | None"
+    week_resets_at: "float | None"
+    fetched_at: float
+
+
+@dataclasses.dataclass(frozen=True)
+class ConfigView:
+    """Everything this daemon takes from Claude Code's config, from one
+    parse. No raw id is held: account_fp is a one-way digest, and org_kind
+    is one of claude_account's own words, never the file's string."""
+    ultra: bool
+    spend_seat: bool
+    account_fp: str
+    org_kind: str
+    mtime: float
+    anchor: "SpendAnchor | None"
+    # The 5-hour and weekly figures the same /usage saved, or None.
+    windows: "CacheWindows | None" = None
+    # When this login's /usage cache was fetched (fetchedAtMs, epoch
+    # seconds), whatever it holds; None with no cache of this login's. The
+    # refresh's "did the run move the cache" check reads this, not
+    # windows or anchor: a cache with both windows null and no spend is
+    # still a refreshed cache (final review of feat/usage-refresh, 3).
+    cache_fetched_at: "float | None" = None
+
+
+# No file, or nothing in it that was asked for. account_fp "" is "no
+# login to follow" (claude_account.AccountWatch takes it as no news).
+EMPTY_VIEW = ConfigView(False, False, "", "consumer", 0.0, None)
+
+
+def is_spend_seat(doc) -> bool:
+    """Whether the login is billed by usage: oauthAccount.seatTier is
+    "enterprise_usage_based" or billingType is "usage_based". Only these
+    decide the mode; the cache decides the figure, never the mode."""
+    acct = doc.get("oauthAccount") if isinstance(doc, dict) else None
+    if not isinstance(acct, dict):
+        return False
+    return (acct.get("seatTier") == SPEND_SEAT_TIER
+            or acct.get("billingType") == SPEND_BILLING_TYPE)
+
+
+# The largest figure an anchor carries, in cents: ten million dollars, the
+# bound pc/spend_count and statusline_source put on the same money. A fetch
+# time is milliseconds up to 2100-01-01, statusline_source's ceiling on a
+# reset stamp. Past either, the cache is not believed: json reads an int of
+# any length and a float up to 1e308, and the figure went to the page and
+# the wire as it was (the final review of 2026-11-04).
+MAX_CENTS = 10 ** 9
+MAX_FETCHED_MS = 4_102_444_800 * 1000
+
+
+def _number(v):
+    """A finite int or float that is not a bool, else None.
+
+    The try: math.isfinite converts to float, and an int of 309 digits or
+    more raises OverflowError there instead of answering. parse() says it
+    never raises, and a used_credits that long made it raise, out of
+    PlanReader.look and with it a WSL watch tick and the Ultra check (the
+    final review of 2026-11-04, U1)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    try:
+        return v if math.isfinite(v) else None
+    except OverflowError:
+        return None
+
+
+def _cache(doc):
+    """(utilization dict, fetched_at epoch) of this login's saved /usage, or
+    None: no cache, one that names another login, a fetch time out of
+    bounds, or no utilization object. Shared by _anchor and _cache_windows
+    so both believe the same cache."""
+    cache = doc.get("cachedUsageUtilization") if isinstance(doc, dict) \
+        else None
+    if not isinstance(cache, dict):
+        return None
+    acct = doc.get("oauthAccount")
+    acct = acct if isinstance(acct, dict) else {}
+    cached_id = cache.get("accountUuid")
+    if cached_id is not None and str(cached_id) != str(
+            acct.get("accountUuid")):
+        return None
+    fetched_ms = _number(cache.get("fetchedAtMs"))
+    util = cache.get("utilization")
+    if (fetched_ms is None or not 0 <= fetched_ms <= MAX_FETCHED_MS
+            or not isinstance(util, dict)):
+        return None
+    return util, fetched_ms / 1000.0
+
+
+def _anchor(doc):
+    """The SpendAnchor in the config's cachedUsageUtilization, or None
+    (module docstring of the plan: USD only, finite non-negative amounts,
+    a boolean is_enabled, and the cache is this login's when it names one).
+    The account comparison happens here and neither id leaves."""
+    got = _cache(doc)
+    if got is None:
+        return None
+    util, fetched_at = got
+    extra = util.get("extra_usage")
+    if not isinstance(extra, dict):
+        return None
+    currency = extra.get("currency")
+    if currency is None:
+        currency = "usd"
+    if not isinstance(currency, str) or currency.strip().casefold() != "usd":
+        return None
+    used = _number(extra.get("used_credits"))
+    enabled = extra.get("is_enabled")
+    if (used is None or not 0 <= used <= MAX_CENTS
+            or not isinstance(enabled, bool)):
+        return None
+    limit = extra.get("monthly_limit")
+    if limit is not None:
+        limit = _number(limit)
+        if limit is None or not 0 <= limit <= MAX_CENTS:
+            return None
+        limit = int(round(limit))
+    return SpendAnchor(int(round(used)), limit, enabled, fetched_at)
+
+
+# A window's percent is believed from 0 to 1000, the board's PCT_MAX; past
+# that, or not a finite number, it is no figure rather than a clamped one.
+MAX_PCT = 1000
+
+
+def _window_pair(w):
+    """(percent, reset epoch) of one saved window; each None when it does
+    not read. A non-object, a null window and a bad number are all "not
+    there"; a reset that will not parse costs only the reset."""
+    if not isinstance(w, dict):
+        return None, None
+    pct = _number(w.get("utilization"))
+    if pct is None or not 0 <= pct <= MAX_PCT:
+        return None, None
+    resets = w.get("resets_at")
+    at = None
+    if isinstance(resets, str):
+        try:
+            when = datetime.datetime.fromisoformat(resets.strip())
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=datetime.timezone.utc)
+            at = when.timestamp()
+        except (ValueError, TypeError, OverflowError, OSError):
+            at = None
+        if at is not None and not 0 <= at <= MAX_FETCHED_MS / 1000:
+            at = None
+    return float(pct), at
+
+
+def _cache_windows(doc):
+    """The CacheWindows in the config's cachedUsageUtilization, or None when
+    the cache is not this login's or holds neither window. Never raises."""
+    try:
+        got = _cache(doc)
+        if got is None:
+            return None
+        util, fetched_at = got
+        five_pct, five_at = _window_pair(util.get("five_hour"))
+        week_pct, week_at = _window_pair(util.get("seven_day"))
+        if five_pct is None and week_pct is None:
+            return None
+        return CacheWindows(five_pct, five_at, week_pct, week_at, fetched_at)
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _cache_fetched_at(doc):
+    """fetchedAtMs of this login's cache, in epoch seconds, or None. Never
+    raises."""
+    try:
+        got = _cache(doc)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return None if got is None else got[1]
+
+
+def month_start_utc(now) -> float:
+    """Epoch seconds of 00:00 UTC on the 1st of the month `now` is in."""
+    t = time.gmtime(now)
+    return float(calendar.timegm((t.tm_year, t.tm_mon, 1, 0, 0, 0)))
+
+
+def next_month_start_utc(now) -> float:
+    """Epoch seconds of 00:00 UTC on the 1st of the month after `now`'s."""
+    t = time.gmtime(now)
+    y, m = (t.tm_year + 1, 1) if t.tm_mon == 12 else (t.tm_year,
+                                                      t.tm_mon + 1)
+    return float(calendar.timegm((y, m, 1, 0, 0, 0)))
+
+
+def _view(doc, mtime):
+    acct = doc.get("oauthAccount") if isinstance(doc, dict) else None
+    acct = acct if isinstance(acct, dict) else {}
+    fp = claude_account._fingerprint((acct.get("accountUuid"),
+                                      acct.get("organizationUuid")))
+    org = acct.get("organizationType")
+    kind = (claude_account.ACCOUNT_KINDS.get(org, claude_account.CONSUMER)
+            if isinstance(org, str) else claude_account.CONSUMER)
+    return ConfigView(ultra=is_ultra(doc), spend_seat=is_spend_seat(doc),
+                      account_fp=fp or "", org_kind=kind, mtime=mtime,
+                      anchor=_anchor(doc),
+                      windows=_cache_windows(doc),
+                      cache_fetched_at=_cache_fetched_at(doc))
+
+
+def parse(path, st=None):
+    """The ConfigView of the file at `path`, or None when it is worth
     trying again: an OSError, or the file changed between the stat and the
-    read. False for a file this reader refuses -- not a regular file, over
-    MAX_BYTES -- or one that does not parse or has the wrong shape; that
-    answer holds until the file changes. `st` is a stat of `path` already
-    taken (PlanReader's), or None to take one. Never raises, and says
-    nothing."""
+    read. A file this reader refuses -- not a regular file, over MAX_BYTES
+    -- or one that parses as JSON but is not an object, gives a view with
+    nothing in it but the mtime; that answer holds until the file changes.
+    Text that will not decode is None, like a half-written read.
+    `st` is a stat of `path` already taken (PlanReader's), or None to take
+    one. Never raises, and says nothing."""
     try:
         if st is None:
             st = os.stat(path)
+        bare = dataclasses.replace(EMPTY_VIEW, mtime=st.st_mtime)
         if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_BYTES:
-            return False                # not opened: a FIFO would block
+            return bare                 # not opened: a FIFO would block
         # O_NONBLOCK in case a FIFO took the file's place since the stat:
         # the open then returns at once, and the fstat below refuses it.
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
@@ -197,50 +442,154 @@ def read(path, st=None):
     except (ValueError, RecursionError):
         # ValueError covers UnicodeDecodeError and JSONDecodeError;
         # RecursionError is json's answer to an array nested thousands
-        # deep, as in session_verdict.load.
-        return False
-    ultra = is_ultra(doc)
+        # deep, as in session_verdict.load. Not an answer: Claude Code
+        # rewrites this file all day, so text that will not decode is most
+        # often a write caught half-done, and reading it as "no seat, not
+        # Ultra" would flip the page until the file next changed. Retry
+        # at the next look and keep the last good view meanwhile.
+        return None
+    try:
+        view = _view(doc, st.st_mtime)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        # The backstop for "never raises": every field _view reads is
+        # checked for its type, but this is a file anyone can write, and a
+        # value no check foresaw must cost the view, not the poll. An
+        # answer, like JSON that is not an object: held until the file
+        # changes, not read again.
+        view = bare
     del doc         # the rest of the file is not kept, not even here
-    return ultra
+    return view
+
+
+def read(path, st=None):
+    """True or False for Ultra, or None to try again (see parse)."""
+    v = parse(path, st)
+    return None if v is None else v.ultra
+
+
+class ConfigFile:
+    """One config file's stat, compare, back off and parse, shared by
+    PlanReader.look and wsl_watch.WslWatch._look (round 6 of the
+    2026-11-04 review, item 7: the watch kept a copy, and the two had
+    drifted -- a failed read retried at every tick there, a minute later
+    here).
+
+    look() stats the file every time it is asked (under a microsecond on
+    the owner's Mac) and parses it when its signature differs from the
+    one the last answer came from, at most once a FIRST_ANSWER_RETRY_S: a
+    change that comes sooner waits for it, and so does a read that failed
+    (a Windows lock, a write caught half done, a file that changed
+    between the stat and the read). A parse reads the whole file, and
+    Claude Code rewrites it all day; a generated 5.6 MB config parsed in
+    11 ms here (median of ten, 2026-11-04), which once a poll on the
+    serial thread would be a fifth of a core on a slower machine for
+    nothing. A refused file, or JSON that is not an object, is an answer
+    (an empty view) and is not read again until it changes."""
+
+    def __init__(self):
+        self._sig = None          # the signature the last answer came from
+        self._parsed_at = None    # when parse() last ran, for the spacing
+
+    def look(self, path, now_epoch, unreachable=None):
+        """A ConfigView when there is a new answer: the file parsed, or
+        EMPTY_VIEW when it is not there. None when there is nothing new --
+        unchanged, a change or a retry not yet due, a read that failed, a
+        stat that failed. `unreachable`, given a FileNotFoundError, says
+        whether it is really a share that dropped (wsl_watch), which is
+        not knowing, not "no file"."""
+        try:
+            st = os.stat(path)
+        except FileNotFoundError as e:
+            if unreachable is not None and unreachable(e):
+                return None
+            # And the next file to appear is parsed at once: a rewrite by
+            # delete and create otherwise waited out the spacing after
+            # this "no file", polls of no seat (final review of round 7,
+            # F3).
+            self._sig = self._parsed_at = None
+            return EMPTY_VIEW
+        except (OSError, ValueError):
+            return None                 # not knowing is not "no seat"
+        sig = (path, stat.S_IFMT(st.st_mode)) + signature(st)
+        if sig == self._sig:
+            return None
+        if self._parsed_at is not None:
+            since = now_epoch - self._parsed_at
+            if since < 0:
+                # A time before the last parse: the clock went back. Read
+                # as due until the final review of round 7 (F4), so a
+                # clock gone back parsed at once. Not due now, and due
+                # FIRST_ANSWER_RETRY_S later on the clock as it now reads:
+                # waiting for it to catch up with the old reading would
+                # hide a /login for as long as the step was.
+                self._parsed_at = now_epoch
+                return None
+            if since < FIRST_ANSWER_RETRY_S:
+                return None
+        self._parsed_at = now_epoch
+        got = parse(path, st)
+        if got is not None:
+            self._sig = sig
+        return got
 
 
 class PlanReader:
-    """The plan, for one process: stat-throttled, cached against the
-    file's signature."""
+    """The config's view, for one process: the file looked at once a poll
+    through a ConfigFile, or `source`, when given, a callable returning a
+    ConfigView or None, used instead of the file; None from it keeps the
+    last good view."""
 
-    def __init__(self, path=None):
+    def __init__(self, path=None, source=None, home=None):
         # None: config_path(), asked on every look, so a HOME moved after
-        # construction (tests/conftest.py) is followed.
+        # construction (tests/conftest.py) is followed. `home`, a callable
+        # returning a claude_home.ClaudeHome, names whose config that is,
+        # asked on every look too; None is claude_home.current().
         self._path = path
+        self._home = home
+        self._source = source
+        self._file = ConfigFile()
+        self._view = EMPTY_VIEW
+        # The time of the last look: another at the same time is the same
+        # poll, and is answered from it (look).
         self._looked_at = None
-        self._sig = None
-        self._ultra = False
 
     def path(self):
-        return self._path if self._path is not None else config_path()
+        if self._path is not None:
+            return self._path
+        return config_path(self._home() if self._home is not None else None)
+
+    def look(self, now_epoch) -> ConfigView:
+        """The view now.
+
+        Looked at once a poll, and not once a minute as until round 5
+        of the 2026-11-04 review (ruling A): the status line is read every
+        two seconds, and a /login seen up to a minute late left the new
+        login's renders counted on the old one and its first render taken
+        for the old login's (claude_cli._note_login). Once a poll: the
+        provider, the login watch, the bus's spend check and ultra() each
+        ask, and looks at one poll's time share the first (round 6, item
+        4). The file's spacing and retries are ConfigFile's. A source
+        answers from memory and is asked at every poll.
+
+        Before a first answer the view held is EMPTY_VIEW, "no seat, not
+        Ultra"; a read that fails then is tried again FIRST_ANSWER_RETRY_S
+        later like any other (/code-review max of 2026-11-04, U18: a
+        minute of Claude Desktop's windows on a spend desk after every
+        daemon start)."""
+        if self._looked_at is not None and now_epoch == self._looked_at:
+            return self._view
+        self._looked_at = now_epoch
+        if self._source is not None:
+            got = self._source()
+        else:
+            try:
+                p = self.path()
+            except (OSError, ValueError):
+                return self._view       # not knowing is not "no seat"
+            got = self._file.look(p, now_epoch)
+        if got is not None:
+            self._view = got
+        return self._view
 
     def ultra(self, now_epoch) -> bool:
-        """Whether the account is on Ultra, as of the last look. A look is
-        due RECHECK_S after the last one, or at once if the clock has gone
-        back past it."""
-        if (self._looked_at is not None
-                and 0 <= now_epoch - self._looked_at < RECHECK_S):
-            return self._ultra
-        self._looked_at = now_epoch
-        try:
-            p = self.path()
-            st = os.stat(p)
-        except (OSError, ValueError):
-            self._sig, self._ultra = None, False
-            return False
-        sig = (p, stat.S_IFMT(st.st_mode)) + signature(st)
-        if sig == self._sig:
-            return self._ultra
-        got = read(p, st)
-        # Only a read worth trying again is not cached against the stamp:
-        # a Windows lock, or a write caught half-done. A refused, corrupt
-        # or misshapen file is kept as "not Ultra" until it changes, so it
-        # is not parsed again once a minute.
-        self._sig = sig if got is not None else None
-        self._ultra = bool(got)
-        return self._ultra
+        return self.look(now_epoch).ultra

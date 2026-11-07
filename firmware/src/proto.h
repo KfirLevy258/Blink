@@ -2,8 +2,10 @@
 #define PROTO_H
 
 #include "ota_parse.h"
+#include "ask_prompt.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 
 /* Initialize protocol I/O, send hello. Call once at startup. */
 void proto_init(void);
@@ -11,6 +13,10 @@ void proto_init(void);
 /* Run one service iteration: drain RX lines (dispatch by "t") and emit a
  * periodic ping. Call repeatedly from the main loop. */
 void proto_service(void);
+
+/* Drops a wifi_set in flight and queues the radio down. For the panel's
+ * Forget and the network thread: nothing may persist a candidate after it. */
+void proto_wifi_cancel(void);
 
 /* True once any protocol message has arrived from a PC daemon -- read at boot
  * to know whether a daemon spoke during the splash. */
@@ -69,6 +75,17 @@ void proto_send_theme_now(const char *why);
 
 /* {"t":"theme_edit","v":2}: Settings > Theme > "Edit on computer". */
 void proto_send_theme_edit(void);
+
+/* Which link protocol lines go over right now: 0 none, 1 USB, 2 WiFi. The
+ * answer link_active() gives (link.h), for the panel. */
+uint8_t proto_link_kind(void);
+
+/* The board's id in hex, as hello says it ("unknown" with none). Settings >
+ * About names the board from its last four digits; never log it. */
+const char *proto_board_id_hex(void);
+/* {"t":"answer","v":2,"id":"refresh","a":"on"|"no"|"later"}: the answer to
+ * the daemon's "Keep figures fresh?" (ask_prompt.h). */
+void proto_send_answer(enum ask_answer a);
 
 /* Did the last welcome advertise the theme builder ("caps":["theme"])? */
 bool proto_host_can_theme(void);

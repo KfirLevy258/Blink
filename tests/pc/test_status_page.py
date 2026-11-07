@@ -1201,3 +1201,11 @@ def test_a_real_server_reply_is_read_however_it_is_framed(monkeypatch,
         server.shutdown()
         server.server_close()
     assert (result, why) == (("major", "Claude Code"), None)
+
+
+@pytest.fixture(autouse=True)
+def _no_recapture_wait(monkeypatch):
+    """`blink uninstall` waits cli.HOOK_RECAPTURE_S between taking the
+    hooks out and removing the script they run; not here."""
+    from pc import cli as _cli
+    monkeypatch.setattr(_cli, "HOOK_RECAPTURE_S", 0)

@@ -361,6 +361,16 @@ def test_the_sandbox_clears_every_variable_it_lists(tmp_path, monkeypatch):
     assert left == []
 
 
+def test_force_wifi_is_cleared_by_the_sandbox(tmp_path, monkeypatch):
+    """BLINK_FORCE_WIFI makes the daemon skip the USB link for WiFi
+    (spec 7.2). Exported in a developer's shell it would send every daemon
+    test down the WiFi path, which CI never takes."""
+    assert "BLINK_FORCE_WIFI" in conftest.CLEARED
+    monkeypatch.setenv("BLINK_FORCE_WIFI", "1")
+    conftest.sandbox_environment(monkeypatch, tmp_path)
+    assert "BLINK_FORCE_WIFI" not in os.environ
+
+
 def test_every_blink_variable_the_code_reads_is_in_the_sandbox():
     """A new BLINK_* environment variable in pc/ or the entry points has to
     be cleared for the tests (conftest.CLEARED) or set by a fixture, or a
@@ -613,3 +623,150 @@ def test_a_run_started_inside_tests_pc_still_loads_the_sandbox():
         cwd=ROOT / "tests" / "pc", env=env, capture_output=True, text=True,
         timeout=120)
     assert out.returncode == 0, out.stdout + out.stderr
+
+
+def test_udp_sendto_off_loopback_is_refused():
+    # Discovery is a broadcast and never calls connect(), so connect-only
+    # guarding let it straight onto a developer's LAN.
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        with pytest.raises(conftest.RealNetworkRefused):
+            s.sendto(b"x", ("255.255.255.255", 49731))
+        if hasattr(s, "sendmsg"):
+            with pytest.raises(conftest.RealNetworkRefused):
+                s.sendmsg([b"x"], [], 0, ("255.255.255.255", 49731))
+        s.sendto(b"x", ("127.0.0.1", 1))      # loopback stays open
+    finally:
+        s.close()
+
+
+# --- the claude / wsl.exe guard -------------------------------------------
+#
+# This Mac has a real `claude` on PATH, and a Windows desk has wsl.exe. A test
+# that reached either would start the owner's Claude Code (a --version call at
+# best, a session that spends quota at worst) or boot a WSL distro. Same
+# mechanism as the browser guard, its own marker: allow_browser must not
+# unlock it, because a test that may open a tab has no business starting
+# Claude.
+
+
+def _claude_guarded(fn):
+    return getattr(fn, "blink_claude_guard", False)
+
+
+@pytest.mark.parametrize("argv", [
+    ["claude", "--version"],
+    ["/usr/local/bin/claude", "--version"],
+    ["claude.CMD", "--version"],
+    ["C:\\Users\\x\\AppData\\Roaming\\npm\\claude.cmd", "--version"],
+    ["Claude.exe", "--version"],
+    ["claude.bat"],
+    ["claude.ps1"],
+    ['"claude" --version'],
+    ['"C:\\Program Files\\nodejs\\claude.exe" --version'],
+    ["'/opt/my tools/claude' --version"],
+    ["cmd", "/c", '"claude"', "--version"],
+])
+def test_launching_claude_is_refused(argv):
+    assert _claude_guarded(subprocess.Popen.__init__), \
+        "the claude guard is not installed"
+    with pytest.raises(conftest.RealClaudeLaunchRefused):
+        subprocess.run(argv, capture_output=True)
+    with pytest.raises(conftest.RealClaudeLaunchRefused):
+        subprocess.Popen(argv)
+    conftest.forget_claude_attempts()
+
+
+@pytest.mark.parametrize("argv", [
+    ["wsl.exe", "-l", "-q"],
+    ["wsl", "--status"],
+    ["WSL.EXE", "--status"],
+    ["C:\\Windows\\System32\\wsl.exe", "-l", "-q"],
+])
+def test_launching_wsl_is_refused(argv):
+    assert _claude_guarded(subprocess.Popen.__init__), \
+        "the claude guard is not installed"
+    with pytest.raises(conftest.RealClaudeLaunchRefused):
+        subprocess.run(argv, capture_output=True)
+    conftest.forget_claude_attempts()
+
+
+def test_the_executable_argument_is_checked_too():
+    assert _claude_guarded(subprocess.Popen.__init__)
+    with pytest.raises(conftest.RealClaudeLaunchRefused):
+        subprocess.Popen(["anything"], executable="/opt/bin/claude")
+    with pytest.raises(conftest.RealClaudeLaunchRefused):
+        subprocess.Popen(["anything"], executable="C:\\Windows\\wsl.exe")
+    conftest.forget_claude_attempts()
+
+
+def test_a_shell_string_and_os_system_are_read_by_their_first_word():
+    assert _claude_guarded(os.system)
+    with pytest.raises(conftest.RealClaudeLaunchRefused):
+        subprocess.run("claude --version", shell=True, capture_output=True)
+    with pytest.raises(conftest.RealClaudeLaunchRefused):
+        os.system("wsl.exe --status")
+    # Quoting does not get a launch past the guard.
+    assert conftest.claude_launcher('"claude" --version') == "claude"
+    assert conftest.claude_launcher(
+        '"C:\\Program Files\\nodejs\\claude.exe" --version') == "claude"
+    assert conftest.claude_launcher('cmd /c "wsl.exe" --status') == "wsl"
+    with pytest.raises(conftest.RealClaudeLaunchRefused):
+        subprocess.run('"claude" --version', shell=True, capture_output=True)
+    conftest.forget_claude_attempts()
+
+
+def test_refused_launch_fails_when_swallowed():
+    """Recorded as well as raised, like the browser: a bare except must not
+    turn a started Claude into a passing test."""
+    assert _claude_guarded(subprocess.Popen.__init__)
+    try:
+        subprocess.run(["claude", "--version"], capture_output=True)
+    except conftest.RealClaudeLaunchRefused:
+        pass
+    assert len(conftest.claude_attempts()) == 1
+    with pytest.raises(pytest.fail.Exception, match="started claude or wsl"):
+        conftest.fail_on_claude_attempts()
+    assert conftest.claude_attempts() == []
+
+
+def test_python_running_a_fake_wsl_script_is_allowed(tmp_path):
+    """The tests that need a stand-in write a script and run it with the
+    interpreter; the program is python, so the guard looks past it."""
+    script = tmp_path / "fake_wsl.py"
+    script.write_text("print('fake wsl')\n")
+    out = subprocess.run([sys.executable, str(script)],
+                         capture_output=True, text=True)
+    assert out.stdout.strip() == "fake wsl"
+    assert conftest.claude_launcher(["echo", "claude"]) is None
+    assert conftest.claude_launcher(["launchctl", "print", "wsl"]) is None
+    assert conftest.claude_launcher("ls -l") is None
+
+
+def test_claude_version_is_stubbed_but_claude_on_path_is_real():
+    from pc import cli
+    assert cli.claude_version() == (None, None)
+    assert cli.claude_on_path.__module__ == "pc.cli"
+    assert not getattr(cli.claude_on_path, "blink_stub", False)
+
+
+def test_a_test_may_patch_claude_version_itself(monkeypatch):
+    from pc import cli
+    monkeypatch.setattr(cli, "claude_version", lambda *a, **k: ("9.9.9", (9, 9, 9)))
+    assert cli.claude_version() == ("9.9.9", (9, 9, 9))
+
+
+@pytest.mark.allow_browser
+def test_allow_browser_does_not_unlock_claude():
+    assert _claude_guarded(subprocess.Popen.__init__)
+    with pytest.raises(conftest.RealClaudeLaunchRefused):
+        subprocess.run(["claude", "--version"], capture_output=True)
+    conftest.forget_claude_attempts()
+
+
+@pytest.mark.allow_claude_launch
+def test_the_claude_marker_lets_a_test_have_the_real_thing():
+    """Checked by identity only: nothing here launches anything."""
+    assert not _claude_guarded(subprocess.Popen.__init__)
+    assert not _claude_guarded(os.system)

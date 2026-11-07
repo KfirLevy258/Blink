@@ -39,6 +39,7 @@ import json
 import os
 import secrets
 import shutil
+import socket
 import socketserver
 import subprocess
 import sys
@@ -47,7 +48,9 @@ import time
 import urllib.parse
 import webbrowser
 
-from pc import theme
+from pc import (logo_encode, logo_preview, private_file, settings_ops,
+                status_page, theme, update, usage_refresh, user_config,
+                wifi_pair)
 
 IDLE_S = 600            # 10 minutes with no edit (plan, revision 2026-10-25)
 # A reload fires pagehide too, then loads the page again, and the builder
@@ -79,7 +82,26 @@ TICK_S = 0.25
 # limit: a link older than that belongs to a builder that would have
 # stopped anyway.
 LINK_LIFE_S = 600
+# Routes that need the board; with no board_ops they answer 409.
+PANELS = ("look", "connect", "board")
+BOARD_PATHS = ("/api/wifi", "/api/device", "/api/logo", "/api/pref")
 MAX_BODY = 4096         # the widest theme is about 200 bytes of JSON
+# POST /api/logo only: a GIF as the owner picked it, or 307200 bytes of RGBA.
+# Checked against Content-Length before a byte is read; every other route
+# keeps MAX_BODY, so the bigger limit buys nothing to a request that is not
+# a logo. 2 MiB is above any GIF the encoder would accept (180 frames at
+# 320x240 compress far smaller) and below what a hostile page could use to
+# hold the handler thread and memory.
+MAX_LOGO_BODY = 2 * 1024 * 1024
+# How long a closing connection may keep sending what was not read
+# (_HTTPServer.shutdown_request).
+_LINGER_S = 2.0
+_ENCODE_LOCK = threading.Lock()
+# What POST /api/pref takes, and the values the board's own checks allow
+# (proto.c pref_set_line). view is an integer the board ignores until
+# feat/ultra-burn gives it meaning; the page sends 0.
+PREF_ENUMS = {"main_src": ("claude", "codex"), "focus": (0, 1),
+              "bright": (20, 40, 60, 80, 100)}
 # The page's tab id on a preview, save or cancel. A header and not a body
 # field because those bodies are the theme itself, which theme.validate
 # checks key by key; see _Handler.do_POST.
@@ -117,6 +139,13 @@ OPEN_EVERY_S = 2
 # The longest a Ctrl-C in `blink theme` waits to be noticed; see
 # BuilderServer.wait_interruptibly.
 WAIT_SLICE_S = 0.5
+
+
+def check_token(token):
+    """A link token is a str of at least 32 characters. A blank one would
+    let a bare /open redeem a session (review of 4.1)."""
+    if not isinstance(token, str) or len(token) < 32:
+        raise ValueError("link token too short")
 
 
 def cookie_name(port):
@@ -173,6 +202,26 @@ def page():
         # caller already says so for a missing one.
         raise FileNotFoundError(f"{PAGE_FILE} has no place for the themes")
     return text.replace(BUILTINS_MARK, builtins_json())
+
+
+# The two faces the board's screen is drawn in (Montserrat is LVGL's font),
+# vendored so the page loads nothing from the network: it is served to a desk
+# that may be offline and runs inside a frozen app. Latin subset of the
+# upstream OFL release; the licence sits beside them.
+FONT_NAMES = ("Montserrat-Medium-latin.woff2", "Montserrat-SemiBold-latin.woff2")
+
+
+def font_path(name):
+    """Where a vendored font is, found the way the page itself is: beside
+    this file, which in the frozen app is also under sys._MEIPASS/pc (where
+    tools/build_binary.sh --add-data puts pc/fonts). The bundle is asked
+    first so a frozen build never reads a stray source tree."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None):
+        bundled = os.path.join(sys._MEIPASS, "pc", "fonts", name)
+        if os.path.isfile(bundled):
+            return bundled
+    return os.path.join(here, "fonts", name)
 
 
 # ------------------------------------------------------------- opening a browser
@@ -301,7 +350,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        if not any(k.lower() == "cache-control" for k, _ in headers):
+            self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         for k, v in headers:
@@ -315,7 +365,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                    "application/json")
 
     def _refuse(self, status=403):
-        self._send(status, b"Not allowed. Run blink theme again.\n")
+        # The prefix is what the page's running_builder matches; the command
+        # is the one that started this server.
+        cmd = "blink settings" if self.builder.persistent else "blink theme"
+        self._send(status, f"Not allowed. Run {cmd} again.\n".encode())
 
     # -- checks
 
@@ -334,12 +387,23 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         return False
 
     def _origin_ok(self):
+        # Required, not merely checked when present: a cross-site form post
+        # can carry no Origin at all in some browsers, and `null` (a sandboxed
+        # frame) is not ours either (spec 8.3, D35).
         origin = self.headers.get("Origin")
-        if origin is None:
-            return True
         port = self.builder.port
         return origin in (f"http://127.0.0.1:{port}",
                           f"http://localhost:{port}")
+
+    def _active(self, path):
+        """The settings page's idle clock follows any request: a person
+        scanning for networks or flipping a switch is not idle, though they
+        are editing no theme. Not the page's own heartbeat or its close,
+        which say nothing about a person (a ping every 20 s would keep it up
+        for good, and a touch would cancel a close's grace)."""
+        if self.builder.persistent and path not in ("/api/ping",
+                                                    "/api/closed"):
+            self.builder.touch()
 
     # -- GET
 
@@ -360,13 +424,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     return self._send(403, b"This link was opened already."
                                       b" Use the tab it opened.\n")
                 return self._refuse()
+            # ?panel= rides the one-time link through the redirect, only if
+            # it names one of the three controls: it opens that control.
+            panel = urllib.parse.parse_qs(url.query).get("panel", [""])[0]
+            where = f"/?panel={panel}" if panel in PANELS else "/"
             return self._send(303, headers=(
-                ("Location", "/"),
+                ("Location", where),
                 ("Set-Cookie", f"{cookie_name(self.builder.port)}="
                                f"{session}; HttpOnly;"
                                " SameSite=Strict; Path=/")))
         if not self._session_ok():
             return self._refuse()
+        self._active(url.path)
         if url.path == "/":
             self.builder.page_served()
             return self._send(200, self.builder.page_bytes,
@@ -374,9 +443,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 ("Content-Security-Policy",
                  "default-src 'none'; script-src 'unsafe-inline';"
                  " style-src 'unsafe-inline'; connect-src 'self';"
-                 " img-src data:; frame-ancestors 'none';"
+                 " font-src 'self'; img-src data:; frame-ancestors 'none';"
                  " form-action 'none'; base-uri 'none'"),
                 ("X-Frame-Options", "DENY")))
+        if url.path.startswith("/font/"):
+            name = url.path[len("/font/"):]
+            if name not in FONT_NAMES:
+                return self._refuse(404)
+            try:
+                with open(font_path(name), "rb") as f:
+                    data = f.read()
+            except OSError:
+                return self._refuse(404)
+            return self._send(200, data, "font/woff2", headers=(
+                ("Cache-Control", "max-age=86400"),))
         if url.path == "/api/state":
             self.builder.touch()
             # "draft": the last preview this builder took, so a tab opened
@@ -394,9 +474,228 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, {"saved": theme.load_saved(
                 self.builder.home), "draft": self.builder.draft,
                 "idle_s": self.builder.idle_s,
+                "persistent": self.builder.persistent,
                 "board": {"themes": takes},
                 "waiting_s": theme.preview_waiting_s(self.builder.home)})
+        if self._theme_only(url.path):
+            return
+        ops = self.builder.board_ops
+        if url.path == "/api/wifi":
+            return self._json(200, ops.state())
+        if url.path == "/api/wifi/nets":
+            return self._json(200, {"nets": self.builder.nets})
+        if url.path == "/api/device":
+            return self._json(200, ops.device())
+        if url.path == "/api/computer":
+            return self._computer_state()
+        if url.path == "/api/logo":
+            return self._json(200, {"logo": ops.device().get("logo")})
+        if url.path == "/api/logo/preview":
+            # Only the copy of what this daemon sent, and only while the
+            # board still reports that same logo (bytes and frames).
+            png = logo_preview.load_matching(self.builder.home,
+                                             ops.device().get("logo"))
+            if png is None:
+                return self._refuse(404)
+            return self._send(200, png, "image/png", headers=(
+                ("Cache-Control", "no-store"),))
         return self._refuse(404)
+
+    # -- the settings endpoints
+
+    def _theme_only(self, path):
+        """True after answering 409 when this is a board-side route and the
+        server was started without a way to the board (`blink theme`)."""
+        if path.startswith(BOARD_PATHS) and self.builder.board_ops is None:
+            self._json(409, {"why": "Open this with blink settings while"
+                                    " the app is running."})
+            return True
+        return False
+
+    def _computer_state(self):
+        home = self.builder.home
+        try:
+            on = user_config.load(home).get(status_page.SETTING) is True
+        except (user_config.Unreadable, OSError):
+            return self._json(500, {"why": "This computer's settings file"
+                                           " could not be read."})
+        self._json(200, {"status_page": on,
+                         "auto_update": update.auto_update_allowed(home),
+                         # Keep figures fresh: develop's usage refresh,
+                         # the same key `blink config usage-refresh` sets.
+                         "usage_refresh": usage_refresh.enabled(home) is True})
+
+    def _post_computer(self, want):
+        home = self.builder.home
+        if not (isinstance(want, dict) and want and all(
+                k in ("status_page", "auto_update", "usage_refresh")
+                and isinstance(v, bool) for k, v in want.items())):
+            return self._json(400, {"why": "That was not a setting."})
+        try:
+            if "status_page" in want:
+                user_config.put(home, status_page.SETTING,
+                                want["status_page"])
+            if "usage_refresh" in want:
+                user_config.put(home, usage_refresh.SETTING,
+                                want["usage_refresh"])
+                if want["usage_refresh"]:
+                    # As `blink config usage-refresh on` does: a fresh
+                    # start, and where claude is now.
+                    usage_refresh.switch_on(home, os.path.expanduser("~"))
+            if "auto_update" in want:
+                marker = os.path.join(home, "no-auto-update")
+                if want["auto_update"]:
+                    if os.path.exists(marker):
+                        os.remove(marker)
+                else:
+                    os.makedirs(home, exist_ok=True)
+                    open(marker, "ab").close()
+        except (user_config.Unreadable, OSError):
+            return self._json(500, {"why": "This computer could not save"
+                                           " that setting."})
+        self._computer_state()
+
+    def _post_wifi(self, path, want):
+        """`want` is the parsed body; the caller drops it on return. Nothing
+        here logs, keeps or echoes it."""
+        ops = self.builder.board_ops
+        try:
+            if path == "/api/wifi/scan":
+                self.builder.nets = ops.scan()
+                return self._json(200, {"nets": self.builder.nets})
+            if path == "/api/wifi/forget":
+                return self._json(200, ops.forget())
+            if path != "/api/wifi/join":
+                return self._refuse(404)
+            ssid = pw = None
+            if isinstance(want, dict):
+                ssid, pw = want.get("s"), want.get("p")
+            try:
+                ssid = bytes.fromhex(ssid)
+            except (TypeError, ValueError):
+                ssid = None
+            if ssid is None or not isinstance(pw, str):
+                return self._json(400, {"why": "That was not a network."})
+            # Before the board is touched, so a bad entry costs no wait.
+            bad = (wifi_pair.ssid_problem(ssid)
+                   or wifi_pair.password_problem(pw))
+            if bad:
+                return self._json(400, {"why": bad})
+            return self._json(200, ops.join(ssid, pw))
+        except settings_ops.BoardOpError as e:
+            self._json(409, {"why": str(e)})
+
+    def _pref_ok(self, want):
+        if not (isinstance(want, dict) and want):
+            return False
+        for k, v in want.items():
+            if k == "view":
+                if isinstance(v, bool) or not isinstance(v, int) \
+                        or not 0 <= v <= 255:
+                    return False
+            elif k not in PREF_ENUMS or isinstance(v, bool) \
+                    or v not in PREF_ENUMS[k]:
+                return False
+        return True
+
+    def _post_pref(self, want):
+        if not self._pref_ok(want):
+            return self._json(400, {"why": "That was not a setting."})
+        try:
+            self._json(200, {"pref": self.builder.board_ops.pref_set(**want)})
+        except settings_ops.BoardOpError as e:
+            self._json(409, {"why": str(e)})
+
+    def _post_logo(self):
+        """The logo as the page chose it, as raw bytes. Every refusal is one
+        sentence and costs the board nothing: the image is encoded and
+        checked here, and only a blob logo_encode.parse accepted goes on.
+        Nothing about the body is logged or echoed."""
+        h = self.headers
+
+        def refuse(status, why):
+            self.close_connection = True      # the body was not read
+            self._json(status, {"why": why})
+
+        if h.get("Content-Type", "").split(";")[0].strip().lower() \
+                != "application/octet-stream":
+            return refuse(415, "That was not a picture.")
+        try:
+            n = int(h.get("Content-Length", ""))
+        except ValueError:
+            return refuse(400, "That was not a picture.")
+        if n < 0 or n > MAX_LOGO_BODY:
+            return refuse(413, "That file is too big. Pick a smaller one.")
+        kind = h.get("X-Blink-Logo")
+        hold = h.get("X-Blink-Hold-Ms", "")
+        fit = h.get("X-Blink-Fit")
+        bg = h.get("X-Blink-Bg", "")
+        if kind not in ("rgba", "gif"):
+            return refuse(400, "That was not a picture.")
+        # Compared as text: str.isdigit() is true for "²" and the like, and
+        # int() of those raises past the handler.
+        if hold not in {str(x) for x in logo_encode.HOLD_CHOICES}:
+            return refuse(400, "Pick 3, 5 or 10 seconds.")
+        if kind == "gif" and fit not in logo_encode.FIT_SCALE:
+            return refuse(400, "Pick a size on the screen.")
+        if len(bg) != 6 or any(c not in "0123456789abcdefABCDEF" for c in bg):
+            return refuse(400, "That was not a background colour.")
+        bgc = tuple(bytes.fromhex(bg))
+        raw = self.rfile.read(n)
+        try:
+            # One encode at a time: a page that re-checks after every
+            # change must not run several 2 MiB decodes at once.
+            with _ENCODE_LOCK:
+                if kind == "rgba":
+                    blob = logo_encode.from_rgba(raw, bgc, int(hold))
+                else:
+                    blob = logo_encode.from_gif(raw, bgc, int(hold), fit)
+        except logo_encode.EncoderBug:
+            # Our bug, not the owner's file. A fixed line: no image data.
+            print("[settings] logo encoder bug", file=sys.stderr)
+            return self._json(500, {"why": "Blink could not prepare this "
+                                    "image. Try another file."})
+        except ValueError as e:
+            msg = str(e)
+            return self._json(400, {"why": msg[:1].upper() + msg[1:] + "."})
+        finally:
+            raw = None
+        # ?check=1: the same encoding and the same refusals, and then the
+        # size alone. The page asks before it offers Send, so "About N KB"
+        # is the encoder's number and a too-big logo is refused on the
+        # page rather than after a minute on the cable.
+        if "check=1" in urllib.parse.urlsplit(self.path).query.split("&"):
+            return self._json(200, {"bytes": len(blob)})
+        try:
+            state = self.builder.board_ops.logo(blob)
+        except settings_ops.BoardOpError as e:
+            return self._json(409, {"why": str(e)})
+        if isinstance(state, dict) and state.get("present") == 1:
+            try:
+                logo_preview.save(self.builder.home, blob, state)
+            except (OSError, ValueError, private_file.NotPrivate):
+                # The preview is a courtesy, the send is done. A programming
+                # error (not these three) is allowed to surface instead.
+                print("[settings] logo preview not kept", file=sys.stderr)
+        self._json(200, {"logo": state, "bytes": len(blob)})
+
+    def _post_logo_remove(self):
+        try:
+            state = self.builder.board_ops.logo_remove()
+        except settings_ops.BoardOpError as e:
+            return self._json(409, {"why": str(e)})
+        # The board answers logo_state either way. A failed flash erase
+        # leaves present:1, or reads "none" over a half-erased sector with
+        # err:1 set (proto.c's logo_state); both are handled below, and a 200 then had the page drop the logo and
+        # say nothing while the next boot showed it again.
+        if (not isinstance(state, dict) or state.get("present") != 0
+                or state.get("err") == 1):
+            print("[settings] the board still reports its logo after remove",
+                  file=sys.stderr)
+            return self._json(409, {"why": (
+                "The board could not remove the logo. Try again.")})
+        logo_preview.remove(self.builder.home)
+        self._json(200, {"logo": state})
 
     # -- POST
 
@@ -414,8 +713,26 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 and self._origin_ok()):
             return self._refuse()
         path = urllib.parse.urlsplit(self.path).path
+        self._active(path)
         self.builder.count(path)
+        want = None
+        settings = path.startswith(("/api/wifi/", "/api/computer",
+                                    "/api/pref", "/api/logo/remove"))
+        if self._theme_only(path):
+            return
+        if path == "/api/logo":
+            return self._post_logo()
+        if settings:
+            if self.headers.get("Content-Type", "").split(";")[0].strip() \
+                    .lower() != "application/json":
+                return self._json(415, {"why": "That was not JSON."})
         raw, err = self._body()
+        if settings and not err:
+            try:
+                want = json.loads(raw.decode("utf-8")) if raw else {}
+            except ValueError:
+                err = 400
+            raw = None
         if err:
             self.close_connection = True
             return self._refuse(err)
@@ -427,14 +744,28 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         # said the builder had stopped (review of fp/edit-reset r2,
         # SHOULD-2). 409 with "newer", so the page stops as a ping would
         # have told it to.
-        if path in ("/api/preview", "/api/save", "/api/cancel") and \
+        if path in ("/api/preview", "/api/save", "/api/cancel",
+                    "/api/done") and \
                 self.builder.superseded(_tab_id(
                     self.headers.get(TAB_HEADER))):
             return self._json(409, {"newer": True, "error":
                                     "Continued in a newer tab."})
+        if path.startswith("/api/wifi/"):
+            return self._post_wifi(path, want)
+        if path == "/api/computer":
+            return self._post_computer(want)
+        if path == "/api/pref":
+            return self._post_pref(want)
+        if path == "/api/logo/remove":
+            return self._post_logo_remove()
         if path == "/api/cancel":
             self._json(200, {"ok": True})
             return self.builder.finish("cancelled")
+        if path == "/api/done":
+            # The settings page's Done button: the session ends, and an
+            # unsaved preview is cancelled by finish() as on any non-save.
+            self._json(200, {"ok": True})
+            return self.builder.finish("done")
         if path == "/api/closed":
             self.builder.closing(_tab_of(raw))
             return self._json(200, {"ok": True})
@@ -483,9 +814,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             # to end it (review NICE-4). ThemeSync.outgoing drops the cancel
             # when a save is owed.
             theme.write_cancel(self.builder.home)
-            self.builder.stop_writing()
+            # The settings page keeps writing on: stop_writing() would make
+            # every later preview return False, so the next theme clicked
+            # would silently not reach the board. finish() ends it.
+            if not self.builder.persistent:
+                self.builder.stop_writing()
+            else:
+                # Nothing is unsaved now: a tab opened next must not start
+                # on the preview this save replaced.
+                self.builder.draft = None
         self._json(200, {"ok": True})
-        self.builder.finish("saved")
+        if not self.builder.persistent:
+            self.builder.finish("saved")
 
 
 def _tab_of(raw):
@@ -503,6 +843,28 @@ def _tab_id(tab):
     if isinstance(tab, str) and 0 < len(tab) <= 32 and tab.isalnum():
         return tab
     return None
+
+
+def _linger(request):
+    """Half-close `request` and drop what it still sends, until it closes,
+    MAX_LOGO_BODY + 64 KiB have been read or _LINGER_S has passed. The
+    number of bytes dropped, for the test of those bounds."""
+    read = 0
+    try:
+        request.shutdown(socket.SHUT_WR)
+        end, cap = time.monotonic() + _LINGER_S, MAX_LOGO_BODY + 65536
+        while read < cap:
+            wait = end - time.monotonic()
+            if wait <= 0:
+                break
+            request.settimeout(wait)
+            got = request.recv(min(cap - read, 65536))
+            if not got:
+                break
+            read += len(got)
+    except OSError:
+        pass
+    return read
 
 
 class _HTTPServer(http.server.ThreadingHTTPServer):
@@ -537,6 +899,30 @@ class _HTTPServer(http.server.ThreadingHTTPServer):
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
+    def shutdown_request(self, request):
+        """Close the way RFC 9112 9.6 asks: stop writing, then read and drop
+        what the client is still sending, then close.
+
+        A refusal answers before the body is read (403 without a session,
+        415, a bad logo header). Closing a socket that still has unread
+        bytes sends a reset, and Windows then throws away the answer the
+        client had not read yet: on the Windows VM (2026-11-07) a 300 KB
+        logo POST refused with 403 or 400 came back as WinError 10053, not
+        the sentence, while macOS and Linux happened to deliver it. Bounded
+        in bytes and time (_linger), and on the handler's own thread, so a
+        client that keeps sending costs at most one more logo body and two
+        seconds.
+
+        By design the bound is below what a hostile body can be: a POST
+        declaring more than MAX_LOGO_BODY is refused with 413 before a byte
+        is read, and if its sender keeps going past the drain this still
+        ends in a reset, so a Windows client may never see that 413. The
+        settings page checks a file's size before it sends, so only a
+        client that ignores the limit meets it.
+        """
+        _linger(request)
+        self.close_request(request)
+
     def handle_error(self, request, client_address):
         # socketserver prints a traceback to stderr here, and under the daemon
         # stderr is the log a customer sends us. A failed request is the
@@ -548,13 +934,24 @@ class BuilderServer:
     """One builder session: a server, its tokens, and its deadlines."""
 
     def __init__(self, home, idle_s=IDLE_S, now=time.monotonic,
-                 tick_s=TICK_S):
+                 tick_s=TICK_S, board_ops=None, panel="look", token=None,
+                 persistent=False):
         self.home = home
+        # True for the settings page, which stays up through a theme save
+        # (Connect and Board go on working); `blink theme` is False and ends
+        # on save as it always did.
+        self.persistent = persistent
+        self.board_ops = board_ops      # None: `blink theme`, no board routes
+        self.nets = []                  # the last scan, for GET /api/wifi/nets
         self.idle_s = idle_s
         self._now = now
         self._tick_s = tick_s
         self._lock = threading.Lock()
         self._links = {}            # unspent link -> when it was made
+        self._minted = set()        # the ones new_link made, not add_token
+        if token is not None:
+            check_token(token)
+            self._links[token] = now()
         # Links that no longer work and why, "replaced" or "used", newest
         # last and kept few: only so the page the browser lands on can say
         # which (see link_fate).
@@ -653,7 +1050,7 @@ class BuilderServer:
 
     # -- tokens
 
-    def new_link(self):
+    def new_link(self, panel=None):
         """A one-time link. It replaces any link not yet used, and lives
         LINK_LIFE_S: "Edit on computer" mints one on every reshow (contract
         Addendum 6), and each used to stay valid, unspent, for the server's
@@ -661,10 +1058,23 @@ class BuilderServer:
         always refused; now so is a superseded or stale one."""
         k = secrets.token_urlsafe(32)
         with self._lock:
-            for old in self._links:
+            # Only links this method minted: the token a `blink settings`
+            # run printed is spoken for, and a press of Open on PC on the
+            # board must not turn it into "replaced" (final review, page
+            # minor 8).
+            for old in [o for o in self._links if o in self._minted]:
                 self._retire_link(old, "replaced")
-            self._links = {k: self._now()}
-        return f"http://127.0.0.1:{self.port}/open?k={k}"
+                del self._links[old]
+            self._minted = {k}
+            self._links[k] = self._now()
+        extra = f"&panel={panel}" if panel in PANELS else ""
+        return f"http://127.0.0.1:{self.port}/open?k={k}{extra}"
+
+    def add_token(self, token):
+        """Another one-time link token, beside any unspent one."""
+        check_token(token)
+        with self._lock:
+            self._links[token] = self._now()
 
     def _retire_link(self, k, why):
         """Called with the lock held."""
@@ -929,8 +1339,16 @@ class Launcher:
     """The daemon's builder: at most one running, reopened on request."""
 
     def __init__(self, home, opener=None, make_server=BuilderServer,
-                 now=time.monotonic):
+                 now=time.monotonic, board_ops=None, persistent=False):
         self._home = home
+        # The settings page; see BuilderServer. A way to the board makes it
+        # one: the page sends no pref_set and loads no Board panel unless
+        # /api/state says persistent, and the daemon built this with
+        # board_ops alone, so the page the board's Open on PC opened
+        # dropped every brightness click without a request and ended on its
+        # first Save (owner, 2026-11-07, board on WiFi: no pref_set logged).
+        self.persistent = persistent or board_ops is not None
+        self.board_ops = board_ops      # the settings page's way to the board
         # `is None`, not `or`: a stub that was falsy (a list subclass, empty
         # until its first call) became the real open_url, which is
         # webbrowser.open on macOS -- a review probe opened two tabs in the
@@ -989,13 +1407,49 @@ class Launcher:
                 self._told = server
             return ok
 
+    def serve_headless(self, panel, token, request_id):
+        """`blink settings`: start or re-use the page server with `token`
+        registered, then record its port with the request id (D37, D50).
+        Never calls the opener: the CLI opens the browser, and launch()
+        holds this lock across an opener measured stuck for 28.7 s."""
+        # A running server needs no Launcher lock: launch() holds it across a
+        # hung opener (28.7 s measured), and the request file is already
+        # consumed, so waiting here made the CLI say "not running" of a
+        # healthy daemon.
+        server = self._server
+        if server is not None and not server.done:
+            server.persistent = True    # the settings page; see BuilderServer
+            server.add_token(token)
+            server.touch()
+            theme.write_builder(self._home, server.port, ack=request_id)
+            return
+        with self._lock:
+            server = self._server
+            if server is not None and not server.done:
+                server.persistent = True
+                server.add_token(token)
+                server.touch()
+            else:
+                kw = {} if self.board_ops is None \
+                    else {"board_ops": self.board_ops}
+                server = self._make(self._home, panel=panel, token=token,
+                                    persistent=True, **kw)
+                server.say = _say_ending
+                server.start()
+                self._server = server
+            # After the token: the record is what the CLI waits for.
+            theme.write_builder(self._home, server.port, ack=request_id)
+
     def _open(self, server):
         """Open a browser on `server`, or on a new builder when it is None.
         (ok, the server it was opened on). Called with the lock held."""
         fresh = server is None
         if fresh:
             try:
-                server = self._make(self._home)
+                more = {"persistent": True} if self.persistent else {}
+                server = self._make(self._home, **more) \
+                    if self.board_ops is None else self._make(
+                        self._home, board_ops=self.board_ops, **more)
             except OSError as e:
                 # The page missing from a broken install, or no port to
                 # bind. One line, and the board's own fallback.

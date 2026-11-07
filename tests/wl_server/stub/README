@@ -1,0 +1,4 @@
+Stand-ins for the Zephyr headers firmware/src/wl_server.c includes, so
+tests/wl_server/host_test.c can build the real file on a laptop. Never put
+this directory on a firmware include path. The socket layer is in
+tests/wl_server/fake_sock.h.

@@ -137,4 +137,75 @@ ok "claude still starts with our settings.json in place"
 claude --version >/dev/null 2>&1 || fail "claude --version fails after uninstall"
 ok "uninstall clean, claude still starts"
 
+# ------------------------------------------------------- the /usage contract
+#
+# The opt-in refresh runs `claude -p /usage` with the flags in
+# pc/usage_refresh.command(), and judges the JSON with judge(). Neither has a
+# stability commitment from Claude Code, the same risk as the status line
+# field above. Logged out (this HOME has no login, and the runner has no
+# keychain), every flag must still be accepted and the answer must be the
+# zero-cost, zero-turn JSON result judge() reads as OK.
+#
+# Except below usage_refresh.USAGE_SINCE (2.1.120): those versions answer
+# with one or two turns at no cost (2.1.100 "Unknown skill: usage", 2.1.113
+# "isn't available", 2.1.119 the figures), which judge() reads as COST, so
+# the daemon never runs them. There the check is that the version gate sees
+# it -- on the `old` cell, 2.1.100. An OK answer below the floor, or a non-OK
+# one above it, means USAGE_SINCE is wrong, and fails.
+#
+# Run from the source tree, not the binary: the binary has no way to run one
+# refresh on demand, and the command, judge and gate are the same code.
+unset CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY
+mkdir -p "$WORK/refresh"
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT" py - "$WORK/refresh" <<'EOF' || exit 1
+import json, shutil, subprocess, sys
+from pc import usage_refresh as ur, wsl
+
+cwd = sys.argv[1]
+exe = shutil.which("claude")
+try:
+    # The daemon's own runner: on Windows, plain run() kills only the
+    # claude.cmd shell at the timeout and then waits on node's pipes with no
+    # limit, so a stalled run hung the cell instead of failing it.
+    r = wsl._bounded_run(ur.command(exe), cwd=cwd, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         timeout=ur.RUN_TIMEOUT_S)
+except subprocess.TimeoutExpired:
+    sys.exit(f"FAIL: claude -p /usage did not finish in {ur.RUN_TIMEOUT_S} s")
+verdict = ur.judge(r.returncode, r.stdout or b"")
+ver = ur.version_of(exe)
+if ver is None:
+    sys.exit("FAIL: claude --version gave no version the gate can read"
+             " (usage_refresh.parse_version)")
+old = ur.version_too_old(ver)
+try:
+    doc = json.loads(r.stdout or b"")
+    keys = sorted(doc) if isinstance(doc, dict) else []
+except ValueError:
+    keys = None
+# Field names only, never values: the answer is Claude Code's own text.
+seen = (f"judged {verdict.name}, exit {r.returncode}, keys {keys}"
+        if keys is not None else
+        f"no JSON (exit {r.returncode}):\n"
+        + (r.stderr or b"").decode(errors="replace")[-600:])
+here = ".".join(map(str, ver))
+floor = ".".join(map(str, ur.USAGE_SINCE))
+if verdict is ur.Verdict.OK:
+    if old:
+        sys.exit(f"FAIL: {here} answers /usage as OK but is below"
+                 f" USAGE_SINCE ({floor}): lower the floor.")
+    print("  ok   /usage answers the zero-cost JSON result, judged OK")
+elif old:
+    print(f"  ok   {here} is below USAGE_SINCE ({floor}) and is never run;"
+          f" /usage {seen}")
+elif verdict is ur.Verdict.COST:
+    sys.exit(f"FAIL: logged out, claude -p /usage reads as COST on {here}:"
+             " the refresh would turn itself off on every desk. Measure the"
+             " command again (CLAUDE.md) before shipping.")
+else:
+    sys.exit(f"FAIL: claude -p /usage on {here}: {seen}. Every desk would"
+             " judge every run FAILED and turn the refresh off a day later;"
+             " check judge() against the new answer before shipping.")
+EOF
+
 printf 'PASS [%s]\n' "$VERSION"

@@ -1,6 +1,7 @@
 #ifndef FMT_H
 #define FMT_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -213,5 +214,127 @@ void fmt_toast(enum fmt_pip_kind kind, const char *label, int count,
  */
 void fmt_focus_line(const char *name, double pct, const char *when,
 		    char *buf, size_t buflen);
+
+/*
+ * THE SPEND PAGE. A Claude seat billed by usage is metered by a dollar cap
+ * per day, week or month, not by a five-hour window, and the daemon says so
+ * in a `plan` message (pc/protocol.plan). On that page
+ * (docs/plans/enterprise-spend.md section 3) the right half is the period:
+ * a ring with the share of the cap, the dollars in its hollow, and the cap
+ * and the period's reset under it. The left half is the dollar burn view
+ * (the `sburn` line), or the share as a gauge until one arrives. Every word
+ * the page shows is decided here, where tests/fmt can reach it;
+ * usage_view.c needs LVGL and only places them.
+ */
+
+/* "of $99.9M" and its NUL, with room. */
+#define FMT_USD_MAX 16
+
+/*
+ * Dollars the way the ring's hollow can hold them, six characters at most:
+ *
+ *   negative, NaN    -> "--"      (not reported yet -- Claude Code sends the
+ *                                  dollars minutes after the share, or never)
+ *   under $10        -> "$4.37"   (cents are the figure when it is all cents)
+ *   under $10,000    -> "$314", "$9999"
+ *   under $100k      -> "$12.5k"
+ *   under $1M        -> "$314k"
+ *   beyond           -> "$1.2M" ... "$999M", where it stops
+ *
+ * To the nearest unit, and each step starts where rounding the one below it
+ * would have spilled into a wider spelling: $9999.60 is "$10.0k", not
+ * "$10000".
+ *
+ * Six characters is not one width. The widest, with the estimate's "~" in
+ * front, is "~$44.4M" (71 px at montserrat_16, 88 at 20) and the hollow at
+ * the thickest theme stroke is 76, so usage_view.c draws the dollars at
+ * montserrat_20 when they fit and at 16 when they do not;
+ * tests/usage_layout holds the measured widths.
+ */
+void fmt_usd(double usd, char *buf, size_t buflen);
+
+/*
+ * What the hollow shows: fmt_usd(), with "~" in front when the daemon says
+ * the figure is an estimate (the plan's "est"). "--" stays "--" either way:
+ * "~--" would be an estimate of a figure there is none of.
+ */
+void fmt_spend_amount(double usd, bool est, char *buf, size_t buflen);
+
+/*
+ * The line under the ring: the cap and the period's reset, a bullet apart
+ * -- "of $500 <b> 27d 5h" -- or either alone when only one is known, or
+ * "--" when neither is. The reset is fmt_countdown()'s. At its widest
+ * ("of $44.0M <b> 20h 48m") it is 148 px at montserrat_14, which is what
+ * SPEND_CD_MAX_W holds.
+ */
+void fmt_spend_under(double lim, int32_t secs, char *buf, size_t buflen);
+
+/*
+ * Focus mode's dim line on a spend page, under the share: "Spent $314 of
+ * $500", "Spent ~$314 of $500" when the figure is an estimate, "Spent ~$12"
+ * with no cap known. Fits FMT_FOCUS_MAX; the widest, "Spent ~$44.0M of
+ * $44.0M", is 184 px of FOCUS_OTHER_MAX_W's 200.
+ */
+void fmt_focus_spend_line(double usd, bool est, double lim, char *buf,
+			  size_t buflen);
+
+/*
+ * The dollar burn view's rate, from the last complete hour in whole cents
+ * (the `sburn` line's unit): "+$1.20/h", "+$1235/h". Nothing spent is
+ * "$0/h" -- "+$0.00/h" reads as the rounding of something.
+ */
+void fmt_usd_rate(uint32_t cents, char *buf, size_t buflen);
+
+/*
+ * The whole line the view writes where the countdown sits: the rate and
+ * the word for which way it is going, "+$1.20/h <b> rising", as the token
+ * view writes "1.1M/h <b> rising". `word` is burn5h_word()'s.
+ */
+void fmt_usd_burn_line(uint32_t cents, const char *word, char *buf,
+		       size_t buflen);
+
+/*
+ * The status row's last resort on a spend page: the figure has no /usage
+ * reading behind it this period (the plan's "hint"), and this is where to
+ * get one. Below the spend limit, the provider's status page and what
+ * Claude Code is doing, which all outrank it.
+ */
+#define FMT_SPEND_USAGE_HINT "Run /usage in Claude Code"
+
+/* The line under the dollars: "of $500", or "" when the cap is not known. */
+void fmt_usd_limit(double lim, char *buf, size_t buflen);
+
+/*
+ * The left gauge's caption for the wire's `period`: "SPEND month", "SPEND
+ * week", "SPEND today", or "SPEND" for one not reported (or not known to this
+ * firmware). Capitals because it sits where "SESSION 5h" sits, and those are
+ * captions, not sentences.
+ */
+const char *fmt_spend_caption(const char *period);
+
+/*
+ * The near-limit hint on a spend page, or NULL below the thresholds the
+ * session hint uses (95%, and 99.5% for "used up", the share the display
+ * rounds to 100%). Its own words because "Session almost used up" over a
+ * dollar cap names a window this account does not have.
+ */
+const char *fmt_spend_hint(double pct);
+
+/* Longest is "999999 days 23 h" plus NUL; round up. */
+#define FMT_UPTIME_MAX 24
+
+/*
+ * How long the board has been up, for Settings > About: "3 days 4 h",
+ * "4 h 12 min", "12 min". Whole minutes, never seconds: the screen is
+ * read, not watched. A negative count reads as "0 min".
+ */
+void fmt_uptime(int64_t secs, char *buf, size_t buflen);
+
+/* "Blink-" and the LAST four hex digits of the board id, upper case:
+ * "Blink-3F7A". An id that is shorter than four digits, or holds anything
+ * but hex ("unknown" is what proto answers with no id), is no name to give
+ * a board, so it reads plain "Blink". */
+#define FMT_BOARD_NAME_MAX 12
+void fmt_board_name(const char *id, char *buf, size_t buflen);
 
 #endif /* FMT_H */

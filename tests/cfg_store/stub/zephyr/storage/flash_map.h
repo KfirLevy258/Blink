@@ -16,6 +16,9 @@ extern int fake_writes;
 /* Non-zero: every erase fails with this code, as a flash that has stopped
  * taking erases does. The record setters must then leave RAM as it was. */
 extern int fake_erase_rc;
+/* Erases still let through before fake_erase_rc bites: 1 fails only the
+ * second, which is how cfg_clear_pairing's second sector is made to fail. */
+extern int fake_erase_pass;
 
 struct flash_area { int unused; };
 #define FIXED_PARTITION_ID(x) 0
@@ -62,7 +65,15 @@ static inline int flash_area_erase(const struct flash_area *fa, long off,
 	if (off < 0 || off + (long)len > FAKE_FLASH_SIZE) {
 		return -1;
 	}
-	if (fake_erase_rc != 0) {
+	/* The budget spent is the power gone: nothing after it erases either.
+	 * Without this a cut in cfg_clear_pairing's first write still let its
+	 * second erase the other sector, a board no power cut can produce. */
+	if (fake_write_budget == 0) {
+		return 0;
+	}
+	if (fake_erase_rc != 0 && fake_erase_pass > 0) {
+		fake_erase_pass--;
+	} else if (fake_erase_rc != 0) {
 		return fake_erase_rc;
 	}
 	memset(fake_flash + off, 0xFF, len);

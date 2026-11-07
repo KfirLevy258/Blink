@@ -84,7 +84,7 @@ import stat
 import sys
 import typing
 
-from pc import protocol
+from pc import claude_home, protocol
 from pc.cowork_audit import iso_to_epoch
 
 # The contract's buckets -- protocol.BURN_BUCKETS quarter-hours of
@@ -192,27 +192,18 @@ _NEEDLE = b'"output_tokens"'
 _GONE = (FileNotFoundError, NotADirectoryError)
 
 
-def transcripts_root(environ=None) -> str:
-    """Where Claude Code keeps its transcripts, worked out now.
+def transcripts_root(home=None) -> str:
+    """Where Claude Code keeps its transcripts, worked out now: the
+    `transcripts` of `home`, claude_home.current() when None.
 
     Inside a function and never at import, so tests/conftest.py's sandbox
     applies (tests/test_sandbox.py fails on the other shape). CLAUDE_CONFIG_
-    DIR outranks HOME, as it does for Claude Code. A login service does not
-    run in the shell that exported it, though, so on a desk that sets it in
-    .zshrc the daemon still looks under ~/.claude. `environ` (os.environ when
-    None) is for the install disclosure, which has to name the folder as the
-    service will see it rather than as its own shell does.
-
-    Joined from the home directory rather than expanded from "~/.claude":
-    on Windows expanduser keeps the slash it was given, and the Windows VM
-    suite (2026-10-31) measured the root as "...\\dir0/.claude\\projects",
-    one forward slash among backslashes.
+    DIR outranks HOME, as it does for Claude Code -- but as `blink install`
+    recorded it, not as this process sees it: a login service does not run
+    in the shell that exported it, so on a desk that sets it in .zshrc the
+    daemon looked under ~/.claude until the record (pc/claude_home).
     """
-    base = (os.environ if environ is None else environ).get(
-        "CLAUDE_CONFIG_DIR")
-    base = (os.path.expanduser(base) if base
-            else os.path.join(os.path.expanduser("~"), ".claude"))
-    return os.path.join(base, "projects")
+    return (home or claude_home.current()).transcripts
 
 
 def _transcripts(root, refused, depth=0):
@@ -315,11 +306,15 @@ class BurnReader:
 
     def __init__(self, root=None, read_budget=READ_BUDGET_BYTES,
                  scan_every_s=SCAN_EVERY_S, chunk_bytes=CHUNK_BYTES,
-                 max_line_bytes=MAX_LINE_BYTES):
+                 max_line_bytes=MAX_LINE_BYTES, home=None):
         # None: transcripts_root(), asked on every walk rather than once
         # here -- the reader lives as long as the daemon, and a path fixed at
         # construction is the hole CLAUDE.md describes, one step later.
+        # `home`, a callable returning a claude_home.ClaudeHome, is whose
+        # transcripts those are, asked on every walk; None asks
+        # claude_home.current().
         self._root = root
+        self._home = home
         self._budget = read_budget
         self._scan_every = scan_every_s
         self._chunk = chunk_bytes
@@ -356,7 +351,8 @@ class BurnReader:
         return self._root if self._root is not None else self.default_root()
 
     def default_root(self):
-        return transcripts_root()
+        return transcripts_root(self._home() if self._home is not None
+                                else None)
 
     def poll(self, now, budget=None):
         """(q, tokens) for wall-clock `now`, or None when there is nothing
@@ -385,10 +381,26 @@ class BurnReader:
         oldest = self.prune(now)
         read = self._drain(oldest, self._budget if budget is None
                            else budget)
-        behind = sum(f.size - f.looked for f in self._files.values()
-                     if f.size > f.looked and f.failures < READ_TRIES)
+        behind = self._behind()
         self.last = PollCost(walked, len(self._files), read, behind,
                              len(self._seen))
+        return self._answer(q, oldest, behind)
+
+    def held(self, now):
+        """poll()'s answer for `now` from what is already in memory: no
+        walk, no read, so a WSL home that has stopped being used still has
+        its bars slide on and empty, and prune()'s promise kept, without
+        the distribution being touched (pc/wsl_watch). None on the same
+        terms as poll()."""
+        oldest = self.prune(now)
+        return self._answer(protocol.burn_quarter(now), oldest,
+                            self._behind())
+
+    def _behind(self):
+        return sum(f.size - f.looked for f in self._files.values()
+                   if f.size > f.looked and f.failures < READ_TRIES)
+
+    def _answer(self, q, oldest, behind):
         if not self._listed or behind:
             return None
         return q, [self._buckets.get(oldest + i * protocol.BURN_BUCKET_S, 0)

@@ -1,0 +1,31 @@
+expect ui_state scr=gauges modal=none
+tap settings.open
+expect ui_state scr=settings ov=none
+widgets
+mem
+click "Brightness"
+expect ui_state ov=brightness
+click "<"
+expect ui_state ov=none
+mem
+click "Open on PC"
+expect ui_state scr=settings edit=waiting|held
+wait-widget "Opening..." 3
+widgets
+mem
+click "Connection"
+expect ui_state ov=connection
+widgets
+expect-widget "Link"
+expect ui_state ln=wifi
+click "Forget WiFi"
+expect ui_state ov=confirm
+mem
+click "Cancel"
+expect ui_state ov=connection
+click "<"
+expect ui_state ov=none
+mem
+click "<"
+expect ui_state scr=gauges
+mem

@@ -297,7 +297,9 @@ def test_the_link_opens_the_builder_with_one_redirect_and_no_history(server):
     status, headers, body = request(server, "GET", "/", cookie=cookie)
     assert status == 200 and "Location" not in headers
     _, script = builder_page.page_parts()
-    for nav in ("location.", "history.", "pushState", "replaceState",
+    # Reading location.search (for ?panel=) is not navigating.
+    for nav in ("location.assign", "location.replace", "location.href",
+                "history.", "pushState", "replaceState",
                 "window.open", "<meta http-equiv", "target="):
         assert nav not in script and nav not in body.decode(), nav
 

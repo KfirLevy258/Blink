@@ -2,15 +2,25 @@
 liveness. I/O (serial) is injected so this is unit-testable without hardware."""
 import datetime
 import hashlib
+import json
 import queue
 import sys
 import threading
 import time
 
+from pc import logo_stream
 from pc import ota as ota_mod
+from pc import wifi_ota
+from pc import private_file
 from pc import protocol
+from pc import settings_ops
+from pc import wifi_pair
 from pc import status_page
 from pc.version import PROTO_VERSION, RELEASE_VERSION
+
+# Under this much idle the person is at the computer: usage_refresh's
+# IDLE_LIMIT_S, the line its "someone is here" rule draws.
+_PRESENT_S = 30 * 60
 
 LIVENESS_WINDOW_S = 30.0
 
@@ -95,6 +105,31 @@ def _proto_for_log(proto) -> str:
     return "a newer protocol"
 
 
+# How long a join's key is kept for a late `up` (the board's verify window).
+JOIN_LATE_S = 60.0
+# net_link_why_text(NL_WHY_FORGET) in firmware/src/net_link.c, byte for byte.
+FORGET_FAIL_WHY = "Could not forget WiFi. Try again."
+# The two reasons a scan can fail with, from net_link_why_text(NL_WHY_SCAN)
+# and (NL_WHY_SELFTEST) in firmware/src/net_link.c, byte for byte. A board
+# whose cipher self-test failed refuses every scan for good, and used to say
+# "Could not scan. Try again." (and "Network not found" to a join), so the
+# owner retried forever; now it says the real reason, and the page shows it
+# at once instead of waiting out the 15 s scan timeout.
+SCAN_FAIL_WHYS = ("Could not scan. Try again.", "WiFi self-test failed")
+
+
+class _UsbLogoLink:
+    """LogoStream's link over the cable: its encode_checked lines go out
+    through the Bridge's own writer, which owns the serial port."""
+    kind = "usb"
+
+    def __init__(self, write_msg):
+        self._write = write_msg
+
+    def write(self, raw):
+        self._write(json.loads(raw))
+
+
 class Bridge:
     def __init__(self, write_msg, fetch_usage, now=time.monotonic,
                  set_preferred=None,
@@ -105,8 +140,16 @@ class Bridge:
                  status_watch=None, board_caps_hint=None,
                  theme_sync=None, open_builder=None, run_async=_spawn,
                  edit_answers=None, builder_ended=None, builder_open=None,
-                 sleep=time.sleep):
+                 sleep=time.sleep, board_ops=None, home=None, verify=None,
+                 flash_refusal=None, link=None, refresh_ask=None, idle=None):
         self._write = write_msg          # callable(dict)
+        self._logo = None                # (LogoStream, link) while one runs
+        self.logo_result = None          # (ok, why) of the last stream
+        self._logo_state = None          # the board's last logo_state
+        # Seconds since the last keyboard or mouse input, or None: asked
+        # only by greet's blank with no earlier line (_send_blank). None
+        # here is pc/idle.seconds_idle, looked up when asked.
+        self._idle = idle
         self._fetch = fetch_usage        # callable() -> usage message dict
         # The board owns the primary-provider preference; this applies it.
         # None on a daemon wired without a bus (the tests do this).
@@ -121,6 +164,13 @@ class Bridge:
         self._fetch_firmware = fetch_firmware or ota_mod.fetch_firmware
         self._manifest = None            # release offered to the board
         self._flash = flash_image        # callable(blob, version); owns the port
+        # Why a flash cannot happen on this link (esptool needs the cable),
+        # said before anything is downloaded or ota_begin is sent.
+        self._flash_refusal = flash_refusal
+        # The WifiLink when this connection is WiFi, else None. A flash then
+        # is a stream pumped from pump(), not a call that owns the port.
+        self._link = link
+        self._ota_stream = None
         # What the board says it is. Set from hello; None until it speaks.
         self._board_proto = None
         self._board_fw = None
@@ -152,6 +202,10 @@ class Bridge:
         self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
         self._last_session = None        # (label, n) last sent; see poll_once
+        self._last_plan = None           # plan message last sent; see _send_plan_if_changed
+        # True from the start of a heartbeat until its plan has gone out:
+        # see _heartbeat.
+        self._restate_plan = False
         # The status-page watch (pc/status_page.StatusWatch), or None on a
         # Bridge wired without one -- every test fake -- which then sends no
         # svc message at all, exactly as a daemon from before it did.
@@ -176,6 +230,23 @@ class Bridge:
         # poll_if_changed decides against: "sent", not "read", because the
         # capping on the way out is part of what the board received.
         self._last_pushed = None
+        # And the line itself, whole: what _outgoing blanks a page
+        # out of, so the other page keeps what the board was last told.
+        self._last_usage = None
+        # The page a spend plan left with no reading to replace its share,
+        # sent blank and restated blank until a line comes: see _outgoing.
+        self._blanked = None
+        # self._now() when that blank was made: a restatement is aged by
+        # the time since (protocol.aged_usage).
+        self._blanked_at = None
+        # self._now() when _last_usage went out: the greeting's blank is
+        # aged from it (greet).
+        self._last_usage_at = None
+        # Whether a status error went out since the greeting began: its
+        # blank must not follow one (greet).
+        self._said_error = False
+        # Whether the last heartbeat had a usage line to send (greet).
+        self._had_usage = False
         # Themes (pc/theme.py). theme_sync owns the files and what the
         # board is believed to hold; open_builder starts the builder and a
         # browser on it, returning whether one opened, and is rate-limited
@@ -211,6 +282,19 @@ class Bridge:
         self._quiet_until = None
         self._sleep = sleep
         self._store_until = None         # see THEME_SAVE_HOLD_S
+        # Settings-page ops (pc/settings_ops.py). `home` is ~/.blink, where
+        # the pairing file lives. _op is the one op in flight; _pending is
+        # the join waiting for its wifi_state. Only this thread touches them.
+        self._ops = board_ops
+        self._home = home
+        self._verify = verify or settings_ops.verify_board
+        self._op = None
+        self._join = None
+        self._scan = []
+        self._wifi_link = None
+        self._said_kid = False
+        if board_ops is not None:
+            board_ops.clear()
         # The burn line (see BURN_MIN_GAP_S), kept per page: provider ->
         # ((p, q, b) last put on the wire, when by self._now). A page with
         # nothing since the last greeting, or since its line stopped, has no
@@ -220,6 +304,10 @@ class Bridge:
         # was always "a change" and always within 15 s of the first's, so
         # it would never have gone out.
         self._burn_sent = {}
+        # The dollar burn line (`sburn`): (key, at) of the last one sent,
+        # key = (q, tuple(b)); and whether its failure has been said.
+        self._sburn_sent = None
+        self._sburn_failed = False
         # Pages whose last ask raised (see _burn_trouble).
         self._burn_failed = set()
         # Passes of the serial loop (begin_pass). A page is asked at most
@@ -237,6 +325,16 @@ class Bridge:
         self._loop_passes = False
         self._burn_pass = None
         self._burn_asked = set()
+        # "Keep figures fresh?" on the board (usage_refresh.BoardAsk), or
+        # None on a Bridge wired without it -- every older test -- which
+        # then never asks. Whether to ask is worked out on run_async's
+        # thread, because it reads Claude Code's config and starts the idle
+        # probe, and the answer comes back through _ask_ready for pump() to
+        # write: only the serial thread writes to the port. _ask_busy keeps
+        # one look in flight at a time.
+        self._ask = refresh_ask
+        self._ask_ready = queue.SimpleQueue()
+        self._ask_busy = False
 
     def greet(self):
         """Introduce ourselves and push what we have, immediately.
@@ -277,6 +375,8 @@ class Bridge:
         # to the last connection is forgotten and the first tick after the
         # window sends one, unchanged or not.
         self._burn_sent = {}
+        self._sburn_sent = None
+        self._sburn_failed = False
         if self._report_failure:
             self._write(protocol.ota_error(self._report_failure))
             self._report_failure = None
@@ -286,9 +386,39 @@ class Bridge:
         # the same shape as offer_if_newer on every connect rather than once
         # per daemon lifetime.
         self._last_session = None
+        # The plan, for the same reason: a board that just booted assumes
+        # windows, and on-change alone would leave a spend page unsaid.
+        self._last_plan = None
         # The status level needs no reset here: poll_once re-states it on
         # every heartbeat, and this is one (see protocol.svc's contract).
+        self._said_error = False
         self.poll_once()                 # push current data immediately
+        # A new process has seen no spend reading, so it has no plan to
+        # send, and with no reading it sends no usage line either: a
+        # restart (an update, an install, a crash) between a /login away
+        # from a spend seat and the new login's first render left the old
+        # seat's dollars on a board that was already running, for as long
+        # as nobody rendered (the review of the WSL work, 2026-11-05). The
+        # first usage line after a welcome is what tells the board there is
+        # no plan (proto.c, plan_unconfirmed), so the blank line goes, and
+        # is held and restated as the in-process switch's is. Not with a
+        # spend plan on the bus, which is the page and was just sent, and
+        # not to a board that cannot draw plans, which has no spend page.
+        #
+        # The /code-review max of 277b81a..4003b0b (item 9) found the line
+        # woke a dozed board and hid an error. It went with no ages, which
+        # the board reads as "cannot say" and never as "nobody is here"
+        # (firmware sleep_gate.c), and after a status error, which any usage
+        # line sets back to OK. So it carries the last line's ages, grown
+        # since, or SECS_MAX when there was none; it goes only where a spend
+        # page can have been shown (IngestionBus.spend_seen); and never
+        # after an error in this greeting.
+        plan = self._plan_msg()
+        if (not self._had_usage and self._blanked is None
+                and not self._said_error and self._spend_maybe_shown()
+                and self._board_can(protocol.BOARD_CAP_PLAN)
+                and (plan is None or plan.get("plan") != protocol.PLAN_SPEND)):
+            self._send_blank(protocol.PLAN_PROVIDER, greeting=True)
         # Only once the board has been heard. On the no-reset connect path
         # greet() runs before any message has reached on_message, so
         # _board_proto is still None -- and _board_ahead() reads None as
@@ -335,6 +465,12 @@ class Bridge:
                     self._resume_pending()
         if t in ("hello", "pref"):
             self._board_caps = protocol.board_caps(msg)
+            if self._ops is not None:
+                self._ops.note_device(
+                    id=self._wire_id(msg) or self._board_id,
+                    fw=msg.get("fw", self._board_fw),
+                    edition=msg.get("edition"),
+                    caps=sorted(self._board_caps), app=self._app_ver)
         if t == "pref":
             # The board's id, from firmware that puts it on pref (Addendum
             # 5). One without it says nothing either way: older firmware
@@ -347,9 +483,28 @@ class Bridge:
             # that restarts picks the choice back up without the user
             # touching anything.
             want = msg.get("provider")
+            # What the board holds, for the settings page's first paint
+            # (GET /api/device "pref"). Not from a refused pref_set (ok 0):
+            # that line carries the values the board kept, but the page
+            # hears the refusal through the op and need not be told twice.
+            if self._ops is not None and msg.get("ok") != 0:
+                self._ops.note_device(pref={k: msg[k] for k in (
+                    "provider", "focus", "bright", "view") if k in msg})
             if self._set_preferred and isinstance(want, str):
                 if self._set_preferred(want):
                     print(f"[bridge] main source: {want}", file=sys.stderr)
+            # The next pref answers the pref_set in flight: the protocol
+            # carries no request id, so a pref crossing it (a welcome's
+            # answer) can be taken for it. Harmless: it holds the board's
+            # values all the same. ok 0 is the board refusing a field.
+            if self._op is not None and self._op.kind == "pref":
+                if msg.get("ok") == 0:
+                    self._finish(self._op, error=(
+                        "The board did not accept that setting."))
+                else:
+                    self._finish(self._op, result={
+                        k: msg.get(k) for k in ("provider", "focus",
+                                                "bright", "view")})
             return
         if t == "hello":
             self._note_board(msg)
@@ -375,6 +530,23 @@ class Bridge:
             self._on_ota_query(cur)
         elif t == "ota_flash":
             self._on_ota_flash()
+        elif t == "ota_ack":
+            if self._ota_stream is not None:
+                self._ota_stream.ack(msg.get("off"), msg.get("err"))
+        elif t == "logo_ack":
+            if self._logo is not None:
+                self._logo[0].ack(msg.get("off"), msg.get("err"))
+        elif t == "logo_state":
+            if self._logo is not None:
+                self._logo[0].state(msg.get("present"))
+            state = {k: msg.get(k) for k in ("present", "bytes", "frames")}
+            if "err" in msg:
+                state["err"] = msg["err"]    # a failed erase (firmware review)
+            self._logo_state = state
+            if self._ops is not None:
+                self._ops.note_device(logo=state)
+            if self._op is not None and self._op.kind == "logo_remove":
+                self._finish(self._op, result=state)
         elif t == "theme_now":
             # Recorded, never answered here: whatever it makes owed goes out
             # on the next tick (see THEME_QUIET_S).
@@ -384,6 +556,12 @@ class Bridge:
                 self._theme.board_now(msg, board_id=self._board_id)
         elif t == "theme_edit":
             self._on_theme_edit()
+        elif t == "wifi_net":
+            self._on_wifi_net(msg)
+        elif t == "wifi_state":
+            self._on_wifi_state(msg)
+        elif t == "answer":
+            self._on_answer(msg)
         # unknown types ignored
 
     # --- OTA, for a board with no network of its own -------------------
@@ -679,6 +857,11 @@ class Bridge:
         drive the new firmware, and installing them the other way round would
         leave the newest firmware being driven by the oldest app.
         """
+        if self._ota_stream is not None:
+            return              # a second tap while the image is on its way
+        if self._logo is not None:
+            self._write(protocol.ota_error("a logo is being sent"))
+            return
         if self._manifest and self._app_update and self._self_update:
             version, artifact = self._app_update
             self._app_update = None
@@ -700,8 +883,11 @@ class Bridge:
         if not self._manifest:
             self._write(protocol.ota_error("nothing staged"))
             return
-        if self._flash is None:
+        if self._flash is None and self._link is None:
             self._write(protocol.ota_error("no flasher configured"))
+            return
+        if self._flash_refusal:
+            self._write(protocol.ota_error(self._flash_refusal))
             return
         try:
             blob = self._fetch_firmware()
@@ -743,8 +929,48 @@ class Bridge:
               file=sys.stderr)
         # Tell the board to remember what it is about to become, now that
         # nothing else can come between this and esptool taking it away.
+        if self._link is not None:
+            # Over WiFi the board writes its own slot 1 and acks as it goes;
+            # the image follows the ready ack, from pump() (spec S9.3-4). The
+            # board took its size from the ota_avail it consented to.
+            self._ota_stream = wifi_ota.WifiOtaStream(
+                blob, version, now=self._now)
+            self._write(protocol.ota_begin(version))
+            return
         self._write(protocol.ota_begin(version))
         self._flash(blob, version)
+
+    def ota_streaming(self) -> bool:
+        return self._ota_stream is not None
+
+    def ota_sealing(self) -> bool:
+        """ota_end is out and the board has not said no: it is verifying,
+        and its reboot drops the session. A reconnect then polls for it
+        (wait_for_link after_ota). False again if its verdict is an err."""
+        s = self._ota_stream
+        return s is not None and s.end_sent
+
+    def _pump_ota(self):
+        s = self._ota_stream
+        if s is None:
+            return
+        s.pump(self._link, self._write)     # a dead session raises: the loop reconnects
+        if s.went_quiet:
+            # End the session as a drop, with the stream left in sealing so the
+            # reconnect polls for the new image (after_ota); no failure said.
+            self._link.close()
+            raise OSError("link lost")
+        res = s.done()
+        if res is None:
+            return
+        self._ota_stream = None
+        why = res[1]
+        print(f"[bridge] ota: FAILED: {why}", file=sys.stderr)
+        self._write(protocol.ota_error(why))
+        if s.refused:
+            # The board holds no offer (it was reset since): say it again, so
+            # the row returns to "Install". Not a retry -- the owner taps.
+            self._on_ota_query(self._board_fw or "0.0.0")
 
     # --- themes ---
 
@@ -829,8 +1055,255 @@ class Bridge:
         self._run_async(work)
         self.pump()
 
+    # --- settings-page ops, on the serial thread ---
+
+    def _drain_ops(self):
+        if self._ops is None:
+            return
+        if self._op is not None and self._op.abandoned:
+            self._op = None             # a late `up` can still be saved
+        while self._op is None:
+            try:
+                op = self._ops.queue.get_nowait()
+            except queue.Empty:
+                return
+            if not op.abandoned:
+                self._start_op(op)
+
+    def _finish(self, op, result=None, error=None):
+        op.args = None
+        op.result, op.error = result, error
+        op.done.set()
+        if self._op is op:
+            self._op = None
+
+    def _start_op(self, op):
+        if op.kind in ("logo", "logo_remove", "pref"):
+            return self._start_board_op(op)
+        if not self._board_can(protocol.BOARD_CAP_WIFI):
+            return self._finish(op, error="This board cannot join WiFi.")
+        # Pairing is for the cable (S5.3). Fail closed: until the board has
+        # said which link it is on, it is not known to be USB.
+        if self._wifi_link != "usb":
+            return self._finish(op, error=(
+                "Plug the board in with the cable to change its WiFi."))
+        if op.kind == "join" and self._board_id is None:
+            return self._finish(op, error=(
+                "The board has not said which one it is yet. Try again."))
+        self._op = op
+        if op.kind == "scan":
+            self._scan = []
+            self._write(protocol.wifi_scan())
+        elif op.kind == "join":
+            ssid, password = op.args
+            key = wifi_pair.new_key()
+            # Outlives the op by the verify window (D65): an `up` after the
+            # page stopped waiting must still save the key the board holds.
+            self._join = {"op": op, "key": key, "kid": wifi_pair.kid(key),
+                          "steps": [], "joining": False,
+                          "board_id": self._board_id,
+                          "until": self._now() + JOIN_LATE_S}
+            self._write(protocol.wifi_set(ssid, password, key))
+            op.args = ssid = password = None
+        else:
+            self._write(protocol.wifi_forget())
+
+    def _start_board_op(self, op):
+        """The logo and the preferences: either link, the board's caps
+        decide (S15.2, S15.3). Each holds the op slot until the board's
+        answer: logo_state for the logo ops, pref for pref_set."""
+        if op.kind == "pref":
+            if not self._board_can(protocol.BOARD_CAP_PREF):
+                return self._finish(op, error=(
+                    "This board's firmware cannot take preferences from"
+                    " here. Update it first."))
+            self._op = op
+            self._write(op.args)
+            return
+        if not self._board_can(protocol.BOARD_CAP_LOGO):
+            return self._finish(op, error=(
+                "This board's firmware cannot change its logo. Update it"
+                " first."))
+        if self._logo is not None:
+            return self._finish(op, error="A logo is already being sent.")
+        if self.ota_streaming():
+            # Two flash writers on one WiFi session, on the board's tightest
+            # heap (final review, daemon minor 4).
+            return self._finish(op, error="An update is being installed.")
+        if op.kind == "logo_remove":
+            self._op = op
+            self._write(protocol.logo_remove())
+            return
+        link = self._link if self._link is not None else _UsbLogoLink(
+            self._write)
+        try:
+            self.start_logo(op.args, link)
+        except ValueError as e:
+            return self._finish(op, error=str(e))
+        op.args = None
+        self._op = op
+
+    def _on_wifi_net(self, msg):
+        op = self._op
+        if op is None or op.kind != "scan":
+            return
+        try:
+            # The board ends an empty scan with i=0, n=0 and no network.
+            n = int(msg["n"])
+            last = int(msg["i"]) + 1 >= n
+            if n > 0:
+                self._scan.append({"s": msg["s"], "r": msg["r"],
+                                   "sec": msg["sec"]})
+        except (KeyError, TypeError, ValueError):
+            return
+        if last:
+            self._finish(op, result=self._scan)
+
+    def _on_wifi_state(self, msg):
+        self._wifi_link = msg.get("link")
+        if self._ops is not None:
+            self._ops.note_state(msg)
+        op, st = self._op, msg.get("st")
+        usb = msg.get("link") == "usb"
+        if (op is not None and op.kind == "scan" and st == "fail"
+                and msg.get("why") in SCAN_FAIL_WHYS):
+            # The radio refused the scan and the board sends no wifi_net at
+            # all; without this the page waited out 15 s and said "did not
+            # answer", or showed an empty list as "no networks". The text
+            # is one of the two fixed sentences above, never the wire's own.
+            return self._finish(op, error=msg["why"])
+        if op is not None and op.kind == "forget":
+            # Only the board's "off" answers a forget: an earlier state still
+            # in flight is not the answer, and the pairing goes with it.
+            if st == "off":
+                wifi_pair.remove(self._home)
+                self._finish(op, result=dict(self._ops.state()))
+            elif st == "fail" and msg.get("why") == FORGET_FAIL_WHY:
+                # Only the firmware's forget failure (NL_WHY_FORGET): a stored
+                # rejoin failing ("not found") can already be on the wire when
+                # wifi_forget is written, and must not end the op early.
+                # cfg_clear_pairing failed on the board: its sector may still
+                # hold the password and key. Say so now rather than let the
+                # page time out and blame a silent board. The PC pairing
+                # stays: the board may still hold the matching key.
+                print("[wifi] the board could not erase its WiFi settings",
+                      file=sys.stderr)
+                self._finish(op, error=(
+                    "The board could not erase its WiFi settings. Try again."))
+            return
+        j = self._join
+        if j is not None and self._now() >= j["until"]:
+            j = self._join = None
+        if j is not None:
+            jop = j["op"] if j["op"] is op else None
+            if st == "joining":
+                j["joining"] = True
+                if "sent" not in j["steps"]:
+                    j["steps"].append("sent")
+            elif st == "fail" and j["joining"] and jop is not None:
+                self._join = None
+                self._finish(jop, result={"state": self._ops.state(),
+                                          "steps": j["steps"]})
+            elif st == "up" and usb and msg.get("kid") == j["kid"]:
+                self._joined(j, jop, msg)
+            return
+        if not usb or self._home is None or self._board_id is None:
+            return
+        if "kid" not in msg and st != "off":
+            return
+        pair = wifi_pair.load(self._home)
+        # Another board on the cable is not this one forgetting us.
+        if (pair is not None and pair["board_id"] == self._board_id
+                and msg.get("kid") != pair["kid"]):
+            wifi_pair.remove(self._home)
+            if not self._said_kid:
+                self._said_kid = True
+                print("[wifi] the board was set up from another computer or"
+                      " forgot this one; plug it in and tap Open on PC on the board",
+                      file=sys.stderr)
+
+    def _joined(self, j, op, msg):
+        key = j["key"]
+        ip, port = msg.get("ip"), msg.get("port")
+        self._join = None
+        if op is not None:
+            self._op = None             # the verify below answers the op
+        if "sent" not in j["steps"]:
+            j["steps"].append("sent")
+        j["steps"].append("joined")
+        err = None
+        if not (isinstance(ip, str) and ip and type(port) is int
+                and 0 < port < 65536):
+            err = "The board gave an address this computer cannot use."
+        else:
+            try:
+                wifi_pair.save(self._home, j["board_id"], key, ip, port)
+            except private_file.NotPrivate:
+                err = "Could not save the pairing safely."
+            except (OSError, ValueError, TypeError):
+                err = "Could not save the pairing."
+        if err:
+            print("[wifi] could not save the pairing", file=sys.stderr)
+            if op is not None:
+                op.args = None
+                op.result, op.error = None, err
+                op.done.set()
+            return
+        if op is None:
+            return                      # saved late; the page gave up
+        state = self._ops.state()
+
+        def work():
+            try:
+                self._verify(ip, port, key)
+                steps = j["steps"] + ["proved", "encrypted"]
+                res = {"state": state, "steps": steps}
+            except Exception as e:
+                # Any failure, not only OSError: this thread has no one to
+                # re-raise to, and an op left unanswered costs the page 30 s.
+                # The class only; an OSError's text can carry the address.
+                print("[wifi] the board joined but did not answer over WiFi"
+                      f" ({type(e).__name__})", file=sys.stderr)
+                res = {"state": state, "steps": j["steps"], "problem": (
+                    "The board joined, but this computer could not reach it"
+                    " over WiFi.")}
+            op.result = res
+            op.args = None
+            op.done.set()
+        self._run_async(work)
+
+    def start_logo(self, blob, link):
+        """Stream a logo image (pc/logo_stream.py) over `link`, pumped from
+        pump() like an OTA. ValueError before anything is sent when the image
+        is over the board's limit. `link` is the WifiLink, or whatever has
+        write(raw) for a serial port (kind defaults to usb)."""
+        self._logo = (logo_stream.LogoStream(
+            blob, getattr(link, "kind", "usb"), now=self._now), link)
+        self.logo_result = None
+
+    def logo_streaming(self) -> bool:
+        return self._logo is not None
+
+    def _pump_logo(self):
+        if self._logo is None:
+            return
+        stream, link = self._logo
+        stream.pump(link)           # a dead link raises: the stream is dropped
+        res = stream.done()         # with the connection, never sealed
+        if res is not None:
+            self._logo, self.logo_result = None, res
+            print("[bridge] logo: " + ("sent" if res[0] else "FAILED: " + res[1]),
+                  file=sys.stderr)
+            op = self._op
+            if op is not None and op.kind == "logo":
+                if res[0]:
+                    self._finish(op, result=self._logo_state)
+                else:
+                    self._finish(op, error=res[1])
+
     def pump(self):
-        """Write any theme_edit answers that are ready. Called by the daemon
+        """Write any theme_edit answers that are ready, and an ask a look
+        on run_async's thread found due. Called by the daemon
         on every pass of its serial loop, so an answer goes out within one
         read timeout of the browser opening -- well inside the board's 5 s."""
         while True:
@@ -839,6 +1312,9 @@ class Bridge:
             except queue.Empty:
                 break
             self._write(protocol.theme_edit_reply(ok))
+        self._drain_ops()
+        self._pump_ota()
+        self._pump_logo()
         # After any answer, so a board that asked again as the old builder
         # ended hears "ok" for the new one before "done" for the old: its
         # done is ignored while an ask is in flight, never the other way.
@@ -857,6 +1333,8 @@ class Bridge:
             print("[theme] the builder ended; told the board",
                   file=sys.stderr)
         self._restate_edit()
+        # "Keep figures fresh?", once _consider_ask's look has said yes.
+        self._send_ask_if_ready()
 
     def _edit_after_silence(self):
         """On every ping, before it is counted: if the board was silent long
@@ -926,6 +1404,71 @@ class Bridge:
         self._write(protocol.edit_state(editing))
         self._edit_said_at = now
 
+    # --- "Keep figures fresh?" (docs/plans/usage-refresh.md, 1b) ---------
+
+    def _ask_caps(self):
+        """The board's OWN caps, never board_caps_hint. The hint is
+        board.json's, which names the last board that spoke, and an ask
+        sent starts a day's wait: one sent to an older board on the same
+        port is dropped there, and the person is asked a day later than
+        they need be. (It is counted only on an answer; BoardAsk.)"""
+        caps = self._board_caps
+        if caps is None or protocol.BOARD_CAP_ASK not in caps:
+            return None
+        return caps
+
+    def _consider_ask(self):
+        """Once a heartbeat: work out, off this thread, whether to ask."""
+        caps = self._ask_caps()
+        if self._ask is None or caps is None or self._ask_busy:
+            return
+        self._ask_busy = True
+
+        def work():
+            try:
+                if self._ask.due(caps):
+                    self._ask_ready.put(True)
+            except Exception:
+                pass            # BoardAsk never raises; a fake might
+            finally:
+                self._ask_busy = False
+
+        try:
+            self._run_async(work)
+        except Exception:
+            self._ask_busy = False
+
+    def _send_ask_if_ready(self):
+        ready = False
+        while True:
+            try:
+                self._ask_ready.get_nowait()
+            except queue.Empty:
+                break
+            ready = True
+        # Asked again here: the board may have said otherwise since the
+        # look began (a pref from a different board on the same port).
+        if not ready or self._ask_caps() is None:
+            return
+        self._write(protocol.ask("refresh"))
+        try:
+            self._ask.asked()
+        except Exception:
+            pass
+
+    def _on_answer(self, msg):
+        """The board's answer to "Keep figures fresh?". Logged by the read
+        loop as `<- answer` and nowhere else: which way the person went is
+        theirs (CLAUDE.md, serial buffers)."""
+        a = msg.get("a")
+        if (self._ask is None or msg.get("id") != "refresh"
+                or a not in protocol.ASK_ANSWERS):
+            return
+        try:
+            self._ask.answer(a)
+        except Exception:
+            pass
+
     def board_alive(self) -> bool:
         return (self._last_ping is not None
                 and self._now() - self._last_ping <= LIVENESS_WINDOW_S)
@@ -961,6 +1504,7 @@ class Bridge:
         self._store_until = None
         self._heartbeat()
         self._send_theme()
+        self._consider_ask()
 
     def _heartbeat(self):
         # Time rides along with every heartbeat so the board's clock re-anchors
@@ -978,6 +1522,14 @@ class Bridge:
         # quarantine lasted. Pages are the last ones usage named.
         self._last_svc = {}
         self._send_svc_if_changed()
+        # The plan likewise, once a heartbeat. It went out on change only,
+        # so one plan line lost on the wire -- dropped whole, as any line
+        # can be -- was repaired only when the dollars next moved: hours
+        # on an idle desk, with the board drawing the spend share under
+        # "SESSION 5h" all that time (/code-review max of 2026-11-04, U16).
+        # A flag and not a cleared _last_plan: _outgoing needs to
+        # know which plan the board held before this one.
+        self._restate_plan = True
 
         try:
             usage = self._read_usage()
@@ -986,9 +1538,22 @@ class Bridge:
             # returns None. Anything that reaches here is a bug worth putting
             # on the panel rather than only in a log nobody opens.
             self._write(protocol.status("error", str(e)[:80]))
+            self._said_error = True
             return
 
         if usage is None:
+            # Nothing to draw, but perhaps something to take down: straight
+            # after a switch back from a spend login there may be no reading
+            # at all, and the board still holds the old account's plan --
+            # and its share (_outgoing). Taken down on an earlier tick, the
+            # blank line is restated, as every heartbeat restates the line:
+            # one lost on the wire, or a board that just connected, would
+            # otherwise be left with the old login's share.
+            self._had_usage = False
+            held = self._blanked
+            self._outgoing(None)
+            if held is not None and self._last_usage is not None:
+                self._write(self._restated_blank())
             # No statusline payload yet. The board keeps its last values and
             # its own dot, which is right -- but the daemon used to say nothing
             # at all, so a machine where Claude Code has simply never rendered
@@ -999,11 +1564,12 @@ class Bridge:
                 self._said_no_source = True
             return
         self._said_no_source = False
+        self._had_usage = True
 
         # Unconditional. The heartbeat is what re-states everything to a board
         # that may have missed a message, and what keeps a panel that has been
         # sitting on the same numbers all afternoon provably connected.
-        self._send_usage(usage)
+        self._send_usage(self._outgoing(usage))
 
     def poll_if_changed(self):
         """Send only when something a reader could act on has moved.
@@ -1049,9 +1615,14 @@ class Bridge:
             usage = None
         if usage is None:
             # Nothing to say about usage, but the status pages still have
-            # their own news, and want() still has to be renewed.
+            # their own news, and want() still has to be renewed. And a
+            # spend page that has just gone takes its share with it.
+            self._outgoing(None)
             self._send_svc_if_changed()
             return
+        # The plan first, and the take-down of a spend page it ends, once
+        # for the tick: _outgoing.
+        usage = self._outgoing(usage)
         if protocol.meaningful_usage(usage) != self._last_pushed:
             self._send_usage(usage)
             return
@@ -1070,6 +1641,11 @@ class Bridge:
         # Only the name goes out in that case. Re-sending an identical usage
         # line to carry it would spend the budget this comparison exists to
         # protect.
+        #
+        # Likewise the plan: the dollar figures arrive from Claude Code on a
+        # timer of their own, several minutes after the share they belong
+        # to, so the cost can move with every usage field standing still.
+        # It went out above, in _outgoing, with any take-down it brings.
         self._send_session_if_changed()
         # And the status level, which changes on the watch's own thread and
         # would otherwise wait for the next usage change to be noticed.
@@ -1077,6 +1653,7 @@ class Bridge:
         # And the burn view, whose numbers move while the usage line holds
         # still: an Ultra desk's session dial says "--%" all day.
         self._send_burn_if_due()
+        self._send_sburn_if_due()
 
     def _read_usage(self):
         """The usage message as it would go out right now, or None if there is
@@ -1091,15 +1668,122 @@ class Bridge:
         # Percentages above 100 are real -- extra usage puts them there -- but
         # firmware older than protocol.FW_ACCEPTS_OVERAGE turns them into 0 on
         # the panel rather than clamping. Hold them at 100 for those boards.
-        return protocol.cap_overage_for_fw(usage, self._board_fw)
+        usage = protocol.cap_overage_for_fw(usage, self._board_fw)
+        # And a spend share is withheld from firmware that would draw it as
+        # "SESSION 5h" -- see protocol.BOARD_CAP_PLAN.
+        return protocol.hide_plan_for_board(
+            usage, self._plan_msg(), self._board_can(protocol.BOARD_CAP_PLAN))
+
+    def _outgoing(self, usage):
+        """Send the plan, and take a spend page's share down when the plan
+        leaves it with nothing to replace it; returns `usage`. Once a tick,
+        before anything is compared or sent.
+
+        /login back to Max before Max has rendered leaves the bus with no
+        claude reading, and the plan alone took the caption down but not
+        the figure: the board repainted its share of dollars under
+        "SESSION 5h" with the month's countdown -- red "Session almost
+        used up" near the cap -- until the new login rendered, hours on an
+        idle desk (U15 of the final review of 2026-11-04). So the page is
+        blanked out of the last line sent, and that blank line is what the
+        heartbeat restates (poll_once) until the bus offers a line again.
+
+        Any line it offers is the new login's: the provider drops the old
+        login's renders when it sees the switch (claude_cli._note_login).
+        Four rounds of the review tried to tell the old reading from the
+        new one here instead -- by its figures, its age, the bus's
+        identity for it -- and each broke, keeping the old share under the
+        new captions or the new login's page blank (round 4)."""
+        replaced = self._send_plan_if_changed()
+        if usage is not None:
+            self._blanked = None
+            return usage
+        page = self._spend_page_gone(replaced)
+        if page is not None:
+            self._send_blank(page)
+        return None
+
+    def _send_blank(self, page, greeting=False):
+        """Take `page` down out of the last line sent, and hold that blank
+        for the heartbeat to restate (_outgoing). `greeting`: greet's, whose
+        last line may be hours old: its ages are grown to now, and an age
+        nothing knows is SECS_MAX, "very old", never absent (greet)."""
+        now = self._now()
+        last = self._last_usage
+        if greeting and last is not None and self._last_usage_at is not None:
+            last = protocol.aged_usage(last, now - self._last_usage_at)
+        blank = protocol.blank_page(last, page)
+        if greeting and last is None:
+            # No earlier line: SECS_MAX for both ages dozed the board under
+            # a person sitting at it (the scoped review of
+            # feat/spend-wsl-refresh, item 4). Whether someone is here is the
+            # idle probe's, asked once, here: it starts ioreg on macOS, and
+            # the restatements after this only age what it said.
+            idle_s = self._idle_seconds()
+            if idle_s is not None and 0 <= idle_s < _PRESENT_S:
+                blank["active_age_s"] = int(idle_s)
+        if greeting:
+            for k in ("age_s", "active_age_s"):
+                v = blank.get(k)
+                if not (isinstance(v, int) and not isinstance(v, bool)
+                        and v >= 0):
+                    blank[k] = protocol.SECS_MAX
+        self._blanked = page
+        self._blanked_at = now
+        self._write(blank)
+        self._last_pushed = protocol.meaningful_usage(blank)
+        self._last_usage = blank
+        self._last_usage_at = now
+
+    def _idle_seconds(self):
+        """The idle probe's answer, or None for any failure."""
+        try:
+            if self._idle is None:
+                from pc import idle
+                return idle.seconds_idle()
+            return self._idle()
+        except Exception:
+            return None
+
+    def _spend_maybe_shown(self):
+        """Whether a spend page can be on the board: the bus has seen a
+        seat billed by usage on this desk (IngestionBus.spend_seen). A
+        fetch that cannot say has never shown one."""
+        ask = getattr(self._fetch, "spend_seen", None)
+        try:
+            return bool(ask is not None and ask())
+        except Exception:
+            return False
+
+    def _restated_blank(self):
+        """The held blank as it reads now: its ages advanced and its
+        countdowns run down by the time since it was made, which is how
+        every line the bus builds reads (protocol.aged_usage)."""
+        if self._blanked_at is None:
+            return self._last_usage
+        return protocol.aged_usage(self._last_usage,
+                                   self._now() - self._blanked_at)
+
+    def _plan_msg(self):
+        """Asked of the fetch when it can answer; None otherwise. A plain
+        callable fetch -- the tests' fakes, the single-source daemon -- has
+        no notion of plans, and neither does a bus that has seen none."""
+        ask = getattr(self._fetch, "plan_msg", None)
+        return None if ask is None else ask()
 
     def _send_usage(self, usage):
         """Put a usage message on the wire and remember what was in it."""
+        # The plan went FIRST, in _outgoing, which every caller runs the
+        # line through: it says what the figures on the usage line are,
+        # and the other order would draw a spend share under the old
+        # captions until the next message.
         self._write(usage)
         # Recorded here, once, so that no path can push without moving the
         # baseline -- a push that forgot to would leave the fast tick
         # re-sending the same message every two seconds forever.
         self._last_pushed = protocol.meaningful_usage(usage)
+        self._last_usage = usage
+        self._last_usage_at = self._now()
 
         self._send_session_if_changed()
 
@@ -1127,6 +1811,7 @@ class Bridge:
         # poll, and the board draws the view only while that line says the
         # session is unknown.
         self._send_burn_if_due()
+        self._send_sburn_if_due()
 
         # No second message for staleness any more. The usage message carries
         # `stale` and the firmware reads it (proto.c, via msg_get_bool), so the
@@ -1223,6 +1908,50 @@ class Bridge:
         for p in marked:
             self._send_burn_for(burn, p)
 
+    def _send_sburn_if_due(self):
+        """The dollar burn line, on the token burn line's cadence.
+
+        Only to a board listing BOARD_CAP_SPENDBURN, and only when the fetch
+        has spend_burn() and says there is a line (a spend page is on the
+        claude page). Same quiet window, BURN_MIN_GAP_S and BURN_HEARTBEAT_S
+        as `burn`, from a clock of its own: the two lines are never on one
+        page, but neither should hold the other back across a switch of seat.
+        A raise costs this line and nothing else, said once by type.
+        """
+        ask = getattr(self._fetch, "spend_burn", None)
+        if ask is None:
+            return
+        if not self._board_can(protocol.BOARD_CAP_SPENDBURN):
+            self._sburn_sent = None
+            return
+        if self._in_quiet_window():
+            return
+        now = self._now()
+        sent = self._sburn_sent
+        if sent is not None and now - sent[1] < BURN_MIN_GAP_S:
+            return
+        try:
+            msg = ask()
+        except Exception as e:
+            if not self._sburn_failed:
+                self._sburn_failed = True
+                print(f"[bridge] spend burn not sent: {type(e).__name__}",
+                      file=sys.stderr)
+            return
+        if self._sburn_failed:
+            self._sburn_failed = False
+            print("[bridge] spend burn line working again", file=sys.stderr)
+        if msg is None:
+            if sent is not None:
+                self._sburn_sent = (None, sent[1])
+            return
+        key = (msg.get("q"), tuple(msg.get("b") or ()))
+        if (sent is not None and key == sent[0]
+                and now - sent[1] < BURN_HEARTBEAT_S):
+            return
+        self._write(msg)
+        self._sburn_sent = (key, now)
+
     def _burn_trouble(self, p, e):
         """Never worth the serial loop, and the only place a failure of the
         line, a reader's included, is caught. Said once per page (`p`; None
@@ -1277,6 +2006,45 @@ class Bridge:
             return
         self._write(msg)
         self._burn_sent[p] = (key, now)
+
+    def _send_plan_if_changed(self):
+        """Tell a board that draws plans what its pages are a share of.
+
+        A board that has not announced protocol.BOARD_CAP_PLAN is sent nothing:
+        it would drop the line unread, and its usage line is already
+        blanked where it would mislead. For one that has, the message goes
+        out when it differs from the last one sent -- a /login, the dollars
+        moving -- and greet() forgets the last one, so each connection
+        starts by stating it.
+        """
+        if not self._board_can(protocol.BOARD_CAP_PLAN):
+            return None
+        current = self._plan_msg()
+        restate, self._restate_plan = self._restate_plan, False
+        if current is None:
+            return None
+        if current != self._last_plan:
+            replaced, self._last_plan = self._last_plan, current
+            self._write(current)
+            return replaced
+        if restate:
+            self._write(current)
+        return None
+
+    def _spend_page_gone(self, replaced):
+        """The page `replaced` -- the plan _send_plan_if_changed just took
+        off the wire -- held as a spend page and the plan now on the wire
+        does not, or None."""
+        if not isinstance(replaced, dict):
+            return None
+        if replaced.get("plan") != protocol.PLAN_SPEND:
+            return None
+        page = replaced.get("p")
+        if self._last_plan is not None and \
+                self._last_plan.get("plan") == protocol.PLAN_SPEND and \
+                self._last_plan.get("p") == page:
+            return None                  # still a spend page: dollars moved
+        return page
 
     def _send_svc_if_changed(self):
         """Put each page's status-page level on the wire, on change only.

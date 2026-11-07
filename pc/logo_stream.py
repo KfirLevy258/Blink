@@ -1,0 +1,139 @@
+"""A logo image streamed to the board, over WiFi or the cable (spec S15.2).
+
+WifiOtaStream's shape (pc/wifi_ota.py): not a blocking function, a small state
+machine that Bridge.pump() drives once per pass, so pings and acks keep moving
+between pumps. The ack that opens the window is `logo_ack off:0`; after that no
+more than WINDOW bytes are unacknowledged, and `logo_end` goes out once an ack
+reaches the size, and the stream stays open until the board's `logo_state`. Over WiFi the bytes ride `G` frames (512 per chunk, via
+write_blob); over USB they are `logo_chunk` lines with base64 `d`, 256 bytes a
+line so the line stays under the board's 512.
+
+An image over LOGO_MAX is refused in the constructor, before anything is sent:
+the board would refuse `logo_begin` anyway, and a refusal that costs nothing
+beats one that costs a stream.
+
+Logging: a percentage and fixed sentences. Never a byte, an offset or a
+length (CLAUDE.md, S7.5).
+"""
+from __future__ import annotations
+
+import sys
+import time
+import zlib
+
+from pc import protocol
+from pc.logo_encode import E_SIZE, LOGO_MAX
+
+CHUNK_WIFI = 512
+CHUNK_USB = 256
+# Over WiFi the board acks every 16 KiB and TCP carries the window. Over USB
+# every byte lands in the board's UART RX ring, 2 KB (proto.c), and a chunk
+# line is ~390 bytes: a 32 KiB window overflows the ring and the board drops
+# lines silently. So the board acks EVERY chunk over USB, after its flash
+# write returns, and the daemon keeps ONE chunk in flight. Not four: on a
+# fused chip each 256-byte write is a read, erase and rewrite of a 4 KB
+# sector with interrupts off for 45 ms or more (Zephyr 4.3.1 flash_esp32.c
+# aligned_flash_write, the hal's cache_utils.c), and at 115200 baud the
+# chunks behind it would overrun the UART's 128-byte hardware FIFO before
+# the ISR could move them to the ring -- a corrupt logo_chunk, every time
+# (review of Task 6.3, 2026-11-07). Stop-and-wait means nothing arrives
+# while the sector is erased. The cost is a slower logo over the cable.
+WINDOW_WIFI = 32 * 1024
+WINDOW_USB = CHUNK_USB
+WINDOW = WINDOW_WIFI
+STALLED = "The logo update stalled"
+REFUSED = "The board refused the logo"
+
+
+class LogoStream:
+    def __init__(self, blob: bytes, link_kind: str, now=time.monotonic,
+                 stall_s: float = 30.0):
+        if len(blob) > LOGO_MAX:
+            raise ValueError(E_SIZE)
+        if link_kind not in ("wifi", "usb"):
+            raise ValueError("unknown link kind")
+        self._blob, self._kind = bytes(blob), link_kind
+        wifi = link_kind == "wifi"
+        self._chunk = CHUNK_WIFI if wifi else CHUNK_USB
+        self._window = WINDOW_WIFI if wifi else WINDOW_USB
+        self._now, self._stall_s = now, stall_s
+        self._sent = self._acked = 0
+        self._begun = self._ready = self._end_sent = False
+        self._result = None
+        self._progress_at = now()
+        self._pct = -1
+
+    def ready(self) -> None:
+        """logo_ack off:0 arrived: the board erased and opened the partition."""
+        if not self._ready:
+            self._ready = True
+            self._progress_at = self._now()
+
+    def ack(self, off, err=None) -> None:
+        if self._result is not None:
+            return
+        if err:
+            self._result = (False, REFUSED)
+            return
+        if not isinstance(off, int) or isinstance(off, bool):
+            return
+        if off == 0:
+            if self._begun:
+                self.ready()
+        elif self._ready and self._acked < off <= self._sent:
+            self._acked = off
+            self._progress_at = self._now()
+            pct = off * 100 // len(self._blob)
+            if pct // 10 != self._pct // 10:
+                print(f"[bridge] logo: {pct}%", file=sys.stderr)
+            self._pct = pct
+
+    def state(self, present) -> None:
+        """The board's logo_state after logo_end: the verdict. `logo_parse`
+        ran over what it wrote, so present 1 is the only success; the stream
+        is not done at logo_end."""
+        if self._result is None and self._end_sent:
+            ok = present is True or (isinstance(present, int) and present == 1)
+            self._result = (True, "") if ok else (False, REFUSED)
+
+    def _send(self, link, msg) -> None:
+        raw, _ = protocol.encode_checked(msg)
+        link.write(raw)
+
+    def pump(self, link) -> None:
+        """logo_begin once, chunks up to WINDOW unacked, logo_end when the
+        last byte is acked."""
+        if self._result is not None:
+            return
+        if self._now() - self._progress_at > self._stall_s:
+            self._result = (False, STALLED)
+            return
+        if self._end_sent:
+            return
+        n = len(self._blob)
+        if not self._begun:
+            # Marked before the write: a link that answers from inside write()
+            # (a test's, or a loopback) acks before write() returns.
+            self._begun = True
+            self._send(link, protocol.logo_begin(
+                n, zlib.crc32(self._blob) & 0xffffffff))
+            return
+        if self._ready and self._acked == n:
+            self._end_sent = True       # before the write: a link may answer inside it
+            self._progress_at = self._now()     # the verdict has its own 30 s
+            self._send(link, protocol.logo_end())
+            return
+        if not self._ready:
+            return
+        while self._sent < n and self._sent - self._acked < self._window:
+            chunk = self._blob[self._sent:self._sent + self._chunk]
+            at, self._sent = self._sent, self._sent + len(chunk)
+            if self._kind == "wifi":
+                link.write_blob(b"G", at, chunk)
+            else:
+                self._send(link, protocol.logo_chunk(at, chunk))
+
+    def done(self):
+        """None while running; (True, "") once the board's logo_state says
+        present, or (False, reason)."""
+        return self._result

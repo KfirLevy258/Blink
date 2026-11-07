@@ -75,6 +75,7 @@ import time
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+from pc import private_file, wifi_pair
 from pc.service_ctl import start_service, stop_service
 from pc.update import archive_name, platform_key
 from tests.fleet import tap_asserts
@@ -296,7 +297,7 @@ def _redirect_home(env, sandbox_dir):
 
 
 def env_for_run(sandbox_dir, scenario, tap, sandbox=True,
-                poll_interval=POLL_INTERVAL_S):
+                poll_interval=POLL_INTERVAL_S, wifi=False):
     """The environment for one daemon run.
 
     sandbox=False is the real-account pass and is the only time the daemon
@@ -311,7 +312,30 @@ def env_for_run(sandbox_dir, scenario, tap, sandbox=True,
         _redirect_home(env, sandbox_dir)
     if scenario is not None:
         env["BLINK_SCENARIO"] = str(scenario)
+    if wifi:
+        env["BLINK_FORCE_WIFI"] = "1"
     return env
+
+
+def install_pairing(home, real_blink_home=None):
+    """Copy this desk's own wifi_pair.json into the sandbox's ~/.blink.
+
+    False when the desk has no (valid, owner-only) pairing: the WiFi
+    scenario then has nothing to prove here and is skipped, not failed. It
+    goes through private_file by handle both ways, so the copy is owner-only
+    from its first byte and a world-readable original is not copied at all.
+    The real home is resolved here, at call time (tests/test_sandbox.py).
+    """
+    src = real_blink_home or os.path.join(os.path.expanduser("~"), ".blink")
+    try:
+        raw = private_file.open_private(src, wifi_pair.PAIR_FILE)
+    except private_file.NotPrivate:
+        return False
+    if raw is None:
+        return False
+    private_file.write_private(str(Path(home) / ".blink"),
+                               wifi_pair.PAIR_FILE, raw)
+    return True
 
 
 def grace_s(doc, poll_interval=POLL_INTERVAL_S):
@@ -580,7 +604,23 @@ def _scenario_duration(doc):
     return duration
 
 
-def _one_pass(name, env, tap, seconds, port, deps, label):
+def _needs_pairing(path):
+    return json.loads(Path(path).read_text(encoding="utf-8")
+                      ).get("link") == "wifi"
+
+
+def console_tail_cmd(tap, port=None):
+    """tools/console_tail.py beside a WiFi daemon. Over WiFi the daemon does
+    not open the cable, so the board's console reaches the tap only this way;
+    it listens plainly (no DTR/RTS) and keeps nothing but the allowlist."""
+    cmd = [sys.executable, str(REPO_ROOT / "tools" / "console_tail.py"),
+           "--tap", str(tap)]
+    if port and port != "auto":
+        cmd.append(port)
+    return cmd
+
+
+def _one_pass(name, env, tap, seconds, port, deps, label, tail=False):
     """Run the daemon for one stretch. Returns (problems, connect_delay).
 
     connect_delay is how long after the spawn the first record of THIS pass
@@ -591,15 +631,23 @@ def _one_pass(name, env, tap, seconds, port, deps, label):
     problems = []
     before = len(read_tap(tap))
     started = deps.wall()
-    proc = deps.spawn(daemon_cmd(port), env, REPO_ROOT)
+    tailer = proc = None
     try:
+        # Inside the try: if the daemon's spawn raises, the tailer still
+        # stops and lets go of the serial port (final review, page minor 9).
+        tailer = deps.spawn(console_tail_cmd(tap, port), env, REPO_ROOT) \
+            if tail else None
+        proc = deps.spawn(daemon_cmd(port), env, REPO_ROOT)
         deps.sleep(seconds)
         if proc.poll() is not None:
             problems.append(f"Scenario {name}: the daemon exited on its own"
                             f" during the {label} pass (status {proc.poll()});"
                             f" its output is beside the tap in {tap}.log.")
     finally:
-        problems += _stop_daemon(proc, f"{name}'s {label} daemon")
+        if proc is not None:
+            problems += _stop_daemon(proc, f"{name}'s {label} daemon")
+        if tailer is not None:
+            problems += _stop_daemon(tailer, f"{name}'s console tail")
 
     # Wire records only. The daemon walks a candidate list looking for the
     # board (claude_usage_bridge.py:858-863) and prints as it goes, so on the
@@ -617,7 +665,22 @@ def _one_pass(name, env, tap, seconds, port, deps, label):
 
 
 def run_scenario(path, board, workroot, port, deps,
-                 poll_interval=POLL_INTERVAL_S):
+                 poll_interval=POLL_INTERVAL_S, real_blink_home=None):
+    """_run_scenario, and then the desk's pairing key is taken back out of
+    the sandbox home, however the scenario ended. The home is shared by
+    every later scenario in the run and stays behind in the run directory,
+    and neither needs the key (review of wifi/platfix, 2026-11-07). Removed
+    after every scenario, not only WiFi ones: the run loop's own check
+    installs a copy too."""
+    try:
+        return _run_scenario(path, board, workroot, port, deps,
+                             poll_interval, real_blink_home)
+    finally:
+        wifi_pair.remove(str(Path(sandbox_home(workroot)) / ".blink"))
+
+
+def _run_scenario(path, board, workroot, port, deps,
+                  poll_interval=POLL_INTERVAL_S, real_blink_home=None):
     """One scenario end to end: spawn, wait it out, stop, read, judge.
 
     A scenario with `host_silence_s` runs in TWO passes with the daemon gone
@@ -655,8 +718,14 @@ def run_scenario(path, board, workroot, port, deps,
     # a work directory it did not clear cannot resurrect a transcript.
     before = len(read_tap(tap))
     scenario = prepare_scenario(path, board, work / "scenario")
-    env = env_for_run(sandbox_home(workroot), scenario=scenario, tap=tap,
-                      sandbox=True, poll_interval=poll_interval)
+    wifi = doc.get("link") == "wifi"
+    home = sandbox_home(workroot)
+    if wifi and not install_pairing(home, real_blink_home):
+        return {"ok": False, "problems": [
+            f"Scenario {name}: this desk has no usable WiFi pairing, so the"
+            f" scenario cannot run here."]}
+    env = env_for_run(home, scenario=scenario, tap=tap,
+                      sandbox=True, poll_interval=poll_interval, wifi=wifi)
     grace = grace_s(doc, poll_interval)
     silence = tap_asserts.as_number(doc.get("host_silence_s")) or 0.0
 
@@ -665,7 +734,7 @@ def run_scenario(path, board, workroot, port, deps,
     deps.sleep(PORT_SETTLE_S)
     problems, delay = _one_pass(name, env, tap,
                                 _scenario_duration(doc) + grace, port, deps,
-                                "first" if silence else "only")
+                                "first" if silence else "only", tail=wifi)
 
     if silence:
         if problems:
@@ -680,7 +749,7 @@ def run_scenario(path, board, workroot, port, deps,
             wake = tap_asserts.as_number(doc.get("wake_duration_s")) or \
                 _scenario_duration(doc)
             more, wake_delay = _one_pass(name, env, tap, wake + grace, port,
-                                         deps, "wake")
+                                         deps, "wake", tail=wifi)
             problems += more
             # The wake pass needs the same protection as the first one, and
             # needs it more: min_tx counts on the second daemon replaying
@@ -980,7 +1049,13 @@ def _run_program(cmd, env, runner, name, what, ours=True):
     are captured and decoded here instead, where there is somewhere to fall
     back to.
     """
-    kwargs = {"env": env, "capture_output": True, "timeout": BUNDLE_TIMEOUT_S}
+    # stdin from nowhere: `blink install` and `blink update` ask a question
+    # when stdin is a terminal, and with the operator's inherited and the
+    # output captured, the prompt sat unseen until BUNDLE_TIMEOUT_S failed
+    # the gate (/code-review max of feat/usage-refresh, V24). No program
+    # run here reads stdin for anything else.
+    kwargs = {"env": env, "capture_output": True, "timeout": BUNDLE_TIMEOUT_S,
+              "stdin": subprocess.DEVNULL}
     if ours:
         kwargs.update(encoding="utf-8", errors="replace")
     try:
@@ -1371,6 +1446,12 @@ def run(args, deps=None):
                                                   "problems": [detail]}
         else:
             for path in paths:
+                if _needs_pairing(path) and not install_pairing(
+                        sandbox_home(workroot)):
+                    # A desk that was never paired has nothing to prove:
+                    # left out of the results, not recorded as a pass.
+                    print(f"[fleet] {path.stem}: skipped, no pairing here")
+                    continue
                 outcome = run_scenario(path, args.board, workroot, args.port,
                                        deps, args.poll_interval)
                 result["scenarios"][path.stem] = outcome

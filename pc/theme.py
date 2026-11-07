@@ -731,8 +731,19 @@ def builder_path(home):
     return os.path.join(home, BUILDER_FILE)
 
 
-def write_builder(home, port):
-    _write_json(builder_path(home), {"port": port})
+def write_builder(home, port, ack=None):
+    """`ack` is the id of the `blink settings` request whose token is now
+    registered on this builder (D50); read_builder ignores it."""
+    rec = {"port": port}
+    if ack is not None:
+        rec["ack"] = ack
+    _write_json(builder_path(home), rec)
+
+
+def read_builder_ack(home):
+    obj = _read_json(builder_path(home))
+    ack = obj.get("ack") if isinstance(obj, dict) else None
+    return ack if isinstance(ack, str) else None
 
 
 def read_builder(home):

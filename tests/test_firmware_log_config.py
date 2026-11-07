@@ -72,13 +72,22 @@ def test_every_protocol_line_is_one_printk():
     # One printk is one log message, written out whole and in order. A line
     # assembled from several printk calls could be split by another thread's
     # message landing between them.
-    src = (FW / "src" / "proto.c").read_text(encoding="utf-8")
+    # emit() in proto.c hands every line to link_emit() (spec 5.3), so the
+    # printk lives there now: emit() must print nothing itself and
+    # link_emit()'s USB path must be exactly one.
+    proto = (FW / "src" / "proto.c").read_text(encoding="utf-8")
     m = re.search(r"static void emit\(const char \*json\)\n\{(.*?)\n\}",
-                  src, re.S)
+                  proto, re.S)
+    assert m
+    assert "printk(" not in m.group(1)
+    assert "link_emit(json);" in m.group(1)
+    link = (FW / "src" / "link.c").read_text(encoding="utf-8")
+    m = re.search(r"void link_emit\(const char \*line\)\n\{(.*?)\n\}",
+                  link, re.S)
     assert m
     body = m.group(1)
     assert body.count("printk(") == 1
-    assert 'printk("%s\\n", json);' in body
+    assert 'printk("%s\\n", line);' in body
 
 
 def test_lvgl_still_reports_a_pool_running_dry():

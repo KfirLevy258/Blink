@@ -75,6 +75,7 @@ import ipaddress
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1007,6 +1008,52 @@ def _utm_worked(done):
     return "error" not in said and "cannot be found" not in said
 
 
+# The signals that end a run from outside it: Ctrl-C, a terminal window
+# closed (SIGHUP), a kill (SIGTERM). SIGHUP is POSIX only.
+_ENDING = tuple(getattr(signal, n) for n in ("SIGINT", "SIGHUP", "SIGTERM")
+                if hasattr(signal, n))
+
+
+def _set_handlers(handler, signals):
+    """`handler` for each of `signals`; {signal: the one it replaced}, with
+    those that cannot be set (not the main thread) left out."""
+    previous = {}
+    for sig in signals:
+        try:
+            previous[sig] = signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
+    return previous
+
+
+def _ignore_interrupt():
+    """Ignore every signal that ends a run (_ENDING); what they replaced,
+    for _restore_interrupt. Children started meanwhile inherit the
+    ignore."""
+    return _set_handlers(signal.SIG_IGN, _ENDING)
+
+
+def _restore_interrupt(previous):
+    for sig, handler in (previous or {}).items():
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
+
+
+def _exit_on_hangup():
+    """SIGHUP and SIGTERM unwind the run as Ctrl-C does, through every
+    finally: the board asked back from the VM, this Mac's service started
+    again, the result written. With their default action, a terminal
+    window closed during the VM phase ended run.py on the spot and left
+    the launchd agent booted out (the /code-review max of
+    277b81a..4003b0b, C32). What they replaced, for _restore_interrupt."""
+    def end(signum, frame):
+        raise SystemExit(128 + signum)
+    return _set_handlers(end, tuple(s for s in _ENDING
+                                    if s != signal.SIGINT))
+
+
 class Bench:
     """This Mac's end of a VM run: its service, and the board's handoffs.
 
@@ -1084,6 +1131,12 @@ class Bench:
         out, and starting a service that is already running costs nothing,
         while not starting one that was stopped leaves this Mac dark.
         """
+        # Held BEFORE the stop is attempted: a Ctrl-C while launchctl runs
+        # can come after the bootout was done, and release() must then
+        # still start the service. Assigned after, as it was, the
+        # interrupt left held False, release() returned at once, and the
+        # board's daemon stayed unloaded on a desk someone works at.
+        self.held = True
         problems, skipped = self._service("stop")
         self.held = not skipped
         self.problems = [f"No VM was handed the board. {p}"
@@ -1100,7 +1153,18 @@ class Bench:
         if not self.held:
             return owed
         self.held = False
-        problems, _ = self._service("start")
+        # With Ctrl-C ignored while it runs, here and in the child it
+        # starts: a terminal sends the signal to the whole foreground
+        # group, so a second Ctrl-C (an operator watching a handback hang)
+        # killed `tests.fleet.service start` between its bootstrap and its
+        # kickstart, or this process before it began, and the service was
+        # left registered but idle or not registered at all. The start is
+        # a few seconds; it is not a place to stop.
+        previous = _ignore_interrupt()
+        try:
+            problems, _ = self._service("start")
+        finally:
+            _restore_interrupt(previous)
         return owed + [f"{p} The board on this Mac will stay dark until it"
                        f" is started (blink install puts it back)."
                        for p in problems]
@@ -1632,6 +1696,7 @@ def main(argv=None, runner=subprocess.run, ask=input, interactive=None,
           f"{', one at a time' if sequential else ''}.")
     if interactive is None:
         interactive = _interactive()
+    hangup = _exit_on_hangup()
     try:
         if sequential:
             _run_in_turn(inventory, settings, args, runner, doc, ask,
@@ -1650,6 +1715,7 @@ def main(argv=None, runner=subprocess.run, ask=input, interactive=None,
         doc["ok"] = (summary["ok"] and not doc["problems"]
                      and doc["sha"] != "unknown")
         _write_state(state, doc)
+        _restore_interrupt(hangup)
 
     # The verdict is already on disk by here. Whatever the table does, it
     # must not be the last thing that happens: a traceback in place of the

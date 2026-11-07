@@ -4,11 +4,14 @@ One JSON object per line, UTF-8, '\n'-terminated. Every message carries
 `t` (type) and `v` (version). Non-JSON lines (logs) and unknown types are
 ignored by callers. v2.
 """
+import base64
 import json
 import math
+import re
 
 from pc.version import PROTO_VERSION
-from pc.providers.base import STATE_UNKNOWN, worst_of
+from pc.providers.base import (PLAN_SPEND, PLAN_UNREPORTED, PLAN_WINDOWS,
+                               STATE_UNKNOWN, worst_of)
 
 # Kept as a name because every message builder below already spells it this
 # way. It is the protocol's version, not the product's -- see pc/version.py.
@@ -74,6 +77,18 @@ def encode(msg: dict) -> bytes:
 # under twelve days: comfortably clear of the seven-day window, and six digits.
 COUNTDOWN_MAX_S = 999999
 
+# A second, longer ceiling, used only for a spend page's session countdown.
+#
+# A monthly cap's period can have 30 days left in it, and COUNTDOWN_MAX_S is
+# under 12. Clamped to that, the countdown would sit frozen at the ceiling
+# for the first two and a half weeks of every month and only then begin to
+# move: false on each of those days, and in the direction that makes the
+# reset look sooner than it is. 32 days is more than the 31 a month can
+# have, so no honest period is cut short, and a stamp in milliseconds still
+# hits a ceiling. The extra digit is paid for by the same line no longer
+# carrying a weekly countdown: a spend page sends -1 there.
+SPEND_COUNTDOWN_MAX_S = 32 * 86400
+
 
 def encode_checked(msg: dict):
     """encode(), but None when the result could not be received.
@@ -90,7 +105,8 @@ def encode_checked(msg: dict):
     return raw, None
 
 
-def secs_until(resets_at, now_epoch: float) -> int:
+def secs_until(resets_at, now_epoch: float,
+               ceiling: int = COUNTDOWN_MAX_S) -> int:
     """Seconds until `resets_at`. -1 when unknown or already past.
 
     -1 rather than 0 for missing input: 0 renders as "resets now", which is a
@@ -117,7 +133,7 @@ def secs_until(resets_at, now_epoch: float) -> int:
     # have already passed. Ceiling keeps the value honest (the window really
     # does have "about a second" left) and keeps 0 reserved for the firmware's
     # own countdown reaching it.
-    return min(COUNTDOWN_MAX_S, max(1, math.ceil(resets_at - now_epoch)))
+    return min(ceiling, max(1, math.ceil(resets_at - now_epoch)))
 
 
 def decode(line: str):
@@ -174,13 +190,170 @@ WIRE_TYPES = frozenset({
     # board -> host
     "hello", "ping", "pref", "ota_query", "ota_flash", "theme_now",
     "theme_edit", "touch_done", "touch_refused", "ui_state", "widgets",
+    "answer",
     # host -> board
     "welcome", "bye", "pong", "time", "usage", "edition", "session",
     "status", "svc", "theme", "ota_avail", "ota_begin", "ota_resume",
-    "ota_none", "ota_error", "edit_state", "burn",
+    "ota_none", "ota_error", "edit_state", "burn", "plan", "sburn", "ask",
+    # The WiFi transport (docs/superpowers/specs/2026-11-05-wifi-transport-
+    # design.md S6.1, S7.5). Builders arrive in Tasks 1.3 and 6.2; the names
+    # are here now so the transcript allowlist below can be complete.
+    # host -> board
+    "wifi_scan", "wifi_set", "wifi_forget", "ota_end", "logo_begin",
+    "logo_chunk", "logo_end", "logo_remove", "pref_set",
+    # board -> host
+    "wifi_net", "wifi_state", "ota_ack", "logo_ack", "logo_state",
+    # The verify-only candidate's one exchange (S5.4): the PC's line is
+    # sealed on the WiFi session, so it never crosses the cable.
+    "verify", "verified",
 })
 
 UNKNOWN_TYPE = "(unknown type)"
+
+# --- the transcript allowlist (S7.5, D54) ------------------------------------
+#
+# BLINK_TAP records whole messages, and with WiFi on the wire a message can
+# carry the network's name, its password, the pairing key and the board's
+# address. A deny-list ("drop s, p, k") fails the day someone adds a field, so
+# this is the other shape: per type, the only fields a transcript may hold.
+# A field nobody listed is dropped, and so is anything that is not a scalar.
+#
+# `v` is in none of them: it is the same number on every line, and what the
+# fleet reads (session_pct, weekly_pct, stale: tests/fleet/agent.py:720-723,
+# tap_asserts.py:127-129) does not include it. Free text a person typed or a
+# program chose (a session label, a status detail, an svc `what`, an ota error
+# reason, a widget label) is left out for the same reason the log leaves it
+# out: it is somebody's content.
+_T = frozenset({"t"})
+_USAGE_FIELDS = frozenset({
+    "t", "session_pct", "session_resets_in_s", "weekly_pct",
+    "weekly_resets_in_s", "stale", "fable_pct", "sonnet_pct", "opus_pct",
+    "provider", "src", "state", "n_sess", "n_run", "n_wait", "n_stuck",
+    "n_agents", "p2", "p2_session_pct", "p2_weekly_pct", "p2_s_in_s",
+    "p2_w_in_s", "p2_stale", "burn_pph", "age_s", "p2_age_s",
+    "active_age_s",
+})
+TAP_FIELDS = {
+    # board -> host
+    "hello": _T, "ping": _T, "pref": _T, "ota_query": _T, "ota_flash": _T,
+    "theme_now": _T, "widgets": _T,
+    "theme_edit": frozenset({"t", "ok", "done"}),
+    "touch_done": frozenset({"t", "op", "ok"}),
+    "touch_refused": _T,
+    "ui_state": frozenset({"t", "scr", "ov", "modal", "busy", "theme",
+                           "stored", "tp", "focus", "bl", "edit", "slp",
+                           "nt", "gf"}),
+    "wifi_net": frozenset({"t", "i", "n", "sec"}),
+    "wifi_state": frozenset({"t", "st", "link", "kid", "why"}),
+    "ota_ack": frozenset({"t", "off", "err"}),
+    "logo_ack": frozenset({"t", "off", "err"}),
+    "logo_state": frozenset({"t", "present", "bytes", "frames", "err"}),
+    # host -> board
+    "welcome": frozenset({"t", "app", "app_ver", "editing"}),
+    "bye": _T, "pong": _T,
+    "time": frozenset({"t", "epoch", "utc_offset_min"}),
+    "usage": _USAGE_FIELDS,
+    "edition": frozenset({"t", "edition"}),
+    "session": frozenset({"t", "n"}),
+    "status": frozenset({"t", "state"}),
+    "svc": frozenset({"t", "provider", "level"}),
+    "theme": frozenset({"t", "op", "id"}),
+    "ota_avail": frozenset({"t", "version", "size"}),
+    "ota_begin": frozenset({"t", "version"}),
+    "ota_resume": frozenset({"t", "version"}),
+    "ota_none": _T, "ota_error": _T,
+    "edit_state": frozenset({"t", "editing"}),
+    "wifi_scan": _T, "wifi_set": _T, "wifi_forget": _T, "ota_end": _T,
+    "logo_begin": frozenset({"t", "size"}), "logo_chunk": frozenset({"t", "off"}),
+    "logo_end": _T, "logo_remove": _T,
+    "pref_set": frozenset({"t", "main_src", "focus", "view", "bright"}),
+    "verify": _T, "verified": _T,
+    # develop's lines, met here at the merge (the transcript allowlist came
+    # with the WiFi branch). The page and the plan's kind and period, as
+    # the board's own [plan] console line carries them; never the buckets
+    # (token use) or the dollars, which are somebody's budget.
+    "burn": frozenset({"t", "p"}), "sburn": frozenset({"t", "p"}),
+    "plan": frozenset({"t", "p", "plan", "period"}),
+    "ask": frozenset({"t", "id"}), "answer": frozenset({"t", "id", "a"}),
+}
+
+# The fixed words of the WiFi lines (spec S5.7, S6.1). A string in one of
+# these fields that is not on its list is dropped, not recorded: the field
+# name is a promise that the value is one of ours, and a board that sent
+# something else is exactly the board whose text we do not want in a file.
+TAP_ENUMS = {
+    "st": frozenset({"off", "joining", "up", "fail"}),
+    "link": frozenset({"usb", "wifi"}),
+    "sec": frozenset({"wpa2", "wpa3", "mixed", "open"}),
+    "why": frozenset({
+        "", "Wrong WiFi password", "Network not found",
+        "No address from the router", "WPA3-only networks are not supported",
+        "WiFi self-test failed", "Could not forget WiFi. Try again.",
+        "Could not scan. Try again.", "Could not start WiFi"}),
+    "err": frozenset({"", "unconfirmed", "refused", "failed"}),
+    # The board's `answer` (ASK_ANSWERS, below; test_protocol holds the two
+    # equal): a board-to-host string, so only our own three words.
+    "a": frozenset({"on", "no", "later"}),
+}
+# The same, for a field whose name another type uses differently: `id` is a
+# number on theme, but on the board's answer it names the question, and
+# "refresh" is the only one (ask()).
+TAP_TYPE_ENUMS = {
+    ("answer", "id"): frozenset({"refresh"}),
+}
+# Fields that are numbers on the wire (spec S6.1, S7.5). Review of Task 0.1:
+# redact() kept any string of 64 characters or fewer in them, so a board
+# printing text under `off` got it into the transcript. _INT_FIELDS must be a
+# real int (a bool is not one); _FLAG_FIELDS and _USAGE_NUM take an int, float
+# or bool (usage percentages are floats, stale and the p2 flags go out as
+# either) and reject only a string.
+_INT_FIELDS = frozenset({"off", "i", "n", "busy", "theme", "stored", "tp",
+                         "bl", "slp", "size", "epoch", "utc_offset_min", "bytes",
+                         "frames", "bright"})
+_NUM_FIELDS = frozenset({
+    "ok", "done", "editing", "present", "focus", "session_pct", "session_resets_in_s",
+    "weekly_pct", "weekly_resets_in_s", "stale", "fable_pct", "sonnet_pct",
+    "opus_pct", "n_sess", "n_run", "n_wait", "n_stuck", "n_agents",
+    "p2_session_pct", "p2_weekly_pct", "p2_s_in_s", "p2_w_in_s", "p2_stale",
+    "burn_pph", "age_s", "p2_age_s", "active_age_s"})
+_KID = re.compile(r"[0-9a-f]{8}\Z")
+TAP_STR_MAX = 64
+TAP_UNKNOWN = "(unknown)"
+
+
+def redact(msg) -> dict:
+    """`msg` as a transcript may hold it: only the fields TAP_FIELDS lists
+    for its type, only scalars, only enum words from TAP_ENUMS, `kid` as 8
+    lowercase hex, any other string at most TAP_STR_MAX long. A type outside
+    WIRE_TYPES is {"t": "(unknown)"}. Never raises on a hostile message:
+    this runs on every line the board prints."""
+    t = msg.get("t") if isinstance(msg, dict) else None
+    allowed = TAP_FIELDS.get(t) if isinstance(t, str) else None
+    if allowed is None:
+        return {"t": TAP_UNKNOWN}
+    out = {}
+    for k, v in msg.items():
+        if k not in allowed:
+            continue
+        if v is not None and not isinstance(v, (str, int, float, bool)):
+            continue
+        enum = TAP_TYPE_ENUMS.get((t, k), TAP_ENUMS.get(k))
+        if enum is not None:
+            if not isinstance(v, str) or v not in enum:
+                continue
+        elif k == "kid":
+            if not isinstance(v, str) or not _KID.match(v):
+                continue
+        elif k in _INT_FIELDS:
+            if not isinstance(v, int) or isinstance(v, bool):
+                continue
+        elif k in _NUM_FIELDS:
+            if isinstance(v, str):
+                continue
+        elif isinstance(v, str) and len(v) > TAP_STR_MAX:
+            continue
+        out[k] = v
+    return out
 
 
 def log_name(msg) -> str:
@@ -618,6 +791,25 @@ def meaningful_usage(msg: dict) -> dict:
     return {k: v for k, v in msg.items() if k not in VOLATILE_USAGE_KEYS}
 
 
+# The largest percentage the board takes (proto.c PCT_MAX). One over it is
+# refused whole and the board keeps its default: 0%, no "used up".
+PCT_MAX = 1000.0
+
+
+def _share(frame):
+    """A frame's session figure as it goes on the wire. A spend share is
+    held at PCT_MAX: $300 against a cap cut to $20 is 1500%, which the
+    board refused, drawing 0% for a page far over its cap (/code-review max
+    of 2026-11-04, U3). A window's figure is left as it is: its sources
+    already refuse one past PCT_MAX."""
+    pct = frame.session_pct
+    if (getattr(frame, "plan", PLAN_WINDOWS) == PLAN_SPEND
+            and isinstance(pct, (int, float)) and not isinstance(pct, bool)
+            and pct > PCT_MAX):
+        return PCT_MAX
+    return pct
+
+
 def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
     """Turn a NormalizedUsageFrame into the usage message for the board.
 
@@ -628,10 +820,11 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
     only thing that decides what a frame looks like on the wire.
     """
     return usage(
-        frame.session_pct, frame.session_resets_at,
+        _share(frame), frame.session_resets_at,
         frame.weekly_pct, frame.weekly_resets_at,
         [],
-        session_resets_in_s=secs_until(frame.session_resets_at, now_epoch),
+        session_resets_in_s=secs_until(frame.session_resets_at, now_epoch,
+                                       _session_ceiling(frame)),
         weekly_resets_in_s=secs_until(frame.weekly_resets_at, now_epoch),
         stale=frame.stale,
         provider=frame.provider, src=frame.src,
@@ -649,10 +842,12 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
         n_stuck=frame.n_stuck + (secondary.n_stuck if secondary else 0),
         n_agents=frame.n_agents + (secondary.n_agents if secondary else 0),
         p2=(secondary.provider if secondary else ""),
-        p2_session_pct=(secondary.session_pct if secondary else UNKNOWN),
+        p2_session_pct=(_share(secondary) if secondary else UNKNOWN),
         p2_weekly_pct=(secondary.weekly_pct if secondary else UNKNOWN),
         p2_session_resets_in_s=(secs_until(secondary.session_resets_at,
-                                           now_epoch) if secondary else -1),
+                                           now_epoch,
+                                           _session_ceiling(secondary))
+                                if secondary else -1),
         p2_weekly_resets_in_s=(secs_until(secondary.weekly_resets_at,
                                           now_epoch) if secondary else -1),
         p2_stale=(secondary.stale if secondary else False),
@@ -669,6 +864,230 @@ def frame_to_usage(frame, now_epoch: float, secondary=None) -> dict:
     )
 
 
+def _session_ceiling(frame) -> int:
+    """How far out this frame's session countdown may reach -- see
+    SPEND_COUNTDOWN_MAX_S. Read with getattr so a frame-shaped object from
+    before plans existed (every older test double) keeps the old bound."""
+    if getattr(frame, "plan", PLAN_WINDOWS) == PLAN_SPEND:
+        return SPEND_COUNTDOWN_MAX_S
+    return COUNTDOWN_MAX_S
+
+
+# --- plan: what a page's percentages are a share of ------------------------
+
+# Whether a board draws the `plan` message is BOARD_CAP_PLAN, with the
+# other board capabilities further down: a capability and not a version,
+# because the svc status line shipped its own gate at 1.4.0 and a board may
+# well have the one and not the other. Gating plans on a number would hand
+# a spend share to such a board as its session figure.
+#
+# Without it, the usage line still reaches the board -- old firmware reads
+# that, and on a spend page it carries the dollar cap's share in
+# `session_pct`, which 1.3.x draws as "SESSION 5h 63%". For such a board that
+# share is blanked (hide_plan_for_board), and the page shows "--", as it did
+# for an Enterprise login before any of this.
+
+
+# The one provider with plans. A plan message always names its page, so a
+# future second one is a new value here and nothing on the board changes.
+PLAN_PROVIDER = "claude"
+
+# Whole cents. The panel shows "$314" and Claude Code's own /usage shows
+# cents; nothing finer is worth the bytes.
+_USD_PLACES = 2
+
+
+# The board refuses an amount above this (proto.c USD_MAX) and keeps its
+# -1, so a larger one would be sent only to be dropped. Clamping here keeps
+# the two ends agreeing on what "too big to be real" means.
+USD_MAX = 1e9
+
+
+def _dollars(v):
+    """A finite, non-negative amount in whole cents, at most USD_MAX,
+    else None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if not math.isfinite(v) or v < 0:
+        return None
+    return round(min(float(v), USD_MAX), _USD_PLACES)
+
+
+def plan(provider, kind, period="", usd=None, limit=None, account="",
+         est=False, hint=False):
+    """Which allowance one provider's page shows -- the `plan` message.
+
+    {"t":"plan","v":2,"p":"claude","plan":"spend","period":"monthly",
+     "usd":314.12,"lim":500.0}
+
+    Its own message rather than fields on `usage`, which measures 454 of
+    MAX_LINE_BYTES at its widest: dollars are not the bytes left. Sent
+    BEFORE the usage line it describes, on change, and again after every
+    connect, so a board never draws a spend share under the old captions for
+    the length of a poll.
+
+      p       the page it belongs to: the provider id `usage` carries in
+              `provider` or `p2`. The board keys it by that, not by slot.
+      plan    PLAN_WINDOWS, PLAN_SPEND or PLAN_UNREPORTED. "windows" is the
+              all-clear a switch back to a Max login sends, and a board
+              that has heard nothing should assume it.
+      period  spend only, one of base.SPEND_PERIODS; omitted when unknown.
+      usd     spend only, dollars used, and the cap; each omitted when
+      lim     unknown -- Claude Code sends them minutes after the share, or
+              never.
+      acct    unreported only: "enterprise" or "team", the word shown.
+      est     spend only, 1 when the dollars are an estimate: the last
+              /usage figure plus what the status line has counted since, or
+              the anchor is old. Omitted when exact, so the common line
+              does not grow.
+      hint    spend only, 1 when there is no /usage figure at all and the
+              page should say where to get one. Omitted otherwise.
+
+    Additive: proto.c's dispatch ends in "unknown types ignored", so older
+    firmware drops it, and PROTO_VERSION does not move.
+    """
+    msg = {"t": "plan", "v": VERSION, "p": provider[:MODEL_MAX_CHARS],
+           "plan": kind}
+    if kind == PLAN_SPEND:
+        if period:
+            msg["period"] = period
+        for key, val in (("usd", usd), ("lim", limit)):
+            val = _dollars(val)
+            if val is not None:
+                msg[key] = val
+        if est:
+            msg["est"] = 1
+        if hint:
+            msg["hint"] = 1
+    elif kind == PLAN_UNREPORTED and account:
+        msg["acct"] = account
+    return msg
+
+
+# The status line's src (statusline_source.SRC_ID, which imports this
+# module, so it is spelled here and a test holds the two together). A spend
+# frame from it is a gateway's own spend_limit figure.
+GATEWAY_SRC_ID = "cli"
+
+
+def plan_for(primary, secondary=None) -> dict:
+    """Build `plan` from the (primary, secondary) frames on the panel.
+
+    The first frame in the pair with a plan other than windows is the one
+    described; with none, the claude page is told it is windows again.
+    """
+    for f in (primary, secondary):
+        if f is None:
+            continue
+        kind = getattr(f, "plan", PLAN_WINDOWS)
+        if kind != PLAN_WINDOWS:
+            spend = kind == PLAN_SPEND
+            # A gateway's figure is the gateway's own count, not this
+            # side's estimate; it is marked only when the reading itself is
+            # old. spend_exact is set on the config's page alone, and until
+            # the /code-review max of 2026-11-04 (U4) every gateway seat
+            # read "~$314" for it.
+            if getattr(f, "src", "") == GATEWAY_SRC_ID:
+                est = bool(getattr(f, "stale", False))
+            else:
+                est = not f.spend_exact
+            return plan(f.provider, kind, f.spend_period, f.spend_usd,
+                        f.spend_limit_usd, f.account,
+                        est=spend and est,
+                        hint=spend and bool(f.spend_hint))
+    return plan(PLAN_PROVIDER, PLAN_WINDOWS)
+
+
+def hide_plan_for_board(msg, plan_msg, can_plan: bool):
+    """The usage line as a board without BOARD_CAP_PLAN may be shown it.
+
+    `can_plan` is whether this board listed BOARD_CAP_PLAN (Bridge passes
+    _board_can, which falls back to board.json's hint before the board has
+    spoken).
+
+    Only a spend plan has anything to hide, and only on the page the plan
+    names: its session share and countdown, in whichever slot that page is
+    -- `provider` for the main page, `p2` for the second. Everything else,
+    the other provider's page included, goes through as it was. The message
+    passed in is never changed; a blanked copy comes back.
+    """
+    spend = isinstance(plan_msg, dict) and plan_msg.get("plan") == PLAN_SPEND
+    if not isinstance(msg, dict) or not spend or can_plan:
+        return msg
+    page = plan_msg.get("p")
+    blanked = {k: v for k, v in msg.items()
+               if not (msg.get("p2") == page
+                       and k in ("p2_session_pct", "p2_s_in_s"))}
+    if msg.get("provider") == page:
+        blanked.update(session_pct=UNKNOWN, session_resets_in_s=-1)
+    return blanked
+
+
+def blank_page(last_usage, page) -> dict:
+    """A usage line that takes `page`'s figures down and leaves the rest.
+
+    For the switch away from a spend login with nothing yet to replace it
+    (Bridge._outgoing): the plan goes back to windows, and the share
+    the board holds must go with it, or the board repaints that share of
+    dollars under "SESSION 5h" until the new login first renders -- hours on
+    an idle desk (/code-review max of 2026-11-04, U15).
+
+    Built from `last_usage`, the line the board last had, so the other page
+    and the light keep what they showed; with none, a line that knows
+    nothing, naming `page`. The message passed in is never changed.
+    """
+    if not isinstance(last_usage, dict) or last_usage.get("t") != "usage":
+        return usage(UNKNOWN, None, UNKNOWN, None, [], provider=page)
+    out = dict(last_usage)
+    if out.get("provider") == page:
+        out.update(session_pct=UNKNOWN, session_resets_in_s=-1,
+                   weekly_pct=UNKNOWN, weekly_resets_in_s=-1)
+        # The burn rate and the per-model figures belong to the share.
+        for k in ("burn_pph", "fable_pct", "sonnet_pct", "opus_pct"):
+            out.pop(k, None)
+    if out.get("p2") == page:
+        # Dropped, not set to -1: usage() omits an unknown second-page
+        # figure, and proto.c reads an absent one as -1.
+        for k in ("p2_session_pct", "p2_weekly_pct", "p2_s_in_s",
+                  "p2_w_in_s"):
+            out.pop(k, None)
+    return out
+
+
+# The fields of a usage line that move with the clock alone, by which way:
+# ages grow, countdowns run down. A subset of VOLATILE_USAGE_KEYS, which
+# also holds the session and weekly countdowns -- the same kind as p2's.
+_AGES = ("age_s", "p2_age_s", "active_age_s")
+_COUNTDOWNS = ("session_resets_in_s", "weekly_resets_in_s",
+               "p2_s_in_s", "p2_w_in_s")
+
+
+def aged_usage(msg, elapsed) -> dict:
+    """`msg`, a usage line made `elapsed` seconds ago, as it reads now.
+
+    For a line the daemon restates without the bus rebuilding it (the
+    blank Bridge._outgoing holds): every other line is built from stamps
+    at each poll, and this one kept its ages from the moment it was made.
+    The board resets its idle clock from active_age_s on every usage line,
+    so a blank held for hours said "active 5 s ago" every minute and the
+    board never dozed (the review of the WSL work, 2026-11-05). An unknown
+    (-1) stays unknown; a countdown stops at 0; an age stops at SECS_MAX,
+    past which the board refuses the figure as absent -- "cannot say",
+    which wakes it (the /code-review max of 277b81a..4003b0b, C20). The
+    message passed in is never changed."""
+    out = dict(msg)
+    step = max(0, int(elapsed))
+    for k in _AGES:
+        v = out.get(k)
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            out[k] = min(v + step, SECS_MAX)
+    for k in _COUNTDOWNS:
+        v = out.get(k)
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            out[k] = max(0, v - step)
+    return out
+
+
 def _active_age(frame, secondary, now_epoch: float) -> int:
     """The age of the freshest contact on the bus, or -1 when nothing says.
 
@@ -680,6 +1099,11 @@ def _active_age(frame, secondary, now_epoch: float) -> int:
                         _age_of(secondary, now_epoch, "active_at"))
             if a >= 0]
     return min(ages) if ages else -1
+
+
+# The largest seconds figure the board takes (firmware/src/proto.c SECS_MAX,
+# INT32_MAX); past it num() refuses the field.
+SECS_MAX = 2147483647
 
 
 def _age_of(frame, now_epoch: float, attr: str = "observed_at") -> int:
@@ -698,7 +1122,11 @@ def _age_of(frame, now_epoch: float, attr: str = "observed_at") -> int:
     """
     if frame is None or getattr(frame, attr, None) is None:
         return -1
-    return max(0, int(now_epoch - getattr(frame, attr)))
+    # And held at INT32_MAX, the most proto.c's SECS_MAX accepts: a frame
+    # active at base.NO_CONTACT (the epoch) is 1.79e9 s old now and past
+    # the bound in 2038, where the board would refuse the field and fall
+    # back to the reading's age -- fresh -- which is the bug it closes.
+    return min(SECS_MAX, max(0, int(now_epoch - getattr(frame, attr))))
 
 
 EDITIONS = ("claude", "codex")
@@ -801,8 +1229,31 @@ BOARD_CAP_THEME = "theme"    # takes theme lines; answers theme_edit
 # while their ask is in flight as an ok 0, put up "run blink theme", and
 # then ignore the real ok 1 (review of fp/audit-nice r2, SHOULD-1).
 BOARD_CAP_EDIT_DONE = "edit_done"
+# Takes wifi_scan / wifi_set / wifi_forget over the cable (spec S6.1). The
+# Connect panel offers its WiFi controls only to a board that lists it.
+BOARD_CAP_WIFI = "wifi"
+# Takes logo_begin / logo_chunk / G frames / logo_end / logo_remove and
+# answers logo_state (spec S15.2); takes pref_set (S15.3).
+BOARD_CAP_LOGO = "logo"
+BOARD_CAP_PREF = "pref"
 # Draws the five-hour burn view from burn lines (docs/plans/burn-5h.md).
 BOARD_CAP_BURN = "burn"
+# Draws the `plan` message: a spend page's dollars and captions
+# (docs/plans/enterprise-spend.md). A board without it is sent no plan, and
+# a spend share on its usage line is blanked -- see hide_plan_for_board.
+BOARD_CAP_PLAN = "plan"
+# Draws the dollar burn line (`sburn`) on a spend page's burn view. Its own
+# cap, not implied by "burn": a board that draws token burn lines has no
+# parser for cents, and the cap is how a build that has one says so.
+BOARD_CAP_SPENDBURN = "spendburn"
+# Puts up "Keep figures fresh?" for an `ask` line and answers it with an
+# `answer` line (docs/plans/usage-refresh.md, 1b; firmware/src/ask_prompt.h).
+# A board without it is never sent one: it would drop the line, and the
+# daemon would wait a day to ask again for nothing. An ask counts toward the
+# three only once the board answers it (usage_refresh.BoardAsk.answer).
+BOARD_CAP_ASK = "ask"
+# The words an `answer` line may carry. Anything else is not an answer.
+ASK_ANSWERS = ("on", "no", "later")
 
 
 def board_caps(msg) -> frozenset:
@@ -944,6 +1395,37 @@ def burn(provider: str, q: int, tokens) -> dict:
     return {"t": "burn", "v": VERSION, "p": provider, "q": q, "b": b}
 
 
+# A dollar bucket's ceiling on the wire, in whole cents: $999,999.99 in a
+# quarter-hour, which no seat spends. Like BURN_MAX it gives the line a
+# widest case (tests/pc/test_spend_wire.py) and keeps the board's sum of
+# twenty inside a signed 32-bit int (1,999,999,980).
+SBURN_MAX_CENTS = 99_999_999
+
+
+def spend_burn(provider: str, q: int, cents) -> dict:
+    """The dollar burn line, for a spend page: the burn line's twin in cents.
+
+        {"t":"sburn","v":2,"p":"claude","q":1793430000,"b":[0,0,412,...]}
+
+    Same shape and the same `q` rule as burn(): twenty quarter-hours, oldest
+    first, `q` the start of the newest. `b` is whole CENTS, each clamped to
+    0..SBURN_MAX_CENTS, counted by the daemon from the status line's session
+    cost (pc/spend_count). Its own type rather than a flag on `burn`, so a
+    board that has only the token parser never mistakes cents for tokens;
+    the board reads it with the burn parser on key "b". Sent only to a board
+    whose caps list BOARD_CAP_SPENDBURN.
+    """
+    cents = list(cents)
+    if len(cents) != BURN_BUCKETS:
+        raise ValueError(f"a spend burn line has {BURN_BUCKETS} buckets, "
+                         f"not {len(cents)}")
+    q = int(q)
+    if q % BURN_BUCKET_S:
+        raise ValueError("q must start a quarter-hour")
+    b = [min(SBURN_MAX_CENTS, max(0, int(c))) for c in cents]
+    return {"t": "sburn", "v": VERSION, "p": provider, "q": q, "b": b}
+
+
 # --- Themes (pc/theme.py validates; these only shape the line) ----------
 
 def theme(op: str, t: dict = None) -> dict:
@@ -958,6 +1440,18 @@ def theme(op: str, t: dict = None) -> dict:
     if t is not None:
         msg.update(t)
     return msg
+
+
+def ask(question: str) -> dict:
+    """{"t":"ask","v":2,"id":...}: put a question up on the board's glass.
+    "refresh" is the only one so far: whether to keep the figures fresh with
+    the person's own /usage. Sent only to a board listing BOARD_CAP_ASK.
+
+    The board answers {"t":"answer","v":2,"id":"refresh","a":"on"|"no"|
+    "later"}, "later" when the box closed itself after a minute untouched,
+    and nothing at all when it withdrew the box because this computer went
+    quiet. The log names both by type alone (log_name)."""
+    return {"t": "ask", "v": VERSION, "id": question}
 
 
 def theme_edit_reply(ok: bool) -> dict:
@@ -1045,6 +1539,68 @@ def ota_none(app=None):
 
 def ota_error(why=""):
     return {"t": "ota_error", "v": VERSION, "why": why}
+
+
+def ota_end(size):
+    """The last WiFi OTA chunk was acked; the board flushes and seals."""
+    return {"t": "ota_end", "v": VERSION, "size": int(size)}
+
+
+# --- WiFi pairing over the cable (spec S6.1) ---
+# SSIDs are arbitrary bytes and passwords any printable ASCII, so both travel
+# as lowercase hex: no JSON escaping on the board, a fixed worst-case width.
+
+
+def wifi_scan():
+    return {"t": "wifi_scan", "v": VERSION}
+
+
+def wifi_set(ssid, password, key):
+    """The one line that carries the password. log_name and redact keep only
+    its type; nothing on the host prints it. A non-ASCII password raises a
+    fixed message: UnicodeEncodeError's own text quotes the character."""
+    if not password.isascii():
+        raise ValueError("the WiFi password must be ASCII") from None
+    return {"t": "wifi_set", "v": VERSION, "s": bytes(ssid).hex(),
+            "p": password.encode("ascii").hex(), "k": bytes(key).hex()}
+
+
+def wifi_forget():
+    return {"t": "wifi_forget", "v": VERSION}
+
+
+# --- the company logo and the viewing preferences (spec S15.2, S15.3) ---
+# logo_chunk carries image bytes; redact() lists only t and off for it, so a
+# transcript never holds a byte of a logo.
+
+
+def logo_begin(size, crc):
+    return {"t": "logo_begin", "v": VERSION, "size": int(size),
+            "crc": int(crc)}
+
+
+def logo_chunk(off, data):
+    """USB only (WiFi sends G frames). 256 bytes is 344 base64 characters, a
+    line of about 390 bytes, inside the board's 512."""
+    return {"t": "logo_chunk", "v": VERSION, "off": int(off),
+            "d": base64.b64encode(bytes(data)).decode("ascii")}
+
+
+def logo_end():
+    return {"t": "logo_end", "v": VERSION}
+
+
+def logo_remove():
+    return {"t": "logo_remove", "v": VERSION}
+
+
+def pref_set(**fields):
+    """Only the fields given are sent; the board validates each against its
+    enum (S15.3). An unknown name is a bug here, not something to forward."""
+    bad = set(fields) - {"main_src", "focus", "view", "bright"}
+    if bad:
+        raise ValueError("unknown preference field")
+    return dict({"t": "pref_set", "v": VERSION}, **fields)
 
 # --------------------------------------------------------------- overage cap
 

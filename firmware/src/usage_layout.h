@@ -299,6 +299,20 @@
  */
 #define GAUGE_CD_Y		186	/* first line: the primary provider */
 #define GAUGE_CD_MAX_W		96	/* "00m 00s" -- named once, up top */
+/*
+ * The right gauge's countdown on a spend page, which carries the cap as well
+ * as the period's reset: "of $500 <bullet> 27d 5h" (fmt_spend_under). Still
+ * centred at x = 240, so the box spans 166..314, inside the right bezel and
+ * clear of the left half's widest row (the burn view's, 5..155).
+ *
+ * 148, not the 144 the plan named. 144 held "of $44.4M <b> 32d 23h" (139
+ * px), but a sweep of every fmt_usd() and every countdown up to the daemon's
+ * 32 days through lv_text_get_size() (2026-11-04) found hours and minutes
+ * wider than days and hours: "of $44.0M <b> 20h 48m" is 148, and under
+ * $100k the widest is exactly 144. A line one pixel over its box wraps onto
+ * the provider pill, so the box is the measured widest.
+ */
+#define SPEND_CD_MAX_W		148
 
 /* The ring itself. */
 #define GAUGE_ARC_W		12

@@ -694,3 +694,23 @@ def test_the_sandbox_home_is_not_the_one_the_daemon_scenarios_share(tmp_path):
     homes = {call["kw"]["env"]["HOME"] for call in runner.calls
              if "env" in call["kw"]}
     assert str(agent.sandbox_home(work)) not in homes
+
+
+def test_install_and_update_never_wait_on_the_operators_terminal(tmp_path):
+    """`blink install` and `blink update` ask the usage-refresh question when
+    stdin is a terminal. The agent captures their output but inherited the
+    operator's stdin, so on a desk run from a terminal the installer sat on
+    a prompt nobody could see until the 420 s timeout failed the release
+    gate (/code-review max of feat/usage-refresh, V24)."""
+    runner = _programs(bundle_version="1.2.4", update_to="1.3.0")
+    agent.run_update_check(tmp_path / "prev", tmp_path / "feed",
+                           expect_version="1.3.0", runner=runner,
+                           sandbox=tmp_path / "home")
+    runner2 = _programs(bundle_version="1.3.0")
+    agent.run_install_check(tmp_path / "bundle", expect_version="1.3.0",
+                            runner=runner2, sandbox=tmp_path / "home2")
+    calls = [c for c in runner.calls + runner2.calls
+             if c["cmd"][-1] in ("install", "update")]
+    assert {c["cmd"][-1] for c in calls} == {"install", "update"}
+    for c in calls:
+        assert c["kw"].get("stdin") is agent.subprocess.DEVNULL, c["cmd"]

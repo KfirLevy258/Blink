@@ -1,12 +1,14 @@
 /* Standalone host test for msg_parse (macOS-friendly; native_sim is Linux-only).
  * Build & run:
- *   cc -I ../../firmware/src host_test.c ../../firmware/src/msg_parse.c -o /tmp/mptest && /tmp/mptest
+ *   cc -I ../../firmware/src host_test.c ../../firmware/src/msg_parse.c \
+ *      ../../firmware/src/burn5h.c -o /tmp/mptest && /tmp/mptest
  */
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include "msg_parse.h"
+#include "burn5h.h"
 
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } \
@@ -91,6 +93,107 @@ int main(void)
 		      "a number after a colliding value still parses");
 		CHECK(!msg_get_str(collide, "nope", v, sizeof(v)),
 		      "an absent key is still absent");
+	}
+
+	/*
+	 * The plan message is the same shape twice over: its type spells one
+	 * of its keys ("plan"), and its page key "p" is a prefix of the "p2"
+	 * the usage line carries. pc/protocol.plan writes it in this order.
+	 */
+	{
+		printf("\n-- the plan message --\n");
+		const char *plan =
+			"{\"t\":\"plan\",\"v\":2,\"p\":\"claude\",\"plan\":\"spend\","
+			"\"period\":\"monthly\",\"usd\":314.12,\"lim\":500.0}";
+		const char *bare = "{\"t\":\"plan\",\"v\":2,\"p\":\"claude\","
+				   "\"plan\":\"windows\"}";
+		char v[16];
+		double d = -1;
+
+		CHECK(msg_get_str(plan, "p", v, sizeof(v)) &&
+		      strcmp(v, "claude") == 0, "the page is read from \"p\"");
+		CHECK(msg_get_str(plan, "plan", v, sizeof(v)) &&
+		      strcmp(v, "spend") == 0,
+		      "the plan key wins over the type that spells it");
+		CHECK(msg_get_double(plan, "usd", &d) && d > 314.11 && d < 314.13,
+		      "the dollars parse");
+		CHECK(msg_get_double(plan, "lim", &d) && d == 500.0,
+		      "the cap parses");
+		CHECK(!msg_get_double(bare, "usd", &d),
+		      "a windows plan carries no amount");
+		CHECK(!msg_get_str("{\"t\":\"usage\",\"p2\":\"codex\"}", "p", v,
+				   sizeof(v)),
+		      "\"p2\" is not \"p\"");
+	}
+
+	/*
+	 * The plan's two flags (pc/protocol.plan): "est" when the dollars are
+	 * an estimate, "hint" when there is no /usage figure at all. Each is
+	 * omitted when false, so the common line does not grow; proto.c reads
+	 * each as a number starting at 0, so an absent flag is false and only an
+ * exact 1 sets it.
+	 */
+	{
+		printf("\n-- the plan's estimate and hint --\n");
+		const char *est =
+			"{\"t\":\"plan\",\"v\":2,\"p\":\"claude\",\"plan\":\"spend\","
+			"\"period\":\"monthly\",\"usd\":314.12,\"lim\":500.0,"
+			"\"est\":1}";
+		const char *hint =
+			"{\"t\":\"plan\",\"v\":2,\"p\":\"claude\",\"plan\":\"spend\","
+			"\"period\":\"monthly\",\"usd\":12.0,\"est\":1,\"hint\":1}";
+		const char *exact =
+			"{\"t\":\"plan\",\"v\":2,\"p\":\"claude\",\"plan\":\"spend\","
+			"\"period\":\"monthly\",\"usd\":314.12,\"lim\":500.0}";
+		double d;
+
+		d = -1;
+		CHECK(msg_get_double(est, "est", &d) && d == 1.0,
+		      "est:1 is read");
+		CHECK(!msg_get_double(est, "hint", &d),
+		      "an estimate without a hint has no hint key");
+		d = -1;
+		CHECK(msg_get_double(hint, "hint", &d) && d == 1.0,
+		      "hint:1 is read");
+		CHECK(!msg_get_double(hint, "lim", &d),
+		      "a hinted page has no cap on the line");
+		CHECK(!msg_get_double(exact, "est", &d) &&
+		      !msg_get_double(exact, "hint", &d),
+		      "an exact figure carries neither flag");
+	}
+
+	/*
+	 * The dollar burn line (pc/protocol.spend_burn) is the burn line's
+	 * twin under its own type, so a board with only the token parser never
+	 * takes cents for tokens. proto.c dispatches on the WHOLE type, which
+	 * this pins: "sburn" is not "burn" read from an offset, and neither
+	 * type is the other's prefix match.
+	 */
+	{
+		printf("\n-- burn and sburn --\n");
+		const char *sburn =
+			"{\"t\":\"sburn\",\"v\":2,\"p\":\"claude\",\"q\":1793450700,"
+			"\"b\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,412,120]}";
+		const char *burn =
+			"{\"t\":\"burn\",\"v\":2,\"p\":\"claude\",\"q\":1793450700,"
+			"\"b\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4120,1200]}";
+		char t[16];
+
+		CHECK(msg_get_str(sburn, "t", t, sizeof(t)) &&
+		      strcmp(t, "sburn") == 0 && strcmp(t, "burn") != 0,
+		      "a dollar line's type is sburn, never burn");
+		CHECK(msg_get_str(burn, "t", t, sizeof(t)) &&
+		      strcmp(t, "burn") == 0 && strcmp(t, "sburn") != 0,
+		      "a token line's type is burn, never sburn");
+		CHECK(burn5h_line_of("sburn") == BURN5H_LINE_DOLLARS,
+		      "sburn goes to the dollar record");
+		CHECK(burn5h_line_of("burn") == BURN5H_LINE_TOKENS,
+		      "burn goes to the token record, never the dollar one");
+		CHECK(burn5h_line_of("burns") == BURN5H_LINE_NONE &&
+		      burn5h_line_of("sbur") == BURN5H_LINE_NONE &&
+		      burn5h_line_of("") == BURN5H_LINE_NONE &&
+		      burn5h_line_of(NULL) == BURN5H_LINE_NONE,
+		      "nothing else is a burn line of either kind");
 	}
 
 	/* The session message: an optional label and a count. */

@@ -149,9 +149,9 @@ HEARTBEAT_S = 60       # the daemon's usage poll
 # the edge zones, the back button, the brightness stops -- are pinned by the
 # same test in the calls that set them.
 FW_LAYOUT = {
-    "TILE_W": 144,
-    "TILE_H": 71,
-    "TILE_GAP": 8,
+    "TILE_W": 94,
+    "TILE_H": 91,
+    "TILE_GAP": 7,
     "TILE_TOP": 46,
     "BRIGHT_STOPS": 5,
     "THEME_SLOTS": 6,
@@ -189,17 +189,16 @@ P_SETTINGS_ZONE = rect_center(SCREEN_W - 44, (SCREEN_H - 150) // 2, 44, 150)
 P_EYE_ZONE = rect_center(0, (SCREEN_H - 150) // 2, 44, 150)
 # mk_back: 60 x 36 at (6, 2), the same on Settings and every screen in it.
 P_BACK = rect_center(6, 2, 60, 36)
-# mk_tile: tile k of four, two by two from (12, TILE_TOP) -- Brightness,
-# Theme, then Focus and Update.
+# mk_tile: tile k of six, three by two from (12, TILE_TOP) -- Brightness,
+# Open on PC, Focus; then Update, Connection, About.
 def _tile(k):
-    x = 12 + (k % 2) * (_L["TILE_W"] + _L["TILE_GAP"])
-    y = _L["TILE_TOP"] + (k // 2) * (_L["TILE_H"] + _L["TILE_GAP"])
+    x = 12 + (k % 3) * (_L["TILE_W"] + _L["TILE_GAP"])
+    y = _L["TILE_TOP"] + (k // 3) * (_L["TILE_H"] + _L["TILE_GAP"])
     return rect_center(x, y, _L["TILE_W"], _L["TILE_H"])
 
 
-P_BRIGHT_ROW, P_THEME_ROW, P_FOCUS_ROW = _tile(0), _tile(1), _tile(2)
-# show_theme: the page button, 60 x 36 in the top right corner (-6, 2).
-P_THEME_PAGE = rect_center(SCREEN_W - 6 - 60, 2, 60, 36)
+P_BRIGHT_ROW, P_FOCUS_ROW = _tile(0), _tile(2)
+P_CONN_ROW, P_ABOUT_ROW = _tile(4), _tile(5)
 
 
 def bright_stop(i):
@@ -208,28 +207,11 @@ def bright_stop(i):
     return rect_center(12 + i * 60, 86, 56, 116)
 
 
-def slot_center(k):
-    """mk_slot: theme slot k of six, two across, inside the grid at
-    THEME_GRID_Y. Slot 5 is "Edit on computer" when the app can open the
-    builder, which this tool always says it can."""
-    x = 12 + (k % 2) * (_L["THEME_TILE_W"] + 8)
-    y = _L["THEME_GRID_Y"] + (k // 2) * (_L["THEME_TILE_H"] +
-                                         _L["THEME_TILE_GAP"])
-    return rect_center(x, y, _L["THEME_TILE_W"], _L["THEME_TILE_H"])
-
-
 def focus_btn(i):
     """show_focus: Off, Session, Weekly, side by side."""
     return rect_center(12 + i * (_L["FOCUS_BTN_W"] + _L["FOCUS_BTN_GAP"]),
                        _L["FOCUS_BTN_Y"],
                        _L["FOCUS_BTN_W"], _L["FOCUS_BTN_H"])
-
-
-def theme_slot(theme_id):
-    """(page, slot) of a theme on the theme screen: ids in order, five a
-    page because the sixth slot is Edit (theme_per_page with caps theme)."""
-    per = _L["THEME_SLOTS"] - 1
-    return (theme_id // per, theme_id % per)
 
 
 # Swipes. Each starts on the ground of the screen it is meant for, not on a
@@ -257,7 +239,7 @@ class Target:
                  ms=None):
         self.name = name
         self.ms = ms                # stroke length; None is the default
-        self.kind = kind            # "tap" | "swipe" | "theme"
+        self.kind = kind            # "tap" | "swipe"
         self.pts = pts
         self.needs = needs          # ui_state fields required beforehand
         self.expect = expect        # f(before) -> fields required after
@@ -304,21 +286,12 @@ def _targets():
         add(f"brightness.level{i + 1}", "tap", [bright_stop(i)],
             {"ov": "brightness"}, {"ov": "brightness", "bl": 20 + 20 * i},
             0.3, f"brightness stop {i + 1} ({20 + 20 * i}%)")
-    add("theme.open", "tap", [P_THEME_ROW], on_settings, {"ov": "theme"},
-        0.6, "the Theme tile")
-    add("theme.next_page", "tap", [P_THEME_PAGE], {"ov": "theme"},
-        {"ov": "theme"}, 0.3, "the theme screen's page button")
-    for name, tid in THEME_IDS.items():
-        _, slot = theme_slot(tid)
-        add(f"theme.{name}", "theme", [slot_center(slot)], {"ov": "theme"},
-            {"ov": "theme", "theme": tid, "stored": tid}, 0.6,
-            f"theme tile {name} (id {tid}), paging to it first")
-    add("theme.edit_on_computer", "tap", [slot_center(5)], {"ov": "theme"},
-        {"ov": "theme", "edit": "held"}, 0.6,
-        "the Edit on computer slot (answered ok 1, as a daemon would; held"
-        " until a done, since this tool greets with the edit_done cap)")
     add("focus.open", "tap", [P_FOCUS_ROW], on_settings, {"ov": "focus"},
         0.6, "the Focus tile")
+    add("connection.open", "tap", [P_CONN_ROW], on_settings,
+        {"ov": "connection"}, 0.6, "the Connection tile")
+    add("about.open", "tap", [P_ABOUT_ROW], on_settings, {"ov": "about"},
+        0.6, "the About tile")
     for i, name in enumerate(FOCUS_NAMES):
         add(f"focus.{name}", "tap", [focus_btn(i)], {"ov": "focus"},
             {"ov": "focus", "focus": name}, 0.4, f"Focus: {name}")
@@ -508,11 +481,11 @@ VERSION_HOLES = {
     "Version %s is available.\nThis also updates the app on your computer.":
         ("ver",),
     "Install version %s?\nThe screen restarts when done.": ("ver",),
+    "Install version %s?\nThe screen restarts when done.\nKeep the cable connected":
+        ("ver",),
     "Updating to %s...": ("ver",),
     "Downloading version %s...": ("ver",),
-    "Install %s": ("ver",),
     "Blink %s": ("ver",),
-    "Blink %s  |  App %s": ("ver", "ver"),
     "%d change%s since %s": ("plural", "ver"),
     "%d change%s": ("plural",),
 }
@@ -897,17 +870,20 @@ def shown_where(where):
 # reply with anything outside this is not printed and not believed.
 _STATE_WORDS = {
     "scr": ("gauges", "settings", "connecting", "eyes"),
-    "ov": ("none", "brightness", "theme", "focus", "confirm"),
-    "modal": ("none", "notice", "whatsnew", "prompt", "download"),
+    # The Connection screen arrives with Task 1.5; the spike tile reports it now.
+    "ov": ("none", "brightness", "theme", "focus", "confirm", "connection",
+           "about"),
+    "modal": ("none", "notice", "whatsnew", "prompt", "ask", "download"),
     "focus": FOCUS_NAMES,
     "edit": ("name", "waiting", "opened", "run", "held"),
     "nt": ("none", "sleep", "ota", "other"),
     "gf": FOCUS_NAMES,
+    "ln": ("wifi", "usb", "none"),
 }
 _STATE_INTS = {"busy": (0, 1), "theme": (0, 12), "stored": (0, 12),
                "tp": (0, 9), "bl": (0, 100), "slp": (0, 1)}
 STATE_KEYS = ("scr", "ov", "modal", "busy", "theme", "stored", "tp",
-              "focus", "bl", "edit", "slp", "nt", "gf")
+              "focus", "bl", "edit", "slp", "nt", "gf", "ln")
 
 
 def _int_in(v, lo, hi):
@@ -1184,7 +1160,7 @@ def _on_panel(pts, lineno):
 _QUOTED_CMDS = ("click", "expect-widget", "wait-widget", "widgets", "fake")
 FAKE_KINDS = ("ota_avail", "ota_none", "ota_error", "boot_notice",
               "reverted_notice", "edit_done", "welcome", "edit_state",
-              "edit_answer", "preview", "host_gone")
+              "edit_answer", "preview", "host_gone", "ask")
 WELCOME_KINDS = ("open", "shut", "old")
 
 
@@ -1228,7 +1204,7 @@ def _parse_quoted(cmd, rest, lineno):
                           + "|".join(FAKE_KINDS) + " [ARG]")
     if kind == "ota_avail" and len(rest) in (2, 3):
         return Step(lineno, "fake", tuple(rest))
-    if kind in ("ota_none", "reverted_notice", "edit_done") and \
+    if kind in ("ota_none", "reverted_notice", "edit_done", "ask") and \
             len(rest) == 1:
         return Step(lineno, "fake", tuple(rest))
     if kind == "welcome":
@@ -1551,10 +1527,37 @@ def _utc_offset_min(now):
     return int((lt.tm_gmtoff or 0) // 60)
 
 
+# What firmware/src/touch_inject.c answers: the whole of what --touch-only may
+# put on the wire. The touch ops (tap, swipe, press, release, click, wake,
+# dismiss) are all t="touch"; mem is only a request to the host harness.
+INJECT_TYPES = frozenset({"touch", "ui_state", "widgets"})
+
+TOUCH_ONLY_REFUSAL = ("--touch-only: this script has a fake or edit-reply "
+                      "step, which writes a line the injector does not "
+                      "handle; take it out or drop --touch-only")
+
+
 class Bench:
     def __init__(self, link, out=None, settle_scale=1.0, verbose=False,
-                 edit_reply=True):
+                 edit_reply=True, touch_only=False, skip_missing=False):
         self.link = link
+        # --touch-only: this bench speaks only INJECT_TYPES. It exists for the
+        # WiFi bench, where a session is live and a welcome, time, usage,
+        # svc, pong or theme line from here would be a second host talking
+        # over the board's real one (and could end the session it measures).
+        # send() refuses everything else, greet() and send_frames() do
+        # nothing, and the board's ping, ota_query and theme_edit go
+        # unanswered; the board's own watchdogs are not what is under test.
+        self.touch_only = touch_only
+        # --skip-missing (bench only): a click, tap, expect-widget or
+        # wait-widget on a widget that is not on the panel (for a tap: a
+        # target whose scr or ov the board is not on; a notice or a doze does
+        # not count, run_target clears those) logs a skip and goes on. Only
+        # that step is skipped; a later expect that depended on it still
+        # fails.
+        self.skip_missing = skip_missing
+        if touch_only:
+            edit_reply = None
         self.out = out or sys.stdout
         self.scale = settle_scale
         self.verbose = verbose
@@ -1598,6 +1601,10 @@ class Bench:
 
     # -- writing --
     def send(self, msg):
+        if self.touch_only and msg.get("t") not in INJECT_TYPES:
+            # The type only: a message may carry anything.
+            raise ValueError("--touch-only: a line the injector does not "
+                             "handle was about to be sent")
         raw, why = protocol.encode_checked(msg)
         if raw is None:
             self.say(f"not sent: {why}")
@@ -1607,6 +1614,8 @@ class Bench:
         return True
 
     def greet(self):
+        if self.touch_only:
+            return
         from pc.version import RELEASE_VERSION
         # editing=False: no builder is open here, and a bench run must not
         # start on an "Edit on computer" held by whatever ran before it.
@@ -1614,6 +1623,8 @@ class Bench:
                                    editing=False))
 
     def send_frames(self):
+        if self.touch_only:
+            return
         now = time.time()
         claude, codex = _fake_frames(now, self._frames_sent)
         self._frames_sent += 1
@@ -1712,13 +1723,17 @@ class Bench:
             return False
         t = obj["t"]
         if t == "ping":
-            self.send(protocol.pong())
+            if not self.touch_only:
+                self.send(protocol.pong())
             return True
         if t == "ota_query":
             # As a daemon with nothing newer answers. Unanswered, the
             # board's own 30 s watchdog (main.c, OTA_UI_CHECKING) fails the
             # check and upd_timer_cb puts "Couldn't check for updates" over
             # the gauges -- the notice that stopped the first board run.
+            if self.touch_only:
+                self.say("ota_query (not answered: --touch-only)")
+                return True
             self.say("ota_query (answered ota_none)")
             self.send(protocol.ota_none())
             return True
@@ -1878,8 +1893,11 @@ class Bench:
         st = None
         while True:
             st = self.query_state()
+            # "a|b" accepts either: a screen that is one of two things by
+            # the time the bench looks (the spike's modal comes and goes).
             if st is not None and st["busy"] == 0 and all(
-                    str(st.get(k)) == str(v) for k, v in want.items()):
+                    str(st.get(k)) in str(v).split("|")
+                    for k, v in want.items()):
                 return True, st
             if time.monotonic() >= deadline:
                 return False, st
@@ -1938,20 +1956,6 @@ class Bench:
         if note is not None:
             note(name)
 
-    def _goto_theme_page(self, page):
-        for _ in range(4):
-            st = self.query_state()
-            if st is None:
-                return False
-            if st["tp"] == page:
-                return True
-            x, y = P_THEME_PAGE
-            self._note("theme.next_page")
-            if not self.stroke(touch_tap(x, y)):
-                return False
-            self.sleep(0.3)
-        return False
-
     def clear_the_way(self, st):
         """Wake a dozing board and take down a notice, saying so, before an
         action. Neither is a target's business: both are things a person at
@@ -1993,12 +1997,6 @@ class Bench:
                       " ".join(f"{k}={before[k]}" for k in t.needs))
             return False
         self.say(f"> {name}")
-        if t.kind == "theme":
-            tid = THEME_IDS[name.split(".", 1)[1]]
-            page, _ = theme_slot(tid)
-            if not self._goto_theme_page(page):
-                self.fail(f"{name}: could not page to theme page {page + 1}")
-                return False
         self._note(name)
         if not self._play(t, t.points()):
             return False
@@ -2277,6 +2275,11 @@ class Bench:
                 msg.pop("editing")
                 msg["caps"] = [protocol.BOARD_CAP_THEME]
             return self.send(msg)
+        if kind == "ask":
+            # "Keep figures fresh?" (ask_prompt.h), the real protocol line a
+            # daemon sends; the board's answer comes back to this tool, which
+            # saves nothing, so a tap here turns nothing on anywhere.
+            return self.send(protocol.ask("refresh"))
         if kind == "edit_state":
             # The daemon's restatement of whether its builder is open.
             return self.send(protocol.edit_state(args[0] == "open"))
@@ -2327,6 +2330,15 @@ class Bench:
         only put up a failure notice, on a bench board."""
         if not (self.ota_flash_pending or self.install_pressed):
             return
+        if self.touch_only:
+            # ota_error and ota_none are not injector types: send() would
+            # raise. The bench has not spoken, so there is no consent of
+            # its own to withdraw; the board's session owner answers it.
+            self.say("--touch-only: the install press is left for the "
+                     "daemon to answer")
+            self.ota_flash_pending = False
+            self.install_pressed = False
+            return
         if not self.ota_flash_pending:
             self._wait(lambda evs: next(
                 (e for e in evs if e["t"] == "ota_flash"), None),
@@ -2351,7 +2363,34 @@ class Bench:
                      f"({100.0 * m['peak'] / pool:.1f}%), "
                      f"largest free {m['largest']}")
 
+    def _widget_absent(self, text):
+        """True when no widget on the panel says `text` (any tier of
+        reachable_matches), False when one does or the listing failed (the
+        step then fails as it always did)."""
+        got, _ = self._list()
+        if got is None:
+            return False
+        q = text[:LABEL_MAX]
+        return not any(w.label and q in w.label for w in got[1])
+
     def run_step(self, s):
+        if self.skip_missing and s.cmd == "tap":
+            st = self.query_state()
+            # `modal` is left out: a notice on top is what run_target would
+            # dismiss and go ahead, so it is not "another screen".
+            if st is not None and any(
+                    str(st[k]) != str(v)
+                    for k, v in TARGETS[s.args[0]].needs.items()
+                    if k != "modal"):
+                self.say(f"skip tap {s.args[0]}: the board is not on its "
+                         "screen (--skip-missing)")
+                return True
+        if (self.skip_missing and s.cmd in ("click", "expect_widget",
+                                            "wait_widget")
+                and self._widget_absent(s.args[0])):
+            self.say(f"skip {s.cmd.replace('_', '-')} {s.args[0]!r}: "
+                     "no such widget (--skip-missing)")
+            return True
         if s.cmd == "tap":
             return self.run_target(s.args[0])
         if s.cmd == "raw_tap":
@@ -2562,10 +2601,11 @@ def restore_plan(start, now, start_h=None):
             plan.append(("line", pc_theme.message("save", {"id": tid})))
         else:
             t = _saved_custom_matching(start_h)
+            # No tile to press it back with: the Theme screen is not
+            # reachable from the board any more (Task 6.1), so a custom
+            # theme whose colours are not on this desk stays as it is.
             if t is not None:
                 plan.append(("line", pc_theme.message("save", t)))
-            else:
-                ui += ["theme.open", "theme.custom", "settings.back"]
     if now["bl"] != start["bl"]:
         k = min(5, max(1, round(start["bl"] / 20)))
         ui += ["brightness.open", f"brightness.level{k}", "settings.back"]
@@ -2629,6 +2669,15 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true",
                     help="click a widget even when it is disabled (LVGL "
                          "drops the press; refused without this)")
+    ap.add_argument("--touch-only", action="store_true",
+                    help="write only touch, ui_state and widgets lines: no "
+                         "welcome, time, usage or answers (for a board with "
+                         "a live WiFi session)")
+    ap.add_argument("--loop", type=int, default=1, metavar="N",
+                    help="run the script N times")
+    ap.add_argument("--skip-missing", action="store_true",
+                    help="bench only: a click, tap or expect-widget on a "
+                         "widget that is not there is skipped, not failed")
     ap.add_argument("--edit-reply", choices=("ok", "no"), default="ok",
                     help="answer the board's theme_edit with ok 1 (as if a "
                          "browser opened) or ok 0")
@@ -2679,6 +2728,12 @@ def main(argv=None):
         print(f"{args.cmd}: {e}", file=sys.stderr)
         return 2
 
+    if args.touch_only and (args.harness or any(
+            st.cmd in ("fake", "edit_reply") for st in steps)):
+        # Before the port opens: nothing may have been written by now.
+        print(TOUCH_ONLY_REFUSAL, file=sys.stderr)
+        return 2
+
     if args.harness:
         port, ser, lock = "the host harness", None, None
         link = HarnessLink(args.harness, args.renders)
@@ -2689,7 +2744,8 @@ def main(argv=None):
         port, ser, lock = conn
         link = Link(ser)
     bench = Bench(link, verbose=args.verbose,
-                  edit_reply=args.edit_reply == "ok")
+                  edit_reply=args.edit_reply == "ok",
+                  touch_only=args.touch_only, skip_missing=args.skip_missing)
     bench.force = args.force
     if ser is not None:
         bench.port_check = lambda: port_holders(port)
@@ -2701,17 +2757,26 @@ def main(argv=None):
         print(f"bench on {port}")
         bench.greet()
         # The board answers welcome with pref (its caps) and theme_now.
-        bench.mark()
-        bench._wait(lambda evs: next((e for e in evs if e["t"] == "pref"),
-                                     None), 3.0)
-        bench.send_frames()
+        if not args.touch_only:
+            bench.mark()
+            bench._wait(lambda evs: next((e for e in evs if e["t"] == "pref"),
+                                         None), 3.0)
+            bench.send_frames()
         bench.sleep(1.0)
         if bench.query_state() is None:
             bench.fail("the board does not answer ui_state -- is this a "
                        "CONFIG_BLINK_TOUCH_INJECT image?")
         else:
-            bench.run_with_restore(steps, keep_going=args.keep_going,
-                                   restore=not args.no_restore)
+            for n in range(max(1, args.loop)):
+                if args.loop > 1:
+                    bench.say(f"loop {n + 1} of {args.loop}")
+                # Restoring would send a theme line, which --touch-only may
+                # not; its scripts only look and open, and change nothing.
+                bench.run_with_restore(
+                    steps, keep_going=args.keep_going,
+                    restore=not (args.no_restore or args.touch_only))
+                if bench.failures and not args.keep_going:
+                    break
         bench.summary()
     finally:
         link.stop()

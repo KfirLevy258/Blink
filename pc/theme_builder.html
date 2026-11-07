@@ -4,373 +4,838 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>BLINK theme builder</title>
+<title>BLINK settings</title>
 <!--
-  Served by pc/theme_server.py from 127.0.0.1 only. Self-contained on purpose:
-  no fonts, scripts or styles from anywhere else, so it works on a desk with no
-  network and the server's Content-Security-Policy can forbid every outside
-  request. Built from the published design (claude.ai artifact
-  WG9LpsFRVuL7R6JsbwDUhB, 2026-10-25); the share code is the wire contract's
-  JSON form, not the design's packed bytes.
+  Served by pc/theme_server.py from 127.0.0.1 only, built to the owner-approved
+  design (docs/design/settings-page.md, 2026-11-06). It loads nothing from
+  anywhere else: no hosted scripts and no web fonts. It is served to a desk that may be
+  offline and from inside a frozen app, and the server's Content-Security-Policy
+  allows only this origin. The two Montserrat files the board's screen is drawn
+  in are vendored in pc/fonts and read through /font/; the page's own text is
+  the system stack, which is the design's stated fallback for IBM Plex.
 -->
 <style>
+@font-face { font-family: "Montserrat"; font-weight: 500; font-display: swap; src: url("/font/Montserrat-Medium-latin.woff2") format("woff2"); }
+@font-face { font-family: "Montserrat"; font-weight: 600; font-display: swap; src: url("/font/Montserrat-SemiBold-latin.woff2") format("woff2"); }
 /*
-  The page wears the board's own themes: Dark (firmware/src/theme.c, id 0)
-  first, because that is what a new board shows, and Light (id 9) when the
-  computer asks for light. --bad is the board's red, for borders. Words in
-  red take --bad-text: the board's #E74C3C measures 4.57:1 on the dark
-  card, a hair over the 4.5:1 small text needs, and 6.9:1 for the lighter
-  red. The marks in Checks are 11 px on a coloured chip, and white on the
-  board's red measured 3.8:1, so the NO chip is dark ink on --bad-text in
-  dark (7.4:1) and white on the board's light red in light (5.6:1). Dark
-  ink on the light scheme's amber measured 3.2:1, so --on-warn is white
-  there (5.9:1). --line is a hairline between parts of the page, at about
-  1.25:1; a box that takes typing is drawn in --edge instead, 3.3:1 on the
-  card and 3.4:1 on the sunk ground in dark, 3.6:1 and 3.4:1 in light,
-  since WCAG 1.4.11 asks 3:1 of the edge that says "this is a field" and
-  the empty paste box read as no box at all (review of fp/builder-look, N2).
-  The page's chrome sits under a header whose height is --top-h; the
-  script keeps it to the header as drawn (review, S4).
+  The tokens are the design's, light and dark, and the page follows the
+  system with data-theme="light|dark" on :root to override it. --warn and
+  --scrim are the two the design's table has no row for: the Check marks
+  and the ended-tab popup need them. --warn is the old builder's amber, 6.2:1
+  on --panel in light and 9.9:1 in dark; the contrast of every pair was
+  measured with the page's own helpers (task 4.2 report).
 */
 :root {
-  --top-h: 80px;
-  --bg: #0E1116; --card: #161A20; --sunk: #12151A; --line: #272C34; --edge: #646C76;
-  --text: #E6E8EB; --dim: #8A9199; --ok: #2ECC71; --ok-text: #2ECC71; --warn: #F1C40F; --on-warn: #0E1116;
-  --bad: #E74C3C; --bad-text: #FF7A6E; --on-bad: #0E1116; --accent: #2ECC71; --on-accent: #0E1116; --focus: #2ECC71;
-  --shadow: rgba(0,0,0,.55); --scrim: rgba(5,6,8,.72); color-scheme: dark;
-  --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --bg: #e6e5e2; --stage: #f7f6f4; --panel: #fbfbfa; --raise: #ffffff; --ink: #1c1b1a; --muted: #5b5853;
+  --line: #dcd9d4; --field: #efeeeb; --accent: #ff6a13; --accent-ink: #a8400a; --on-accent: #1f0b00;
+  --ok: #1b7642; --danger: #b1261d; --floor: rgba(60, 40, 20, .30); --warn: #8a5a00; --scrim: rgba(17, 20, 24, .45);
+  --shadow: 0 1px 2px rgba(50, 35, 20, .06), 0 18px 40px -16px rgba(50, 35, 20, .22);
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, Menlo, Consolas, monospace;
+  --out: cubic-bezier(.2, .7, .2, 1);
+  color-scheme: light;
 }
-@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) {
-  --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6; --edge: #80878F;
-  --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
-  --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
-  --shadow: rgba(17,20,24,.16); --scrim: rgba(17,20,24,.45); color-scheme: light; } }
-:root[data-theme="light"] {
-  --bg: #F3F4F6; --card: #FFFFFF; --sunk: #F7F8F9; --line: #E1E3E6; --edge: #80878F;
-  --text: #111418; --dim: #545A62; --ok: #0E9F48; --ok-text: #0A7A37; --warn: #8A5A00; --on-warn: #FFFFFF;
-  --bad: #CC2000; --bad-text: #CC2000; --on-bad: #FFFFFF; --accent: #2ECC71; --on-accent: #0E1116; --focus: #0E9F48;
-  --shadow: rgba(17,20,24,.16); --scrim: rgba(17,20,24,.45); color-scheme: light; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121110; --stage: #262421; --panel: #1b1a18; --raise: #2a2825; --ink: #eceae6; --muted: #a29e97;
+  --line: #2f2d2a; --field: #23211f; --accent: #ff6a13; --accent-ink: #ff9152; --on-accent: #1f0b00;
+  --ok: #5fd394; --danger: #ff8a7d; --floor: rgba(0, 0, 0, .55); --warn: #f1c40f; --scrim: rgba(5, 6, 8, .72);
+  --shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 22px 48px -16px rgba(0, 0, 0, .7);
+  color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #121110; --stage: #262421; --panel: #1b1a18; --raise: #2a2825; --ink: #eceae6; --muted: #a29e97;
+  --line: #2f2d2a; --field: #23211f; --accent: #ff6a13; --accent-ink: #ff9152; --on-accent: #1f0b00;
+  --ok: #5fd394; --danger: #ff8a7d; --floor: rgba(0, 0, 0, .55); --warn: #f1c40f; --scrim: rgba(5, 6, 8, .72);
+  --shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 22px 48px -16px rgba(0, 0, 0, .7);
+  color-scheme: dark;
+}
 
+[hidden] { display: none !important; }
 * { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
-button, input { font: inherit; color: inherit; }
-h1, h2 { margin: 0; }
-code { font-family: var(--mono); font-size: .875em; background: var(--sunk); border: 1px solid var(--line); padding: 1px 6px; border-radius: 6px; }
-:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-.icon { width: 18px; height: 18px; flex: none; }
-.eyebrow { font: 600 12px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); }
-.lede { color: var(--dim); margin: 0; max-width: 68ch; }
-.desc { color: var(--dim); margin: 6px 0 0; font-size: 14px; }
+html { scrollbar-gutter: stable; }
+body {
+  margin: 0; min-height: 100dvh; color: var(--ink); font: 400 14px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; background: var(--bg);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px; display: flex; flex-direction: column;
+}
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+h1, h2, p { margin: 0; }
+.label { font: 500 13px/1.4 var(--sans); color: var(--muted); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
-/* Every button, segment, swatch and box is at least 44 px tall: the page
-   is opened from the board, and as often as not on a touch laptop. The
-   segment buttons were 42 px and the claim was here regardless (review of
-   fp/builder-look, S6); tests/pc/test_theme_page.py reads each control's
-   rule now, rather than finding "44px" somewhere in the file. */
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 18px; border-radius: 10px;
-  border: 1px solid var(--line); background: var(--card); font-weight: 600; font-size: 15px; cursor: pointer; white-space: nowrap;
-  transition: background-color .2s ease, border-color .2s ease, color .2s ease, opacity .2s ease; }
-.btn:hover:not(:disabled) { border-color: var(--dim); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-.btn.primary:hover:not(:disabled) { border-color: var(--text); }
-.btn.ghost { background: transparent; }
-.btn.small { padding: 0 12px; font-size: 14px; }
+/* ---------- top bar: the mark and wordmark, then Done on the settings page ---------- */
+.top { display: flex; align-items: center; gap: 10px; max-width: 1720px; width: 100%; margin: 0 auto; }
+.top svg { width: 26px; height: 20px; color: var(--ink); flex: none; }
+h1 { font: 600 15px/1 var(--sans); letter-spacing: .14em; }
+h1 span { font-weight: 400; letter-spacing: 0; color: var(--muted); margin-left: 8px; }
+.top .done { margin-left: auto; }
+
+/* ---------- three columns, the board in the middle one ---------- */
+.page { flex: 1; width: 100%; max-width: 1720px; margin: 0 auto; display: grid; column-gap: 28px;
+  grid-template-columns: minmax(320px, 1fr) minmax(460px, 600px) minmax(320px, 1fr); grid-template-areas: "left hub right";
+  /* Owner, 2026-11-07: start under the header, not centred in the leftover
+     height, which left a 150 px empty band at 1440x900. The side cards and
+     the board share the row's top, so they stay level with each other. */
+  align-content: start; align-items: stretch; padding-top: 4px; }
+.hub { grid-area: hub; display: flex; flex-direction: column; align-items: center; min-width: 0; position: relative; }
+/* A panel is out of flow with its top edge on the case's top edge, so its
+   height never changes the row and the board never moves. */
+.side { min-width: 0; position: relative; }
+.side .panel { position: absolute; top: 34px; }
+#sideL { grid-area: left; } #sideL .panel { right: 0; }
+#sideR { grid-area: right; } #sideR .panel { left: 0; }
+@media (min-width: 1680px) { .page { column-gap: 40px; grid-template-columns: minmax(320px, 1fr) 660px minmax(320px, 1fr); } }
+
+/* ---------- the studio: a light pool, a contact shadow, two desk objects ---------- */
+.stage { width: 100%; position: relative; isolation: isolate; }
+.scanning { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--muted); }
+.scanning[hidden] { display: none; }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.stage::before { content: ""; position: absolute; z-index: -1; left: -14%; right: -14%; top: -10%; bottom: 4%;
+  background: radial-gradient(50% 50% at 50% 46%, var(--stage) 0%, color-mix(in srgb, var(--stage) 55%, var(--bg)) 45%, transparent 100%);
+  pointer-events: none; }
+svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
+.floor { fill: url(#floorG); }
+.track { fill: none; stroke: color-mix(in srgb, var(--muted) 55%, transparent); stroke-width: 1.4; stroke-linecap: round; transition: stroke .4s ease, opacity .4s ease; }
+.track.live { stroke: var(--muted); }
+.track.wifi { stroke-dasharray: 1 5; }
+.track.wifi.live { stroke-dasharray: none; }
+.pulse { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 0 101; opacity: 0; }
+.pulse.run { opacity: 1; stroke-dasharray: 10 91; animation: travel 1.3s var(--out) infinite; }
+@keyframes travel { from { stroke-dashoffset: 10; } to { stroke-dashoffset: -91; } }
+.node { transition: opacity .4s ease; }
+.node.ghost .glyph { opacity: .55; }
+.node.ghost .node-label { fill: var(--muted); }
+.lamp { fill: var(--ok); }
+.node.ghost .lamp { fill: none; }
+.node-ink { fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.node-fill { fill: var(--panel); }
+.node.ghost .node-ink { stroke-dasharray: 2 3; }
+.node-label { font: 500 13px var(--sans); fill: var(--ink); }
+.node-sub { font: 400 12px var(--sans); fill: var(--muted); }
+.lock { opacity: 0; transition: opacity .4s ease; }
+.lock.on { opacity: 1; }
+.lock circle { fill: var(--panel); stroke: var(--ok); stroke-width: 1.4; }
+.lock path { fill: none; stroke: var(--ok); stroke-width: 1.5; }
+.lock rect { fill: var(--ok); }
+@keyframes flow { to { stroke-dashoffset: -24; } }
+#scr .dash { animation: flow 1.2s linear infinite; }
+
+/* ---------- name, status, controls ---------- */
+.ident { display: flex; flex-direction: column; align-items: center; gap: 4px; margin-top: 4px; text-align: center; min-height: 52px; }
+.devname { font: 500 20px/1.3 var(--sans); letter-spacing: -.005em; }
+.hubstatus { font-size: 14px; color: var(--muted); display: inline-flex; align-items: center; gap: 8px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+.dot.danger { background: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent); }
+.dot.busy { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.hs { display: inline-flex; align-items: center; gap: 12px; font-size: 14px; color: var(--ink); }
+.hs ol { list-style: none; margin: 0; padding: 0; display: flex; gap: 4px; }
+.hs li { width: 18px; height: 3px; border-radius: 2px; background: var(--line); transition: background .3s ease; }
+.hs li.active { background: var(--accent); }
+.hs li.done { background: var(--ok); }
+.hs li.fail { background: var(--danger); }
+
+.chips { display: inline-flex; gap: 2px; padding: 4px; margin-top: 20px; border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 70%, transparent); box-shadow: inset 0 0 0 1px var(--line); }
+.chips button { min-height: 44px; min-width: 104px; padding: 0 18px; border: 0; border-radius: 10px; background: none;
+  color: var(--muted); font-weight: 500; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  transition: background .2s ease, color .2s ease, box-shadow .2s ease; }
+.chips svg { width: 16px; height: 16px; flex: none; }
+.chips button:hover { color: var(--ink); }
+.chips button[aria-pressed="true"] { background: var(--raise); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px var(--line); }
+.chips button[aria-pressed="true"] svg { color: var(--accent-ink); }
+
+/* ---------- panels ---------- */
+.panel { width: 100%; max-width: 372px; max-height: max(360px, calc(100dvh - 210px)); overflow: auto; overscroll-behavior: contain;
+  background: var(--panel); border-radius: 18px; padding: 24px; box-shadow: var(--shadow), 0 0 0 1px color-mix(in srgb, var(--line) 60%, transparent);
+  display: flex; flex-direction: column; gap: 20px; scrollbar-width: thin; }
+.panel.wide { max-width: 452px; }
+#sideL .panel { animation: inL .32s var(--out) both; }
+#sideR .panel { animation: inR .32s var(--out) both; }
+@keyframes inL { from { opacity: 0; transform: translateX(14px); } }
+@keyframes inR { from { opacity: 0; transform: translateX(-14px); } }
+.panel h2 { font: 600 17px/1.3 var(--sans); }
+.phead { display: flex; flex-direction: column; gap: 4px; }
+.phead p { font-size: 14px; color: var(--muted); }
+.phead p b { color: var(--ink); font-weight: 500; }
+.stack { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.sec { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.sec + .sec { border-top: 1px solid var(--line); padding-top: 20px; }
+.sec > .label, .sec-h { font: 600 14px/1.3 var(--sans); color: var(--ink); }
+.sec-h { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.note2 { font-size: 13px; color: var(--muted); }
+.tap { display: none; }
+@media (hover: none) { .hov { display: none; } .tap { display: inline; } }
+
+.btn { min-height: 44px; padding: 0 18px; border-radius: 10px; border: 0; background: var(--field); font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: filter .2s ease, background .2s ease, transform .1s ease; }
+.btn:hover:not(:disabled) { filter: brightness(1.04); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn.primary { width: 100%; background: var(--accent); color: var(--on-accent); box-shadow: inset 0 1px 0 rgba(255,255,255,.25), 0 1px 2px rgba(120,40,0,.25); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
-/* Until /api/state answers, the form is off (see "loaded" in the script),
-   and a preset or a segment button has no disabled look of its own, so the
-   controls dim -- the controls only. The whole studio at .6 put the dim
-   text (the lede, each .desc, the slot hints) at 2.6 to 2.9:1, from 5.5 to
-   7.0:1, in both schemes (review of fp/save-before-load, N2); the words
-   that say what the page is for stay as they are. .btn has its own
-   disabled look and is left to it. "waiting" comes 150 ms after the page
-   runs and not with it, so a state answered on loopback in a few
-   milliseconds does not flash the controls dim for a frame (N3). A class
-   set late and not an animation delay: the notice's fade is the one
-   motion here, and reduced motion takes every animation away. */
-.studio.waiting button:not(.btn), .studio.waiting input { opacity: .5; }
-.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn.danger { background: none; color: var(--danger); box-shadow: inset 0 0 0 1px currentColor; }
+.btn.danger.solid { background: var(--danger); color: var(--panel); box-shadow: none; }
+.link { min-height: 44px; border: 0; background: none; padding: 0; color: var(--muted); font-weight: 500; display: inline-flex; align-items: center; gap: 8px; align-self: flex-start; transition: color .2s ease; }
+.link:hover { color: var(--ink); }
+.link svg { width: 12px; height: 12px; transition: transform .25s var(--out); }
+.link[aria-expanded="true"] svg { transform: rotate(180deg); }
+.link.sm { margin-block: -12px; font-size: 13px; color: var(--accent-ink); }
+.link.sm:hover { color: var(--ink); }
+/* Until /api/state answers the form is off, and a segment or tile has no
+   disabled look of its own, so the controls dim -- the controls only, and
+   150 ms after the page runs and not with it, so a state answered on
+   loopback in a few milliseconds does not flash them dim for a frame. The
+   words that say what the page is for keep their contrast (review of
+   fp/save-before-load, N2, N3). */
+.waiting button:not(.btn), .waiting input { opacity: .5; }
 
-/* The status says how it went in its icon and colour as well as its words. */
-.status { display: flex; gap: 8px; align-items: flex-start; color: var(--dim); font-size: 15px; min-width: 0; transition: color .2s ease; }
-.status .icon { margin-top: 2px; display: none; }
-.status .s-info { display: block; }
-.status.ok { color: var(--text); } .status.ok .s-info { display: none; } .status.ok .s-ok { display: block; color: var(--ok); }
-.status.err { color: var(--bad-text); } .status.err .s-info { display: none; } .status.err .s-err { display: block; }
+/* sub-tabs: one tablist per panel, Left and Right move between them */
+.tabs { display: flex; gap: 2px; padding: 3px; border-radius: 12px; background: var(--field); }
+.tabs button { flex: 1; min-height: 44px; border: 0; border-radius: 9px; background: none; color: var(--muted); font-weight: 500; transition: background .2s ease, color .2s ease; }
+.tabs button:hover { color: var(--ink); }
+.tabs button[aria-selected="true"] { background: var(--raise); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px var(--line); }
+.tabpanel { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.tabpanel:focus-visible { outline: none; }
+.empty { min-height: 44px; }
 
-/* The board, framed as a device so the preview reads as the panel on the
-   desk and not as one more picture on a page. */
-.device { margin: 0; position: relative; padding: clamp(12px, 2.4vw, 26px); border-radius: clamp(16px, 2.6vw, 30px);
-  background: linear-gradient(155deg, #2A2F37 0%, #16191E 55%, #0B0D10 100%);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 0 0 1px rgba(255,255,255,.04), 0 40px 80px -40px var(--shadow), 0 12px 24px -12px var(--shadow); }
-.device::after { content: ""; position: absolute; right: -5px; top: 44%; width: 5px; height: 30px; border-radius: 0 3px 3px 0; background: #2A2F37; }
-.screen { border-radius: 4px; overflow: hidden; box-shadow: 0 0 0 2px #050608, 0 0 0 3px rgba(255,255,255,.05); }
-.screen svg { display: block; width: 100%; height: auto; }
+/* themes: each tile is that theme's screen in miniature */
+.themes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 12px; }
+.th { border: 0; background: none; padding: 0; min-height: 44px; display: flex; flex-direction: column; gap: 8px; min-width: 0; text-align: left; color: var(--muted); border-radius: 10px; }
+.th .scr { position: relative; display: block; aspect-ratio: 4 / 3; border-radius: 8px; overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(127,127,127,.25), 0 1px 2px rgba(0,0,0,.08); transition: box-shadow .2s ease, transform .25s var(--out); }
+.th .scr svg { width: 100%; height: 100%; display: block; }
+.th .nm { font-size: 13px; line-height: 1.3; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 2px; transition: color .2s ease; }
+.th:hover .scr { transform: translateY(-2px); box-shadow: 0 0 0 1px rgba(127,127,127,.35), 0 8px 18px -8px rgba(0,0,0,.35); }
+.th:hover .nm { color: var(--ink); }
+.th:focus-visible { outline: none; }
+.th:focus-visible .scr { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--ink); }
+.th[aria-pressed="true"] .scr { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--accent); }
+.th[aria-pressed="true"] .nm { color: var(--ink); font-weight: 600; }
+.th .tick { position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: var(--on-accent);
+  display: grid; place-items: center; opacity: 0; transform: scale(.6); transition: opacity .2s ease, transform .25s var(--out); }
+.th .tick svg { width: 12px; height: 12px; }
+.th[aria-pressed="true"] .tick { opacity: 1; transform: none; }
 
-.view { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
-.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--sunk); }
-.seg button { min-height: 44px; min-width: 44px; padding: 0 14px; border: 0; background: transparent; color: var(--dim); font-size: 15px; font-weight: 500; cursor: pointer;
-  transition: background-color .2s ease, color .2s ease; }
-.seg button + button { border-left: 1px solid var(--line); }
-.seg button:hover { color: var(--text); }
-.seg button[aria-pressed="true"] { background: var(--text); color: var(--bg); }
-.seg button:focus-visible { outline-offset: -3px; }
-.slider { display: flex; align-items: center; gap: 10px; font-size: 15px; color: var(--dim); min-width: 0; }
-.slider input { width: 120px; height: 44px; margin: 0; accent-color: var(--accent); }
-.slider output { font: 14px var(--mono); color: var(--text); min-width: 40px; font-variant-numeric: tabular-nums; }
-
-/* A built-in as a small board: its ground, a text line, and its three
-   level colours, drawn from the injected list (the script sets them). */
-.presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; }
-.preset { display: flex; flex-direction: column; gap: 8px; padding: 8px 8px 10px; min-height: 44px; border: 1px solid var(--line); border-radius: 12px;
-  background: var(--card); text-align: left; cursor: pointer; transition: border-color .2s ease, box-shadow .2s ease; }
-.preset:hover { border-color: var(--dim); }
-/* --focus, not --accent: the board's green on a white card is 2.1:1, under
-   the 3:1 a state needs; the light focus green is 3.5:1 (review, N1). */
-.preset[aria-pressed="true"] { border-color: var(--focus); box-shadow: inset 0 0 0 1px var(--focus); }
-.preset .pn { font-size: 14px; font-weight: 600; line-height: 1.25; padding: 0 2px; }
-.sw { position: relative; display: block; height: 48px; border-radius: 7px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(128,128,128,.28); }
-.sw i { position: absolute; display: block; border-radius: 2px; }
-.sw .sw-text { top: 9px; left: 9px; width: 38%; height: 4px; }
-.sw .sw-low, .sw .sw-mid, .sw .sw-high { bottom: 9px; height: 7px; width: calc((100% - 30px) / 3); }
-.sw .sw-low { left: 9px; } .sw .sw-mid { left: calc(12px + (100% - 30px) / 3); } .sw .sw-high { left: calc(15px + 2 * (100% - 30px) / 3); }
-
-.slots { display: grid; }
-.slot { display: grid; grid-template-columns: 44px minmax(0, 1fr) 112px; column-gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); transition: opacity .2s ease; }
-.slot:last-child { border-bottom: 0; }
-.slot input[type=color] { width: 44px; height: 44px; padding: 0; border: 1px solid var(--edge); border-radius: 10px; background: none; cursor: pointer; }
-.slot input[type=color]::-webkit-color-swatch-wrapper { padding: 3px; }
-.slot input[type=color]::-webkit-color-swatch { border: 0; border-radius: 7px; }
-.slot input[type=color]::-moz-color-swatch { border: 0; border-radius: 7px; }
-.slot label { font-weight: 600; font-size: 15px; line-height: 1.3; }
-.slot small { display: block; color: var(--dim); font-size: 13px; font-weight: 400; margin-top: 2px; }
-.slot input[type=text], .paste input { font: 15px var(--mono); width: 100%; min-height: 44px; padding: 0 10px; border: 1px solid var(--edge); border-radius: 10px; background: var(--sunk); color: var(--text); transition: border-color .2s ease; }
-.slot input[type=text] { text-transform: uppercase; letter-spacing: .02em; }
-.slot input[type=text]:hover, .paste input:hover { border-color: var(--dim); }
-[aria-invalid="true"] { border-color: var(--bad) !important; }
-.slot.off { opacity: .45; }
-/* A field's own message sits under it, across the label and the box. */
-.slot .fmsg { grid-column: 2 / -1; }
-.fmsg { margin: 6px 0 0; font-size: 14px; line-height: 1.4; }
+/* colour rows: swatch, name and hint, hex */
+.crow { display: grid; grid-template-columns: 48px minmax(0, 1fr) 96px; align-items: center; column-gap: 14px; min-height: 56px; padding: 6px; border-radius: 12px; background: var(--field); transition: opacity .2s ease; }
+.crow + .crow { margin-top: 6px; }
+.crow.off { opacity: .6; }
+.crow .pick { position: relative; width: 48px; height: 44px; border-radius: 9px; overflow: hidden; cursor: pointer; box-shadow: inset 0 0 0 1px rgba(127,127,127,.35); }
+.crow .pick:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.crow .pick input { position: absolute; inset: -8px; width: calc(100% + 16px); height: calc(100% + 16px); border: 0; padding: 0; cursor: pointer; background: none; }
+.crow .txt { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.crow .txt b { font-weight: 500; font-size: 14px; }
+.crow .txt span { font-size: 13px; color: var(--muted); }
+.crow .hex { width: 100%; min-height: 44px; border: 0; border-radius: 9px; padding: 0 10px; background: var(--panel); font: 400 13px var(--mono); font-variant-numeric: tabular-nums;
+  text-transform: uppercase; box-shadow: inset 0 0 0 1px var(--line); outline: none; transition: box-shadow .2s ease; }
+.crow .hex:focus-visible { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.crow .hex[aria-invalid="true"] { box-shadow: inset 0 0 0 1.5px var(--danger); }
+.crow .fmsg { grid-column: 1 / -1; padding: 0 6px 6px; }
+.fmsg { margin: 6px 0 0; font-size: 13px; line-height: 1.4; }
 .fmsg:empty { display: none; }
-.f-ok { color: var(--ok-text); } .f-warn { color: var(--warn); } .f-bad { color: var(--bad-text); }
+.f-ok { color: var(--ok); } .f-warn { color: var(--warn); } .f-bad { color: var(--danger); }
 
-.band { display: grid; grid-template-columns: repeat(3, 1fr); height: 8px; border-radius: 4px; overflow: hidden; margin: 14px 0 4px; }
-.bandl { display: grid; grid-template-columns: repeat(3, 1fr); font: 12px var(--mono); color: var(--dim); }
-.bandl span:nth-child(2) { text-align: center; } .bandl span:last-child { text-align: right; }
-.note { font-size: 14px; color: var(--dim); margin: 10px 0 0; }
+/* segmented groups: arc thickness, ends, dot, mode, screen, window */
+.seg { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 2px; padding: 3px; border-radius: 12px; background: var(--field); }
+.seg button { min-height: 44px; border: 0; border-radius: 9px; background: none; color: var(--muted); font-weight: 500; transition: background .2s ease, color .2s ease;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 6px 4px; }
+.seg button svg { width: 40px; height: 26px; }
+.seg button:hover { color: var(--ink); }
+.seg button[aria-pressed="true"] { background: var(--raise); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px var(--line); }
+.seg button[aria-pressed="true"] svg .on { stroke: var(--accent); }
 
-.opts { display: grid; gap: 12px; }
-.opt { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 12px; align-items: center; }
-.opt .seg { justify-self: start; }
-.olabel { font-size: 15px; color: var(--dim); }
+/* try it: sliders painted in the theme's own three colours */
+.try { display: flex; flex-direction: column; gap: 2px; }
+.try output { font: 500 20px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+.try input { -webkit-appearance: none; appearance: none; width: 100%; height: 44px; margin: 0; background: transparent; cursor: pointer; }
+.try input::-webkit-slider-runnable-track { height: 8px; border-radius: 4px;
+  background: linear-gradient(90deg, var(--lo) 0 60%, var(--mi) 60% 90%, var(--hi) 90% 100%); box-shadow: inset 0 0 0 1px rgba(127,127,127,.25); }
+.try input::-moz-range-track { height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--lo) 0 60%, var(--mi) 60% 90%, var(--hi) 90% 100%); }
+.try input::-webkit-slider-thumb { -webkit-appearance: none; width: 26px; height: 26px; margin-top: -9px; border-radius: 50%; background: #fff;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.18), 0 2px 6px rgba(0,0,0,.28); }
+.try input::-moz-range-thumb { width: 26px; height: 26px; border: 0; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.18), 0 2px 6px rgba(0,0,0,.28); }
+.try input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+.marks { position: relative; height: 18px; margin: 0 13px; font: 400 12px/1 var(--mono); color: var(--muted); }
+.marks span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.marks span::before { content: ""; position: absolute; left: 50%; top: -9px; width: 1px; height: 5px; background: currentColor; opacity: .6; }
+.marks span:first-child { transform: none; } .marks span:first-child::before { left: 0; }
 
-.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; font-size: 15px; }
+/* the checks, the share code and the terminal line */
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; font-size: 13px; }
 .checks li { display: flex; gap: 10px; align-items: baseline; }
-.mark { font: 700 11px/1 var(--mono); letter-spacing: .04em; padding: 4px 7px; border-radius: 5px; flex: none; color: var(--on-accent); }
-.m-ok { background: var(--ok); } .m-warn { background: var(--warn); color: var(--on-warn); } .m-bad { background: var(--bad-text); color: var(--on-bad); }
-
-.code, .cmd { font: 14px/1.6 var(--mono); background: var(--sunk); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
-/* anywhere, not break-all: the built-in sentence breaks at its spaces and
-   only the share code itself, one long word, breaks inside. */
+.mark { font: 600 11px/1 var(--mono); letter-spacing: .04em; padding: 4px 7px; border-radius: 5px; flex: none; }
+.m-ok { background: var(--ok); color: var(--panel); } .m-warn { background: var(--warn); color: var(--panel); } .m-bad { background: var(--danger); color: var(--panel); }
+.code, .cmd { font: 13px/1.6 var(--mono); background: var(--field); border-radius: 10px; padding: 12px 14px; min-width: 0; }
 .code { overflow-wrap: anywhere; }
 .cmd { white-space: pre; overflow-x: auto; }
-.cmd .k { color: var(--dim); } .cmd .v { color: var(--ok-text); }
-.paste { display: flex; gap: 8px; margin-top: 14px; }
-.paste input { flex: 1 1 auto; min-width: 0; }
-.termhead { display: flex; align-items: center; gap: 8px; margin: 22px 0 8px; font-weight: 600; font-size: 15px; }
-.termhead .btn { margin-left: auto; }
+.cmd .k { color: var(--muted); } .cmd .v { color: var(--ok); }
+.paste { display: flex; gap: 8px; }
+.paste input { flex: 1 1 auto; min-width: 0; min-height: 44px; border: 0; border-radius: 10px; padding: 0 12px; background: var(--field); font: 13px var(--mono); box-shadow: inset 0 0 0 1px var(--line); outline: none; }
+.paste input:focus-visible { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.paste input[aria-invalid="true"] { box-shadow: inset 0 0 0 1.5px var(--danger); }
+.paste .btn { width: auto; }
+.keep { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.keep .btn.primary { width: auto; flex: 1 1 160px; }
+.savebtn { width: 100%; max-width: 320px; margin-top: 10px; }
 
-/* ---------------------------------------------------------------- layout */
-.top { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 14px clamp(16px, 3vw, 40px);
-  background: var(--bg); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
-.brand { display: flex; align-items: center; gap: 12px; }
-.brand .icon { width: 26px; height: 26px; color: var(--ok); }
-.brand h1 { font-size: 18px; font-weight: 650; letter-spacing: -.01em; }
-.top .status { flex: 1 1 280px; }
-.studio { display: grid; grid-template-columns: minmax(0, 1fr) 460px; align-items: start; }
-.stage { position: sticky; top: var(--top-h); min-height: calc(100vh - var(--top-h)); display: grid; place-items: center; padding: 32px clamp(16px, 4vw, 64px);
-  background: radial-gradient(60% 55% at 50% 42%, color-mix(in srgb, var(--text) 7%, transparent), transparent 70%); }
-/* The device is sized by the window's height as well as its width, so the
-   Checks under it are in view on a laptop. Sized by width alone, it was
-   967 px of stage in a 900 px window at 1440x900, and the Checks list sat
-   below the fold through the whole scroll (review of fp/builder-look, S3).
-   The 420 px is what stands beside the screen at 1440x900, measured: the
-   view row (98, on two lines), the lede (68), three checks (89), the gaps
-   (60), the stage's padding (64) and the frame round the screen (about
-   13 over 3/4 of its width), with some 20 px spare for a check that wraps.
-   4/3 is the panel's shape. The floor keeps a short window from shrinking
-   it to a stamp. The Checks come before the lede, so it is the lede and
-   not a check that a window too short for both leaves below the fold: with
-   every warning showing, the checks wrap to five lines. */
-.stage-inner { width: 100%; max-width: clamp(420px, calc((100vh - var(--top-h) - 420px) * 4 / 3), 780px); display: grid; gap: 20px; }
-.stage .view { justify-content: center; }
-.stage .lede { text-align: center; margin: 0 auto; font-size: 15px; }
-.stage .checks { max-width: 560px; margin: 0 auto; width: 100%; }
-.inspector { background: var(--card); border-left: 1px solid var(--line); min-height: calc(100vh - var(--top-h)); }
-.group { padding: 24px 28px; border-bottom: 1px solid var(--line); }
-.group h2 { font: 600 12px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); margin-bottom: 16px; }
-.inspector .presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.colours .opt { margin-bottom: 6px; }
-@media (max-width: 1100px) {
-  .studio { grid-template-columns: minmax(0, 1fr); }
-  .stage { position: static; min-height: 0; padding: 32px 16px; }
-  .inspector { border-left: 0; border-top: 1px solid var(--line); min-height: 0; }
-  .inspector .presets { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
-}
-@media (max-width: 640px) {
-  .top { position: static; }
-  .top .actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
-  .top .actions #copy-code { grid-column: 1 / -1; }
-  .group { padding: 20px 16px; }
-  .slider input { width: 100%; } .slider { flex: 1 1 100%; } .slider span { width: 64px; flex: none; }
-  .opt { grid-template-columns: minmax(0, 1fr); gap: 6px; }
-  .slot { grid-template-columns: 44px minmax(0, 1fr) 100px; }
-}
-/* The popup a tab shows once it is no longer the live builder: saved,
+/* the theme message: how a preview or a save went, in words and an icon */
+.say { display: flex; gap: 8px; align-items: flex-start; color: var(--muted); font-size: 13px; min-width: 0; transition: color .2s ease; }
+.say .icon { width: 16px; height: 16px; flex: none; margin-top: 2px; display: none; }
+.say .s-info { display: block; }
+.say.ok { color: var(--ink); } .say.ok .s-info { display: none; } .say.ok .s-ok { display: block; color: var(--ok); }
+.say.err { color: var(--danger); } .say.err .s-info { display: none; } .say.err .s-err { display: block; }
+
+/* in-page confirm: the destructive button is replaced by this box */
+.confirm { display: flex; flex-direction: column; gap: 14px; padding: 14px; border-radius: 12px; background: color-mix(in srgb, var(--danger) 7%, var(--field)); }
+.confirm .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* The popup a tab shows once it is no longer the live page: saved,
    cancelled, taken over by a newer tab, or the builder gone. A browser
    refuses window.close() on most tabs it did not open by script, so the
-   status bar's last word was all an old tab said, in 15 px at the top of a
-   page that still looked live (the owner's report, 2026-10-29). It was
-   taken out for a status line on 2026-10-31 and put back the same day,
-   with the countdown inside it: the owner wanted the ending said where the
-   eye is, not at the top (2026-10-31, "lets do this in the popup"). The
-   card is drawn in the page's own tokens, so its words measure as the
-   page's do: --text on --card 14.2:1 dark and 18.5:1 light, --dim on
-   --card 5.5:1 and 7.0:1, the primary button 9.0:1. The scrim only dims;
-   nothing is read through it. Its fade is the one motion here, and the
-   reduced-motion rule below takes it away. */
+   status line's last word was all an old tab said, over a page that still
+   looked live (the owner's report, 2026-10-29; the wording, 2026-10-31).
+   Drawn in the page's own tokens: --ink on --panel 15.3:1 light and 14.5:1
+   dark, --muted on --panel 6.7:1 and 6.9:1. The scrim only dims. Its fade
+   is the one motion here, and reduced motion takes it away. */
 .notice { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 16px; background: var(--scrim); animation: notice-in .2s ease; }
 .notice[hidden] { display: none; }
-.notice-card { width: 100%; max-width: 440px; display: grid; gap: 12px; padding: 28px; border-radius: 16px; border: 1px solid var(--line);
-  background: var(--card); color: var(--text); box-shadow: 0 24px 64px -24px var(--shadow); }
-/* Focus is put on the card itself, as the dialog, so that a screen reader
-   reads its heading and words; it is not a control, and a ring round the
-   whole card on opening read as a fault. Its buttons keep the page's ring. */
+.notice-card { width: 100%; max-width: 440px; display: grid; gap: 12px; padding: 28px; border-radius: 16px;
+  background: var(--panel); color: var(--ink); box-shadow: var(--shadow), 0 0 0 1px color-mix(in srgb, var(--line) 60%, transparent); }
+/* Focus is put on the card itself, as the dialog, so a screen reader reads
+   its heading and words; it is not a control, and a ring round the whole
+   card on opening read as a fault. Its buttons keep the page's ring. */
 .notice-card:focus { outline: none; }
-.notice-card h2 { font-size: 20px; font-weight: 650; line-height: 1.3; letter-spacing: -.01em; }
+.notice-card h2 { font-size: 20px; font-weight: 600; line-height: 1.3; }
 .notice-card p { margin: 0; }
-.notice-card .n-end { color: var(--dim); }
-.notice-card .btn { justify-self: start; }
-/* .btn sets its own display, which outranks the hidden attribute. */
+.notice-card .n-end { color: var(--muted); }
+.notice-card .btn { justify-self: start; width: auto; }
 .notice-card [hidden] { display: none; }
 @keyframes notice-in { from { opacity: 0; } to { opacity: 1; } }
 @media (max-width: 640px) { .notice-card { padding: 22px 18px; } .notice-card .btn { justify-self: stretch; } }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+
+/* ---------- narrow: the board, name, status and controls stick; the desk goes ---------- */
+/* Browser floor: Chrome 111, Safari 16.2, Firefox 121 (color-mix and :has).
+   Under it the three uses degrade rather than vanish: the cable lines and the
+   light pool take plain colours, and a swatch's focus ring follows
+   :focus-within. See docs/design/settings-page.md, "Notes on the build". */
+@supports not (color: color-mix(in srgb, red, blue)) {
+  .track { stroke: var(--muted); stroke-opacity: .55; }
+  .stage::before { background: radial-gradient(50% 50% at 50% 46%, var(--stage) 0%, transparent 100%); }
+  .chips, .confirm { background: var(--field); }
+}
+@supports not selector(:has(a)) {
+  .crow .pick:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
+
+@media (max-width: 1199px) {
+  /* The stuck board covers the top of the viewport; a focused field must stay clear of it. */
+  html { scroll-padding-top: calc(min(34vh, 300px) + 150px); }
+  body { padding-top: 12px; }
+  .page { display: block; max-width: 600px; }
+  .hub { position: sticky; top: 0; z-index: 2; background: var(--bg); padding-block: 8px 16px;
+    margin-inline: calc(-1 * max(16px, env(safe-area-inset-left, 0px))); padding-inline: max(16px, env(safe-area-inset-left, 0px)); }
+  .side { margin-top: 16px; }
+  .side .panel { position: static; }
+  .panel.wide { max-width: none; }
+  #pCust { margin-top: 16px; }
+  .panel { max-width: none; max-height: none; overflow: visible; }
+  #sideL .panel, #sideR .panel { animation-name: inUp; }
+  @keyframes inUp { from { opacity: 0; transform: translateY(10px); } }
+  svg.hero { height: min(34vh, 300px); width: 100%; }
+  .stage::before { inset: -6% -4% 0; }
+  .track, .pulse, .node, .lock { display: none; }
+  .ident { min-height: 0; }
+  .devname { font-size: 17px; }
+  .chips { display: flex; width: 100%; margin-top: 14px; }
+  .chips button { min-width: 0; flex: 1; padding: 0 8px; }
+}
+@media (max-width: 420px) {
+  .themes { gap: 12px 8px; }
+  .crow { grid-template-columns: 44px minmax(0, 1fr) 92px; column-gap: 10px; }
+  .crow .pick { width: 44px; }
+  .panel { padding: 20px; }
+  .hubstatus { font-size: 13px; }
+}
+/* connect */
+.rows { display: flex; flex-direction: column; gap: 20px; }
+.rows > * + * { border-top: 1px solid var(--line); padding-top: 20px; }
+.quiet { font-size: 14px; color: var(--muted); }
+.linkcard { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.linkcard .ic { width: 40px; height: 40px; border-radius: 10px; background: var(--field); display: grid; place-items: center; flex: none; }
+.linkcard .ic svg { width: 20px; height: 20px; color: var(--ink); }
+.linkcard > div { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.linkcard b { font-weight: 600; }
+.linkcard .quiet { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.state { font-size: 13px; font-weight: 500; color: var(--ok); white-space: nowrap; }
+.problem { display: flex; flex-direction: column; gap: 10px; }
+.problem b { color: var(--danger); font-weight: 600; }
+.nets { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.net { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 14px; align-items: center; min-height: 54px; padding: 8px 14px; border-radius: 10px; background: var(--field); cursor: pointer; transition: box-shadow .2s ease, background .2s ease; }
+.net:hover { background: color-mix(in srgb, var(--field) 70%, var(--line)); }
+.net:has(input:checked) { box-shadow: inset 0 0 0 1.5px var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--field)); }
+.net:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.net:has(input:disabled) { cursor: not-allowed; background: none; box-shadow: inset 0 0 0 1px var(--line); }
+.net input { appearance: none; width: 16px; height: 16px; margin: 0; border: 1.5px solid var(--muted); border-radius: 50%; display: grid; place-items: center; cursor: inherit; outline: none; }
+.net input:checked { border-color: var(--accent); }
+.net input:checked::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.net input:disabled { border-style: dashed; }
+.net b { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.net small { display: block; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.net small.no { color: var(--danger); }
+.bars { width: 20px; height: 14px; }
+.bars rect { fill: var(--ink); } .bars rect.off { fill: var(--line); }
+.pw { display: flex; border-radius: 10px; background: var(--field); min-width: 0; box-shadow: inset 0 0 0 1px var(--line); transition: box-shadow .2s ease; }
+.pw:focus-within { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.pw[aria-invalid="true"] { box-shadow: inset 0 0 0 1.5px var(--danger); }
+.pw input { flex: 1; min-width: 0; border: 0; background: none; padding: 0 14px; min-height: 46px; font: 400 14px var(--mono); color: var(--ink); outline: none; }
+.pw button { border: 0; background: none; min-width: 64px; min-height: 46px; color: var(--muted); font-weight: 500; border-radius: 10px; }
+.pw button:hover { color: var(--ink); }
+.note { display: flex; gap: 8px; font-size: 13px; color: var(--muted); }
+.note svg { width: 14px; height: 14px; flex: none; margin-top: 2px; }
+.msg { font-size: 14px; }
+.msg:empty { display: none; }
+.msg.ok { color: var(--ok); } .msg.bad { color: var(--danger); }
+.actions { display: flex; flex-direction: column; gap: 4px; }
+.actions .link { align-self: center; }
+
+/* main-screen views, each a little drawing of its layout */
+.views { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.vw { border: 0; border-radius: 12px; background: var(--field); padding: 6px 6px 8px; display: flex; flex-direction: column; gap: 8px; align-items: stretch; text-align: left; color: var(--muted); min-height: 44px;
+  box-shadow: inset 0 0 0 1px transparent; transition: box-shadow .2s ease, color .2s ease; }
+.vw svg { width: 100%; height: auto; display: block; border-radius: 6px; }
+.vw b { font-weight: 500; font-size: 12px; line-height: 1.3; color: var(--ink); text-align: center; }
+.vw:hover { color: var(--ink); }
+.vw[aria-pressed="true"] { box-shadow: inset 0 0 0 1.5px var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--field)); }
+.vw[aria-pressed="true"] .lit { stroke: var(--accent); }
+.vw[aria-pressed="true"] .litf { fill: var(--accent); }
+
+/* on/off rows */
+.sw2 { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; min-height: 56px; }
+.sw2 + .sw2 { border-top: 1px solid var(--line); padding-top: 12px; margin-top: -4px; }
+.sw2 b { display: block; font-weight: 500; }
+.sw2 span { display: block; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.sw2 span.new { display: inline-block; font-size: 11px; color: var(--accent-ink); line-height: 1.5; }
+.sw2 > div { padding-block: 6px; }
+.switch { width: 52px; height: 44px; border: 0; padding: 0; background: none; display: grid; place-items: center; }
+.switch i { width: 44px; height: 26px; border-radius: 13px; background: var(--line); position: relative; transition: background .2s ease; display: block; }
+.switch i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: transform .2s var(--out); }
+.switch[aria-checked="true"] i { background: var(--accent); }
+.switch[aria-checked="true"] i::after { transform: translateX(18px); }
+
+/* brightness levels: the five the board stores */
+.seg5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.onboard { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px; border-radius: 12px; background: var(--field); }
+.onboard p { font-size: 13px; color: var(--muted); }
+.onboard .btn { background: var(--panel); box-shadow: inset 0 0 0 1px var(--line); font-weight: 500; }
+.onboard .btn[aria-pressed="true"] { box-shadow: inset 0 0 0 1.5px var(--accent); }
+
+/* logo */
+.lhave .thumb { width: 56px; height: 42px; flex: none; border-radius: 6px; overflow: hidden; background: var(--panel); box-shadow: inset 0 0 0 1px rgba(127,127,127,.3); }
+.lhave .thumb img { width: 100%; height: 100%; display: block; }
+.lhave > span:nth-child(2) { flex: 1; min-width: 0; }
+.dropzone { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; min-height: 150px; padding: 20px; border-radius: 14px; text-align: center;
+  border: 1.5px dashed color-mix(in srgb, var(--muted) 55%, transparent); background: var(--field); cursor: pointer; transition: border-color .2s ease, background .2s ease; }
+.dropzone svg { width: 28px; height: 28px; color: var(--muted); margin-bottom: 4px; }
+.dropzone b { font-weight: 500; }
+.dropzone span { font-size: 13px; color: var(--muted); }
+.dropzone u { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.dropzone.over, .dropzone:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--field)); }
+#logoFile:focus-visible + .dropzone { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lfile { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 8px; border-radius: 12px; background: var(--field); }
+.lfile .thumb { width: 56px; height: 42px; border-radius: 6px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(127,127,127,.3); display: grid; place-items: center; }
+.lfile .thumb img { max-width: 90%; max-height: 90%; display: block; }
+.lfile b { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lfile span { font-size: 13px; color: var(--muted); }
+.lfile .link { align-self: center; }
+.facts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+.facts li { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 8px; }
+.facts li::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; margin: 7px 0 0 4px; opacity: .7; }
+.lrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 44px; }
+.bgpick { display: flex; gap: 8px; align-items: center; }
+.bgpick .pick { position: relative; width: 44px; height: 44px; border-radius: 9px; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(127,127,127,.35); cursor: pointer; }
+.bgpick .pick:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.bgpick .pick input { position: absolute; inset: -8px; width: calc(100% + 16px); height: calc(100% + 16px); border: 0; padding: 0; cursor: pointer; }
+select.mini { min-height: 44px; border: 0; border-radius: 10px; background: var(--field); padding: 0 34px 0 12px; box-shadow: inset 0 0 0 1px var(--line); appearance: none; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+.sendrow { display: flex; flex-direction: column; gap: 6px; }
+.btnrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.btnrow .btn.primary { width: 100%; }
+.progress { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s linear; }
+
+.tryrow { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 14px; align-items: start; }
+.play { width: 44px; height: 44px; border: 0; border-radius: 50%; background: var(--field); color: var(--ink); display: grid; place-items: center;
+  box-shadow: inset 0 0 0 1px var(--line); transition: background .2s ease, color .2s ease; }
+.play:hover { background: var(--accent); color: var(--on-accent); box-shadow: none; }
+.play svg { width: 16px; height: 16px; }
+.new { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font: 600 11px/1.5 var(--sans); vertical-align: 2px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-ink); }
+/* board */
+.name { min-height: 44px; border: 0; border-radius: 10px; background: var(--field); padding: 0 14px; font-size: 14px; font-weight: 500; width: 100%; min-width: 0; box-shadow: inset 0 0 0 1px var(--line); outline: none; transition: box-shadow .2s ease; }
+.name:focus-visible { box-shadow: inset 0 0 0 1.5px var(--accent); }
+select.name { appearance: none; padding-right: 40px; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 20px) 50%, calc(100% - 15px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+.fw { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fw .tag { font-size: 13px; color: var(--ok); display: inline-flex; align-items: center; gap: 6px; }
+.fw .tag svg { width: 13px; height: 13px; }
+.vw:disabled { opacity: .45; cursor: not-allowed; }
+.vw small { font-size: 11px; line-height: 1.3; color: var(--muted); text-align: center; }
+.switch:disabled { opacity: .45; cursor: not-allowed; }
+.fw .tag.old { color: var(--muted); }
+.lhave { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 12px; background: var(--field); }
+.lhave .btn { width: auto; }
+/* The remove confirm is inserted as a sibling in this row; without wrap it took a flex share and squeezed the note to one word per line. */
+.lhave { flex-wrap: wrap; }
+.lhave .confirm { flex: 1 0 100%; }
+.ok-quiet { color: var(--ok); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  .pulse.run { stroke-dasharray: none; opacity: .9; }
+}
 </style>
 </head>
 <body>
-<!--
-  Laid out as a product shot (the owner's pick of three directions,
-  2026-10-29): the board is the largest thing on the page and stays in view
-  while the panel beside it scrolls, because every control is judged by what
-  it does to the panel. Icons are inline and drawn in currentColor, so the
-  page fetches nothing and every icon follows the light or dark scheme.
--->
 <header class="top">
-  <div class="brand">
-    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="M7 15a5 5 0 0 1 10 0"/></svg>
-    <div><span class="eyebrow">BLINK</span><h1>Theme builder</h1></div>
-  </div>
-  <div class="status" id="status" role="status" aria-live="polite">
-    <svg class="icon s-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5v.01"/></svg>
-    <svg class="icon s-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9.5"/></svg>
-    <svg class="icon s-err" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>
-    <span id="status-text">Loading your current theme. You can make changes once it is here.</span>
-  </div>
-  <div class="actions">
-    <button type="button" class="btn primary" id="save" disabled><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Save to board</span></button>
-    <button type="button" class="btn" id="cancel"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg><span>Cancel</span></button>
-    <button type="button" class="btn ghost" id="copy-code"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
-  </div>
+  <svg viewBox="0 0 120 92" aria-hidden="true" focusable="false"><rect x="4" y="4" width="112" height="84" rx="17" fill="none" stroke="currentColor" stroke-width="8"/><rect x="24" y="34" width="24" height="24" rx="7" fill="currentColor"/><path d="M92 34 L73 46 L92 58" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  <h1 translate="no">BLINK<span translate="yes">Settings</span></h1>
+  <button type="button" class="btn done" id="done" hidden>Done</button>
 </header>
 
-<main class="studio" aria-busy="true">
-  <section class="stage" aria-label="Preview">
-    <div class="stage-inner">
-      <figure class="device">
-        <div class="screen"><svg id="scr" viewBox="0 0 320 240" role="img" aria-label="Preview of the board screen"></svg></div>
-        <figcaption class="visually-hidden">The board, 320 by 240</figcaption>
-      </figure>
-      <div class="view">
-        <div class="seg" role="group" aria-label="Screen">
-          <button type="button" data-v="gauges" aria-pressed="true">Gauges</button>
-          <button type="button" data-v="focus" aria-pressed="false">Focus mode</button>
-        </div>
-        <div class="seg" role="group" aria-label="Left half">
-          <button type="button" data-l="gauge" aria-pressed="true">Session gauge</button>
-          <button type="button" data-l="burn" aria-pressed="false">Burn view</button>
-        </div>
-        <div class="seg" role="group" aria-label="Focus window">
-          <button type="button" data-f="session" aria-pressed="true">Session</button>
-          <button type="button" data-f="weekly" aria-pressed="false">Weekly</button>
-        </div>
-        <label class="slider" for="p1"><span>Session</span><input type="range" id="p1" min="0" max="100" value="42"><output id="o1">42%</output></label>
-        <label class="slider" for="p2"><span>Weekly</span><input type="range" id="p2" min="0" max="100" value="91"><output id="o2">91%</output></label>
-      </div>
-      <ul class="checks" id="checks" aria-label="Checks"></ul>
-      <p class="lede">Pick a theme or choose the seven colours. Your board shows each change as a preview, without keeping it. Save keeps it on the board; Cancel, closing this tab, or ten minutes without a change puts the board back as it was.</p>
+<main class="page studio" aria-busy="true">
+  <!-- the board, always centred -->
+  <section class="hub" aria-label="Your board">
+    <div class="stage">
+      <svg class="hero" id="hero" viewBox="0 0 600 470" role="img" aria-labelledby="heroTitle">
+        <title id="heroTitle">Board preview</title>
+        <defs>
+          <clipPath id="scrClip"><rect x="0" y="0" width="320" height="240"/></clipPath>
+          <linearGradient id="faceG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff8a45"/><stop offset=".35" stop-color="#ff7425"/><stop offset="1" stop-color="#ee600f"/></linearGradient>
+          <linearGradient id="sheenG" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#000" stop-opacity=".07"/><stop offset=".22" stop-color="#fff" stop-opacity=".05"/><stop offset=".6" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".09"/></linearGradient>
+          <linearGradient id="wallG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b9480a"/><stop offset=".12" stop-color="#d8590d"/><stop offset="1" stop-color="#f77026"/></linearGradient>
+          <linearGradient id="earL" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#c94f08"/><stop offset="1" stop-color="#e2600f"/></linearGradient>
+          <linearGradient id="earR" x1="1" y1="0" x2="0" y2="0"><stop offset="0" stop-color="#c94f08"/><stop offset="1" stop-color="#e2600f"/></linearGradient>
+          <linearGradient id="legG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a94006"/><stop offset=".3" stop-color="#d4580c"/><stop offset="1" stop-color="#e5651a"/></linearGradient>
+          <linearGradient id="glassG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#17181a"/><stop offset=".5" stop-color="#0b0c0d"/><stop offset="1" stop-color="#060607"/></linearGradient>
+          <pattern id="layers" width="8" height="3" patternUnits="userSpaceOnUse"><rect width="8" height=".7" fill="#5a1e00" opacity=".09"/></pattern>
+          <radialGradient id="floorG" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="var(--floor)" style="stop-color: var(--floor)"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+        </defs>
+
+        <ellipse class="floor" cx="300" cy="412" rx="236" ry="20"/>
+        <ellipse class="floor" cx="58" cy="412" rx="44" ry="6"/>
+        <ellipse class="floor" cx="542" cy="412" rx="44" ry="6"/>
+
+        <path class="track" id="usbTrack" d="M80 252 C48 268 52 330 62 374"/>
+        <path class="pulse" id="usbBeam" pathLength="100" d="M80 252 C48 268 52 330 62 374"/>
+        <path class="track wifi" id="wifiTrack" d="M520 252 C552 268 548 330 540 378"/>
+        <path class="pulse" id="wifiBeam" pathLength="100" d="M540 378 C548 330 552 268 520 252"/>
+        <g class="lock" id="lock" transform="translate(553 318)">
+          <circle r="13"/><path d="M-4 -1 v-3 a4 4 0 0 1 8 0 v3"/><rect x="-6" y="-1" width="12" height="8.5" rx="1.5"/>
+        </g>
+
+        <g class="node" id="nodePc">
+          <g class="glyph">
+            <rect class="node-fill" x="36" y="376" width="50" height="32" rx="3"/>
+            <rect class="node-ink" x="36" y="376" width="50" height="32" rx="3"/>
+            <path class="node-ink" d="M26 410 h70"/>
+          </g>
+          <text class="node-label" x="61" y="440" text-anchor="middle">This computer</text>
+          <text class="node-sub" x="61" y="456" text-anchor="middle">USB cable</text>
+        </g>
+        <g class="node ghost" id="nodeRouter">
+          <g class="glyph">
+            <rect class="node-fill" x="516" y="392" width="52" height="18" rx="5"/>
+            <rect class="node-ink" x="516" y="392" width="52" height="18" rx="5"/>
+            <path class="node-ink" d="M528 378 v14 M556 378 v14"/>
+            <circle cx="530" cy="401" r="1.6" class="lamp"/>
+          </g>
+          <text class="node-label" x="542" y="440" text-anchor="middle" id="routerName">WiFi</text>
+          <text class="node-sub" x="542" y="456" text-anchor="middle" id="routerSub">Not set up</text>
+        </g>
+
+        <g id="case">
+          <g fill="url(#legG)">
+            <rect x="152" y="336" width="30" height="74" rx="4"/><rect x="204" y="336" width="30" height="74" rx="4"/>
+            <rect x="366" y="336" width="30" height="74" rx="4"/><rect x="418" y="336" width="30" height="74" rx="4"/>
+          </g>
+          <rect x="74" y="148" width="40" height="122" rx="6" fill="url(#earL)"/>
+          <rect x="486" y="148" width="40" height="122" rx="6" fill="url(#earR)"/>
+          <rect x="100" y="46" width="400" height="320" rx="24" fill="#b94707"/>
+          <rect x="100" y="38" width="400" height="320" rx="24" fill="url(#faceG)"/>
+          <rect x="100" y="38" width="400" height="320" rx="24" fill="url(#sheenG)"/>
+          <rect x="100" y="38" width="400" height="320" rx="24" fill="url(#layers)"/>
+          <path d="M124 39.5 H476" stroke="#ffc49e" stroke-width="1.5" stroke-linecap="round" opacity=".75"/>
+          <rect x="126" y="66" width="348" height="268" rx="9" fill="url(#wallG)"/>
+          <path d="M136 333.5 H464" stroke="#ffa36a" stroke-width="1" opacity=".55"/>
+          <rect x="133" y="73" width="334" height="254" rx="3" fill="url(#glassG)"/>
+          <g transform="translate(140 80)">
+            <g clip-path="url(#scrClip)"><g id="scr"></g></g>
+          </g>
+        </g>
+      </svg>
     </div>
+
+    <div class="ident">
+      <p class="devname" id="devLabel" translate="no">Your BLINK</p>
+      <p class="hubstatus" id="board-status" aria-live="polite" hidden><span class="dot" id="board-dot"></span><span id="board-status-text"></span></p>
+      <div class="hs" id="hs" hidden>
+        <ol aria-hidden="true"><li></li><li></li><li></li><li></li></ol>
+        <span id="hs-text" aria-live="polite"></span>
+      </div>
+    </div>
+
+    <div class="chips" role="group" aria-label="Settings">
+      <button type="button" data-panel="look" aria-controls="pLook pCust" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3.2 12.2A6 6 0 1 1 12.8 12.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M3.2 12.2A6 6 0 0 1 4 4.4" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>Look</button>
+      <button type="button" data-panel="connect" aria-controls="pConn" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M2 6.2a8.5 8.5 0 0 1 12 0M4.4 8.8a5 5 0 0 1 7.2 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="8" cy="12" r="1.5" fill="currentColor"/></svg>Connect</button>
+      <button type="button" data-panel="board" aria-controls="pBoard" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="1.8" y="3" width="12.4" height="9.4" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 14.5v-2M11 14.5v-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Board</button>
+    </div>
+    <!-- Owner, 2026-11-07: Save sits directly under the Look / Connect / Board tabs, and only while Look is open. It is last in the hub, so hiding it moves nothing above it. -->
+    <button type="button" class="btn primary savebtn" id="save" disabled hidden>Save theme to board</button>
   </section>
 
-  <aside class="inspector" aria-label="Theme settings">
-    <section class="group">
-      <h2>Built-in themes</h2>
-      <div class="presets" id="presets"></div>
-    </section>
-
-    <section class="group colours">
-      <h2>Colours</h2>
-      <div class="opt"><span class="olabel">Arc colour</span>
-        <div class="seg" role="group" aria-label="Arc colour">
-          <button type="button" data-m="level" aria-pressed="true">By level</button>
-          <button type="button" data-m="gauge" aria-pressed="false">Per gauge</button>
+  <div class="side" id="sideL">
+    <!-- Look, the left half: themes, and the logo -->
+    <section class="panel wide" id="pLook" aria-labelledby="hLook" hidden>
+      <div class="phead"><h2 id="hLook">Look</h2></div>
+      <div class="tabs" role="tablist" aria-label="Look"><button type="button" role="tab" id="tThemes-t" aria-controls="tThemes" aria-selected="true" tabindex="0">Themes</button><button type="button" role="tab" id="tLogo-t" aria-controls="tLogo" aria-selected="false" tabindex="-1">Logo</button></div>
+      <div class="tabpanel" role="tabpanel" id="tThemes" aria-labelledby="tThemes-t" tabindex="0">
+        <p class="note2"><span class="hov">Point at a theme to preview it on the board.</span><span class="tap">Tap a theme to put it on the board.</span></p>
+        <div class="themes" id="presets" role="group" aria-label="Themes"></div>
+        <div class="say" id="status" role="status" aria-live="polite">
+          <svg class="icon s-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5v.01"/></svg>
+          <svg class="icon s-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9.5"/></svg>
+          <svg class="icon s-err" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>
+          <span id="status-text">Loading your current theme. You can make changes once it is here.</span>
         </div>
       </div>
-      <div class="slots" id="slots"></div>
-      <div class="band" id="band" aria-hidden="true"></div>
-      <div class="bandl" aria-hidden="true"><span>0</span><span>60%</span><span>90% · 100</span></div>
-      <p class="note" id="modenote"></p>
+      <div class="tabpanel" role="tabpanel" id="tLogo" aria-labelledby="tLogo-t" tabindex="0" hidden>
+        <p class="note2">Your company logo, shown each time the board starts.</p>
+        <div class="lhave" id="lHave" hidden><span class="thumb" id="lBoardThumb"></span><span id="lBoardText">A logo is on the board.</span><button type="button" class="btn danger" id="lRemoveB">Remove</button></div>
+        <div id="logoEmpty">
+          <input type="file" id="logoFile" class="sr" accept=".png,.svg,.jpg,.jpeg,.gif,image/png,image/svg+xml,image/jpeg,image/gif">
+          <label class="dropzone" for="logoFile" id="drop"><svg viewBox="0 0 28 28" aria-hidden="true"><rect x="3" y="5" width="22" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M14 18V10M10.5 13.5 14 10l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><b>Drop a logo here</b><span>or <u>choose a file</u>. PNG, SVG, JPEG or GIF.</span></label>
+        </div>
+        <div class="stack" id="logoOn" hidden style="gap:16px">
+          <div class="lfile"><span class="thumb" id="lThumb"></span><div style="min-width:0"><b id="lName"></b><span id="lSize" aria-live="polite"></span></div><button type="button" class="link" id="lReplace">Replace</button><button type="button" class="link" id="lClear">Clear</button></div>
+          <div class="stack">
+            <span class="label" id="lScaleL">Size on the screen</span>
+            <div class="seg" role="group" aria-labelledby="lScaleL" id="lScale">
+              <button type="button" data-s="fill" aria-pressed="true">Fill</button><button type="button" data-s="large" aria-pressed="false">Large</button><button type="button" data-s="margin" aria-pressed="false">With margin</button>
+            </div>
+          </div>
+          <div class="lrow">
+            <div><span class="label" id="lBgL">Background</span><p class="note2" id="lBgNote">From the picture's corner</p></div>
+            <div class="bgpick"><label class="pick" title="Pick a background"><input type="color" id="lBg" value="#000000" aria-labelledby="lBgL"></label><button type="button" class="link sm" id="lBgAuto" style="margin:0">Auto</button></div>
+          </div>
+          <div class="lrow">
+            <label class="label" for="lHold">Stays up for</label>
+            <select class="mini" id="lHold"><option value="3000">3 seconds</option><option value="5000">5 seconds</option><option value="10000">10 seconds</option></select>
+          </div>
+          <div class="sendrow">
+            <div class="btnrow"><button type="button" class="btn primary" id="lSend" disabled>Send to board</button><button type="button" class="btn danger" id="lRemove">Remove</button></div>
+            <p class="msg" id="lMsg" role="status"></p>
+          </div>
+        </div>
+        <ul class="facts" aria-label="What the board can show">
+          <li>Fitted inside 320 by 240 pixels, 65,536 colours, up to 512 KB.</li>
+          <li>Shown after the BLINK animation, for up to 15 seconds.</li>
+        </ul>
+      </div>
+    </section>
+  </div>
+
+  <div class="side" id="sideR">
+    <!-- Look, the right half: customise -->
+    <section class="panel wide" id="pCust" aria-labelledby="hCust" hidden>
+      <div class="phead">
+        <h2 id="hCust">Customise</h2>
+        <p id="themeName" aria-live="polite"></p>
+      </div>
+      <div class="tabs" role="tablist" aria-label="Customise"><button type="button" role="tab" id="tColours-t" aria-controls="tColours" aria-selected="true" tabindex="0">Colours</button><button type="button" role="tab" id="tScreen-t" aria-controls="tScreen" aria-selected="false" tabindex="-1">Screen</button><button type="button" role="tab" id="tTry-t" aria-controls="tTry" aria-selected="false" tabindex="-1">Try it</button></div>
+      <div class="tabpanel" role="tabpanel" id="tColours" aria-labelledby="tColours-t" tabindex="0">
+        <div class="sec">
+          <div class="sec-h"><span>Colours</span><button type="button" class="link sm" id="resetBtn" hidden>Reset</button></div>
+          <div id="slots"></div>
+          <button type="button" class="link" id="more-btn" aria-expanded="false" aria-controls="more">More colours <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+          <div id="more" hidden>
+            <div class="stack" style="margin-bottom:12px">
+              <span class="label" id="lMode">Arc colour</span>
+              <div class="seg" role="group" aria-labelledby="lMode">
+                <button type="button" data-m="level" aria-pressed="true">By level</button>
+                <button type="button" data-m="gauge" aria-pressed="false">Per gauge</button>
+              </div>
+              <p class="note2" id="modenote"></p>
+            </div>
+            <div id="slots-more"></div>
+          </div>
+        </div>
+        <div class="sec">
+          <span class="label" id="lW">Arc thickness</span>
+          <div class="seg" role="group" aria-labelledby="lW" id="segW">
+            <button type="button" data-w="5"><svg viewBox="0 0 40 26" aria-hidden="true" focusable="false"><path d="M6 22 A15 15 0 0 1 34 22" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="2" stroke-linecap="round"/><path class="on" d="M6 22 A15 15 0 0 1 20 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Thin</button><button type="button" data-w="12"><svg viewBox="0 0 40 26" aria-hidden="true" focusable="false"><path d="M6 22 A15 15 0 0 1 34 22" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="4.5" stroke-linecap="round"/><path class="on" d="M6 22 A15 15 0 0 1 20 7" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round"/></svg>Medium</button><button type="button" data-w="22"><svg viewBox="0 0 40 26" aria-hidden="true" focusable="false"><path d="M6 22 A15 15 0 0 1 34 22" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="8" stroke-linecap="round"/><path class="on" d="M6 22 A15 15 0 0 1 20 7" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"/></svg>Bold</button>
+          </div>
+          <span class="label" id="lE">Arc ends</span>
+          <div class="seg" role="group" aria-labelledby="lE"><button type="button" data-e="round" aria-pressed="true">Round</button><button type="button" data-e="flat" aria-pressed="false">Flat</button></div>
+          <span class="label" id="lD">Moving dot</span>
+          <div class="seg" role="group" aria-labelledby="lD"><button type="button" data-d="on" aria-pressed="true">Show</button><button type="button" data-d="off" aria-pressed="false">Hide</button></div>
+        </div>
+        <div class="sec">
+          <span class="sec-h">Checks</span>
+          <ul class="checks" id="checks" aria-label="Checks"></ul>
+        </div>
+        <div class="sec">
+          <div class="keep">
+            <button type="button" class="btn" id="cancel">Cancel</button>
+          </div>
+        </div>
+        <div class="sec">
+          <span class="sec-h">Share code</span>
+          <div class="code" id="code"></div>
+          <p class="note2">The same theme as one code, for blink theme set on another desk, or to post for other people.</p>
+          <div class="keep"><button type="button" class="btn" id="copy-code"><span class="lbl">Copy share code</span></button></div>
+          <div class="paste">
+            <label class="sr" for="paste">Share code to load</label>
+            <input type="text" id="paste" placeholder="Paste a share code (BT1.…)" spellcheck="false" autocomplete="off" aria-describedby="m-paste">
+            <button type="button" class="btn" id="load"><span>Load</span></button>
+          </div>
+          <p class="fmsg" id="m-paste" aria-live="polite"></p>
+          <span class="sec-h">The same from a terminal</span>
+          <div class="cmd" id="cmd"></div>
+          <div class="keep"><button type="button" class="btn" id="copy-cmd"><span class="lbl">Copy command</span></button></div>
+          <p class="note2">Runs on this computer and saves the theme exactly as Save does.</p>
+        </div>
+      </div>
+      <div class="tabpanel" role="tabpanel" id="tScreen" aria-labelledby="tScreen-t" tabindex="0" hidden>
+        <div class="sec">
+          <span class="label" id="vL">Main screen</span>
+          <div class="views" role="group" aria-labelledby="vL" id="views"><button type="button" class="vw" data-v="gauges" aria-pressed="false"><svg viewBox="0 0 80 60" aria-hidden="true"><rect x=".5" y=".5" width="79" height="59" rx="5" fill="none" stroke="currentColor" stroke-opacity=".35"/><path d="M16.2 35.8 A11 11 0 1 1 31.8 35.8" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="3" stroke-linecap="round"/><path class="lit" d="M16.2 35.8 A11 11 0 0 1 19.0 18.2" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><path d="M48.2 35.8 A11 11 0 1 1 63.8 35.8" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="3" stroke-linecap="round"/><path class="lit" d="M48.2 35.8 A11 11 0 1 1 64.9 21.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><rect x="14" y="44" width="20" height="2" rx="1" fill="currentColor" opacity=".4"/><rect x="46" y="44" width="20" height="2" rx="1" fill="currentColor" opacity=".4"/></svg><b>Two gauges</b></button><button type="button" class="vw" data-v="focus" data-f="session" aria-pressed="false"><svg viewBox="0 0 80 60" aria-hidden="true"><rect x=".5" y=".5" width="79" height="59" rx="5" fill="none" stroke="currentColor" stroke-opacity=".35"/><path d="M29.4 37.6 A15 15 0 1 1 50.6 37.6" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="4" stroke-linecap="round"/><path class="lit" d="M29.4 37.6 A15 15 0 0 1 33.2 13.6" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><rect x="24" y="48" width="32" height="2" rx="1" fill="currentColor" opacity=".4"/></svg><b>Session big</b></button><button type="button" class="vw" data-v="focus" data-f="weekly" aria-pressed="false"><svg viewBox="0 0 80 60" aria-hidden="true"><rect x=".5" y=".5" width="79" height="59" rx="5" fill="none" stroke="currentColor" stroke-opacity=".35"/><path d="M29.4 37.6 A15 15 0 1 1 50.6 37.6" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="4" stroke-linecap="round"/><path class="lit" d="M29.4 37.6 A15 15 0 1 1 52.1 18.2" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><rect x="24" y="48" width="32" height="2" rx="1" fill="currentColor" opacity=".4"/></svg><b>Weekly big</b></button><button type="button" class="vw" data-card="burn" aria-pressed="false"><svg viewBox="0 0 80 60" aria-hidden="true"><rect x=".5" y=".5" width="79" height="59" rx="5" fill="none" stroke="currentColor" stroke-opacity=".35"/><rect x="12" y="13" width="18" height="4" rx="1" fill="currentColor" opacity=".5"/><rect class="litf" x="9" y="36" width="2" height="4" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="12" y="34" width="2" height="6" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="15" y="35" width="2" height="5" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="18" y="32" width="2" height="8" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="21" y="33" width="2" height="7" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="24" y="30" width="2" height="10" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="27" y="31" width="2" height="9" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="30" y="28" width="2" height="12" fill="currentColor" stroke="none" opacity=".55"/><rect class="litf" x="33" y="26" width="2" height="14" fill="currentColor" stroke="none" opacity="1"/><rect class="litf" x="36" y="27" width="2" height="13" fill="currentColor" stroke="none" opacity="1"/><rect class="litf" x="39" y="23" width="2" height="17" fill="currentColor" stroke="none" opacity="1"/><rect class="litf" x="42" y="20" width="2" height="20" fill="currentColor" stroke="none" opacity="1"/><rect x="8" y="40" width="37" height="1" fill="currentColor" opacity=".5"/><path d="M50.9 35.1 A10 10 0 1 1 65.1 35.1" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="3" stroke-linecap="round"/><path class="lit" d="M50.9 35.1 A10 10 0 1 1 66.1 22.1" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg><b>Burn view</b></button></div>
+          <p class="note2" id="vNote" aria-live="polite"></p>
+        </div>
+        <div class="sec">
+          <span class="label" id="mainL">Main provider</span>
+          <div class="seg" role="group" aria-labelledby="mainL" id="segMain" style="grid-template-columns: repeat(2, minmax(0, 1fr))"><button type="button" data-src="claude" aria-pressed="false">Claude</button><button type="button" data-src="codex" aria-pressed="false">Codex</button></div>
+          <p class="note2">Its gauges come first when the board shows both.</p>
+          <p class="msg" id="s-msg" role="status"></p>
+        </div>
+      </div>
+      <div class="tabpanel" role="tabpanel" id="tTry" aria-labelledby="tTry-t" tabindex="0" hidden>
+        <p class="note2">Move the gauges to see every colour. This changes only the preview.</p>
+        <div class="sec try">
+          <div class="sec-h"><label for="p1">Try session at</label><output id="o1" for="p1">42%</output></div>
+          <div class="tryrow">
+            <div><input type="range" id="p1" min="0" max="100" value="42"><div class="marks" aria-hidden="true"><span style="left:0">0</span><span style="left:60%">60%</span><span style="left:90%">90%</span></div></div>
+            <button type="button" class="play" id="sweep" aria-label="Sweep both arcs from 0 to 100%" title="Sweep 0 to 100%"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.2v9.6l7.6-4.8z" fill="currentColor"/></svg></button>
+          </div>
+        </div>
+        <div class="sec try">
+          <div class="sec-h"><label for="p2">Try weekly at</label><output id="o2" for="p2">91%</output></div>
+          <div><input type="range" id="p2" min="0" max="100" value="91"><div class="marks" aria-hidden="true"><span style="left:0">0</span><span style="left:60%">60%</span><span style="left:90%">90%</span></div></div>
+        </div>
+      </div>
     </section>
 
-    <section class="group">
-      <h2>Arcs and dot</h2>
-      <div class="opts">
-        <div class="opt"><span class="olabel">Arc thickness</span><div class="seg" role="group" aria-label="Arc thickness">
-          <button type="button" data-w="5" aria-pressed="false">Thin</button><button type="button" data-w="12" aria-pressed="true">Normal</button><button type="button" data-w="22" aria-pressed="false">Thick</button></div></div>
-        <div class="opt"><span class="olabel">Arc ends</span><div class="seg" role="group" aria-label="Arc ends">
-          <button type="button" data-e="round" aria-pressed="true">Round</button><button type="button" data-e="flat" aria-pressed="false">Flat</button></div></div>
-        <div class="opt"><span class="olabel">Moving dot</span><div class="seg" role="group" aria-label="Moving dot">
-          <button type="button" data-d="on" aria-pressed="true">Show</button><button type="button" data-d="off" aria-pressed="false">Hide</button></div></div>
+    <section class="panel" id="pConn" aria-labelledby="hConn" hidden>
+      <h2 id="hConn">Connect</h2>
+      <div class="problem" id="c-problem" hidden>
+        <b>Can't reach the board</b>
+        <p>Check the USB cable, or that the board is switched on. BLINK keeps trying.</p>
+        <button type="button" class="btn primary" id="c-retry">Try again</button>
+      </div>
+      <div class="rows" id="connect-body">
+        <div class="linkcard">
+          <span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path id="c-ic" d="M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <div><b id="c-title">Over USB</b><span class="quiet" id="c-sub" translate="no"></span></div>
+          <span class="state" id="c-state"></span>
+        </div>
+        <div class="stack">
+          <button type="button" class="btn primary" id="c-move" aria-expanded="false" aria-controls="c-picker">Move to WiFi</button>
+          <p class="msg bad" id="c-need" hidden>Plug the board in with its USB cable to set up WiFi.</p>
+          <div class="stack" id="c-picker" hidden>
+            <fieldset style="border:0;margin:0;padding:0;min-width:0" class="stack">
+              <legend class="label" style="padding:0;margin-bottom:8px">Networks the board can hear</legend>
+              <ul class="nets" id="c-nets"></ul>
+            </fieldset>
+            <p class="scanning" id="c-scanning" role="status" aria-live="polite" hidden><span class="spin" aria-hidden="true"></span>Looking for networks…</p>
+            <p class="note">2.4 GHz networks only</p>
+            <button type="button" class="link" id="c-scan">Scan again</button>
+            <button type="button" class="link" id="c-other">Network not listed?</button>
+            <div class="stack" id="c-other-box" hidden>
+              <label class="label" for="c-name">Network name</label>
+              <div class="pw"><input id="c-name" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" translate="no"></div>
+            </div>
+            <div class="stack">
+              <label class="label" for="c-pw" id="c-pwl">Password</label>
+              <div class="pw" id="c-pwbox">
+                <input id="c-pw" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="64" aria-describedby="c-pwn">
+                <button type="button" id="c-show" aria-pressed="false" aria-label="Show password">Show</button>
+              </div>
+              <p class="note" id="c-pwn"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 7V5a3.5 3.5 0 0 1 7 0v2" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="3" y="7" width="10" height="7" rx="1.5" fill="currentColor"/></svg><span>Sent to the board over USB only, never saved on this computer.</span></p>
+            </div>
+            <div class="actions">
+              <button type="button" class="btn primary" id="c-go">Connect</button>
+              <button type="button" class="link" id="c-cancel">Cancel</button>
+            </div>
+          </div>
+          <button type="button" class="btn danger" id="c-forget" hidden>Forget WiFi</button>
+          <p class="msg" id="c-msg" role="status"></p>
+        </div>
       </div>
     </section>
 
-    <section class="group">
-      <h2>Share code</h2>
-      <div class="code" id="code"></div>
-      <p class="desc">The same theme as one code, for <code>blink theme set &lt;code&gt;</code> on another desk, or to post for other people.</p>
-      <div class="paste">
-        <label class="visually-hidden" for="paste">Share code to load</label>
-        <input type="text" id="paste" placeholder="Paste a share code (BT1.…)" spellcheck="false" autocomplete="off" aria-describedby="m-paste">
-        <button type="button" class="btn" id="load"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span>Load</span></button>
+    <section class="panel wide" id="pBoard" aria-labelledby="hBoard" hidden>
+      <h2 id="hBoard">Board</h2>
+      <div class="tabs" role="tablist" aria-label="Board"><button type="button" role="tab" id="tDevice-t" aria-controls="tDevice" aria-selected="true" tabindex="0">This board</button><button type="button" role="tab" id="tComputer-t" aria-controls="tComputer" aria-selected="false" tabindex="-1">This computer</button></div>
+      <div class="tabpanel rows" role="tabpanel" id="tDevice" aria-labelledby="tDevice-t" tabindex="0">
+        <div class="stack">
+          <span class="label" id="devIdL">Board id</span>
+          <span class="val" id="devId" translate="no">Not reported yet</span>
+        </div>
+        <div class="stack">
+          <span class="label" id="brL">Brightness</span>
+          <div class="seg seg5" role="group" aria-labelledby="brL" id="segBr">
+            <button type="button" data-b="20" aria-pressed="false">20%</button><button type="button" data-b="40" aria-pressed="false">40%</button><button type="button" data-b="60" aria-pressed="false">60%</button><button type="button" data-b="80" aria-pressed="false">80%</button><button type="button" data-b="100" aria-pressed="false">100%</button>
+          </div>
+          <p class="msg" id="b-msg" role="status"></p>
+        </div>
+        <div class="fw">
+          <span class="quiet">Firmware <span class="val" id="devFw">unknown</span></span>
+          <span class="tag" id="devTag" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="devTagT">Up to date</span></span>
+        </div>
+        <div class="onboard">
+          <b style="font-weight:500">On the board<span class="new">New</span></b>
+          <p>The board's Settings screen swaps its Theme button for Open on PC, which opens this page on your computer.</p>
+          <button type="button" class="btn" id="showSet" aria-pressed="false">Show it on the board</button>
+        </div>
+        <div class="stack">
+          <button type="button" class="link" id="detBtn" aria-expanded="false" aria-controls="det">Details <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+          <div class="stack" id="det" hidden style="gap:14px">
+            <div class="line"><span class="label">Address</span><span class="val" id="devAddr">Unknown</span></div>
+            <div class="line"><span class="label">Saved WiFi</span><span class="quiet" id="savedNet">None</span></div>
+            <button type="button" class="btn danger" id="forgetBtn" hidden>Forget WiFi</button>
+          </div>
+        </div>
       </div>
-      <p class="fmsg" id="m-paste" aria-live="polite"></p>
-      <div class="termhead">
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
-        <span>The same from a terminal</span>
-        <button type="button" class="btn small ghost" id="copy-cmd"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy</span></button>
+      <div class="tabpanel" role="tabpanel" id="tComputer" aria-labelledby="tComputer-t" tabindex="0" hidden>
+        <div class="line"><span class="label">Usage comes from</span><span class="quiet" id="envName">This computer</span></div>
+        <div>
+          <div class="sw2"><div><b id="cfgStatusL">Service incidents</b><span id="cfgStatusH">Show outages from status.claude.com and status.openai.com on the board</span></div><button type="button" class="switch" role="switch" id="cfgStatus" data-key="status_page" aria-checked="false" aria-labelledby="cfgStatusL" aria-describedby="cfgStatusH"><i></i></button></div>
+          <div class="sw2"><div><b id="cfgUpdateL">Update the app by itself</b><span id="cfgUpdateH">New versions install when the board is idle</span></div><button type="button" class="switch" role="switch" id="cfgUpdate" data-key="auto_update" aria-checked="false" aria-labelledby="cfgUpdateL" aria-describedby="cfgUpdateH"><i></i></button></div>
+          <div class="sw2"><div><b id="cfgRefreshL">Keep figures fresh<span class="new">New</span></b><span id="cfgRefreshH">Runs Claude Code's own /usage now and then. Sends no messages.</span></div><button type="button" class="switch" role="switch" id="cfgRefresh" data-key="usage_refresh" aria-checked="false" aria-labelledby="cfgRefreshL" aria-describedby="cfgRefreshH"><i></i></button></div>
+          <div class="sw2"><div><b id="cfgDozeL">Doze when nobody's around<span class="new">New</span></b><span id="cfgDozeH">Dims the board after 4 hours with nothing running</span></div><button type="button" class="switch" role="switch" id="cfgDoze" data-soon="1" aria-checked="false" aria-labelledby="cfgDozeL" aria-describedby="cfgDozeH"><i></i></button></div>
+        </div>
+        <p class="msg" id="k-msg" role="status"></p>
       </div>
-      <div class="cmd" id="cmd"></div>
-      <p class="desc">Runs on this computer and saves the theme exactly as Save does.</p>
     </section>
-  </aside>
+  </div>
 </main>
 
 <!--
   Shown, and the page behind it made inert, when this tab stops being the
-  live builder. Its words are written by the script with textContent; the
+  live page. Its words are written by the script with textContent; the
   heading and the reason sentence change with the ending, so they are
   empty here (see showNotice). The last line is the countdown after a save
   or a cancel, and "You can close this tab." otherwise.
@@ -380,7 +845,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     <h2 id="notice-title"></h2>
     <p id="notice-why"></p>
     <p id="notice-keep-text" hidden></p>
-    <button type="button" class="btn primary" id="notice-copy" hidden><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span class="lbl">Copy share code</span></button>
+    <button type="button" class="btn primary" id="notice-copy" hidden><span class="lbl">Copy share code</span></button>
     <div class="code" id="notice-code" hidden></div>
     <p class="n-end" id="notice-end" aria-live="polite">You can close this tab.</p>
     <button type="button" class="btn primary" id="notice-close"><span class="lbl">Close tab</span></button>
@@ -392,13 +857,13 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   'use strict';
   // The order of the colours on the wire (contract "c"), and their keys here.
   var SLOTS = [
-    { k: 'bg',   w: 'bg',     name: 'Background',     hint: 'Behind everything' },
+    { k: 'bg',   w: 'bg',     name: 'Background',     hint: 'Behind everything', main: 1 },
     { k: 'text', w: 'text',   name: 'Text',           hint: 'Numbers, labels, the dot' },
     { k: 'g1',   w: 'gauge1', name: 'Gauge 1',        hint: 'Left arc (session), in per-gauge mode', mode: 'gauge' },
     { k: 'g2',   w: 'gauge2', name: 'Gauge 2',        hint: 'Right arc (weekly), in per-gauge mode', mode: 'gauge' },
-    { k: 'low',  w: 'low',    name: 'Under 60%',      hint: 'Plenty left' },
-    { k: 'mid',  w: 'mid',    name: '60% to 90%',     hint: 'Getting there' },
-    { k: 'high', w: 'high',   name: '90% and above',  hint: 'Almost used up; also the warning line' }
+    { k: 'low',  w: 'low',    name: 'Low',            hint: 'Under 60%', main: 1 },
+    { k: 'mid',  w: 'mid',    name: 'Middle',         hint: '60% to 90%', main: 1 },
+    { k: 'high', w: 'high',   name: 'High',           hint: '90% and above', main: 1 }
   ];
   // THEME_IDS 0..11, in id order, written in by pc/theme_server.py from
   // pc/theme_builtins.py, which is generated from the firmware's own table
@@ -410,7 +875,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var PRESETS = BUILTINS.map(function (b) {
     var c = b.c.map(function (h) { return h.toUpperCase(); });
     return [b.name, { bg: c[0], text: c[1], g1: c[2], g2: c[3], low: c[4], mid: c[5], high: c[6],
-                      w: b.w, e: b.ends, d: b.dot ? 'on' : 'off', mode: b.by }];
+                      w: b.w, e: b.ends, d: b.dot ? 'on' : 'off', mode: b.by, grey: b.grey.toUpperCase() }];
   });
   var CLI_NAMES = BUILTINS.map(function (b) { return b.cli; });
   // 3.05, the computer's floor (pc/theme.py MIN_CONTRAST): clear of the
@@ -419,13 +884,21 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   var HEX = /^[0-9a-fA-F]{6}$/;
 
   // preset: the id of an untouched built-in, or -1 for the custom theme.
+  // base: the built-in the edits started from, for "Custom, changed from Dark".
+  // screen: what the board draws, usage | settings | startup | connection.
+  // left: what the two-gauge screen shows in its left half, the session
+  // gauge or, on an account with no five-hour window, the burn view.
+  // Preview only, like the weekly card and the sliders: the board puts the
+  // burn view up by itself and has no setting for it (docs/plans/burn-5h.md).
+  var st = Object.assign({ mode: 'level', view: 'gauges', left: 'gauge', fw: 'session', p1: 42, p2: 91, preset: 0, base: 0,
+                           screen: 'usage', link: null, logo: null, bright: null, versions: null }, PRESETS[0][1]);
   // The table's own track and grey for each built-in, by id; see burnInks().
   var BUILTIN_TG = BUILTINS.map(function (b) { return { track: b.track.toUpperCase(), grey: b.grey.toUpperCase() }; });
   var DARK_ID = BUILTINS.map(function (b) { return b.key; }).indexOf('dark');
-  // left: what the two-gauge screen shows in its left half, the session
-  // gauge or, on an account with no five-hour window, the burn view.
-  // Preview only, like view and the sliders: it is not part of a theme.
-  var st = Object.assign({ mode: 'level', view: 'gauges', left: 'gauge', fw: 'session', p1: 42, p2: 91, preset: 0 }, PRESETS[0][1]);
+  // The settings page (BuilderServer persistent) stays up through a theme
+  // save and takes a click on a theme as the save; `blink theme` does not.
+  // Known once /api/state answers.
+  var persistent = false;
   var finished = false, previewTimer = null, lastSent = null;
   // loaded: /api/state has answered and the page shows the owner's theme.
   // Until then the page holds only its own default, preset 0, and Save was
@@ -510,8 +983,12 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // and aria-invalid stayed under a valid colour after a preset click
   // (review of fp/builder-look, S1).
   function fromOutside() { bad = {}; }
+  function pickPreset(i) { Object.assign(st, PRESETS[i][1]); st.preset = i; st.base = i; fromOutside(); }
 
-  // ---------------------------------------------------------------- drawing
+  // ---------------------------------------------------------------- the board
+  // render(), gauge(), arcPath(), el(), customDim and dotColours below are the
+  // old builder's, unchanged (tests/pc/test_theme_page.py pins four of them
+  // by hash: gauge, arcPath, customDim and readableMix): the preview is the board's own drawing and was reviewed as such.
   var NS = 'http://www.w3.org/2000/svg';
   function el(tag, attrs, text) { var e = document.createElementNS(NS, tag); for (var k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; return e; }
   function pt(cx, cy, r, deg) { var a = deg * Math.PI / 180; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
@@ -526,6 +1003,176 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     if (p > 0) svg.appendChild(el('path', { d: arcPath(cx, cy, r, 135, Math.max(end, 135.5)), fill: 'none', stroke: '#' + col, 'stroke-width': w, 'stroke-linecap': cap }));
     if (st.d === 'on') { var k = pt(cx, cy, r, end); svg.appendChild(el('circle', { cx: k[0], cy: k[1], r: Math.max(5, w / 2 + 2), fill: '#' + txt, stroke: '#' + st.bg, 'stroke-width': 2 })); }
     svg.appendChild(el('text', { x: cx, y: cy + pctSize * .36, 'text-anchor': 'middle', 'font-family': 'Montserrat, sans-serif', 'font-size': pctSize, 'font-weight': 500, fill: '#' + txt }, Math.round(p) + '%'));
+  }
+
+  // The screens beside usage, drawn the way the firmware draws its own: arcs,
+  // rects, lines, text in Montserrat and the logo, no blur or gradient. The
+  // connection screen is the design's (docs/design/settings-page.md), not one
+  // the firmware has: firmware draws nothing after a join, and this preview
+  // is the page's own. Colours the firmware fixes (the boot screen's white
+  // and black) and the design's orange are written as rgb() and names, not as the theme's
+  // hex: a six-digit literal in this script is a palette that did not come
+  // from theme.c, and tests/pc/test_theme_builtins.py fails on one.
+  var WHITE = 'white', BLACK = 'black', ORANGE = 'rgb(255,106,19)', GREY = 'rgb(138,145,153)';
+  function txtF(g, x, y, size, fill, s, extra) {
+    var a = { x: x, y: y, 'text-anchor': 'middle', 'font-family': 'Montserrat, sans-serif', 'font-size': size, fill: fill };
+    for (var k in extra) a[k] = extra[k];
+    g.appendChild(el('text', a, s));
+  }
+  function txt(g, x, y, size, col, s, extra) { txtF(g, x, y, size, '#' + col, s, extra); }
+  // The status-bar link mark, about 21 px wide, alone in the top right: the
+  // status dot is gone (owner, 2026-11-07) and the mark's COLOUR is the
+  // status, as usage_view.c refresh_dots() colours it (branch
+  // wifi/fw-linkicon): live is the theme's live colour (theme_dot_colours,
+  // so dotColours), stale the theme's stale colour, error COL_RED (the
+  // theme's high) and no link or no data COL_GREY (the theme's grey).
+  // A built-in's grey is theme.c's own table, served with it; a custom
+  // theme's is custom_grey(), customGrey() above. Glyph: WiFi on a WiFi link,
+  // USB otherwise, unpaired included. tests/pc/test_theme_builtins.py runs
+  // customGrey beside the C.
+  function linkColour() {
+    var dc = dotColours(st.low, st.mid, st.bg);
+    var grey = st.preset >= 0 && PRESETS[st.preset] ? PRESETS[st.preset][1].grey : customGrey(st.text, st.bg);
+    return '#' + { live: dc[0], stale: dc[1], error: st.high, none: grey }[st.linkState || 'none'];
+  }
+  function linkMark(g, x, y) {
+    var c = linkColour();
+    var line = { fill: 'none', stroke: c, 'stroke-width': 1.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
+    function P(d, extra) { g.appendChild(el('path', Object.assign({ d: d }, extra || line))); }
+    if (st.link === 'wifi') {
+      P('M' + (x - 9) + ' ' + (y - 2) + ' a13 13 0 0 1 18 0');
+      P('M' + (x - 6) + ' ' + (y + 1) + ' a8.5 8.5 0 0 1 12 0');
+      P('M' + (x - 3) + ' ' + (y + 4) + ' a4 4 0 0 1 6 0');
+      g.appendChild(el('circle', { cx: x, cy: y + 7, r: 1.5, fill: c }));
+    } else {
+      P('M' + (x - 7) + ' ' + y + ' H' + (x + 6));
+      g.appendChild(el('circle', { cx: x - 8.5, cy: y, r: 2.2, fill: c }));
+      P('M' + (x + 11) + ' ' + y + ' L' + (x + 6.5) + ' ' + (y - 2.8) + ' V' + (y + 2.8) + ' Z', { fill: c, stroke: c, 'stroke-width': 1 });
+      P('M' + (x - 3.5) + ' ' + y + ' L' + (x - 2) + ' ' + (y - 4.5) + ' H' + (x + .5));
+      g.appendChild(el('circle', { cx: x + 2.3, cy: y - 4.5, r: 1.6, fill: c }));
+      P('M' + (x - 1.5) + ' ' + y + ' L' + (x) + ' ' + (y + 4.5) + ' H' + (x + .5));
+      g.appendChild(el('rect', { x: x + .5, y: y + 3, width: 3, height: 3, fill: c }));
+    }
+  }
+  function tileIcon(g, kind, cx, cy, c) {
+    var s = { fill: 'none', stroke: '#' + c, 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
+    function P(d) { g.appendChild(el('path', Object.assign({ d: d }, s))); }
+    if (kind === 'sun') {
+      g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 4.5 }, s)));
+      for (var i = 0; i < 8; i++) { var a = i * Math.PI / 4; P('M' + (cx + 7.5 * Math.cos(a)).toFixed(1) + ' ' + (cy + 7.5 * Math.sin(a)).toFixed(1) + ' L' + (cx + 10 * Math.cos(a)).toFixed(1) + ' ' + (cy + 10 * Math.sin(a)).toFixed(1)); }
+    }
+    if (kind === 'laptop-out') { P('M' + (cx - 10) + ' ' + (cy + 6) + ' h20 M' + (cx - 8) + ' ' + (cy + 4) + ' v-11 h16 v11'); P('M' + (cx - 2) + ' ' + (cy + 1) + ' l5 -5 M' + (cx - .5) + ' ' + (cy - 4) + ' h3.5 v3.5'); }
+    if (kind === 'focus') { g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 9 }, s))); g.appendChild(el('circle', { cx: cx, cy: cy, r: 3.5, fill: '#' + c })); }
+    if (kind === 'info') { g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 9 }, s))); P('M' + cx + ' ' + (cy - 5) + ' v.1 M' + cx + ' ' + (cy - 1.5) + ' v6'); }
+    if (kind === 'link') { P('M' + (cx - 1) + ' ' + (cy + 3) + ' l4 -4 a3.5 3.5 0 0 1 5 5 l-3 3 a3.5 3.5 0 0 1 -5 0'); P('M' + (cx + 1) + ' ' + (cy - 3) + ' l-4 4 a3.5 3.5 0 0 1 -5 -5 l3 -3 a3.5 3.5 0 0 1 5 0'); }
+    if (kind === 'update') { P('M' + (cx + 8) + ' ' + (cy - 2) + ' A8.5 8.5 0 1 0 ' + (cx + 7) + ' ' + (cy + 5)); P('M' + (cx + 9) + ' ' + (cy - 8) + ' V' + (cy - 2) + ' H' + (cx + 3)); }
+  }
+  // The board's own Settings screen (ui_settings.c): Back, the title, a rule
+  // at y 40 and six 94 x 91 tiles (gap 7) from (12, 46), three across. A
+  // tile's second line is drawn only when the page has the figure: the page
+  // shows nothing it was not told. A tile with none centres icon and name.
+  function drawSettings(g, dim) {
+    var card = mix(st.bg, st.text, .06), line = mix(st.bg, st.text, .1);
+    g.appendChild(el('rect', { x: 6, y: 4, width: 60, height: 32, rx: 6, fill: '#' + card, stroke: '#' + line }));
+    g.appendChild(el('path', { d: 'M39 14 L33 20 L39 26', fill: 'none', stroke: '#' + st.text, 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
+    txt(g, 160, 26, 14, st.text, 'Settings', { 'font-weight': 600 });
+    g.appendChild(el('rect', { x: 0, y: 40, width: 320, height: 1, fill: '#' + line }));
+    var focus = st.view === 'focus' ? (st.fw === 'weekly' ? 'Weekly' : 'Session') : 'Off';
+    [['sun', 'Brightness', st.bright == null ? '' : st.bright + '%'], ['laptop-out', 'Open on PC', 'In browser'],
+     ['focus', 'Focus', focus], ['update', 'Update', ''],
+     ['link', 'Connection', st.link === 'wifi' ? 'WiFi' : st.link === 'usb' ? 'USB' : ''],
+     ['info', 'About', st.versions ? st.versions.board : '']].forEach(function (t, k) {
+      var x = 12 + (k % 3) * 101, y = 46 + Math.floor(k / 3) * 98, hi = k === 1, dy = t[2] ? 0 : 11;
+      g.appendChild(el('rect', { x: x + .5, y: y + .5, width: 93, height: 90, rx: 8, fill: '#' + card, stroke: '#' + (hi ? st.g1 : line), 'stroke-width': hi ? 1.5 : 1 }));
+      tileIcon(g, t[0], x + 47, y + 24 + dy, hi ? st.g1 : st.text);
+      txt(g, x + 47, y + 55 + dy, 13, st.text, t[1], { 'font-weight': 500 });
+      if (t[2]) txt(g, x + 47, y + 75, 11.5, dim, t[2]);
+    });
+  }
+  // The start-up screen: the logo fitted on its background, or the BLINK mark
+  // the boot animation ends on.
+  function drawStartup(g) {
+    var L = st.logo;
+    g.appendChild(el('rect', { x: 0, y: 0, width: 320, height: 240, fill: L ? L.bg : BLACK }));
+    if (L) {
+      var k = Math.min(320 / L.w, 240 / L.h) * (L.scale || 1), w = L.w * k, h = L.h * k;
+      g.appendChild(el('image', { href: L.url, x: (160 - w / 2).toFixed(1), y: (120 - h / 2).toFixed(1), width: w.toFixed(1), height: h.toFixed(1), preserveAspectRatio: 'none' }));
+    } else {
+      g.appendChild(el('rect', { x: 112, y: 84, width: 96, height: 72, rx: 15, fill: 'none', stroke: WHITE, 'stroke-width': 6 }));
+      g.appendChild(el('rect', { x: 130, y: 110, width: 20, height: 20, rx: 6, fill: WHITE }));
+      g.appendChild(el('path', { d: 'M190 110 L174 120 L190 130', fill: 'none', stroke: WHITE, 'stroke-width': 7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+      txtF(g, 160, 192, 12, GREY, 'No logo yet');
+    }
+  }
+  // The design's screen for a few seconds after a join (the board draws no
+  // such screen at this commit): circles, a dashed
+  // line (an offset shift is cheap in LVGL) and two labels.
+  function drawConnection(g, dim, track, pill) {
+    g.appendChild(el('circle', { cx: 160, cy: 92, r: 70, fill: 'none', stroke: '#' + track, 'stroke-dasharray': '2 6' }));
+    g.appendChild(el('line', { 'class': 'dash', x1: 86, y1: 92, x2: 234, y2: 92, stroke: '#' + st.low, 'stroke-width': 3, 'stroke-dasharray': '6 6' }));
+    g.appendChild(el('circle', { cx: 70, cy: 92, r: 16, fill: '#' + pill, stroke: '#' + st.text, 'stroke-width': 2 }));
+    g.appendChild(el('rect', { x: 62, y: 86, width: 16, height: 11, rx: 2, fill: 'none', stroke: '#' + st.text, 'stroke-width': 1.6 }));
+    g.appendChild(el('line', { x1: 59, y1: 100, x2: 81, y2: 100, stroke: '#' + st.text, 'stroke-width': 1.6 }));
+    g.appendChild(el('circle', { cx: 250, cy: 92, r: 16, fill: ORANGE }));
+    g.appendChild(el('rect', { x: 242, y: 86, width: 16, height: 12, rx: 1.5, fill: '#' + st.bg }));
+    txt(g, 160, 190, 17, st.text, 'Linked to this computer', { 'font-weight': 600 });
+    txt(g, 160, 212, 13, dim, 'WiFi • encrypted');
+  }
+  function drawOther(g, dim, track, pill) {
+    if (st.screen === 'settings') drawSettings(g, dim);
+    else if (st.screen === 'startup') drawStartup(g);
+    else if (st.screen === 'connection') drawConnection(g, dim, track, pill);
+  }
+  // The title says what the board shows, for a screen reader: the hero is
+  // role="img" and a drawing says nothing otherwise.
+  function setTitle() {
+    var t = 'Board preview, ' + (st.preset >= 0 ? PRESETS[st.preset][0] + ' theme' : 'custom theme') + ': ', wk = st.fw === 'weekly';
+    if (st.screen === 'settings') t += "the board's Settings screen.";
+    else if (st.screen === 'startup') t += st.logo ? 'the start-up screen with your logo.' : 'the start-up screen, no logo yet.';
+    else if (st.screen === 'connection') t += 'the connection screen, linked to this computer over WiFi.';
+    else if (st.view === 'focus') t += 'Claude, ' + (wk ? 'weekly ' + Math.round(st.p2) + '%, resets in 1d 1h; session ' + Math.round(st.p1) + '%.' : 'session ' + Math.round(st.p1) + '%, resets in 3h 40m; weekly ' + Math.round(st.p2) + '%.');
+    else if (st.left === 'burn') t += 'Claude, the burn view in place of the session gauge; weekly ' + Math.round(st.p2) + '%, resets in 1d 1h.';
+    else t += 'Claude, session ' + Math.round(st.p1) + '%, resets in 3h 40m; weekly ' + Math.round(st.p2) + '%, resets in 1d 1h.';
+    var e = document.getElementById('heroTitle');
+    if (e.textContent !== t) e.textContent = t;
+  }
+  // What a task further on (Connect, Board) calls to move the board: any of
+  // theme (a wire theme), view, focus, session_pct, weekly_pct, link,
+  // screen, logo. A board's screen is a thing the page was told, not a guess.
+  var board = {
+    draw: drawBoard,
+    show: function (s) {
+      if ('theme' in s && s.theme) applyTheme(s.theme);
+      if ('view' in s) st.view = s.view;
+      if ('focus' in s) st.fw = s.focus;
+      if ('session_pct' in s) st.p1 = +s.session_pct;
+      if ('weekly_pct' in s) st.p2 = +s.weekly_pct;
+      if ('link' in s) { st.link = s.link; paintLink(); }
+      // live | stale | error | none, set by the page's own link events (a link
+      // made, no board, a failed join), never by the status line's kind. Stale
+      // (data old) is not an event the page has: it asks once on load.
+      if ('linkState' in s) st.linkState = s.linkState;
+      if ('screen' in s) st.screen = s.screen;
+      if ('logo' in s) st.logo = s.logo;
+      render();
+    },
+    // The design's connection screen, held by the page for 4.2 s, then
+    // whatever the panels say.
+    connected: function () {
+      clearTimeout(board.timer);
+      st.screen = 'connection'; render();
+      board.timer = setTimeout(function () { board.timer = null; syncScreen(); render(); }, 4200);
+    },
+    timer: null
+  };
+  // The desk beside the case: the cable line and the router follow the link.
+  function paintLink() {
+    var w = st.link === 'wifi', u = st.link === 'usb';
+    document.getElementById('usbTrack').setAttribute('class', 'track' + (u ? ' live' : ''));
+    document.getElementById('wifiTrack').setAttribute('class', 'track wifi' + (w ? ' live' : ''));
+    document.getElementById('nodeRouter').setAttribute('class', 'node' + (w ? '' : ' ghost'));
+    document.getElementById('routerSub').textContent = w ? 'WiFi router' : 'Not set up';
+    document.getElementById('lock').setAttribute('class', 'lock' + (w ? ' on' : ''));
   }
   // ------------------------------------------------- the five-hour burn view
   // The left half on an account with no five-hour window, drawn as
@@ -679,7 +1326,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       svg.appendChild(el('text', { 'class': r[2], x: 80, y: r[1] + 13, 'text-anchor': 'middle', 'font-family': F, 'font-size': 14, fill: '#' + dim }, r[0]));
     });
   }
-  function render() {
+  function drawBoard() {
     var svg = document.getElementById('scr'); while (svg.firstChild) svg.removeChild(svg.firstChild);
     // The board derives dim text and the arc track by mixing text and bg
     // (contract: 25% bg into text, and 15% text into bg); so does this.
@@ -688,13 +1335,23 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     var dim = customDim(st.text, st.bg), track = mix(st.bg, st.text, .15), pill = mix(st.bg, st.text, .1);
     svg.appendChild(el('rect', { x: 0, y: 0, width: 320, height: 240, fill: '#' + st.bg }));
     var F = 'Montserrat, sans-serif';
+    if (st.screen !== 'usage') { drawOther(svg, dim, track, pill); setTitle(); return; }
+    // The header's session marks, one per session, as usage_view.c lays them
+    // out: 8 px circles, 11 px apart from x 10, centred on the 12 px header
+    // row at y 8. Tones are fmt_pip_tone(): a running (green), a finished
+    // (amber) and a stuck (red) session -- the three tones, not waiting, which
+    // shares stuck's red and so taught nothing (owner, 2026-11-07). A custom
+    // theme's ok/warn/bad are its low/mid/high (theme.c); a built-in's are
+    // near them.
+    var pipCol = [st.low, st.mid, st.high];
+    pipCol.forEach(function (c, i) { svg.appendChild(el('circle', { 'class': 'pip', cx: 14 + i * 11, cy: 14, r: 4, fill: '#' + c })); });
     if (st.view === 'gauges') {
       svg.appendChild(el('text', { x: 160, y: 18, 'text-anchor': 'middle', 'font-family': F, 'font-size': 11.5, 'letter-spacing': 3, fill: '#' + dim }, 'BLINK'));
       // With the burn view up the session reading is unknown, as on the
       // board (s_pct -1), so it cannot be the one almost used up.
       var burn = st.left === 'burn', warn = Math.max(burn ? 0 : st.p1, st.p2) >= 95;
       svg.appendChild(el('text', { x: 160, y: 34, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (warn ? st.high : dim) }, warn ? (!burn && st.p1 >= st.p2 ? 'Session almost used up' : 'Weekly almost used up') : '14:05'));
-      svg.appendChild(el('circle', { cx: 302, cy: 14, r: 5, fill: '#' + dotColours(st.low, st.mid, st.bg)[0] }));
+      linkMark(svg, 297, 14);   // always drawn: the board draws USB when unpaired
       if (burn) burnView(svg, F, dim); else gauge(svg, 80, 104, 120, st.w, st.p1, arcCol(1, st.p1), track, st.text, 20);
       gauge(svg, 240, 104, 120, st.w, st.p2, arcCol(2, st.p2), track, st.text, 20);
       // The window name and its countdown: on the board two default-font
@@ -732,8 +1389,9 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       svg.appendChild(el('text', { x: 160, y: 196, 'text-anchor': 'middle', 'font-family': F, 'font-size': 12, fill: '#' + (otherP >= 90 ? st.high : otherP >= 60 ? st.mid : dim) },
                          (wk ? 'Session ' : 'Weekly ') + Math.round(otherP) + '% \u2022 ' + (wk ? '3h 40m' : '1d 1h')));
     }
-    paintControls(); checks(); output();
+    setTitle();
   }
+  function render() { drawBoard(); paintControls(); checks(); output(); }
   function paintControls() {
     SLOTS.forEach(function (s) {
       var row = document.getElementById('row-' + s.k);
@@ -741,14 +1399,28 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       document.getElementById('c-' + s.k).value = '#' + st[s.k].toLowerCase();
       var t = document.getElementById('t-' + s.k); if (document.activeElement !== t) t.value = '#' + st[s.k];
     });
-    var band = document.getElementById('band'); while (band.firstChild) band.removeChild(band.firstChild);
-    ['low','mid','high'].forEach(function (k) { var d = document.createElement('span'); d.style.background = '#' + st[k]; band.appendChild(d); });
     document.getElementById('modenote').textContent = st.mode === 'level'
       ? 'By level: both arcs take the colour of their own level. Gauge 1 and Gauge 2 are not used.'
       : 'Per gauge: each arc keeps its own colour, and switches to the 90%-and-above colour near the limit so a warning is never missed. The status dot uses the under-60% colour, or, when it and the 60%-to-90% colour are both greys, whichever stands out more.';
-    press('[data-m]', 'm', st.mode); press('[data-w]', 'w', String(st.w)); press('[data-e]', 'e', st.e); press('[data-d]', 'd', st.d); press('[data-v]', 'v', st.view); press('[data-l]', 'l', st.left); press('[data-f]', 'f', st.fw);
+    press('[data-m]', 'm', st.mode); press('[data-w]', 'w', String(st.w)); press('[data-e]', 'e', st.e); press('[data-d]', 'd', st.d); press('[data-v]', 'v', st.view); press('[data-f]', 'f', st.fw);
     document.querySelectorAll('#presets button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.p === st.preset)); });
+    paintCards();
+    // The try-it tracks are painted in the theme's own three colours.
+    cssVar('--lo', '#' + st.low); cssVar('--mi', '#' + st.mid); cssVar('--hi', '#' + st.high);
+    // "Starting from Dark", or "Custom, changed from Dark". Rewritten only
+    // when it changes: it is a live region.
+    var tn = document.getElementById('themeName'), base = PRESETS[st.base][0], key = st.preset + ':' + st.base;
+    if (tn.dataset.key !== key) {
+      tn.dataset.key = key; tn.textContent = '';
+      var b = document.createElement('b');
+      if (st.preset >= 0) { tn.appendChild(document.createTextNode('Starting from ')); b.textContent = PRESETS[st.preset][0]; tn.appendChild(b); }
+      else { b.textContent = 'Custom'; tn.appendChild(b); tn.appendChild(document.createTextNode(', changed from ' + base)); }
+    }
+    var reset = document.getElementById('resetBtn');
+    if (st.preset >= 0) reset.setAttribute('hidden', ''); else reset.removeAttribute('hidden');
+    reset.textContent = 'Reset to ' + base;
   }
+  function cssVar(k, v) { var s = document.documentElement.style; if (s.setProperty) s.setProperty(k, v); }
   function press(sel, key, val) { document.querySelectorAll(sel).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset[key] === val)); }); }
   function textContrast() { return contrast(st.text, st.bg); }
   // A ratio as the words give it: cut to two decimals, never rounded. One
@@ -1045,8 +1717,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   function stopped() {
     if (saving) { stopOwed = true; return; }
     var keep = holdsDraft();
-    retire('The builder stopped.', 'Run blink theme on your computer to start it again.',
-           'The builder stopped. Run blink theme on your computer to start it again.', true, keep && KEEP_LINE);
+    var again = 'Run ' + (persistent ? 'blink settings' : 'blink theme') + ' on your computer to start it again.';
+    retire('The builder stopped.', again, 'The builder stopped. ' + again, true, keep && KEEP_LINE);
   }
   function schedulePreview() {
     if (finished) return;
@@ -1125,35 +1797,77 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   function changed() { render(); schedulePreview(); }
 
   // ---------------------------------------------------------------- controls
+  // Each theme is its own screen in miniature: the header, two gauges at 38%
+  // and 74% in the theme's low and mid, the ball if it has one, the pill.
+  function mini(p) {
+    var w = p.w / 2, cap = p.e === 'round' ? 'round' : 'butt', dim = customDim(p.text, p.bg), tr = mix(p.bg, p.text, .15);
+    var s = el('svg', { viewBox: '0 0 160 120', 'aria-hidden': 'true', focusable: 'false' });
+    s.appendChild(el('rect', { width: 160, height: 120, fill: '#' + p.bg }));
+    s.appendChild(el('text', { x: 80, y: 13, 'text-anchor': 'middle', 'font-family': 'Montserrat, sans-serif', 'font-size': 7, 'letter-spacing': 1.6, fill: '#' + dim }, 'BLINK'));
+    [[42, 58, 38, p.low], [118, 58, 74, p.mid]].forEach(function (g) {
+      var r = 27 - w / 2, end = 135 + 270 * g[2] / 100;
+      s.appendChild(el('path', { d: arcPath(g[0], g[1], r, 135, 405), fill: 'none', stroke: '#' + tr, 'stroke-width': w, 'stroke-linecap': cap }));
+      s.appendChild(el('path', { d: arcPath(g[0], g[1], r, 135, end), fill: 'none', stroke: '#' + g[3], 'stroke-width': w, 'stroke-linecap': cap }));
+      if (p.d === 'on') { var k = pt(g[0], g[1], r, end); s.appendChild(el('circle', { cx: k[0].toFixed(1), cy: k[1].toFixed(1), r: Math.max(2.5, w / 2 + 1), fill: '#' + p.text, stroke: '#' + p.bg })); }
+      s.appendChild(el('text', { x: g[0], y: g[1] + 4, 'text-anchor': 'middle', 'font-family': 'Montserrat, sans-serif', 'font-size': 11, 'font-weight': 500, fill: '#' + p.text }, g[2] + '%'));
+    });
+    s.appendChild(el('rect', { x: 62, y: 98, width: 36, height: 11, rx: 5.5, fill: '#' + mix(p.bg, p.text, .1) }));
+    s.appendChild(el('rect', { x: 70, y: 102.5, width: 20, height: 2, rx: 1, fill: '#' + p.high }));
+    return s;
+  }
+  // What the board shows while a tile is pointed at or focused by keyboard,
+  // and put back when it is left. Nothing is sent: it moves the drawing only.
+  var held = null, LOOK = ['preset', 'bg', 'text', 'g1', 'g2', 'low', 'mid', 'high', 'w', 'e', 'd', 'mode'];
+  function peek(i) {
+    if (!loaded || finished) return;
+    if (!held) { held = {}; LOOK.forEach(function (k) { held[k] = st[k]; }); }
+    Object.assign(st, PRESETS[i][1]); st.preset = i; drawBoard();
+  }
+  function unpeek() { if (!held) return; Object.assign(st, held); held = null; drawBoard(); }
   var pre = document.getElementById('presets');
   PRESETS.forEach(function (entry, i) {
-    // A card: the theme's ground with its text and three level colours on
-    // it, as a small board would show them, then the name its tile shows.
-    var name = entry[0], p = entry[1], b = document.createElement('button'), sw = document.createElement('span');
-    b.type = 'button'; b.dataset.p = String(i); b.className = 'preset';
-    sw.className = 'sw'; sw.setAttribute('aria-hidden', 'true');
-    sw.style.background = '#' + p.bg;
-    ['text', 'low', 'mid', 'high'].forEach(function (k) { var d = document.createElement('i'); d.className = 'sw-' + k; d.style.background = '#' + p[k]; sw.appendChild(d); });
-    var n = document.createElement('span'); n.className = 'pn'; n.textContent = name;
-    b.appendChild(sw); b.appendChild(n);
-    b.addEventListener('click', function () { if (!loaded) return; Object.assign(st, PRESETS[i][1]); st.preset = i; fromOutside(); fieldSay('paste', null); changed(); });
+    var name = entry[0], b = document.createElement('button'), sc = document.createElement('span'), tick = document.createElement('span');
+    b.type = 'button'; b.dataset.p = String(i); b.className = 'th'; b.setAttribute('aria-pressed', 'false');
+    sc.className = 'scr'; sc.appendChild(mini(entry[1]));
+    tick.className = 'tick';
+    var ts = el('svg', { viewBox: '0 0 12 12', 'aria-hidden': 'true', focusable: 'false' });
+    ts.appendChild(el('path', { d: 'M2.5 6.2l2.3 2.3 4.7-4.8', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+    tick.appendChild(ts); sc.appendChild(tick);
+    var n = document.createElement('span'); n.className = 'nm'; n.textContent = name;
+    b.appendChild(sc); b.appendChild(n);
+    b.addEventListener('pointerenter', function (e) { if (!e.pointerType || e.pointerType === 'mouse') peek(i); });
+    b.addEventListener('pointerleave', unpeek);
+    b.addEventListener('focus', function () { if (typeof b.matches !== 'function' || b.matches(':focus-visible')) peek(i); });
+    b.addEventListener('blur', unpeek);
+    b.addEventListener('click', function () {
+      if (!loaded || finished) return;
+      held = null; pickPreset(i); fieldSay('paste', null);
+      // On the settings page a click is the save; the page stays up after
+      // it (BuilderServer persistent), and the next preview still reaches
+      // the board. `blink theme` keeps its Save button.
+      if (persistent) { render(); save(); } else changed();
+    });
     pre.appendChild(b);
   });
-  var slots = document.getElementById('slots');
+  var slots = document.getElementById('slots'), more = document.getElementById('slots-more');
   SLOTS.forEach(function (s) {
-    var row = document.createElement('div'); row.className = 'slot'; row.id = 'row-' + s.k;
-    var c = document.createElement('input'); c.type = 'color'; c.id = 'c-' + s.k; c.setAttribute('aria-label', s.name);
-    var l = document.createElement('label'); l.htmlFor = c.id; l.textContent = s.name;
-    var sm = document.createElement('small'); sm.textContent = s.hint; l.appendChild(sm);
-    var t = document.createElement('input'); t.type = 'text'; t.id = 't-' + s.k; t.maxLength = 7; t.setAttribute('aria-label', s.name + ' hex');
+    var row = document.createElement('div'); row.className = 'crow'; row.id = 'row-' + s.k;
+    var pick = document.createElement('label'); pick.className = 'pick';
+    var c = document.createElement('input'); c.type = 'color'; c.id = 'c-' + s.k; c.setAttribute('aria-label', s.name); c.setAttribute('aria-describedby', 'h-' + s.k);
+    pick.appendChild(c);
+    var tx = document.createElement('div'); tx.className = 'txt';
+    var nm = document.createElement('b'); nm.textContent = s.name;
+    var hn = document.createElement('span'); hn.id = 'h-' + s.k; hn.textContent = s.hint;
+    tx.appendChild(nm); tx.appendChild(hn);
+    var t = document.createElement('input'); t.type = 'text'; t.className = 'hex'; t.id = 't-' + s.k; t.maxLength = 7; t.setAttribute('aria-label', s.name + ', hex value');
     t.spellcheck = false; t.autocomplete = 'off'; t.setAttribute('aria-describedby', 'm-' + s.k);
     // Live, except the background's: its note is the text's, word for
     // word, and a screen reader heard it twice (review, S5).
     var m = document.createElement('p'); m.className = 'fmsg'; m.id = 'm-' + s.k; if (s.k !== 'bg') m.setAttribute('aria-live', 'polite');
-    row.appendChild(c); row.appendChild(l); row.appendChild(t); row.appendChild(m); slots.appendChild(row);
+    row.appendChild(pick); row.appendChild(tx); row.appendChild(t); row.appendChild(m); (s.main ? slots : more).appendChild(row);
     c.addEventListener('input', function (e) { if (!loaded) return; st[s.k] = e.target.value.slice(1).toUpperCase(); delete bad[s.k]; markCustom(); changed(); });
     // Half-typed is not wrong, so a box is only told off once it has its
-    // seven characters, or when it is left with something it cannot use.
+    // seven characters. Leaving it puts back the colour it holds.
     function typed() {
       if (!loaded) return;
       var v = t.value.replace('#', '');
@@ -1162,7 +1876,10 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       else if (bad[s.k]) { delete bad[s.k]; fieldSay(s.k, null); }
     }
     t.addEventListener('input', function () { typed(); });
-    t.addEventListener('blur', function () { if (bad[s.k]) return; if (!HEX.test(t.value.replace('#', ''))) { t.value = '#' + st[s.k]; fieldSay(s.k, null); render(); } });
+    t.addEventListener('blur', function () {
+      if (!loaded) return;
+      delete bad[s.k]; t.value = '#' + st[s.k]; fieldSay(s.k, null); render();
+    });
   });
   document.querySelectorAll('[data-m]').forEach(function (b) { b.addEventListener('click', function () { if (!loaded) return; st.mode = b.dataset.m; markCustom(); changed(); }); });
   document.querySelectorAll('[data-w]').forEach(function (b) { b.addEventListener('click', function () { if (!loaded) return; st.w = +b.dataset.w; markCustom(); changed(); }); });
@@ -1171,11 +1888,6 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // The screen and the two sliders only move the drawing here; they are not
   // part of the theme and send nothing.
   document.querySelectorAll('[data-v]').forEach(function (b) { b.addEventListener('click', function () { st.view = b.dataset.v; render(); }); });
-  // The left half is the two-gauge screen's, so choosing either shows that
-  // screen: Focus keeps today's screen on the board, burn view or not
-  // (docs/plans/burn-5h.md), and a choice that changed nothing visible would
-  // look broken.
-  document.querySelectorAll('[data-l]').forEach(function (b) { b.addEventListener('click', function () { st.left = b.dataset.l; st.view = 'gauges'; render(); }); });
   // Choosing a focus window shows the focus view, since it is the only view
   // that window changes.
   document.querySelectorAll('[data-f]').forEach(function (b) { b.addEventListener('click', function () { st.fw = b.dataset.f; st.view = 'focus'; render(); }); });
@@ -1245,7 +1957,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     else fieldSay('paste', ['bad', 'That share code holds a theme the board cannot use.']);
   });
 
-  document.getElementById('save').addEventListener('click', function () {
+  function save() {
     // A click is ignored before the state, not only kept off by disabled:
     // disabled is whatever the last render() left, and a click dispatched
     // by script or an extension reaches this handler whatever it says.
@@ -1280,7 +1992,16 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     post('/api/save', sent).then(function (j) {
       var owed = settled();
       if (j.status === 200) {
-        savedKey = JSON.stringify(sent);
+        savedKey = JSON.stringify(sent); savedHere = true;
+        if (persistent) {
+          // The page stays up. The server wrote its cancel with the save, so
+          // what the board shows is the saved theme, and a later preview of
+          // any theme must go out even if it equals the last one sent.
+          lastSent = savedKey;
+          say('Saved: ' + name + '. Your board keeps it.', 'ok');
+          if (owed) ping();
+          return;
+        }
         var keep = holdsDraft();
         if (retire('Saved.', 'Your board keeps ' + name + '.', 'Saved: ' + name + '. Your board keeps it.', 'ok',
                    keep && KEEP_AFTER_SAVE, closeLine(CLOSE_AFTER_S)) && !keep) closeSoon();
@@ -1294,7 +2015,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
       else if (j.status === 400 || j.status === 500) { say(j.error || 'The board would refuse that theme.', true); if (owed) ping(); }
       else stopped();
     }, function () { settled(); stopped(); });
-  });
+  }
+  document.getElementById('save').addEventListener('click', save);
   document.getElementById('cancel').addEventListener('click', function () {
     if (finished) return;
     clearTimeout(previewTimer);
@@ -1326,6 +2048,7 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // colours on screen and the popup offering their share code; the
   // newer tab opens on the last preview this one sent (/api/state "draft").
   var savedKey = null;
+  var savedHere = false;      // a save went through in this tab, for the Done popup's wording
   function unsaved() { return savedKey === null || JSON.stringify(wireTheme()) !== savedKey; }
   function superseded() {
     // closes: only a tab that holds nothing unsaved, which includes a tab
@@ -1363,21 +2086,724 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // way out, and the builder may have ended since: ask before it is used.
   window.addEventListener('pageshow', function (e) { if (e.persisted) ping(); });
 
-  // --top-h follows the header: 80 px as a rule, more when a long status
-  // wraps it. It was 73 px, written in, with the header at 80 (review of
-  // fp/builder-look, S4).
-  (function () {
-    var top = document.querySelector('.top'), rootStyle = document.documentElement.style;
-    function fit() { if (top.offsetHeight) rootStyle.setProperty('--top-h', top.offsetHeight + 'px'); }
-    if (window.ResizeObserver) new ResizeObserver(fit).observe(top);
-    fit();
+
+  // ---------------------------------------------------------------- the shell
+  // The hub's status line and the handshake ticks. kind: live | danger | busy.
+  // steps(i, state): ticks before i are done, i is `state` (active | done |
+  // fail), the rest pending; 4 with 'done' is all four, and only then does
+  // "Connected. You can unplug the cable." appear (Task 4.4 reports each
+  // step as the real event happens). steps(null) goes back to the line.
+  var STEP_TEXT = ['Pairing over the cable', 'Board joins the network', 'Both prove their keys over WiFi', 'Encrypting the link'];
+  var status = {
+    say: function (text, kind) {
+      var p = document.getElementById('board-status'), t = document.getElementById('board-status-text'), d = document.getElementById('board-dot');
+      if (t.textContent !== text) t.textContent = text;
+      d.className = 'dot' + (kind === 'danger' ? ' danger' : kind === 'busy' ? ' busy' : '');
+      if (document.getElementById('hs').getAttribute('hidden') === null) return;   // the handshake is showing
+      if (text) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
+    },
+    steps: function (i, state) {
+      var hs = document.getElementById('hs'), line = document.getElementById('board-status');
+      if (i == null) { hs.setAttribute('hidden', ''); if (document.getElementById('board-status-text').textContent) line.removeAttribute('hidden'); return; }
+      var ticks = hs.querySelectorAll('li');
+      ticks.forEach(function (li, j) { li.className = j < i ? 'done' : j === i ? (state === 'done' ? 'done' : state || 'active') : ''; });
+      var text = i >= 4 ? 'Connected. You can unplug the cable.' : STEP_TEXT[i];
+      var e = document.getElementById('hs-text'); if (e.textContent !== text) e.textContent = text;
+      line.setAttribute('hidden', ''); hs.removeAttribute('hidden');
+    }
+  };
+
+  // One control open at a time: Look takes both sides, Connect and Board the
+  // right. Pressing the open one again closes it, and so does Escape.
+  var SIDES = { look: ['pLook', 'pCust'], connect: ['pConn'], board: ['pBoard'] };
+  var chips = document.querySelectorAll('[data-panel]');
+  var panel = {
+    current: null,
+    open: function (name) {
+      if (!SIDES[name]) name = null;
+      panel.current = name;
+      chips.forEach(function (c) { c.setAttribute('aria-pressed', String(c.dataset.panel === name)); });
+      Object.keys(SIDES).forEach(function (k) {
+        SIDES[k].forEach(function (id) {
+          var p = document.getElementById(id);
+          if (k === name) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
+        });
+      });
+      var sv = document.getElementById('save');
+      if (name === 'look') sv.removeAttribute('hidden'); else sv.setAttribute('hidden', '');
+      syncScreen(); render();
+    },
+    close: function () { panel.open(null); }
+  };
+  // What the board shows follows what is being edited: the start-up screen
+  // while the Logo tab is open, its own Settings screen while the Board
+  // panel has asked for it, the usage screen otherwise. The connection
+  // screen is held by the page for its 4.2 s first.
+  function syncScreen() {
+    if (board.timer) return;
+    var logo = document.getElementById('tLogo').getAttribute('hidden') === null;
+    var set = document.getElementById('pBoard').getAttribute('hidden') === null && st.showSettings;
+    st.screen = panel.current === 'look' && logo ? 'startup' : set ? 'settings' : 'usage';
+  }
+  chips.forEach(function (c) {
+    c.addEventListener('click', function () { panel.open(c.getAttribute('aria-pressed') === 'true' ? null : c.dataset.panel); });
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape' || noticeOpen() || !panel.current) return;
+    var on = document.querySelector('[data-panel][aria-pressed="true"]');
+    panel.close(); if (on) on.focus();
+  });
+  // Sub-tabs: one tablist per panel, Left and Right move between them, and
+  // only the selected tab is in the tab order.
+  document.querySelectorAll('[role="tablist"]').forEach(function (list) {
+    var tabs = list.querySelectorAll('[role="tab"]');
+    function choose(t, focus) {
+      tabs.forEach(function (x) {
+        var on = x === t, p = document.getElementById(x.getAttribute('aria-controls'));
+        x.setAttribute('aria-selected', String(on)); x.setAttribute('tabindex', on ? '0' : '-1');
+        if (on) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
+      });
+      if (focus) t.focus();
+      syncScreen(); render();
+    }
+    tabs.forEach(function (t, i) {
+      t.addEventListener('click', function () { choose(t); });
+      t.addEventListener('keydown', function (e) {
+        var d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+        if (d) { e.preventDefault(); choose(tabs[(i + d + tabs.length) % tabs.length], true); }
+      });
+    });
+  });
+  // The in-page confirm, in place of the browser's dialog: the destructive button is
+  // replaced by a tinted box with the question, the solid action and a quiet
+  // Keep, and focus goes to Keep, the safe one.
+  var confirm = {
+    ask: function (host, question, actionLabel, onConfirm) {
+      var box = document.createElement('div'), q = document.createElement('p'), btns = document.createElement('div');
+      var yes = document.createElement('button'), keep = document.createElement('button');
+      box.className = 'confirm'; box.setAttribute('role', 'group'); q.textContent = question; btns.className = 'btns';
+      yes.type = 'button'; yes.className = 'btn danger solid'; yes.textContent = actionLabel;
+      keep.type = 'button'; keep.className = 'btn'; keep.textContent = 'Keep';
+      btns.appendChild(yes); btns.appendChild(keep); box.appendChild(q); box.appendChild(btns);
+      function put(back) { host.parentNode.removeChild(box); host.removeAttribute('hidden'); if (back) host.focus(); }
+      yes.addEventListener('click', function () { put(false); onConfirm(); });
+      keep.addEventListener('click', function () { put(true); });
+      host.setAttribute('hidden', '');
+      host.parentNode.insertBefore(box, host.nextSibling);
+      keep.focus();
+      return box;
+    }
+  };
+  // ---------------------------------------------------------------- Connect
+  // The panel for moving the board to WiFi. Everything the board or the
+  // network says goes in through textContent: an SSID is whatever a neighbour
+  // named their router, so a name like <img onerror=...> is only ever text.
+  // The password exists in the field until Connect, then in the one join
+  // body, and nowhere else: not storage, not the address, never logged.
+  var conn = (function () {
+    var STEPS = ['sent', 'joined', 'proved', 'encrypted'];
+    var NEED = 'Plug the board in with its USB cable to set up WiFi.';
+    var HOLD_MS = 4200;      // the page's own hold on its preview of the design's connection screen
+    var busy = false, pick = null, saved = null, hold = null, scanning = 0;
+    function g(id) { return document.getElementById(id); }
+    function show(id, on) { if (on) g(id).removeAttribute('hidden'); else g(id).setAttribute('hidden', ''); }
+    function say(t, cls) { var m = g('c-msg'); m.textContent = t; m.className = 'msg' + (cls ? ' ' + cls : ''); }
+    function bad(on) { if (on) { g('c-pwbox').setAttribute('aria-invalid', 'true'); g('c-pw').setAttribute('aria-invalid', 'true'); } else { g('c-pwbox').removeAttribute('aria-invalid'); g('c-pw').removeAttribute('aria-invalid'); } }
+    // The SSID's bytes as text. Not UTF-8 shows its bytes, and controls and
+    // direction overrides show as "?", so a name cannot rewrite the line.
+    function name(hex) {
+      var b = hex.match(/../g) || [], s;
+      try { s = decodeURIComponent('%' + b.join('%')); }
+      catch (e) { s = b.map(function (x) { var c = parseInt(x, 16); return c > 31 && c < 127 ? String.fromCharCode(c) : '\\x' + x; }).join(''); }
+      return s.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, '?');
+    }
+    function good(hex) { return typeof hex === 'string' && /^([0-9a-fA-F]{2}){1,32}$/.test(hex); }
+
+    // The state /api/wifi gave: the card, what is enabled, the forget button.
+    function paint(j) {
+      var link = j.link === 'usb' || j.link === 'wifi' ? j.link : null;
+      saved = good(j.s) ? j.s : null;
+      deviceWifi(link, saved ? name(saved) : null, j.ip);
+      show('c-problem', !link); show('connect-body', !!link);
+      if (!link) return;
+      g('c-title').textContent = link === 'wifi' ? 'Over WiFi' : 'Over USB';
+      g('c-sub').textContent = link === 'wifi' && saved ? name(saved) : 'This computer';
+      g('c-state').textContent = link === 'wifi' ? 'Encrypted' : 'Live';
+      g('c-move').textContent = saved ? 'Change network' : 'Move to WiFi';
+      g('c-move').disabled = link !== 'usb';
+      show('c-need', link !== 'usb');
+      show('c-forget', link === 'usb' && !!saved);
+      if (link !== 'usb') closePicker();
+    }
+    function down() { paint({}); }
+    function note(text) { say(text, 'bad'); }
+
+    function bars(rssi) {
+      var n = rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
+      var svg = el('svg', { 'class': 'bars', viewBox: '0 0 20 14', 'aria-hidden': 'true' });
+      for (var i = 0; i < 4; i++) svg.appendChild(el('rect', { x: i * 5.5, y: 10.5 - i * 3.5, width: 3.5, height: 3.5 + i * 3.5, rx: 1, 'class': i < n ? '' : 'off' }));
+      return [svg, ['weak', 'fair', 'good', 'strong'][n - 1]];
+    }
+    // Wording by what the board can join: WPA2 and WPA2/WPA3 only. A "sec"
+    // the page does not know is read as enterprise, which it cannot join.
+    function secText(sec) {
+      return sec === 'wpa2' ? ['WPA2', true] : sec === 'mixed' ? ['WPA2/WPA3', true]
+        : sec === 'wpa3' ? ['WPA3 only, not supported', false] : sec === 'open' ? ['Open network, not supported', false]
+        : ['802.1X, not supported', false];
+    }
+    function select(n) {
+      other(false); pick = n; g('c-pwl').textContent = 'Password for ' + n.name; say(''); bad(false);
+    }
+    function list(nets) {
+      var ul = g('c-nets'), seen = {}, rows = [];
+      while (ul.firstChild) ul.removeChild(ul.firstChild);
+      (nets || []).forEach(function (n) {
+        if (!n || !good(n.s)) return;
+        var k = n.s.toLowerCase();
+        if (seen[k] && seen[k].r >= n.r) return;
+        if (seen[k]) rows.splice(rows.indexOf(seen[k]), 1);
+        seen[k] = n; rows.push(n);
+      });
+      rows.sort(function (a, b) { return b.r - a.r; });
+      pick = null;
+      rows.forEach(function (n) {
+        var li = document.createElement('li'), lab = document.createElement('label'), box = document.createElement('span');
+        var b = document.createElement('b'), sm = document.createElement('small'), input = document.createElement('input');
+        var sec = secText(n.sec), bs = bars(n.r), nm = name(n.s);
+        lab.className = 'net'; input.setAttribute('type', 'radio'); input.setAttribute('name', 'net'); input.setAttribute('value', n.s);
+        input.disabled = !sec[1];
+        b.textContent = nm; box.style.minWidth = '0';
+        sm.textContent = sec[1] ? sec[0] + ', ' + bs[1] + ' signal' : sec[0];
+        if (!sec[1]) sm.className = 'no';
+        function choose() { select({ hex: n.s, name: nm }); }
+        input.addEventListener('click', choose); input.addEventListener('change', choose);
+        box.appendChild(b); box.appendChild(sm);
+        lab.appendChild(input); lab.appendChild(box); lab.appendChild(bs[0]); li.appendChild(lab); ul.appendChild(li);
+        if (sec[1] && !pick) { input.checked = true; choose(); }
+      });
+      if (!rows.length) { g('c-pwl').textContent = 'Password'; say('The board heard no networks. Move it closer to the router and scan again.', 'bad'); }
+    }
+
+    function openPicker() {
+      show('c-picker', true); show('c-move', false); g('c-move').setAttribute('aria-expanded', 'true'); scan();
+    }
+    function closePicker() {
+      scanning++; show('c-scanning', false); g('c-nets').removeAttribute('aria-busy'); show('c-picker', false); show('c-move', true); g('c-move').setAttribute('aria-expanded', 'false');
+      g('c-pw').value = ''; bad(false); unshow(); other(false); g('c-name').value = '';
+    }
+    // Synchronous on the PC for up to ~15 s, so the list says it is looking.
+    function scan() {
+      var mine = ++scanning;
+      list([]); say(''); show('c-scanning', true); g('c-nets').setAttribute('aria-busy', 'true'); g('c-go').disabled = true;
+      function done() { show('c-scanning', false); g('c-nets').removeAttribute('aria-busy'); }
+      post('/api/wifi/scan', null).then(function (j) {
+        if (mine !== scanning) return;
+        done(); g('c-go').disabled = busy;
+        if (j.status === 200) { say(''); list(j.nets); }
+        // A scan refused by a failed self-test arrives as the board's bare
+        // reason, which has no full stop and no next step of its own.
+        else if (j.why === 'WiFi self-test failed') note('WiFi self-test failed. Restart the board and try again.');
+        else note(j.why || 'The board did not answer.');
+      }, function () { if (mine !== scanning) return; done(); g('c-go').disabled = busy; note('The app did not answer.'); });
+    }
+    // A hand-typed name goes the way a scanned one does: its UTF-8 bytes as hex.
+    function typed() {
+      var v = g('c-name').value, b;
+      if (!v) return say('Enter the network name.', 'bad');
+      try { b = unescape(encodeURIComponent(v)); } catch (e) { return say('That network name is not valid text.', 'bad'); }
+      if (b.length > 32) return say('The network name can be at most 32 bytes.', 'bad');
+      if (b.indexOf('\u0000') >= 0) return say('The network name cannot contain a zero byte.', 'bad');
+      var h = '';
+      for (var i = 0; i < b.length; i++) h += ('0' + b.charCodeAt(i).toString(16)).slice(-2);
+      return { hex: h, name: name(h) };
+    }
+    function other(on) {
+      show('c-other-box', on); show('c-other', !on);
+      if (on) { pick = null; g('c-pwl').textContent = 'Password'; g('c-name').focus(); }
+    }
+
+    function unshow() {
+      var t = g('c-show'); t.setAttribute('aria-pressed', 'false'); t.textContent = 'Show'; t.setAttribute('aria-label', 'Show password'); g('c-pw').setAttribute('type', 'password');
+    }
+
+    function release() { busy = false; g('c-go').disabled = false; g('c-go').textContent = 'Connect'; }
+    function later(f, ms) { clearTimeout(hold); hold = setTimeout(function () { hold = null; f(); }, ms); }
+    function join() {
+      if (busy) return;
+      var chosen = g('c-other-box').getAttribute('hidden') === null ? typed() : pick;
+      if (chosen === undefined) return;
+      if (!chosen) { note('Pick a network first.'); return; }
+      var nm = chosen.name, pw = g('c-pw').value;
+      if (pw.length < 8) {
+        say(pw ? 'A WiFi password has at least 8 characters.' : 'Enter the password for ' + nm + '.', 'bad');
+        bad(true); g('c-pw').focus(); return;
+      }
+      var body = { s: chosen.hex, p: pw };
+      g('c-pw').value = ''; pw = null; unshow();
+      clearTimeout(hold); hold = null; bad(false); say('');
+      busy = true; g('c-go').disabled = true; g('c-go').textContent = 'Connecting…';
+      status.steps(0, 'active');
+      var sent = post('/api/wifi/join', body);
+      body = null;
+      sent.then(function (j) { release(); landed(j, nm); },
+                function () { release(); status.steps(null); note('The app did not answer.'); });
+    }
+    function landed(j, nm) {
+      g('c-pw').value = '';
+      if (j.status !== 200) {
+        status.steps(null);
+        if (j.status === 400) { bad(true); note(j.why || 'That was not a network.'); return; }
+        // The PC waits 30 s and the board can take about 50: the pairing is
+        // saved the moment the board comes up, so a late board still works.
+        board.show({ linkState: 'error' });   // a failed WiFi join is a link-level failure
+        if (j.why === 'The board did not answer.') note('The board has not answered yet. If it joins the network late, the pairing is still saved. Give it a minute, then check the status line.');
+        else note(j.why || 'The board did not answer.');
+        return;
+      }
+      var steps = j.steps || [], k = 0;
+      while (k < 4 && steps.indexOf(STEPS[k]) >= 0) k++;
+      if (j.state) paint(j.state);
+      if (k === 4 && !j.problem) {
+        status.steps(4, 'done'); say('Connected. You can unplug the cable.', 'ok');
+        show('c-picker', false); show('c-move', true); g('c-move').setAttribute('aria-expanded', 'false');
+        board.show({ link: 'wifi', linkState: 'live' }); board.connected();
+        later(function () { status.steps(null); status.say('Live over WiFi, ' + nm + ', encrypted', 'live'); }, HOLD_MS);
+        return;
+      }
+      status.steps(k, 'fail');
+      board.show({ linkState: 'error' });
+      later(function () { status.steps(null); }, 3000);
+      if (k >= 2) note('The board joined ' + nm + ' but could not be reached over WiFi. Check that the network lets devices talk to each other.');
+      else {
+        var why = j.state && j.state.why;
+        note('The board could not join ' + nm + '. ' + (why && why !== 'Wrong WiFi password' ? why + '.' : 'Check the password and try again.'));
+        if (!why || why === 'Wrong WiFi password') bad(true);
+      }
+    }
+
+    function forget(host) {
+      if (!saved) return;
+      confirm.ask(host || g('c-forget'), 'Forget ' + name(saved) + '? The board deletes the password and its key, and goes back to USB only.', 'Forget it', function () {
+        say('');
+        post('/api/wifi/forget', null).then(function (j) {
+          if (j.status !== 200) { note(j.why || 'The board did not answer.'); return; }
+          paint(j); board.show({ link: 'usb', linkState: 'live' }); status.say('Live over USB', 'live');
+          g('c-move').focus();
+        }, function () { note('The app did not answer.'); });
+      });
+    }
+
+    g('c-move').addEventListener('click', openPicker);
+    g('c-other').addEventListener('click', function () { other(true); });
+    g('c-scan').addEventListener('click', scan);
+    g('c-cancel').addEventListener('click', function () { if (busy) return; closePicker(); say(''); g('c-move').focus(); });
+    g('c-go').addEventListener('click', join);
+    g('c-forget').addEventListener('click', function () { forget(); });
+    g('c-pw').addEventListener('input', function () { bad(false); });
+    g('c-pw').addEventListener('keydown', function (e) { if (e.key === 'Enter') join(); });
+    var tog = g('c-show');
+    tog.addEventListener('click', function () {
+      var on = tog.getAttribute('aria-pressed') !== 'true';
+      tog.setAttribute('aria-pressed', String(on)); g('c-pw').setAttribute('type', on ? 'text' : 'password');
+      tog.textContent = on ? 'Hide' : 'Show'; tog.setAttribute('aria-label', on ? 'Hide password' : 'Show password');
+    });
+    g('c-retry').addEventListener('click', function () { loadHub(); });
+    return { paint: paint, down: down, name: name, good: good, note: note, forget: forget };
   })();
+
+  // Hub status from the daemon's view of the link. One ask, on load: nothing
+  // moves while the page is idle. `blink theme` has no board to ask, and
+  // says nothing here.
+  function loadHub() {
+    var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    var limit = ctl ? setTimeout(function () { ctl.abort(); }, REQUEST_MS) : null;
+    fetch('/api/wifi', { credentials: 'same-origin', signal: ctl ? ctl.signal : undefined }).then(function (r) {
+      clearTimeout(limit);
+      return r.status === 200 ? r.json() : null;
+    }).then(function (j) {
+      if (finished) return;
+      if (!j) return conn.down();
+      conn.paint(j);
+      var n = conn.good(j.s) ? conn.name(j.s) : '';
+      if (j.link === 'usb' || j.link === 'wifi') {
+        board.show({ link: j.link, linkState: 'live' });
+        status.say(j.link === 'usb' ? 'Live over USB' : 'Live over WiFi, ' + (n ? n + ', ' : '') + 'encrypted', 'live');
+      } else { board.show({ linkState: 'none' }); status.say('Board not found, check the USB cable', 'danger'); }
+    }, function () { clearTimeout(limit); conn.down(); });
+  }
+  document.getElementById('resetBtn').addEventListener('click', function () {
+    if (!loaded || finished) return;
+    pickPreset(st.base); fieldSay('paste', null); changed();
+    document.getElementById('t-' + SLOTS[0].k).focus();
+  });
+
+  // ---------------------------------------------------------------- Look: Screen, Try it
+  // The four view cards. Two gauges and Session big are the board's own Focus
+  // preference (focus 0 / 1, through /api/pref). Weekly big is a preview only:
+  // there is no weekly scope on the page (D61), because the board no longer
+  // reads weekly_sel, so a control for it would persist a byte nothing draws.
+  // What the owner's own tap on a card is, a theme-less board write, is a flash write,
+  // so it goes out once per click and never from a drag.
+  var VNOTE = {
+    gauges: 'Both windows, side by side.',
+    session: 'Session big, weekly as a line.',
+    weekly: 'Weekly big, session as a line. This one previews here only: the board keeps the window its Focus tile names.',
+    // The burn view is no setting on the board: it takes the session
+    // gauge's place by itself, on the two-gauge screen only (Focus keeps
+    // its own), while the account has no five-hour window
+    // (docs/plans/burn-5h.md), so the card previews and sends nothing.
+    burn: 'Recent token use in place of the session gauge. Your board shows it on the two-gauge screen by itself when your plan has no five-hour window; this previews it here.'
+  };
+  function cardOf(b) { return b.dataset.card || (b.dataset.v === 'gauges' ? 'gauges' : b.dataset.f); }
+  function paintCards() {
+    var which = st.view === 'focus' ? st.fw : st.left === 'burn' ? 'burn' : 'gauges';
+    document.querySelectorAll('.vw').forEach(function (b) { b.setAttribute('aria-pressed', String(cardOf(b) === which)); });
+    var n = document.getElementById('vNote'), t = VNOTE[which] || '';
+    if (n.textContent !== t) n.textContent = t;
+  }
+  function msgSet(id, text, kind) {
+    var m = document.getElementById(id);
+    if (m.textContent !== text) m.textContent = text;
+    m.className = 'msg' + (kind ? ' ' + kind : '');
+  }
+  // One pref_set at a time, in the order asked: the board answers each with
+  // its own pref and carries no request id.
+  var prefChain = Promise.resolve();
+  function prefSet(fields, mid) {
+    if (finished) return;
+    // Not silently: the page the board opened was once not persistent, and
+    // a brightness click there sent nothing and said nothing (2026-11-07).
+    // The words are the server's own 409 for a board route on `blink theme`.
+    if (!persistent) { msgSet(mid, 'Open this with blink settings while the app is running.', 'bad'); return; }
+    // A logo streams for about a minute and the board answers nothing else
+    // meanwhile, so a click now would time out as "did not answer".
+    if (lgBusy) { msgSet(mid, 'Wait for the logo to finish.', 'bad'); return; }
+    prefChain = prefChain.then(function () {
+      return post('/api/pref', fields, true).then(function (j) {
+        if (j.status !== 200 || !j.pref) { msgSet(mid, j.why || 'The board did not accept that setting.', 'bad'); return; }
+        msgSet(mid, '');
+        applyPref(j.pref);
+      }, function () { msgSet(mid, 'The app did not answer.', 'bad'); });
+    });
+  }
+  // What the board says it holds now (its pref line): the provider, Focus on
+  // or off, and the brightness level. At load they come from /api/device
+  // ("pref": the last pref line the daemon saw, which the board sends after
+  // every hello); with no board heard yet nothing is marked.
+  function applyPref(p) {
+    if (p.bright != null) { st.bright = +p.bright; press('[data-b]', 'b', String(st.bright)); }
+    if (typeof p.provider === 'string') press('[data-src]', 'src', p.provider);
+    if (p.focus === 1 && st.view !== 'focus') st.view = 'focus';
+    if (p.focus === 0 && st.view === 'focus') st.view = 'gauges';
+    render();
+  }
+  document.querySelectorAll('.vw').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var c = cardOf(b);
+      if (b.disabled) return;
+      if (c === 'burn') { st.view = 'gauges'; st.left = 'burn'; render(); }
+      else if (c === 'gauges') { st.view = 'gauges'; st.left = 'gauge'; render(); prefSet({ focus: 0 }, 's-msg'); }
+      else if (c === 'session') { st.view = 'focus'; st.fw = 'session'; render(); prefSet({ focus: 1 }, 's-msg'); }
+      else { st.view = 'focus'; st.fw = 'weekly'; render(); }
+    });
+  });
+  document.querySelectorAll('[data-src]').forEach(function (b) {
+    b.addEventListener('click', function () { if (loaded) prefSet({ main_src: b.dataset.src }, 's-msg'); });
+  });
+  // Sweep both arcs 0 to 100 in the preview: the drawing only.
+  var sweepTimer = null;
+  function setTry(a, b) {
+    st.p1 = a; st.p2 = b;
+    [['p1', 'o1', a], ['p2', 'o2', b]].forEach(function (x) { document.getElementById(x[0]).value = String(x[2]); document.getElementById(x[1]).textContent = x[2] + '%'; });
+    render();
+  }
+  document.getElementById('sweep').addEventListener('click', function () {
+    clearInterval(sweepTimer);
+    var v = 0; setTry(0, 0);
+    sweepTimer = setInterval(function () { v = Math.min(100, v + 2); setTry(v, v); if (v >= 100) { clearInterval(sweepTimer); sweepTimer = null; } }, 30);
+  });
+  ['p1', 'p2'].forEach(function (id) { document.getElementById(id).addEventListener('input', function () { clearInterval(sweepTimer); }); });
+
+  // ---------------------------------------------------------------- Look: Logo
+  // The file is read here and goes nowhere but this computer's own app: a GIF
+  // as its bytes (the app decodes it with its own player, so the board keeps
+  // the GIF's delays), anything else drawn to a 320x240 canvas at the chosen
+  // scale and sent as raw RGBA. The page keeps the picture only as long as
+  // the tab is open and never writes it down. "About N KB" is the app's own
+  // encoding, asked for with ?check=1, not an estimate made here.
+  var FITS = { fill: 1, large: .8, margin: .6 };
+  var MAX_PICK = 20 * 1024 * 1024, MAX_GIF = 2 * 1024 * 1024 - 1024;
+  var lg = null, onBoard = false, boardLogo = null, boardKey = null, lgBusy = false, checkSeq = 0, checkTimer = null, checkCtl = null;
+  function byId(id) { return document.getElementById(id); }
+  function vis(id, on) { if (on) byId(id).removeAttribute('hidden'); else byId(id).setAttribute('hidden', ''); }
+  function lmsg(t, kind) { msgSet('lMsg', t, kind); }
+  function paintLogo() {
+    vis('logoEmpty', !lg); vis('logoOn', !!lg); vis('lHave', onBoard && !lg);
+    if (lg) {
+      byId('lName').textContent = lg.name;
+      press('#lScale button', 's', lg.fit);
+      byId('lBg').value = '#' + lg.bg.toLowerCase();
+      byId('lBgNote').textContent = lg.bgAuto ? "From the picture's corner" : 'Your colour';
+      byId('lHold').value = String(lg.hold);
+      byId('lRemove').disabled = !onBoard || lgBusy;
+      byId('lSend').disabled = lgBusy || lg.kb == null;
+      byId('lClear').disabled = lgBusy;
+      byId('lSend').textContent = lgBusy ? 'Sending…' : 'Send to board';
+    }
+    var bt = byId('lBoardThumb');
+    while (bt.firstChild) bt.removeChild(bt.firstChild);
+    if (onBoard && boardLogo) { var bi = document.createElement('img'); bi.setAttribute('src', boardLogo); bi.setAttribute('alt', 'The logo on the board'); bt.appendChild(bi); }
+    byId('lBoardText').textContent = !onBoard ? '' : boardLogo ? 'The logo on the board.' : 'A logo is on the board. There is no preview of it on this computer.';
+    board.show({ logo: lg ? { url: lg.url, w: lg.w, h: lg.h, bg: '#' + lg.bg, scale: FITS[lg.fit] }
+                 : onBoard && boardLogo ? { url: boardLogo, w: 320, h: 240, bg: '#' + CLEAR, scale: 1 } : null });
+  }
+  // The daemon's copy of what it last sent, served only while the board
+  // still reports that logo. A data URL, not a path: the page's CSP allows
+  // no remote images and the route is behind the session cookie.
+  function logoKey(l) { return l.bytes + ':' + l.frames; }
+  function loadBoardLogo() {
+    fetch('/api/logo/preview', { credentials: 'same-origin' }).then(function (r) { return r.status === 200 ? r.blob() : null; })
+      .then(function (b) { return b && b.size ? readDataURL(b) : null; })
+      .then(function (u) { boardLogo = u; paintLogo(); }, function () { boardLogo = null; paintLogo(); });
+  }
+  function readDataURL(file) {
+    return new Promise(function (ok, no) {
+      var r = new FileReader();
+      r.onload = function () { ok(String(r.result)); };
+      r.onerror = function () { no(new Error('read')); };
+      r.readAsDataURL(file);
+    });
+  }
+  function loadImg(url) {
+    return new Promise(function (ok, no) { var i = new Image(); i.onload = function () { ok(i); }; i.onerror = function () { no(new Error('img')); }; i.src = url; });
+  }
+  function canvas(w, h) { var c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+  // The colour in the picture's top-left corner; black when it is clear,
+  // or when the browser will not say.
+  var CLEAR = rgb2hex([0, 0, 0]);   // computed, so the palette test finds no literal
+  function corner(img) {
+    try {
+      var c = canvas(64, 64), x = c.getContext('2d');
+      x.drawImage(img, 0, 0, 64, 64);
+      var d = x.getImageData(0, 0, 1, 1).data;
+      return d[3] < 128 ? CLEAR : rgb2hex([d[0], d[1], d[2]]);
+    } catch (e) { return CLEAR; }
+  }
+  // The still, as the board will get it: the picture fitted inside 320x240
+  // at the chosen scale on a clear canvas (the app fills the clear part with
+  // the background colour).
+  function stillRGBA() {
+    var c = canvas(320, 240), x = c.getContext('2d');
+    var k = Math.min(320 / lg.w, 240 / lg.h) * FITS[lg.fit], w = lg.w * k, h = lg.h * k;
+    x.clearRect(0, 0, 320, 240);
+    x.drawImage(lg.img, (320 - w) / 2, (240 - h) / 2, w, h);
+    return x.getImageData(0, 0, 320, 240).data;
+  }
+  function sendLogo(path, signal) {
+    var body = lg.kind === 'gif' ? lg.bytes : stillRGBA();
+    return fetch(path, { method: 'POST', credentials: 'same-origin', body: body, headers: {
+      'Content-Type': 'application/octet-stream', 'X-Blink-Tab': TAB, 'X-Blink-Logo': lg.kind === 'gif' ? 'gif' : 'rgba',
+      'X-Blink-Bg': lg.bg.toLowerCase(), 'X-Blink-Hold-Ms': String(lg.hold), 'X-Blink-Fit': lg.fit }, signal: signal })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j.status = r.status; return j; }); });
+  }
+  var TOO_BIG = 'Too big for the board. Pick a plainer background or a smaller size.';
+  function reason(j) { return /too big for the board/i.test(j.why || '') ? TOO_BIG : j.why || 'The app could not use that picture.'; }
+  // The size, asked of the app after any change that moves it. A late answer
+  // for an older choice is dropped.
+  function check() {
+    clearTimeout(checkTimer);
+    if (!lg) return;
+    var mine = ++checkSeq;
+    if (checkCtl) checkCtl.abort();      // the older check's answer is not wanted
+    checkCtl = typeof AbortController === 'function' ? new AbortController() : null;
+    lg.kb = null; byId('lSend').disabled = true;
+    byId('lSize').textContent = 'Working out the size…'; lmsg('');
+    checkTimer = setTimeout(function () {
+      sendLogo('/api/logo?check=1', checkCtl ? checkCtl.signal : undefined).then(function (j) {
+        if (mine !== checkSeq || !lg) return;
+        if (j.status === 200 && typeof j.bytes === 'number') {
+          lg.kb = Math.max(1, Math.round(j.bytes / 1024));
+          byId('lSize').textContent = 'About ' + lg.kb + ' KB of 512 KB on the board';
+          byId('lSend').disabled = lgBusy;
+        } else { byId('lSize').textContent = ''; lmsg(reason(j), 'bad'); }
+      }, function () { if (mine === checkSeq) { byId('lSize').textContent = ''; lmsg('The app did not answer.', 'bad'); } });
+    }, 250);
+  }
+  function takeFile(file) {
+    if (!file || !loaded || finished) return;
+    lmsg('');
+    if (file.size > MAX_PICK) return lmsg('That file is too big to open here.', 'bad');
+    file.arrayBuffer().then(function (buf) {
+      var u = new Uint8Array(buf), gif = u.length > 3 && u[0] === 71 && u[1] === 73 && u[2] === 70 && u[3] === 56;
+      if (gif && u.length > MAX_GIF) throw new Error('gifbig');
+      return readDataURL(file).then(loadImg).then(function (img) {
+        var next = { kind: gif ? 'gif' : 'still', name: String(file.name || 'logo').slice(0, 80), bytes: gif ? u : null, img: img,
+                     url: img.src, w: img.naturalWidth || 320, h: img.naturalHeight || 240, fit: lg ? lg.fit : 'fill',
+                     hold: lg ? lg.hold : 3000, bgAuto: true, bg: corner(img), kb: null };
+        lg = next;
+        var t = byId('lThumb'); while (t.firstChild) t.removeChild(t.firstChild);
+        var im = document.createElement('img'); im.setAttribute('src', next.url); im.setAttribute('alt', ''); t.appendChild(im);
+        paintLogo(); check();
+      });
+    }).then(null, function (e) {
+      lmsg(e && e.message === 'gifbig' ? 'That GIF is over 2 MB. Pick a smaller one.' : 'That picture could not be opened.', 'bad');
+    });
+  }
+  byId('logoFile').addEventListener('change', function (e) { var f = e.target.files && e.target.files[0]; takeFile(f); try { e.target.value = ''; } catch (x) {} });
+  ['dragenter', 'dragover'].forEach(function (t) { byId('drop').addEventListener(t, function (e) { e.preventDefault(); byId('drop').classList.add('over'); }); });
+  byId('drop').addEventListener('dragleave', function () { byId('drop').classList.remove('over'); });
+  byId('drop').addEventListener('drop', function (e) { e.preventDefault(); byId('drop').classList.remove('over'); takeFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]); });
+  byId('lReplace').addEventListener('click', function () { byId('logoFile').click(); });
+  // Drops the chosen picture only. A logo already on the board goes through
+  // Remove, which asks first; this never talks to the board.
+  byId('lClear').addEventListener('click', function () {
+    if (!lg || lgBusy) return;
+    checkSeq++; clearTimeout(checkTimer); if (checkCtl) checkCtl.abort();
+    lg = null; lmsg(''); byId('lSize').textContent = '';
+    paintLogo(); byId('logoFile').focus();
+  });
+  document.querySelectorAll('#lScale button').forEach(function (b) {
+    b.addEventListener('click', function () { if (!lg) return; lg.fit = b.dataset.s; if (lg.bgAuto) lg.bg = corner(lg.img); paintLogo(); check(); });
+  });
+  byId('lBg').addEventListener('input', function () { if (!lg) return; lg.bgAuto = false; lg.bg = byId('lBg').value.slice(1).toUpperCase(); paintLogo(); check(); });
+  byId('lBgAuto').addEventListener('click', function () { if (!lg) return; lg.bgAuto = true; lg.bg = corner(lg.img); paintLogo(); check(); });
+  byId('lHold').addEventListener('change', function () { if (!lg) return; lg.hold = +byId('lHold').value; check(); });
+  byId('lSend').addEventListener('click', function () {
+    if (!lg || lg.kb == null || lgBusy || !loaded) return;
+    lgBusy = true; paintLogo(); lmsg('Sending to the board. A big logo takes about a minute.');
+    sendLogo('/api/logo').then(function (j) {
+      lgBusy = false;
+      if (j.status === 200 && j.logo && j.logo.present === 1) { onBoard = true; boardKey = logoKey(j.logo); loadBoardLogo(); lmsg('The logo is on the board. It shows when the board starts.', 'ok'); }
+      else lmsg(j.why || 'The board refused the logo.', 'bad');
+      paintLogo();
+    }, function () { lgBusy = false; lmsg('The app did not answer.', 'bad'); paintLogo(); });
+  });
+  // Remove, behind the in-page confirm, from either button.
+  function removeLogo(host) {
+    confirm.ask(host, 'Remove the logo from the board? It starts with the BLINK animation only.', 'Remove it', function () {
+      post('/api/logo/remove', null).then(function (j) {
+        if (j.status !== 200) { lmsg(j.why || 'The board did not answer.', 'bad'); return; }
+        onBoard = false; boardLogo = null; boardKey = null; lg = null; lmsg('');
+        paintLogo(); byId('logoFile').focus();
+      }, function () { lmsg('The app did not answer.', 'bad'); });
+    });
+  }
+  byId('lRemove').addEventListener('click', function () { removeLogo(byId('lRemove')); });
+  byId('lRemoveB').addEventListener('click', function () { removeLogo(byId('lRemoveB')); });
+
+  // ---------------------------------------------------------------- Board
+  // `mid`: the message line that hears why a page of the app did not load. A
+  // silent null here showed the switches in their HTML defaults, and the next
+  // tap posted the opposite of what the file held.
+  function getJSON(path, mid) {
+    var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    var limit = ctl ? setTimeout(function () { ctl.abort(); }, REQUEST_MS) : null;
+    return fetch(path, { credentials: 'same-origin', signal: ctl ? ctl.signal : undefined }).then(function (r) {
+      clearTimeout(limit);
+      if (r.status === 200) { msgSet(mid, ''); return r.json(); }
+      return r.json().then(function (j) { return j && j.why; }, function () { return null; }).then(function (why) {
+        msgSet(mid, why || 'The app did not answer.', 'bad'); return null;
+      });
+    }, function () { clearTimeout(limit); msgSet(mid, 'The app did not answer.', 'bad'); return null; });
+  }
+  function vnum(v) { return String(v || '').split('.').map(function (x) { return parseInt(x, 10) || 0; }); }
+  function vless(a, b) { a = vnum(a); b = vnum(b); for (var i = 0; i < 3; i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) < (b[i] || 0); } return false; }
+  function paintDevice(d) {
+    if (!d) return;
+    if (typeof d.id === 'string' && d.id) byId('devId').textContent = d.id;
+    if (typeof d.fw === 'string' && d.fw) {
+      byId('devFw').textContent = d.fw;
+      var old = typeof d.app === 'string' && vless(d.fw, d.app);
+      byId('devTagT').textContent = old ? 'The app has ' + d.app : 'Up to date';
+      byId('devTag').className = 'tag' + (old ? ' old' : ''); vis('devTag', true);
+      if (typeof d.app === 'string') { st.versions = { board: d.fw, app: d.app }; render(); }
+    }
+    if (d.pref) applyPref(d.pref);
+    // The board's report is the truth: a logo changed or removed elsewhere (a
+    // second tab, another computer, the board) must not leave this page's
+    // thumbnail on show. Refetch when the size or frames differ; the server
+    // 404s a copy that no longer matches.
+    var L = d.logo;
+    if (L && L.present === 1) {
+      var key = logoKey(L), fresh = !onBoard || key !== boardKey;
+      onBoard = true; boardKey = key; paintLogo(); if (fresh) loadBoardLogo();
+    } else if (L && L.present === 0 && onBoard) { onBoard = false; boardLogo = null; boardKey = null; paintLogo(); }
+  }
+  // The address and the saved network, from /api/wifi through Connect's paint.
+  function deviceWifi(link, savedName, ip) {
+    byId('devAddr').textContent = link === 'wifi' ? 'WiFi' + (typeof ip === 'string' && ip ? ', ' + ip : '') : link === 'usb' ? 'USB' : 'Unknown';
+    byId('savedNet').textContent = savedName || 'None';
+    vis('forgetBtn', link === 'usb' && !!savedName);
+  }
+  byId('forgetBtn').addEventListener('click', function () { conn.forget(byId('forgetBtn')); });
+  byId('detBtn').addEventListener('click', function () {
+    var on = byId('detBtn').getAttribute('aria-expanded') !== 'true';
+    byId('detBtn').setAttribute('aria-expanded', String(on)); vis('det', on);
+  });
+  // Brightness: the five levels the board stores. Marked only when the
+  // board has said it took one.
+  document.querySelectorAll('[data-b]').forEach(function (b) {
+    b.addEventListener('click', function () { if (loaded) prefSet({ bright: +b.dataset.b }, 'b-msg'); });
+  });
+  byId('showSet').addEventListener('click', function () {
+    st.showSettings = !st.showSettings;
+    byId('showSet').setAttribute('aria-pressed', String(st.showSettings));
+    syncScreen(); render();
+  });
+  // This computer.
+  // False until a good /api/computer load: before it the switches sit in their
+  // HTML defaults and a tap would post the inverse of the real value.
+  var computerLoaded = false;
+  function paintComputer(c) {
+    if (!c) return;
+    computerLoaded = true;
+    document.querySelectorAll('.switch[data-key]').forEach(function (b) { if (typeof c[b.dataset.key] === 'boolean') b.setAttribute('aria-checked', String(c[b.dataset.key])); });
+  }
+  document.querySelectorAll('.switch[data-key]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      if (!loaded || !computerLoaded || finished) return;
+      var want = {}; want[b.dataset.key] = b.getAttribute('aria-checked') !== 'true';
+      post('/api/computer', want).then(function (j) {
+        if (j.status !== 200) { msgSet('k-msg', j.why || 'This computer could not save that setting.', 'bad'); return; }
+        msgSet('k-msg', ''); paintComputer(j);
+      }, function () { msgSet('k-msg', 'The app did not answer.', 'bad'); });
+    });
+  });
+  function loadBoardPanel() {
+    getJSON('/api/device', 'b-msg').then(paintDevice);
+    getJSON('/api/computer', 'k-msg').then(paintComputer);
+  }
+  // The board's logo can change under an open tab (another computer, the
+  // board's own Remove). Ask again on coming back into view, as ping does.
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && persistent && !finished) getJSON('/api/device', 'b-msg').then(paintDevice);
+  });
+  // The rows that wait for another branch stay off whatever the form does.
+  function soon() { document.querySelectorAll('[data-soon]').forEach(function (e) { e.disabled = true; }); }
+
+  // For the page's tests (tests/pc/test_theme_page.py).
+  window.blinkSettings = { board: board, panel: panel, status: status, confirm: confirm };
+  document.getElementById('done').addEventListener('click', function () {
+    if (finished) return;
+    clearTimeout(previewTimer);
+    post('/api/done', null, true).then(function (j) {
+      if (j.status === 409) return superseded();
+      var keep = holdsDraft();
+      if (retire('Done.', 'Your board keeps what it has now.', 'Done. Your board keeps what it has now.', 'ok',
+                 keep && (savedHere ? KEEP_AFTER_SAVE : KEEP_LINE), closeLine(CLOSE_AFTER_S)) && !keep) closeSoon();
+    }, stopped);
+  });
+  // ?panel=look|connect|board: `blink theme` (look) and `blink settings`
+  // (connect, by default) open the page with that control open; the board's
+  // Open on PC opens it with none.
+  var want = /[?&]panel=(look|connect|board)\b/.exec(typeof location === 'undefined' ? '' : location.search || '');
+  if (want) panel.open(want[1]);
 
   // A theme as /api/state gives it, onto the page. False if it is neither a
   // built-in nor a custom theme this page can show.
   function applyTheme(t) {
     if (t && t.id === CUSTOM) return applyCustom(t);
-    if (t && t.id >= 0 && t.id < PRESETS.length) { Object.assign(st, PRESETS[t.id][1]); st.preset = t.id; fromOutside(); return true; }
+    if (t && t.id >= 0 && t.id < PRESETS.length) { pickPreset(t.id); return true; }
     return false;
   }
   // Limited like the posts, and ending the same way as a refused one: the
@@ -1392,10 +2818,9 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
   // The form is off until then; see loaded. Copy share code with it, which
   // copied "blink theme set dark", a theme the page had never read, under
   // a bar asking the owner to wait (review of fp/save-before-load, S1).
-  // Cancel stays on: it writes nothing of its own, only puts the board
-  // back on the theme it keeps.
   var FORM = 'main button, main input, #copy-code';
-  document.querySelectorAll(FORM).forEach(function (e) { e.disabled = true; });
+  // Cancel stays on: it writes nothing of its own, only puts the board back.
+  document.querySelectorAll(FORM).forEach(function (e) { e.disabled = e.id !== 'cancel'; });
   var studio = document.querySelector('main');
   var waiting = setTimeout(function () { if (!loaded) studio.classList.add('waiting'); }, 150);
   var stateCtl = typeof AbortController === 'function' ? new AbortController() : null;
@@ -1407,6 +2832,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     clearTimeout(stateLimit);
     var t = j.saved;
     oldBoard = !!j.board && j.board.themes === false;
+    persistent = !!j.persistent;
+    if (persistent) { document.getElementById('done').removeAttribute('hidden'); document.getElementById('cancel').setAttribute('hidden', ''); }
     applyTheme(t);
     savedKey = JSON.stringify(wireTheme());
     lastSent = savedKey;
@@ -1423,6 +2850,8 @@ code { font-family: var(--mono); font-size: .875em; background: var(--sunk); bor
     say(oldBoard ? OLD_BOARD_LOAD : draft ? 'This picks up the changes you had not saved. Your board shows them as a preview.'
         : t ? 'This is the theme your board has now. Changes show on it as a preview.' : 'Your board is on its own theme. Changes show on it as a preview.');
     render();
+    soon();
+    if (persistent) { loadHub(); loadBoardPanel(); }
   }, function () { clearTimeout(stateLimit); render(); stopped(); });
   render();
 })();

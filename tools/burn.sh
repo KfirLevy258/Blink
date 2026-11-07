@@ -308,6 +308,24 @@ else
 	echo "   --bench: flashing a TOUCH INJECT build the computer can drive"
 fi
 
+# A bench test knob (CONFIG_BLINK_TEST_*) or a standalone-network image is
+# refused the way release.sh and flash_encrypted.sh refuse it, and for a worse
+# reason here: burn.sh signs the image CONFIRMED, so a HANG_AFTER_BOOT image
+# that one -D left in build-sb's CMake cache would hang on every boot with no
+# revert to rescue the unit, and NEVER_HEALTHY would revert every update that
+# desk takes later. This was the one flashing path that did not ask
+# (round-2 review of PR 9, finding 1). BLINK_BENCH_KNOBS=1 is the bench's
+# permission, loud, and not a flag a script passes by habit.
+if [ "${BLINK_BENCH_KNOBS:-0}" = 1 ]; then
+	echo "!! BLINK_BENCH_KNOBS=1: test-knob and standalone-net checks SKIPPED." >&2
+	echo "!! This image must never reach a desk." >&2
+else
+	blink_refuse_test_knobs "$BUILD/firmware/zephyr/.config" "$SIGNED" ||
+		die "this build carries a CONFIG_BLINK_TEST_* knob (above). Bench only: BLINK_BENCH_KNOBS=1."
+	blink_refuse_standalone_net "$BUILD/firmware/zephyr/.config" "$SIGNED" ||
+		die "this build has a standalone network path (above). Bench only: BLINK_BENCH_KNOBS=1."
+fi
+
 # ------------------------------------------- 2a. a CONFIRMED image to flash
 # zephyr.signed.bin is signed but not confirmed: its trailer says "boot this
 # once". Right for OTA -- it lands in slot 1 and main.c confirms it once the
@@ -348,7 +366,7 @@ if [ -n "$LOGO" ]; then
 			src="--frames"
 		else
 			case "$LOGO" in
-			*.mp4|*.mov|*.webm|*.mkv|*.gif) src="--video" ;;
+			*.mp4|*.mov|*.webm|*.mkv) src="--video" ;;
 			*) src="--image" ;;
 			esac
 		fi

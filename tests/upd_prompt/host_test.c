@@ -38,22 +38,22 @@ int main(void)
 	int i;
 
 	/* --- the ordinary offer ------------------------------------------- */
-	t = upd_prompt_step(OTA_UI_AVAILABLE, false, false, false);
+	t = upd_prompt_step(OTA_UI_AVAILABLE, false, false, false, false);
 	CHECK(t.act == UPD_PROMPT_SHOW);
 	CHECK(t.latched == true);
 
 	/* Shown once. The second turn finds the latch and says nothing --
 	 * this is what makes "Later" mean later rather than five seconds. */
-	t = upd_prompt_step(OTA_UI_AVAILABLE, false, true, false);
+	t = upd_prompt_step(OTA_UI_AVAILABLE, false, true, false, false);
 	CHECK(t.act == UPD_PROMPT_NOTHING);
 	CHECK(t.latched == true);
 
 	/* Already on the glass: not shown twice, and not withdrawn either. */
-	t = upd_prompt_step(OTA_UI_AVAILABLE, true, true, false);
+	t = upd_prompt_step(OTA_UI_AVAILABLE, true, true, false, false);
 	CHECK(t.act == UPD_PROMPT_NOTHING);
 
 	/* --- never on top of something else -------------------------------- */
-	t = upd_prompt_step(OTA_UI_AVAILABLE, false, false, true);
+	t = upd_prompt_step(OTA_UI_AVAILABLE, false, false, true, false);
 	CHECK(t.act == UPD_PROMPT_NOTHING);
 	/* And being refused for busy must NOT latch: the offer has not been
 	 * made yet, so the next quiet turn still owes the user the question. */
@@ -67,7 +67,7 @@ int main(void)
 		if (ALL[i] == OTA_UI_AVAILABLE) {
 			continue;
 		}
-		t = upd_prompt_step(ALL[i], true, true, false);
+		t = upd_prompt_step(ALL[i], true, true, false, false);
 		CHECK(t.act == UPD_PROMPT_WITHDRAW);
 		CHECK(t.latched == false);   /* never answered: ask again */
 	}
@@ -80,27 +80,27 @@ int main(void)
 	 * tap survives the whole boot and the board never offers again, which
 	 * is exactly the state a customer's desk was left in on 2026-09-10.
 	 */
-	t = upd_prompt_step(OTA_UI_FAILED, false, true, false);
+	t = upd_prompt_step(OTA_UI_FAILED, false, true, false, false);
 	CHECK(t.act == UPD_PROMPT_NOTHING);   /* nothing to take down */
 	CHECK(t.latched == false);            /* but ask again */
 
 	/* And once it has lifted, the next genuine offer really is made. */
-	t = upd_prompt_step(OTA_UI_AVAILABLE, false, false, false);
+	t = upd_prompt_step(OTA_UI_AVAILABLE, false, false, false, false);
 	CHECK(t.act == UPD_PROMPT_SHOW);
 
 	/* A failure while the box is somehow still up: both rules agree. */
-	t = upd_prompt_step(OTA_UI_FAILED, true, true, false);
+	t = upd_prompt_step(OTA_UI_FAILED, true, true, false, false);
 	CHECK(t.act == UPD_PROMPT_WITHDRAW);
 	CHECK(t.latched == false);
 
 	/* Busy does not stop a failure from re-arming: `busy` gates SHOWING,
 	 * not the latch. A notice on screen is usually the failure's own. */
-	t = upd_prompt_step(OTA_UI_FAILED, false, true, true);
+	t = upd_prompt_step(OTA_UI_FAILED, false, true, true, false);
 	CHECK(t.latched == false);
 
 	/* --- the latch is never set by anything but showing ---------------- */
 	for (i = 0; i < NSTATES; i++) {
-		t = upd_prompt_step(ALL[i], false, false, false);
+		t = upd_prompt_step(ALL[i], false, false, false, false);
 		if (ALL[i] == OTA_UI_AVAILABLE) {
 			CHECK(t.latched == true);
 		} else {
@@ -113,10 +113,30 @@ int main(void)
 		if (ALL[i] == OTA_UI_AVAILABLE || ALL[i] == OTA_UI_FAILED) {
 			continue;
 		}
-		t = upd_prompt_step(ALL[i], false, true, false);
+		t = upd_prompt_step(ALL[i], false, true, false, false);
 		CHECK(t.act == UPD_PROMPT_NOTHING);
 		CHECK(t.latched == true);   /* nothing here lifts it */
 	}
+
+	/* --- the doze: down at once, never up under it --------------------- */
+	/* The update offer is the same 300 px box on lv_layer_top as "Keep
+	 * figures fresh?", and lv_timer_handler runs on under the sleep clip:
+	 * an offer up when the doze started, or raised under it (a daemon
+	 * restart's welcome check answered AVAILABLE), took the waking tap,
+	 * and "Update now" could start an install nobody saw (/code-review max
+	 * of feat/usage-refresh, V22). Taken down unanswered, so the latch
+	 * lifts and the offer comes back once the board is awake. */
+	t = upd_prompt_step(OTA_UI_AVAILABLE, true, true, false, true);
+	CHECK(t.act == UPD_PROMPT_WITHDRAW);
+	CHECK(t.latched == false);
+	for (i = 0; i < NSTATES; i++) {
+		t = upd_prompt_step(ALL[i], false, false, false, true);
+		CHECK(t.act != UPD_PROMPT_SHOW);
+		CHECK(t.latched == false);
+	}
+	/* Awake again: the same offer goes up. */
+	t = upd_prompt_step(OTA_UI_AVAILABLE, false, false, false, false);
+	CHECK(t.act == UPD_PROMPT_SHOW);
 
 	/* --- the install confirm comes down with the offer ----------------- */
 	for (i = 0; i < NSTATES; i++) {

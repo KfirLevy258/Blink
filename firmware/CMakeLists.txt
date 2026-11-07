@@ -5,6 +5,8 @@ project(claude_usage_display)
 target_sources(app PRIVATE
 	src/main.c
 	src/proto.c
+	src/link.c
+	src/wifi_msg.c
 	src/msg_parse.c
 	src/usage_view.c
 	src/fmt.c
@@ -16,11 +18,13 @@ target_sources(app PRIVATE
 	src/ui_sleep.c
 	src/sleep_gate.c
 	src/upd_prompt.c
+	src/ask_prompt.c
 	src/upd_row.c
 	src/upd_tap.c
 	src/whatsnew.c
 	src/logo_parse.c
 	src/logo.c
+	src/logo_write.c
 	src/ui_settings.c
 	src/edit_hold.c
 	src/settings_icons.c
@@ -42,6 +46,10 @@ target_sources(app PRIVATE
 	src/burn5h.c
 )
 
+# The radio's station half (spec S5.1); on in every image (Kconfig).
+target_sources_ifdef(CONFIG_BLINK_WIFI_LINK app PRIVATE src/net_link.c
+		     src/wl_server.c src/wl_hs.c src/wl_frame.c src/ota_net.c)
+
 # Diagnostic only; CONFIG_BLINK_TOUCH_TRACE is off in release builds.
 target_sources_ifdef(CONFIG_BLINK_TOUCH_TRACE app PRIVATE src/touch_trace.c)
 
@@ -50,6 +58,11 @@ target_sources_ifdef(CONFIG_BLINK_TOUCH_TRACE app PRIVATE src/touch_trace.c)
 target_sources_ifdef(CONFIG_BLINK_TOUCH_INJECT app PRIVATE src/touch_inject.c
 		     src/touch_widgets.c)
 
+
+# The WiFi link's cipher (mbedTLS behind wl_crypto.h) and its boot
+# self-test; CONFIG_BLINK_WIFI_LINK and the mbedTLS modules it needs come
+# from firmware/Kconfig and prj.conf (spec S5.1).
+target_sources_ifdef(CONFIG_BLINK_WIFI_LINK app PRIVATE src/wl_crypto_mbedtls.c)
 
 # The [mem] lines (src/mem_stats.c), on whenever prj.conf keeps the heap
 # counters on. It reads the LVGL pool's free lists through Zephyr's private
