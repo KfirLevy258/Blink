@@ -1220,7 +1220,12 @@ static void wifi_poll(void)
 				wifi_send_state(NULL, NULL, false);
 			} else {
 				wifi_send_state("fail", WIFI_WHY_SAVE, false);
+				/* Still on the candidate network: the automatic
+				 * rejoin only fires off NL_UP, so go down first
+				 * (the work arms the rejoin, then downs, then
+				 * rejoins at +5 s). */
 				if (cfg_paired()) {
+					net_link_request_down();
 					wifi_rejoin_stored();
 				} else {
 					net_link_request_down();
