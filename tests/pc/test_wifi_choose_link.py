@@ -422,6 +422,12 @@ class Daemon:
         except (OSError, ValueError):
             return {}
 
+    def link_or_none(self):
+        try:
+            return self.link()["link"]
+        except (OSError, ValueError, KeyError):
+            return None
+
     def link(self):
         return json.loads((self.home / ".blink" / "link.json").read_text())
 
@@ -450,6 +456,10 @@ def test_main_reaches_wifi_with_no_serial_port_and_a_busy_one(
     d = Daemon(tmp_path, "busy", force=force, board=fake_board())
     try:
         assert d.wait(lambda: HANDSHAKE <= set(d.seen()))
+        # The tap has the hello before the read loop gets round to writing
+        # link.json; reading it at once lost that race on a loaded Ubuntu
+        # run (2026-11-07). Wait for the record itself.
+        assert d.wait(lambda: d.link_or_none() == "wifi")
         if force:
             time.sleep(3.5)         # a flapping link would reconnect by now
         assert d.link()["link"] == "wifi"
