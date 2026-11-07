@@ -691,6 +691,17 @@ uint32_t net_link_request_join(const uint8_t *ssid, size_t ssid_len, const char 
 	return ticket;
 }
 
+void net_link_request_rejoin(void)
+{
+	if (iface == NULL || refused) {
+		return;
+	}
+	/* The work asks cfg_paired() and a join requested in the same wake-up
+	 * wins, as for a lost network. */
+	atomic_set(&rejoin_want, 2);
+	kick();
+}
+
 void net_link_request_down(void)
 {
 	/* Refused too: the radio never came up, and a down would turn the

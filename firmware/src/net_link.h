@@ -47,6 +47,10 @@ int net_link_scan_results(struct net_link_ap *out, int max);
  * Asking again replaces a request that has not started; the ticket of the
  * one that wins is the one net_link_run_ticket() later reports. */
 uint32_t net_link_request_join(const uint8_t *ssid, size_t ssid_len, const char *psk);
+/* The stored network again, as an automatic rejoin: the first try after the
+ * 5 s router wait, then the capped backoff. For a failed candidate on a paired
+ * board, whose fallback join would otherwise be one-shot. No-op unpaired. */
+void net_link_request_rejoin(void);
 /* Sockets closed, NET_REQUEST_WIFI_DISCONNECT (wait <= 2 s), net_if_down(),
  * esp_wifi_stop(): D46. */
 void net_link_request_down(void);

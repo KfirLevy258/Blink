@@ -1126,16 +1126,9 @@ out:
  * the attempt, so go back to it rather than sit off until a reboot. */
 static void wifi_rejoin_stored(void)
 {
-	uint8_t ssid[32];
-	size_t ssid_len = 0;
-	char psk[CFG_PSK_MAX];
-	uint8_t key[CFG_PAIR_KEY_LEN];
-
-	if (cfg_get_pairing(ssid, &ssid_len, psk, sizeof(psk), key)) {
-		net_link_request_join(ssid, ssid_len, psk);
-	}
-	wipe(psk, sizeof(psk));
-	wipe(key, sizeof(key));
+	/* An automatic rejoin, not a requested join: a requested join is
+	 * one-shot, so one slow DHCP left the board off until a reboot. */
+	net_link_request_rejoin();
 }
 
 /* Main thread only: cand has no lock. Task 2.5's network thread must not
