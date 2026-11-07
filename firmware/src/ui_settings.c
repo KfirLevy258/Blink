@@ -1858,9 +1858,8 @@ static lv_obj_t *mk_back(lv_obj_t *parent, lv_event_cb_t cb)
  * 128 px, so "Software update" could become "Update" -- the icon says which
  * tile it is -- and nothing needs a wider column.
  *
- * Stacked rather than icon-beside-text for the state's sake: a 28 px icon on
- * the left of a 144 px tile leaves 92 px for words, and the update tile's
- * state must hold "Ready to install" and "Install 1.10.0".
+ * Stacked rather than icon-beside-text for the state's sake: beside a 28 px
+ * icon a 94 px tile would leave 50 px for words.
  *
  * Not smaller, whatever else wants the height: the rows before these were
  * measured at 30 px once, 5.3 mm sitting 5 px apart, and one press covered

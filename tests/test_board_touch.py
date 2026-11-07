@@ -184,7 +184,7 @@ class FakeLink:
         self.bench_ref = bench_ref
         self.state = dict(scr="gauges", ov="none", modal="none", busy=0,
                           theme=0, stored=0, tp=0, focus="off", bl=60,
-                          edit="name", slp=0, nt="none", gf="off")
+                          edit="name", slp=0, nt="none", gf="off", ln="usb")
         if state:
             self.state.update(state)
 
@@ -249,12 +249,12 @@ def test_a_ui_state_line_keeps_only_known_fields_in_range():
                             "ov": "theme", "modal": "none", "busy": 0,
                             "theme": 9, "stored": 9, "tp": 1,
                             "focus": "off", "bl": 60, "edit": "opened",
-                            "slp": 0, "nt": "none", "gf": "off",
+                            "slp": 0, "nt": "none", "gf": "off", "ln": "usb",
                             "extra": "dropped"})
     assert st == {"scr": "settings", "ov": "theme", "modal": "none",
                   "busy": 0, "theme": 9, "stored": 9, "tp": 1,
                   "focus": "off", "bl": 60, "edit": "opened",
-                  "slp": 0, "nt": "none", "gf": "off"}
+                  "slp": 0, "nt": "none", "gf": "off", "ln": "usb"}
     assert bt.parse_ui_state({"t": "ui_state", "scr": "x" * 99}) is None
 
 

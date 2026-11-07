@@ -878,11 +878,12 @@ _STATE_WORDS = {
     "edit": ("name", "waiting", "opened", "run", "held"),
     "nt": ("none", "sleep", "ota", "other"),
     "gf": FOCUS_NAMES,
+    "ln": ("wifi", "usb", "none"),
 }
 _STATE_INTS = {"busy": (0, 1), "theme": (0, 12), "stored": (0, 12),
                "tp": (0, 9), "bl": (0, 100), "slp": (0, 1)}
 STATE_KEYS = ("scr", "ov", "modal", "busy", "theme", "stored", "tp",
-              "focus", "bl", "edit", "slp", "nt", "gf")
+              "focus", "bl", "edit", "slp", "nt", "gf", "ln")
 
 
 def _int_in(v, lo, hi):

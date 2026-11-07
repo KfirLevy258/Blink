@@ -45,6 +45,7 @@
 #include "touch_inject_geom.h"
 #include "ui_swipe.h"
 #include "ui_swipe_geom.h"
+#include "proto.h"
 #include "ui_settings.h"
 #include "ui_anim.h"
 #include "ui_slide.h"
@@ -571,7 +572,7 @@ static void touch_line(const char *json)
 static void ui_state_line(void)
 {
 	struct ui_settings_bench b;
-	char buf[256];
+	char buf[288];
 	const char *scr;
 
 	ui_settings_bench_state(&b);
@@ -581,7 +582,7 @@ static void ui_state_line(void)
 		 "{\"t\":\"ui_state\",\"v\":2,\"scr\":\"%s\",\"ov\":\"%s\","
 		 "\"modal\":\"%s\",\"busy\":%d,\"theme\":%d,\"stored\":%d,"
 		 "\"tp\":%d,\"focus\":\"%s\",\"bl\":%d,\"edit\":\"%s\","
-		 "\"slp\":0,\"nt\":\"%s\",\"gf\":\"%s\"}",
+		 "\"slp\":0,\"nt\":\"%s\",\"gf\":\"%s\",\"ln\":\"%s\"}",
 		 scr, b.open ? b.sub : "none", b.modal,
 		 (b.busy || anim_pending ||
 		  lv_display_get_screen_prev(NULL) != NULL) ? 1 : 0,
@@ -589,7 +590,9 @@ static void ui_state_line(void)
 		 ui_theme_stored_id(), b.theme_page,
 		 !cfg_get_focus_on() ? "off" :
 		 cfg_get_focus_win() ? "weekly" : "session",
-		 (int)backlight_get(), b.edit, b.nt, usage_view_bench_focus());
+		 (int)backlight_get(), b.edit, b.nt, usage_view_bench_focus(),
+		 proto_link_kind() == 2 ? "wifi" :
+		 proto_link_kind() == 1 ? "usb" : "none");
 	reply(buf);
 }
 

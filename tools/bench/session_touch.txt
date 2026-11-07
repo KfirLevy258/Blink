@@ -17,6 +17,7 @@ click "Connection"
 expect ui_state ov=connection
 widgets
 expect-widget "Link"
+expect ui_state ln=wifi
 click "Forget WiFi"
 expect ui_state ov=confirm
 mem

@@ -277,6 +277,8 @@ static const char *board_id_hex(void)
 
 /* For Settings > About, which shows only the last four digits and never
  * logs it. */
+/* Called from the LVGL thread: hello has long since filled the cached id by
+ * the time a person can open Settings, so the lazy fill is not raced. */
 const char *proto_board_id_hex(void)
 {
 	return board_id_hex();

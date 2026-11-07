@@ -634,8 +634,12 @@ static void test_fmt_about(void)
 		}
 	}
 	/* The widest: a year of uptime in days cannot overflow the buffer. */
-	fmt_uptime(999999LL * 86400 + 23 * 3600, b, sizeof(b));
-	check_true("widest uptime fits", strlen(b) < sizeof(b));
+	/* snprintf always NUL-terminates, so "strlen < size" passes for any
+	 * size: fill a buffer of exactly FMT_UPTIME_MAX and compare the whole
+	 * string, so a macro that is too small cuts it and fails. */
+	fmt_uptime(999999LL * 86400 + 23 * 3600 + 59 * 60, b, FMT_UPTIME_MAX);
+	check_true("widest uptime is whole in FMT_UPTIME_MAX",
+		   strcmp(b, "999999 days 23 h") == 0);
 
 	static const struct { const char *id; const char *want; } nm[] = {
 		{ "a4cf12d3b07e", "Blink-B07E" }, { "A4CF12D3B07E", "Blink-B07E" },

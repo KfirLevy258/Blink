@@ -58,7 +58,7 @@ class WidgetBoard:
         self.click_answers = []     # touch_refused whys, then touch_done
         self.state = dict(scr="gauges", ov="none", modal="none", busy=0,
                           theme=0, stored=0, tp=0, focus="off", bl=60,
-                          edit="name", slp=0, nt="none", gf="off")
+                          edit="name", slp=0, nt="none", gf="off", ln="usb")
 
     def now(self):
         return self.screens[0]
@@ -1403,3 +1403,19 @@ def test_the_six_tile_grid_and_the_about_screen_are_in_the_firmware():
         ln for ln in src.splitlines() if "printk" in ln)
     for name in ("connection.open", "about.open"):
         assert name in bt.TARGETS
+
+
+_UI = dict(scr="settings", ov="none", modal="none", busy=0, theme=0,
+           stored=0, tp=0, focus="off", bl=60, edit="name", slp=0,
+           nt="none", gf="off", ln="wifi")
+
+
+def test_the_session_script_checks_the_link_in_ui_state_not_in_a_label():
+    # The Connection row's value is not a widget label, so "Link" alone also
+    # reads true on USB; ui_state's ln is what says WiFi.
+    steps = bt.parse_script((ROOT / "tools" / "bench" / "session_touch.txt")
+                            .read_text(encoding="utf-8"))
+    assert any(s.cmd == "expect" and s.args[0] == "ui_state"
+               and s.args[1].get("ln") == "wifi" for s in steps)
+    assert bt.parse_ui_state({**_UI, "ln": "dsl"}) is None
+    assert bt.parse_ui_state({**_UI}) ["ln"] == "wifi"
