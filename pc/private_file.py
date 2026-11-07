@@ -247,7 +247,9 @@ def _owner_only(sddl, sid, ace):
 
 def check_facts(sddl, attrs, final, expect_dir, sid):
     """Judge what a handle reported: its owner+DACL SDDL, its attributes and
-    its final path. Raises NotPrivate; returns None when the file is ours."""
+    its final path, against `sid` spelled as SDDL output spells it
+    (_WinApi.sddl_sid). Raises NotPrivate; returns None when the file is
+    ours."""
     if attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY):
         raise NotPrivate("not a regular file")
     parts = parse_sddl(sddl)
@@ -271,16 +273,15 @@ def check_facts(sddl, attrs, final, expect_dir, sid):
 def _win_dir(home, win):
     _makedirs(home)
     path = _join(home, PRIVATE_DIR)
-    sid = win.user_sid()
     # False means it already existed: validated below, never adopted.
-    win.create_dir_with_sddl(path, _DIR_SDDL.format(sid=sid))
+    win.create_dir_with_sddl(path, _DIR_SDDL.format(sid=win.user_sid()))
     try:
         sddl, attrs = win.dir_facts(path)
     except OSError:
         raise NotPrivate("private directory not owner-only") from None
     if (attrs & FILE_ATTRIBUTE_REPARSE_POINT
             or not attrs & FILE_ATTRIBUTE_DIRECTORY
-            or not _owner_only(sddl, sid, _DIR_ACE)):
+            or not _owner_only(sddl, win.sddl_sid(), _DIR_ACE)):
         raise NotPrivate("private directory not owner-only")
     return path
 
@@ -424,6 +425,7 @@ class _WinApi:
                                         w.LPCWSTR, ctypes.c_int, D,
                                         pP, pP, pP, pP, pP)
         self._sid = None
+        self._sddl_sid = None
 
     def _err(self, code=None):
         return self.ct.WinError(self.ct.get_last_error() if code is None
@@ -457,6 +459,29 @@ class _WinApi:
         finally:
             self.CloseHandle(tok)
         return self._sid
+
+    def sddl_sid(self):
+        """user_sid() as a descriptor read back spells it. Not always the
+        same string: SDDL output writes a few well-known accounts as an
+        alias, and the built-in Administrator (RID 500) comes back as "LA".
+        That account is what an Azure VM's admin user is, so on the GitHub
+        Windows runner (runneradmin, PR #9, 2026-11-07) a directory we had
+        just created owner-only read back as O:LA...(A;OICI;FA;;;LA), and
+        comparing it with the numeric SID refused our own directory: every
+        pairing and settings write failed. The OS spells the SID here, by
+        round-tripping the very descriptor we create with, so the checks
+        compare like with like and still refuse any other account."""
+        if self._sddl_sid is None:
+            psd = self.ct.c_void_p()
+            if not self.CSSDtoSD(_FILE_SDDL.format(sid=self.user_sid()),
+                                 self.SDDL_REVISION_1, self.ct.byref(psd),
+                                 None):
+                raise self._err()
+            parts = parse_sddl(self._sddl_of(psd))
+            if parts is None:
+                raise NotPrivate("acl check failed")
+            self._sddl_sid = parts[0]
+        return self._sddl_sid
 
     def _with_sa(self, sddl, call):
         ct = self.ct
@@ -548,7 +573,7 @@ class _WinApi:
         except OSError:
             raise NotPrivate("acl check failed") from None
         check_facts(sddl, tag.FileAttributes, buf.value, expect_dir,
-                    self.user_sid())
+                    self.sddl_sid())
 
     def write(self, h, data):
         # WriteFile on the handle itself rather than msvcrt.open_osfhandle:

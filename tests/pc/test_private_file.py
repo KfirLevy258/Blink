@@ -167,7 +167,9 @@ class FakeWin:
     """The `win` surface, recording every call. Handles are ints; each
     holds the facts validate_handle judges (through the real check)."""
 
-    def __init__(self):
+    def __init__(self, sid=SID, alias=None):
+        self.sid = sid
+        self.alias = alias        # how the OS spells `sid` when reading back
         self.log = []
         self.dirs = {}            # path -> (sddl, attrs)
         self.files = {}           # path -> bytes
@@ -178,12 +180,19 @@ class FakeWin:
         self.facts = None         # override for the next validated handle
 
     def user_sid(self):
-        return SID
+        return self.sid
+
+    def sddl_sid(self):
+        return self.alias or self.sid
+
+    def _read_back(self, sddl):
+        return sddl.replace(self.sid, self.alias) if self.alias else sddl
 
     def create_dir_with_sddl(self, path, sddl):
         self.log.append(("create_dir_with_sddl", path, sddl))
         if path in self.dirs:
             return False
+        sddl = self._read_back(sddl)
         owner = sddl.split("G:")[0]
         self.dirs[path] = (owner + "D:" + sddl.split("D:")[1], 0x10)
         return True
@@ -194,6 +203,7 @@ class FakeWin:
 
     def _new_handle(self, path, sddl):
         self.next += 1
+        sddl = self._read_back(sddl)
         owner = sddl.split("G:")[0]
         self.handles[self.next] = {
             "path": path, "sddl": owner + "D:" + sddl.split("D:")[1],
@@ -213,7 +223,7 @@ class FakeWin:
             raise self.open_error
         if path not in self.files:
             raise FileNotFoundError(2, "absent")
-        h = self._new_handle(path, "O:%sG:%sD:P(A;;FA;;;%s)" % (SID, SID, SID))
+        h = self._new_handle(path, "O:%sG:%sD:P(A;;FA;;;%s)" % ((self.sid,) * 3))
         self.handles[h]["data"] = self.files[path]
         return h
 
@@ -223,7 +233,7 @@ class FakeWin:
         if self.facts:
             f.update(self.facts)
         private_file.check_facts(f["sddl"], f["attrs"], f["final"],
-                                 expect_dir, SID)
+                                 expect_dir, self.sddl_sid())
 
     def write(self, h, data):
         self.log.append(("write", h))
@@ -396,6 +406,43 @@ def test_windows_load_rejects_foreign_sid_and_reparse_and_owner(win):
     assert private_file.open_private(HOME, "f.json", win=win) == b"secret"
 
 
+ADMIN500 = "S-1-5-21-1111111111-2222222222-3333333333-500"
+
+
+def test_builtin_administrator_reads_back_as_la_and_is_still_ours(monkeypatch):
+    """The GitHub Windows runner's account (runneradmin, an Azure VM admin)
+    is the built-in Administrator, RID 500, and SDDL output spells that SID
+    "LA". Judged against the numeric SID, the directory we had just created
+    owner-only was refused (PR #9's red run, ~40 tests). The check compares
+    against the OS's own spelling of our SID, so it is ours again."""
+    _as_windows(monkeypatch)
+    win = FakeWin(sid=ADMIN500, alias="LA")
+    private_file.write_private(HOME, "f.json", b"secret", win=win)
+    assert private_file.open_private(HOME, "f.json", win=win) == b"secret"
+    # Created with the numeric SID: the alias is only a reading.
+    created = [c[2] for c in win.log if c[0] == "create_dir_with_sddl"]
+    assert created and all(ADMIN500 in c and "LA" not in c for c in created)
+    assert win.dirs[PDIR][0] == "O:LAD:PAI(A;OICI;FA;;;LA)"
+
+
+def test_an_la_owned_directory_is_not_an_ordinary_users(monkeypatch):
+    """Accepting "LA" is accepting our own SID's spelling, nothing wider: for
+    any other account a directory the built-in Administrator owns, or one
+    that also lets it in, is still refused."""
+    _as_windows(monkeypatch)
+    win = FakeWin()
+    for sddl in ("O:LAD:PAI(A;OICI;FA;;;LA)",
+                 "O:%sD:PAI(A;OICI;FA;;;%s)(A;OICI;FA;;;LA)" % (SID, SID)):
+        win.dirs[PDIR] = (sddl, 0x10)
+        with pytest.raises(NotPrivate) as e:
+            private_file.private_dir(HOME, win=win)
+        assert str(e.value) == "private directory not owner-only"
+    win = FakeWin(sid=ADMIN500, alias="LA")
+    win.dirs[PDIR] = ("O:%sD:PAI(A;OICI;FA;;;%s)" % (SID, SID), 0x10)
+    with pytest.raises(NotPrivate):
+        private_file.private_dir(HOME, win=win)
+
+
 def test_sddl_parse_is_locale_free():
     """SDDL is the same string in every Windows language; icacls output is
     not. The owner alias case is the one a lazy regex gets wrong."""
@@ -437,7 +484,7 @@ def test_real_owner_and_sddl_read_back_through_a_fresh_handle(tmp_path):
         api.close(h)
     sddl, attrs = api.dir_facts(os.path.join(home, "private"))
     owner, flags, aces = private_file.parse_sddl(sddl)
-    assert owner == api.user_sid() and "P" in flags and len(aces) == 1
+    assert owner == api.sddl_sid() and "P" in flags and len(aces) == 1
 
 
 @_apply(windows_real)
