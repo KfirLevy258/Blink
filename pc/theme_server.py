@@ -48,7 +48,7 @@ import time
 import urllib.parse
 import webbrowser
 
-from pc import (logo_encode, settings_ops, status_page, theme, update,
+from pc import (logo_encode, logo_preview, settings_ops, status_page, theme, update,
                 usage_refresh, user_config, wifi_pair)
 
 IDLE_S = 600            # 10 minutes with no edit (plan, revision 2026-10-25)
@@ -489,6 +489,15 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._computer_state()
         if url.path == "/api/logo":
             return self._json(200, {"logo": ops.device().get("logo")})
+        if url.path == "/api/logo/preview":
+            # Only the copy of what this daemon sent, and only while the
+            # board still reports that same logo (bytes and frames).
+            png = logo_preview.load_matching(self.builder.home,
+                                             ops.device().get("logo"))
+            if png is None:
+                return self._refuse(404)
+            return self._send(200, png, "image/png", headers=(
+                ("Cache-Control", "no-store"),))
         return self._refuse(404)
 
     # -- the settings endpoints
@@ -655,11 +664,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             state = self.builder.board_ops.logo(blob)
         except settings_ops.BoardOpError as e:
             return self._json(409, {"why": str(e)})
+        if isinstance(state, dict) and state.get("present") == 1:
+            try:
+                logo_preview.save(self.builder.home, blob, state)
+            except Exception:       # the preview is a courtesy, the send is done
+                pass
         self._json(200, {"logo": state, "bytes": len(blob)})
 
     def _post_logo_remove(self):
         try:
-            self._json(200, {"logo": self.builder.board_ops.logo_remove()})
+            state = self.builder.board_ops.logo_remove()
+            logo_preview.remove(self.builder.home)
+            self._json(200, {"logo": state})
         except settings_ops.BoardOpError as e:
             self._json(409, {"why": str(e)})
 

@@ -240,12 +240,13 @@ def _walk_payload(img, off, plen, count):
     return px
 
 
-def parse(img, check=True, frames=False):
+def parse(img, check=True, frames=False, first_frame=False):
     """The daemon's own check of an image, with the board's caps (`check`
     False reads the headers and walks without enforcing them: tools/
     encode_logo.py --info on a factory .bin that predates the caps).
     Returns the header fields, `rects` (per frame) and `max_rects`, and with
-    `frames` the decoded frames as flat RGB565 lists."""
+    `frames` the decoded frames as flat RGB565 lists; `first_frame` keeps only
+    the first of them (a 180-frame logo is 110 MB of lists otherwise)."""
     if len(img) < HDR_LEN + 12 or img[:4] != MAGIC:
         raise ValueError(E_BLGO)
     version, hold_ms, blob_len, crc = struct.unpack_from("<HHII", img, 4)
@@ -268,6 +269,7 @@ def parse(img, check=True, frames=False):
     elif n < 1:
         raise ValueError(E_NOFRAMES)
     off, rects, out = 12, [], []
+    frames = frames or first_frame
     canvas = [0] * (W * H) if frames else None
     for _ in range(n):
         if off >= blob_len:
@@ -288,11 +290,11 @@ def parse(img, check=True, frames=False):
                 raise ValueError(E_PAYLOAD)
             px = _walk_payload(blob, off, plen, rw * rh)
             off += plen
-            if frames:
+            if frames and not (first_frame and out):
                 for r in range(rh):
                     base = (y + r) * W + x
                     canvas[base:base + rw] = px[r * rw:(r + 1) * rw]
-        if frames:
+        if frames and not (first_frame and out):
             out.append(list(canvas))
     if off != blob_len:
         raise ValueError(E_PAYLOAD)

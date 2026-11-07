@@ -10,6 +10,7 @@ tests/support/builder_dom.js, and each was checked to fail on the code the
 review read.
 """
 import re
+from pathlib import Path
 
 import pytest
 
@@ -2412,15 +2413,15 @@ def test_the_board_drawing_has_a_running_waiting_and_stuck_pip_in_theme_colours(
         .map(n => [+n.attrs.cx, +n.attrs.cy, +n.attrs.r, n.attrs.fill]);
     const first = pips();
     preset('Ocean'); await advance(10);
-    return { first, second: pips(), key: $('pipkey').hidden,
-             words: $('pipkey').querySelectorAll('li').map(l => l.textContent) };
+    return { first, second: pips(),
+             legend: !!$('pipkey') };
     """, SAVED_DARK)
     first, second = r["first"], r["second"]
     # usage_layout.h: 8 px pips, 11 px apart from x 10, centred on y 14.
     assert [p[:3] for p in first] == [[14, 14, 4], [25, 14, 4], [36, 14, 4]]
     assert first[1][3] == first[2][3] != first[0][3]        # waiting and stuck share red
     assert second[0][3] != first[0][3]                      # a new theme recolours them
-    assert r["key"] is False and r["words"] == ["Running", "Waiting", "Stuck"]
+    assert r["legend"] is False         # no word key beside the drawing, only the pips
 
 
 def test_clear_drops_a_chosen_logo_without_touching_the_board():
@@ -2465,3 +2466,41 @@ def test_the_spinner_stops_for_reduced_motion_and_is_a_live_region():
     assert "@keyframes spin" in css and "animation: spin" in css
     assert "animation: none !important" in re.search(
         r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*?)\}\s*\}", css, re.S).group(1)
+
+
+def _on_board(**more):
+    return _live(**{"/api/device": {"status": 200, "body": {
+        "id": "ab12", "fw": "1.5.0", "app": "1.5.0",
+        "logo": {"present": 1, "bytes": 2048, "frames": 1}}}, **more})
+
+
+def test_the_page_has_no_session_legend_words():
+    html = (Path(__file__).resolve().parents[2] / "pc" / "theme_builder.html").read_text()
+    assert "pipkey" not in html
+    assert "<li><i></i>" not in html
+
+
+def test_the_board_logo_shows_in_the_editor_and_on_the_start_up_screen():
+    r = builder_page.run("""
+    await advance(300);
+    document.querySelectorAll('[data-panel]')[0].click();
+    $('tLogo-t').click(); await advance(10);
+    return { imgs: $('lBoardThumb').querySelectorAll('img').length,
+             text: $('lBoardText').textContent, title: $('heroTitle').textContent,
+             asked: requests.filter(q => q.path === '/api/logo/preview').length };
+    """, _on_board(**{"/api/logo/preview": {"status": 200, "body": {}}}))
+    assert r["imgs"] == 1 and r["asked"] == 1
+    assert r["text"] == "The logo on the board."
+    assert "start-up screen with your logo" in r["title"]
+
+
+def test_a_logo_without_a_matching_copy_says_there_is_no_preview():
+    r = builder_page.run("""
+    await advance(300);
+    document.querySelectorAll('[data-panel]')[0].click();
+    $('tLogo-t').click(); await advance(10);
+    return { imgs: $('lBoardThumb').querySelectorAll('img').length,
+             text: $('lBoardText').textContent, hidden: $('lHave').getAttribute('hidden') };
+    """, _on_board(**{"/api/logo/preview": {"status": 404, "body": {}}}))
+    assert r["imgs"] == 0 and r["hidden"] is None
+    assert "Set from another computer, so there is no preview here." in r["text"]

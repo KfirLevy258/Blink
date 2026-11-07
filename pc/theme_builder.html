@@ -94,10 +94,6 @@ h1 span { font-weight: 400; letter-spacing: 0; color: var(--muted); margin-left:
 .scanning[hidden] { display: none; }
 .spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.pipkey { position: absolute; top: 0; left: 0; z-index: 1; list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
-.pipkey[hidden] { display: none; }
-.pipkey li { display: flex; align-items: center; gap: 6px; }
-.pipkey i { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 1px var(--line); }
 .stage::before { content: ""; position: absolute; z-index: -1; left: -14%; right: -14%; top: -10%; bottom: 4%;
   background: radial-gradient(50% 50% at 50% 46%, var(--stage) 0%, color-mix(in srgb, var(--stage) 55%, var(--bg)) 45%, transparent 100%);
   pointer-events: none; }
@@ -437,6 +433,9 @@ svg.hero { width: 100%; height: auto; display: block; overflow: visible; }
 .onboard .btn[aria-pressed="true"] { box-shadow: inset 0 0 0 1.5px var(--accent); }
 
 /* logo */
+.lhave .thumb { width: 56px; height: 42px; flex: none; border-radius: 6px; overflow: hidden; background: var(--panel); box-shadow: inset 0 0 0 1px rgba(127,127,127,.3); }
+.lhave .thumb img { width: 100%; height: 100%; display: block; }
+.lhave > span:nth-child(2) { flex: 1; min-width: 0; }
 .dropzone { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; min-height: 150px; padding: 20px; border-radius: 14px; text-align: center;
   border: 1.5px dashed color-mix(in srgb, var(--muted) 55%, transparent); background: var(--field); cursor: pointer; transition: border-color .2s ease, background .2s ease; }
 .dropzone svg { width: 28px; height: 28px; color: var(--muted); margin-bottom: 4px; }
@@ -508,9 +507,6 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   <!-- the board, always centred -->
   <section class="hub" aria-label="Your board">
     <div class="stage">
-      <ul class="pipkey" id="pipkey" aria-label="Session marks in the header" hidden>
-        <li><i></i>Running</li><li><i></i>Waiting</li><li><i></i>Stuck</li>
-      </ul>
       <svg class="hero" id="hero" viewBox="0 0 600 470" role="img" aria-labelledby="heroTitle">
         <title id="heroTitle">Board preview</title>
         <defs>
@@ -615,7 +611,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       </div>
       <div class="tabpanel" role="tabpanel" id="tLogo" aria-labelledby="tLogo-t" tabindex="0" hidden>
         <p class="note2">Your company logo, shown each time the board starts.</p>
-        <div class="lhave" id="lHave" hidden><span>A logo is on the board.</span><button type="button" class="btn danger" id="lRemoveB">Remove</button></div>
+        <div class="lhave" id="lHave" hidden><span class="thumb" id="lBoardThumb"></span><span id="lBoardText">A logo is on the board.</span><button type="button" class="btn danger" id="lRemoveB">Remove</button></div>
         <div id="logoEmpty">
           <input type="file" id="logoFile" class="sr" accept=".png,.svg,.jpg,.jpeg,.gif,image/png,image/svg+xml,image/jpeg,image/gif">
           <label class="dropzone" for="logoFile" id="drop"><svg viewBox="0 0 28 28" aria-hidden="true"><rect x="3" y="5" width="22" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M14 18V10M10.5 13.5 14 10l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><b>Drop a logo here</b><span>or <u>choose a file</u>. PNG, SVG, JPEG or GIF.</span></label>
@@ -1332,8 +1328,6 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     var dim = customDim(st.text, st.bg), track = mix(st.bg, st.text, .15), pill = mix(st.bg, st.text, .1);
     svg.appendChild(el('rect', { x: 0, y: 0, width: 320, height: 240, fill: '#' + st.bg }));
     var F = 'Montserrat, sans-serif';
-    var key = document.getElementById('pipkey');
-    if (key) key.hidden = st.screen !== 'usage';
     if (st.screen !== 'usage') { drawOther(svg, dim, track, pill); setTitle(); return; }
     // The header's session marks, one per session, as usage_view.c lays them
     // out: 8 px circles, 11 px apart from x 10, centred on the 12 px header
@@ -1341,7 +1335,6 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     // stuck both red (high). A running, a waiting and a stuck session here.
     var pipCol = [st.low, st.high, st.high];
     pipCol.forEach(function (c, i) { svg.appendChild(el('circle', { 'class': 'pip', cx: 14 + i * 11, cy: 14, r: 4, fill: '#' + c })); });
-    if (key) Array.prototype.forEach.call(key.querySelectorAll('i'), function (d, i) { d.style.background = '#' + pipCol[i]; });
     if (st.view === 'gauges') {
       svg.appendChild(el('text', { x: 160, y: 18, 'text-anchor': 'middle', 'font-family': F, 'font-size': 11.5, 'letter-spacing': 3, fill: '#' + dim }, 'BLINK'));
       // With the burn view up the session reading is unknown, as on the
@@ -2528,7 +2521,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   // encoding, asked for with ?check=1, not an estimate made here.
   var FITS = { fill: 1, large: .8, margin: .6 };
   var MAX_PICK = 20 * 1024 * 1024, MAX_GIF = 2 * 1024 * 1024 - 1024;
-  var lg = null, onBoard = false, lgBusy = false, checkSeq = 0, checkTimer = null, checkCtl = null;
+  var lg = null, onBoard = false, boardLogo = null, lgBusy = false, checkSeq = 0, checkTimer = null, checkCtl = null;
   function byId(id) { return document.getElementById(id); }
   function vis(id, on) { if (on) byId(id).removeAttribute('hidden'); else byId(id).setAttribute('hidden', ''); }
   function lmsg(t, kind) { msgSet('lMsg', t, kind); }
@@ -2545,7 +2538,20 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       byId('lClear').disabled = lgBusy;
       byId('lSend').textContent = lgBusy ? 'Sending…' : 'Send to board';
     }
-    board.show({ logo: lg ? { url: lg.url, w: lg.w, h: lg.h, bg: '#' + lg.bg, scale: FITS[lg.fit] } : null });
+    var bt = byId('lBoardThumb');
+    while (bt.firstChild) bt.removeChild(bt.firstChild);
+    if (onBoard && boardLogo) { var bi = document.createElement('img'); bi.setAttribute('src', boardLogo); bi.setAttribute('alt', 'The logo on the board'); bt.appendChild(bi); }
+    byId('lBoardText').textContent = !onBoard ? '' : boardLogo ? 'The logo on the board.' : 'A logo is on the board. Set from another computer, so there is no preview here.';
+    board.show({ logo: lg ? { url: lg.url, w: lg.w, h: lg.h, bg: '#' + lg.bg, scale: FITS[lg.fit] }
+                 : onBoard && boardLogo ? { url: boardLogo, w: 320, h: 240, bg: '#' + CLEAR, scale: 1 } : null });
+  }
+  // The daemon's copy of what it last sent, served only while the board
+  // still reports that logo. A data URL, not a path: the page's CSP allows
+  // no remote images and the route is behind the session cookie.
+  function loadBoardLogo() {
+    fetch('/api/logo/preview', { credentials: 'same-origin' }).then(function (r) { return r.status === 200 ? r.blob() : null; })
+      .then(function (b) { return b && b.size ? readDataURL(b) : null; })
+      .then(function (u) { boardLogo = u; paintLogo(); }, function () { boardLogo = null; paintLogo(); });
   }
   function readDataURL(file) {
     return new Promise(function (ok, no) {
@@ -2654,7 +2660,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     lgBusy = true; paintLogo(); lmsg('Sending to the board. A big logo takes about a minute.');
     sendLogo('/api/logo').then(function (j) {
       lgBusy = false;
-      if (j.status === 200 && j.logo && j.logo.present === 1) { onBoard = true; lmsg('The logo is on the board. It shows when the board starts.', 'ok'); }
+      if (j.status === 200 && j.logo && j.logo.present === 1) { onBoard = true; loadBoardLogo(); lmsg('The logo is on the board. It shows when the board starts.', 'ok'); }
       else lmsg(j.why || 'The board refused the logo.', 'bad');
       paintLogo();
     }, function () { lgBusy = false; lmsg('The app did not answer.', 'bad'); paintLogo(); });
@@ -2664,7 +2670,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     confirm.ask(host, 'Remove the logo from the board? It starts with the BLINK animation only.', 'Remove it', function () {
       post('/api/logo/remove', null).then(function (j) {
         if (j.status !== 200) { lmsg(j.why || 'The board did not answer.', 'bad'); return; }
-        onBoard = false; lg = null; lmsg('');
+        onBoard = false; boardLogo = null; lg = null; lmsg('');
         paintLogo(); byId('logoFile').focus();
       }, function () { lmsg('The app did not answer.', 'bad'); });
     });
@@ -2693,7 +2699,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       if (typeof d.app === 'string') { st.versions = { board: d.fw, app: d.app }; render(); }
     }
     if (d.pref) applyPref(d.pref);
-    if (d.logo && d.logo.present === 1) { onBoard = true; paintLogo(); }
+    if (d.logo && d.logo.present === 1) { var was = onBoard; onBoard = true; paintLogo(); if (!was) loadBoardLogo(); }
   }
   // The address and the saved network, from /api/wifi through Connect's paint.
   function deviceWifi(link, savedName, ip) {

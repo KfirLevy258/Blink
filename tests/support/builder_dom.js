@@ -162,7 +162,7 @@ function fetch_(path, opts) {
     // 'hold': a reply that never comes, for one the page asks for as it
     // loads, before a scenario can hold() it.
     if (x === 'hold') return new Promise(() => {});
-    return Promise.resolve({ status: x.status, json: () => Promise.resolve(JSON.parse(JSON.stringify(x.body || {}))) });
+    return Promise.resolve({ status: x.status, blob: () => Promise.resolve({ type: 'image/png', size: 4 }), json: () => Promise.resolve(JSON.parse(JSON.stringify(x.body || {}))) });
   };
   let reply;
   if (a === 'held') { const h = hold(); (held[path] = held[path] || []).push(h); reply = h.p.then(settle); }

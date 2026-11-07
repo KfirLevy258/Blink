@@ -6,13 +6,15 @@ import http.client
 import json
 import os
 import socket
+import struct
 import threading
+import zlib
 import time
 import urllib.parse
 
 import pytest
 
-from pc import logo_encode, settings_ops, theme_server, user_config
+from pc import logo_encode, logo_preview, settings_ops, theme_server, user_config
 from tests.pc.test_theme_server import Clock, login, request
 from tests.support import gen_gif
 
@@ -636,3 +638,76 @@ def test_the_page_the_board_opens_is_the_settings_page(home, ops):
         assert ops.prefs == [{"bright": 40}]
     finally:
         lau.close()
+
+
+# ------------------------------------------------ the preview of the board's logo
+
+
+def _sent(server, ops, c):
+    """Send a 320x240 red still through the real handler; the board's answer
+    is what a real board would report for it."""
+    raw = bytes([255, 0, 0, 255]) * (320 * 240)
+    blob = logo_encode.from_rgba(raw, (0, 0, 0), 3000)
+    info = logo_encode.parse(blob)
+    ops.logo_state = {"t": "logo_state", "present": 1,
+                      "bytes": logo_encode.HDR_LEN + info["blob_len"],
+                      "frames": info["nframes"]}
+    ops.device = lambda: {"fw": "1.5.0", "link": "usb",
+                          "logo": dict(ops.logo_state)}
+    assert _logo(server, c, raw)[0] == 200
+
+
+def _preview(server, c):
+    return request(server, "GET", "/api/logo/preview", cookie=c)
+
+
+def test_preview_route_needs_the_session_cookie(server, ops):
+    assert request(server, "GET", "/api/logo/preview",
+                   origin=own(server))[0] == 403
+
+
+def test_preview_is_the_png_of_what_was_sent_while_the_board_reports_it(server, ops):
+    c = login(server)
+    assert _preview(server, c)[0] == 404            # nothing sent yet
+    _sent(server, ops, c)
+    s, h, body = _preview(server, c)
+    assert s == 200 and body[:8] == b"\x89PNG\r\n\x1a\n"
+    assert len(body) < logo_preview.MAX_PNG
+    w, hh = struct.unpack(">II", body[16:24])
+    assert (w, hh) == (320, 240)
+
+
+def test_preview_is_refused_when_the_board_reports_another_logo(server, ops):
+    c = login(server)
+    _sent(server, ops, c)
+    other = dict(ops.logo_state, bytes=ops.logo_state["bytes"] + 32)
+    ops.device = lambda: {"logo": other}
+    assert _preview(server, c)[0] == 404
+    ops.device = lambda: {"logo": dict(ops.logo_state, present=0)}
+    assert _preview(server, c)[0] == 404
+    ops.device = lambda: {}                          # an older board
+    assert _preview(server, c)[0] == 404
+
+
+def test_removing_the_logo_deletes_the_copy(server, ops, home):
+    c = login(server)
+    _sent(server, ops, c)
+    assert os.path.exists(os.path.join(home, "private", logo_preview.PNG_NAME))
+    s, _, _ = post(server, "/api/logo/remove", {}, c)
+    assert s == 200
+    for n in (logo_preview.PNG_NAME, logo_preview.META_NAME):
+        assert not os.path.exists(os.path.join(home, "private", n))
+    assert _preview(server, c)[0] == 404
+
+
+def test_copy_is_owner_only(server, ops, home):
+    _sent(server, ops, login(server))
+    mode = os.stat(os.path.join(home, "private", logo_preview.PNG_NAME)).st_mode
+    assert mode & 0o077 == 0 or os.name == "nt"
+
+
+def test_first_frame_of_a_gif_is_what_is_kept():
+    blob = logo_encode.from_rgba(bytes([0, 255, 0, 255]) * (320 * 240), (0, 0, 0), 3000)
+    png = logo_preview.png_from_565(logo_encode.parse(blob, first_frame=True)["frames"][0])
+    assert len(logo_encode.parse(blob, first_frame=True)["frames"]) == 1
+    assert zlib.decompress(png[png.index(b"IDAT") + 4:png.index(b"IEND") - 8])[1:4] == bytes([0, 255, 0])
