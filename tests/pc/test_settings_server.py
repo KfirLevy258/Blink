@@ -8,6 +8,7 @@ import os
 import socket
 import threading
 import time
+import urllib.parse
 
 import pytest
 
@@ -583,3 +584,30 @@ def test_a_non_ascii_digit_hold_is_a_400_not_a_crash(server, ops, capsys):
         s, _, body = _logo(server, c, bytes(307200), hold=hold)
         assert s == 400 and json.loads(body)["why"], hold
     assert "Traceback" not in capsys.readouterr().err and ops.logos == []
+
+
+def test_the_page_the_board_opens_is_the_settings_page(home, ops):
+    # Owner, 2026-11-07, board on WiFi: Open settings on the board opened
+    # the page, a brightness click changed nothing and no pref_set was
+    # written. The daemon's Launcher was built with board_ops but not
+    # persistent, so /api/state said persistent false, the page's prefSet
+    # returned without a request, and the first Save ended the page.
+    opened = []
+    lau = theme_server.Launcher(home, opener=lambda u: opened.append(u)
+                                or True, board_ops=ops)
+    try:
+        assert lau.launch()
+        s = lau._server
+        link = urllib.parse.urlsplit(opened[0])
+        st, headers, _ = request(s, "GET", link.path + "?" + link.query)
+        assert st == 303
+        c = headers["Set-Cookie"].split(";", 1)[0]
+        _, _, body = request(s, "GET", "/api/state", cookie=c)
+        assert json.loads(body)["persistent"] is True
+        assert post(s, "/api/save", {"id": 0}, c)[0] == 200
+        assert not s.done
+        st, _, body = post(s, "/api/pref", {"bright": 40}, c)
+        assert st == 200 and json.loads(body)["pref"]["bright"] == 40
+        assert ops.prefs == [{"bright": 40}]
+    finally:
+        lau.close()

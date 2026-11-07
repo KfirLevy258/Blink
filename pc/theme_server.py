@@ -1288,7 +1288,13 @@ class Launcher:
     def __init__(self, home, opener=None, make_server=BuilderServer,
                  now=time.monotonic, board_ops=None, persistent=False):
         self._home = home
-        self.persistent = persistent    # the settings page; see BuilderServer
+        # The settings page; see BuilderServer. A way to the board makes it
+        # one: the page sends no pref_set and loads no Board panel unless
+        # /api/state says persistent, and the daemon built this with
+        # board_ops alone, so the page the board's Open settings opened
+        # dropped every brightness click without a request and ended on its
+        # first Save (owner, 2026-11-07, board on WiFi: no pref_set logged).
+        self.persistent = persistent or board_ops is not None
         self.board_ops = board_ops      # the settings page's way to the board
         # `is None`, not `or`: a stub that was falsy (a list subclass, empty
         # until its first call) became the real open_url, which is

@@ -2276,6 +2276,21 @@ def test_brightness_posts_a_board_level():
     assert r["pressed"] == r["ok"]          # a refused level is not marked
 
 
+
+def test_a_board_setting_on_a_theme_only_page_says_why():
+    # It returned without a word: the owner's brightness click on the page
+    # the board opened (not persistent, 2026-11-07) changed nothing and
+    # said nothing.
+    r = builder_page.run("""
+    await advance(300);
+    document.querySelectorAll('[data-b]').find(b => b.dataset.b === '40').click(); await advance(10);
+    return { posts: """ + _POSTS + """.map(q => q.path), msg: $('b-msg').textContent };
+    """, _live(**{"/api/state": {"status": 200, "body": {
+        "saved": {"id": 0}, "draft": None, "persistent": False}}}),
+        search="?panel=board")
+    assert "/api/pref" not in r["posts"]
+    assert r["msg"] == "Open this with blink settings while the app is running."
+
 def test_computer_switches_round_trip():
     r = builder_page.run("""
     await advance(300);

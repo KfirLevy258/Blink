@@ -2268,7 +2268,11 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   // its own pref and carries no request id.
   var prefChain = Promise.resolve();
   function prefSet(fields, mid) {
-    if (!persistent || finished) return;
+    if (finished) return;
+    // Not silently: the page the board opened was once not persistent, and
+    // a brightness click there sent nothing and said nothing (2026-11-07).
+    // The words are the server's own 409 for a board route on `blink theme`.
+    if (!persistent) { msgSet(mid, 'Open this with blink settings while the app is running.', 'bad'); return; }
     // A logo streams for about a minute and the board answers nothing else
     // meanwhile, so a click now would time out as "did not answer".
     if (lgBusy) { msgSet(mid, 'Wait for the logo to finish.', 'bad'); return; }
