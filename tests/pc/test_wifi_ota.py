@@ -81,14 +81,23 @@ def rig(tmp_path):
         board.stop()
 
 
-def _drive(b, link, until, secs=20.0):
+def _drive(b, link, until, secs=20.0, progress=None):
+    """Pump until `until()`, or `secs` pass. With `progress`, `secs` is a
+    stall limit instead: each change in progress() restarts it, up to a
+    300 s cap. A whole image through the pure-Python AEAD on both ends
+    reached only half of 1 MB in 20 s under Docker's x86_64 emulation
+    (2026-11-06) while still moving; what this must catch is a stop."""
     reader = protocol.LineReader()
-    end = time.monotonic() + secs
-    while time.monotonic() < end and not until():
+    now = time.monotonic()
+    end, cap = now + secs, now + 300.0
+    seen = progress() if progress else None
+    while time.monotonic() < min(end, cap) and not until():
         if link.in_waiting:
             for m in reader.feed(link.read(4096)):
                 b.on_message(m)
         b.pump()
+        if progress and progress() != seen:
+            seen, end = progress(), time.monotonic() + secs
         time.sleep(0.001)
     return until()
 
@@ -99,7 +108,8 @@ def test_a_whole_image_arrives_in_order_through_bridge_pump(rig, size):
     board, link = rig()
     b = _bridge(blob, link)
     _offer(b)
-    assert _drive(b, link, lambda: any(m.get("t") == "ota_end" for m in board.lines))
+    assert _drive(b, link, lambda: any(m.get("t") == "ota_end" for m in board.lines),
+                  progress=lambda: len(board.ota_sink))
     assert bytes(board.ota_sink) == blob
     ends = [m for m in board.lines if m.get("t") == "ota_end"]
     assert len(ends) == 1 and ends[0]["size"] == size

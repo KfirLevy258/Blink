@@ -24,14 +24,23 @@ def _bridge(write):
     return Bridge(write_msg=write, fetch_usage=lambda: {})
 
 
-def _drive(b, link, until, secs=20.0):
+def _drive(b, link, until, secs=20.0, progress=None):
+    """Pump until `until()`, or `secs` pass. With `progress`, `secs` is a
+    stall limit instead: each change in progress() restarts it, up to a
+    300 s cap. A whole image through the pure-Python AEAD on both ends
+    reached only half of 1 MB in 20 s under Docker's x86_64 emulation
+    (2026-11-06) while still moving; what this must catch is a stop."""
     reader = protocol.LineReader()
-    end = time.monotonic() + secs
-    while time.monotonic() < end and not until():
+    now = time.monotonic()
+    end, cap = now + secs, now + 300.0
+    seen = progress() if progress else None
+    while time.monotonic() < min(end, cap) and not until():
         if link.in_waiting:
             for m in reader.feed(link.read(4096)):
                 b.on_message(m)
         b.pump()
+        if progress and progress() != seen:
+            seen, end = progress(), time.monotonic() + secs
         time.sleep(0.001)
     return until()
 
@@ -60,7 +69,8 @@ def test_logo_stream_over_fake_board_wifi(rig, size):
     board, link = rig()
     b = _bridge(lambda m: link.write(protocol.encode(m)))
     b.start_logo(blob, link)
-    assert _drive(b, link, lambda: b.logo_result is not None)
+    assert _drive(b, link, lambda: b.logo_result is not None,
+                  progress=lambda: len(board.logo_sink))
     assert b.logo_result == (True, "")
     assert bytes(board.logo_sink) == blob and not board.ota_sink
     begin = [m for m in board.lines if m.get("t") == "logo_begin"]
