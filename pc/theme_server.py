@@ -39,6 +39,7 @@ import json
 import os
 import secrets
 import shutil
+import socket
 import socketserver
 import subprocess
 import sys
@@ -91,6 +92,9 @@ MAX_BODY = 4096         # the widest theme is about 200 bytes of JSON
 # 320x240 compress far smaller) and below what a hostile page could use to
 # hold the handler thread and memory.
 MAX_LOGO_BODY = 2 * 1024 * 1024
+# How long a closing connection may keep sending what was not read
+# (_HTTPServer.shutdown_request).
+_LINGER_S = 2.0
 _ENCODE_LOCK = threading.Lock()
 # What POST /api/pref takes, and the values the board's own checks allow
 # (proto.c pref_set_line). view is an integer the board ignores until
@@ -825,6 +829,35 @@ class _HTTPServer(http.server.ThreadingHTTPServer):
         # name the address as given.
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
+
+    def shutdown_request(self, request):
+        """Close the way RFC 9112 9.6 asks: stop writing, then read and drop
+        what the client is still sending, then close.
+
+        A refusal answers before the body is read (403 without a session,
+        415, a bad logo header). Closing a socket that still has unread
+        bytes sends a reset, and Windows then throws away the answer the
+        client had not read yet: on the Windows VM (2026-11-07) a 300 KB
+        logo POST refused with 403 or 400 came back as WinError 10053, not
+        the sentence, while macOS and Linux happened to deliver it. Bounded
+        in bytes and time, and on the handler's own thread, so a client
+        that keeps sending costs at most one more logo body and two seconds.
+        """
+        try:
+            request.shutdown(socket.SHUT_WR)
+            end, left = time.monotonic() + _LINGER_S, MAX_LOGO_BODY + 65536
+            while left > 0:
+                wait = end - time.monotonic()
+                if wait <= 0:
+                    break
+                request.settimeout(wait)
+                got = request.recv(min(left, 65536))
+                if not got:
+                    break
+                left -= len(got)
+        except OSError:
+            pass
+        self.close_request(request)
 
     def handle_error(self, request, client_address):
         # socketserver prints a traceback to stderr here, and under the daemon
