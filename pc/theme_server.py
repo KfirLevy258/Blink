@@ -798,6 +798,28 @@ def _tab_id(tab):
     return None
 
 
+def _linger(request):
+    """Half-close `request` and drop what it still sends, until it closes,
+    MAX_LOGO_BODY + 64 KiB have been read or _LINGER_S has passed. The
+    number of bytes dropped, for the test of those bounds."""
+    read = 0
+    try:
+        request.shutdown(socket.SHUT_WR)
+        end, cap = time.monotonic() + _LINGER_S, MAX_LOGO_BODY + 65536
+        while read < cap:
+            wait = end - time.monotonic()
+            if wait <= 0:
+                break
+            request.settimeout(wait)
+            got = request.recv(min(cap - read, 65536))
+            if not got:
+                break
+            read += len(got)
+    except OSError:
+        pass
+    return read
+
+
 class _HTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
@@ -840,23 +862,18 @@ class _HTTPServer(http.server.ThreadingHTTPServer):
         client had not read yet: on the Windows VM (2026-11-07) a 300 KB
         logo POST refused with 403 or 400 came back as WinError 10053, not
         the sentence, while macOS and Linux happened to deliver it. Bounded
-        in bytes and time, and on the handler's own thread, so a client
-        that keeps sending costs at most one more logo body and two seconds.
+        in bytes and time (_linger), and on the handler's own thread, so a
+        client that keeps sending costs at most one more logo body and two
+        seconds.
+
+        By design the bound is below what a hostile body can be: a POST
+        declaring more than MAX_LOGO_BODY is refused with 413 before a byte
+        is read, and if its sender keeps going past the drain this still
+        ends in a reset, so a Windows client may never see that 413. The
+        settings page checks a file's size before it sends, so only a
+        client that ignores the limit meets it.
         """
-        try:
-            request.shutdown(socket.SHUT_WR)
-            end, left = time.monotonic() + _LINGER_S, MAX_LOGO_BODY + 65536
-            while left > 0:
-                wait = end - time.monotonic()
-                if wait <= 0:
-                    break
-                request.settimeout(wait)
-                got = request.recv(min(left, 65536))
-                if not got:
-                    break
-                left -= len(got)
-        except OSError:
-            pass
+        _linger(request)
         self.close_request(request)
 
     def handle_error(self, request, client_address):

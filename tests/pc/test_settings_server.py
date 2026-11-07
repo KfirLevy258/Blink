@@ -5,6 +5,9 @@ Real loopback server, a fake BoardOps. No browser, no board.
 import http.client
 import json
 import os
+import socket
+import threading
+import time
 
 import pytest
 
@@ -336,6 +339,113 @@ def test_logo_post_needs_origin(server, ops):
                    ctype="application/octet-stream",
                    origin=own(server), extra=_logo_headers())[0] == 403
     assert ops.logos == []
+
+
+def _foreign_logo_post(server, c, length):
+    """A raw socket that has sent the head of a logo POST from another site:
+    do_POST refuses it with 403 before a byte of the body is read."""
+    sock = socket.create_connection(("127.0.0.1", server.port), timeout=10)
+    head = (f"POST /api/logo HTTP/1.1\r\nHost: 127.0.0.1:{server.port}\r\n"
+            f"Cookie: {c}\r\nOrigin: http://evil.test\r\n"
+            f"Content-Type: application/octet-stream\r\n"
+            f"Content-Length: {length}\r\n\r\n")
+    sock.sendall(head.encode())
+    return sock
+
+
+def _record_linger(monkeypatch):
+    """What each closing connection's drain read, and how long it took, by
+    the client's port: login()'s own connection closes through it too."""
+    seen, real = {}, theme_server._linger
+
+    def linger(request):
+        peer = request.getpeername()[1]
+        t = time.monotonic()
+        n = real(request)
+        seen[peer] = (n, time.monotonic() - t)
+        return n
+    monkeypatch.setattr(theme_server, "_linger", linger)
+    return seen
+
+
+def _keep_sending(sock, chunk, pause, secs=10.0):
+    """Send `chunk` every `pause` s until the server ends the connection
+    (or `secs`, the test's own guard), on a thread."""
+    def run():
+        end = time.monotonic() + secs
+        try:
+            while time.monotonic() < end:
+                sock.sendall(chunk)
+                if pause:
+                    time.sleep(pause)
+        except OSError:
+            pass
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
+
+
+def _wait_for(seen, sock, secs):
+    """(bytes drained, seconds) for this client's connection, or None."""
+    port = sock.getsockname()[1]
+    end = time.monotonic() + secs
+    while port not in seen and time.monotonic() < end:
+        time.sleep(0.02)
+    return seen.get(port)
+
+
+def test_a_refused_flood_is_drained_no_further_than_one_logo(
+        server, monkeypatch):
+    """A refused client that never stops sending: the drain ends at one logo
+    body plus 64 KiB, well inside its time bound, and the connection ends."""
+    seen = _record_linger(monkeypatch)
+    sock = _foreign_logo_post(server, login(server), 64 * 1024 * 1024)
+    t = _keep_sending(sock, bytes(65536), 0)
+    try:
+        got = _wait_for(seen, sock, 5)
+        assert got, "the connection never closed"
+        n, secs = got
+        # It was the byte bound that ended it, and it held.
+        assert theme_server.MAX_LOGO_BODY < n <= theme_server.MAX_LOGO_BODY + 65536
+        assert secs < 3.0
+        t.join(5)
+        assert not t.is_alive()      # the server's close ended the sender
+    finally:
+        sock.close()
+
+
+def test_a_refused_trickle_is_drained_for_two_seconds_at_most(
+        server, monkeypatch):
+    """A refused client that sends slowly, never reaching the byte bound:
+    the time bound alone ends it."""
+    seen = _record_linger(monkeypatch)
+    sock = _foreign_logo_post(server, login(server), 64 * 1024 * 1024)
+    t = _keep_sending(sock, bytes(1024), 0.05)
+    try:
+        got = _wait_for(seen, sock, 8)
+        assert got, "the connection never closed"
+        n, secs = got
+        assert 0 < n < theme_server.MAX_LOGO_BODY and 1.5 < secs < 3.0
+    finally:
+        sock.close()
+        t.join(11)
+
+
+def test_a_client_that_stops_sending_reads_the_refusal(server, monkeypatch):
+    """The point of the drain: a whole 300 KB body refused unread, and the
+    client that sent it still reads the 403 rather than a reset (WinError
+    10053 on Windows before the drain)."""
+    seen = _record_linger(monkeypatch)
+    body = bytes(307200)
+    sock = _foreign_logo_post(server, login(server), len(body))
+    try:
+        sock.sendall(body)
+        status = sock.makefile("rb").readline()
+        assert status.split()[1:2] == [b"403"], status
+        got = _wait_for(seen, sock, 5)
+        assert got and got[1] < 3.0
+    finally:
+        sock.close()
 
 
 def test_logo_post_needs_octet_stream(server, ops):
