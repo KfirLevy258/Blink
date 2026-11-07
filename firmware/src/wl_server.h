@@ -14,18 +14,13 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/types.h>
 
 #define WL_RX_FRAMES 4		/* Task 0.3's numbers */
 #define WL_TX_LINES 8
 
 /* Idempotent. Spawns the thread; -EPERM after a failed self-test (D24). */
 int wl_server_start(void);
-/* Open/close the TCP listener and UDP socket. The thread opens them itself on
- * NL_UP while paired; false forces them shut until the link next leaves
- * NL_UP (Forget), and true is a no-op wake. */
-void wl_server_listen(bool on);
-/* Closes the session and every socket, and takes the interface down. */
-void wl_server_stop(void);
 /* Closes only the live session, "[wifi] session closed" (Forget, a stream
  * with no sink). The daemon reconnects at once. */
 void wl_server_close_session(void);
@@ -61,6 +56,13 @@ static inline bool wl_verify_body_ok(const uint8_t *b, size_t n)
 		n = w;
 	}
 	return n == w && memcmp(b, want, w) == 0;
+}
+
+/* A candidate's opener went out whole in one non-blocking send. Pure, so
+ * tests/wl_server/host_test.c pins it. */
+static inline bool wl_opener_sent_whole(ssize_t k, size_t n)
+{
+	return k >= 0 && (size_t)k == n;
 }
 
 #endif /* WL_SERVER_H */

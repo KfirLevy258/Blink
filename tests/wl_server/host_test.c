@@ -36,5 +36,10 @@ int main(void)
 	eq("verify with a tail", ok("{\"t\":\"verify\",\"x\":1}"), 0);
 	eq("a prefix", ok("{\"t\":\"verif\"}"), 0);
 	eq("empty", ok(""), 0);
+	/* The opener is one non-blocking send: whole, or the candidate goes. */
+	eq("opener sent whole", wl_opener_sent_whole(20, 20), 1);
+	eq("opener short write", wl_opener_sent_whole(7, 20), 0);
+	eq("opener EAGAIN", wl_opener_sent_whole(-1, 20), 0);
+	eq("opener zero", wl_opener_sent_whole(0, 20), 0);
 	return fails ? 1 : 0;
 }

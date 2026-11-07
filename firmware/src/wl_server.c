@@ -66,7 +66,7 @@ static struct tx_slot tx_ring[WL_TX_LINES];
 static atomic_t rx_head, rx_tail, tx_head, tx_tail;
 static atomic_t epoch, session_gen;
 static atomic_t live;		/* a full session is open */
-static atomic_t close_req, close_all_req, listen_off;
+static atomic_t close_req;
 
 static int lsock = -1, usock = -1, csock = -1, ssock = -1;
 static bool rng_dead;		/* until reboot: a repeated Nb would replay M2 */
@@ -236,7 +236,12 @@ static void on_accept(void)
 		return;
 	}
 	sock_opts(fd);
-	if (!send_all(fd, m1, sizeof(m1))) {
+	/* Never wait: a peer with a zero window would stall the live session
+	 * for the send timeout on each connect. 20 bytes fit any fresh socket
+	 * whose peer has a window, so a short write or EAGAIN drops it. */
+	if (!wl_opener_sent_whole(zsock_send(fd, m1, sizeof(m1),
+					     ZSOCK_MSG_DONTWAIT),
+				  sizeof(m1))) {
 		zsock_close(fd);
 		wl_hs_wipe(&hs);
 		return;
@@ -536,18 +541,14 @@ static void tick(void)
 	int64_t now = k_uptime_get();
 	bool up = net_link_state() == NL_UP;
 
-	if (atomic_clear(&close_all_req)) {
-		wl_server_close_all();
-	}
 	if (atomic_clear(&close_req)) {
 		session_close();
 	}
 	if (!up) {
-		atomic_clear(&listen_off);
 		wl_server_close_all();
 		return;
 	}
-	if (atomic_get(&listen_off) || !cfg_paired()) {
+	if (!cfg_paired()) {
 		wl_server_close_all();
 		return;
 	}
@@ -596,17 +597,6 @@ int wl_server_start(void)
 			net_main, NULL, NULL, NULL, PRIO, 0, K_NO_WAIT);
 	k_thread_name_set(&wl_thread, "wl_net");
 	return 0;
-}
-
-void wl_server_listen(bool on)
-{
-	atomic_set(&listen_off, on ? 0 : 1);
-}
-
-void wl_server_stop(void)
-{
-	atomic_set(&close_all_req, 1);
-	net_link_request_down();
 }
 
 void wl_server_close_session(void)
