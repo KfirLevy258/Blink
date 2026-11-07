@@ -367,6 +367,12 @@ class Daemon:
                    PYTHONPATH=ROOT, PYTHONDONTWRITEBYTECODE="1",
                    BLINK_SKIP_SERVICE="1", BLINK_TAP=str(self.tap))
         env.pop("BLINK_FORCE_WIFI", None)
+        # The child is outside conftest's network guard. Without this, a
+        # hello carrying `fw` made it fetch the real release feed from
+        # GitHub, and under Docker's emulation that fetch outlasted the
+        # test's wait for board.json (2026-11-07). A missing directory
+        # reads as "feed unreachable" at once.
+        env["BLINK_OTA_DIR"] = str(tmp_path / "no-feed")
         if force:
             env["BLINK_FORCE_WIFI"] = "1"
         if pair and board is not None:
@@ -409,6 +415,12 @@ class Daemon:
             _, err = self.proc.communicate()
         self.log = err.decode(errors="replace")
         return self.log
+
+    def board(self):
+        try:
+            return json.loads((self.home / ".blink" / "board.json").read_text())
+        except (OSError, ValueError):
+            return {}
 
     def link(self):
         return json.loads((self.home / ".blink" / "link.json").read_text())
@@ -515,8 +527,10 @@ def test_learn_board_over_wifi_keeps_the_port_only_for_the_same_board(
                board_json={"port": "/dev/known", "board_id": "aaaa"})
     try:
         assert d.wait(lambda: d.seen().count(("rx", "hello")) >= 2)
-        time.sleep(0.5)
+        # The tap records a message before it is handled, so wait for the
+        # record the second hello writes rather than a fixed sleep.
+        assert d.wait(lambda: d.board().get("fw") == "1.0.0")
     finally:
         d.stop()
-    rec = json.loads((d.home / ".blink" / "board.json").read_text())
+    rec = d.board()
     assert rec["port"] == ("/dev/known" if same else None)
