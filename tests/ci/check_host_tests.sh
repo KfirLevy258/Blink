@@ -121,8 +121,11 @@ run_one ota_parse    "ota_parse.c"     ""
 run_one ota_net      "ota_net.c ota_parse.c $ROOT/tests/support/flash_img_fake.c $ROOT/tests/support/wl_crypto_fake.c" ""
 run_one sleep_gate   "sleep_gate.c usage_freshness.c" ""
 run_one theme        "theme.c msg_parse.c" "-lm"
-# The one line a verify-only WiFi candidate may send.
-run_one wl_server    ""                ""
+# wl_server.c unchanged (the test #includes it) on fake sockets, with the real
+# link.c, wl_hs.c and wl_frame.c over the toy cipher: D29, the verify-only
+# candidate, a bad frame, the discovery rules, the failure backoff.
+run_one wl_server    "link.c wl_hs.c wl_frame.c $ROOT/tests/support/wl_crypto_fake.c" \
+	"-I$ROOT/tests/wl_server/stub"
 # When a leaking WiFi blob may cost the board one clean restart.
 run_one wl_heap      ""                ""
 # ui_theme.c and cfg_store.c unchanged, on cfg_store's RAM flash; the test
