@@ -1189,7 +1189,7 @@ class Bridge:
             if not self._said_kid:
                 self._said_kid = True
                 print("[wifi] the board was set up from another computer or"
-                      " forgot this one; plug it in and open blink settings",
+                      " forgot this one; plug it in and tap Open on PC on the board",
                       file=sys.stderr)
 
     def _joined(self, j, op, msg):
