@@ -7,7 +7,7 @@
  *
  * Dormant means the interface, not the driver (D42): with CONFIG_WIFI=y the
  * device initialiser runs esp_wifi_init() at boot on every board
- * (esp_wifi_drv.c:933), paired or not. What waits is net_if_up(), and with it
+ * (esp_wifi_drv.c:940), paired or not. What waits is net_if_up(), and with it
  * the RF, DHCP and the sockets. Zephyr brings every interface admin-up at
  * boot (net_if_post_init), so net_link_init() takes this one down again
  * before anything can start the RF, and an unpaired board never brings it
@@ -23,7 +23,10 @@
  * Phase 0 proved esp_wifi_stop() returns ESP_OK and that a join after it
  * succeeds (docs/research/2026-11-wifi-ram-spike.md, "Down and up").
  *
- * The console lines are spec S5.8's fixed strings and nothing else: no SSID,
+ * The console lines are spec S5.8's fixed strings, plus three that are not in
+ * it: "[wifi] scan failed" (a fixed sentence), "[wifi] connect refused: %d"
+ * (the radio's errno, nothing about the network) and "[wifi] heap free=%u"
+ * (our own byte count, which pc/logbook.py allowlists by its stem). No SSID,
  * address, RSSI or password at any level, on any path (CLAUDE.md).
  */
 #include <zephyr/kernel.h>
@@ -47,7 +50,7 @@
 #include "wl_server.h"
 
 /* A connect result of 0 is our "joined": with this option the driver raises
- * it at DHCP_BOUND, not at association (esp_wifi_drv.c:83, :305), so it means
+ * it at DHCP_BOUND, not at association (esp_wifi_drv.c:86, :305), so it means
  * an address is in hand. Without it, "joined" would be printed before the
  * router had answered. */
 BUILD_ASSERT(IS_ENABLED(CONFIG_ESP32_WIFI_STA_AUTO_DHCPV4),
@@ -81,13 +84,14 @@ static K_SEM_DEFINE(sem_disc, 0, 1);
 static K_SEM_DEFINE(sem_scan, 0, 1);
 
 static atomic_t ops;
-/* Rejoin (Task 2.5): the lost-network event asks (net_mgmt thread), a
- * requested join or down cancels (any thread); everything else here is the
- * network thread's alone, so the int64_t times never tear. */
 /* K_HEAP_DEFINE(_system_heap) in kernel/mempool.c: the heap k_malloc, mbedTLS
  * and the WiFi blob draw on. Not the LVGL pool mem_stats.c reports. */
 extern struct k_heap _system_heap;
 static atomic_t heap_free = ATOMIC_INIT(-1);
+/* Rejoin (Task 2.5): the lost-network event and proto's
+ * net_link_request_rejoin() ask (net_mgmt thread, main thread), a requested
+ * join or down cancels (any thread); everything else here is the network
+ * thread's alone, so the int64_t times never tear. */
 static atomic_t rejoin_want, rejoin_cancel;
 static int64_t rejoin_at;	/* 0: none scheduled */
 static unsigned int rejoin_n;
@@ -102,8 +106,9 @@ static uint32_t req_ticket;	/* under lock */
 static bool req_pending;	/* under lock: a request not yet taken by do_join */
 
 /* Caller holds `lock`. Every join, requested or automatic, takes its own
- * ticket here and none is reused or skipped, so a rejoin can never be
- * credited to a wifi_set candidate (proto trusts a result only when
+ * ticket here and none is ever reused (one a newer request replaced or a down
+ * cancelled before do_join took it is simply never run), so a rejoin can
+ * never be credited to a wifi_set candidate (proto trusts a result only when
  * net_link_run_ticket() equals the ticket its request returned). */
 static uint32_t next_ticket(void)
 {
@@ -116,7 +121,7 @@ static volatile enum net_link_state state = NL_OFF;
 static volatile enum net_link_why why = NL_WHY_NONE;
 /* Set once at boot by net_link_refuse_selftest(), never cleared: a board
  * whose cipher failed its known-answer test keeps the radio off until it
- * reboots (spec S5.4, D47). */
+ * reboots (spec S5.4, D24). */
 static volatile bool refused;
 static volatile int conn_status;
 static volatile bool joining;
@@ -408,7 +413,7 @@ static void join_run(const uint8_t *ssid, size_t ssid_len, const char *psk,
 	}
 
 	/* A driver still connecting or connected answers -EALREADY
-	 * (esp_wifi_drv.c:495): disconnect first. Re-pairing to another
+	 * (esp_wifi_drv.c:497): disconnect first. Re-pairing to another
 	 * network needs exactly this. The state is already off NL_UP, so the
 	 * event is not taken for a lost network. */
 	disconnect_wait();
@@ -455,11 +460,20 @@ static void join_run(const uint8_t *ssid, size_t ssid_len, const char *psk,
 		/* Associated, and the router never gave an address. */
 		disconnect_wait();
 		join_failed(NL_WHY_NO_IP);
-	} else if (rc == 0 && sec >= 0) {
+	} else if (rc != 0) {
+		/* The radio would not take the request (-EALREADY after a
+		 * disconnect that timed out, -ENOMEM or -EINVAL from the driver,
+		 * or -EIO ten times running): not a missing network. Reported
+		 * as "Network not found" it sent the owner to move the router
+		 * while the file sent to support could not tell the two apart.
+		 * The errno names the cause and says nothing about the network. */
+		printk("[wifi] connect refused: %d\n", rc);
+		join_failed(NL_WHY_RADIO);
+	} else if (sec >= 0) {
 		/* The network was on the air and refused us. */
 		join_failed(NL_WHY_WRONG_PSK);
 	} else {
-		/* Never seen, or a radio that would not take the request. */
+		/* Never seen. */
 		join_failed(NL_WHY_NOT_FOUND);
 	}
 }
@@ -505,7 +519,8 @@ static void rssi_refresh(void)
 	}
 }
 
-/* 5 s, doubling, capped at 5 min. Every connection attempt leaks about 40 B
+/* 5 s, doubling to 5 min, then 30 min from the eighth attempt on
+ * (net_link_rejoin_delay_ms). Every connection attempt leaks about 40 B
  * inside the WiFi blob, so a board whose router is gone for a weekend must
  * not try every few seconds (spec S5.1). */
 static void auto_rejoin(void)
@@ -609,7 +624,8 @@ void net_link_work(void)
 }
 
 /* The thread that calls net_link_work() is Task 2.5's (wl_server.c): a join
- * blocks for up to 30 s, which is why it is never the main thread, nor the
+ * blocks for up to about 52 s (scan 15 + disconnect 2 + connect retries 3 +
+ * association 30 + disconnect 2), which is why it is never the main thread, nor the
  * system work queue the driver and net stack share. Its 4096 B at priority 7
  * is what the spike measured (below main, the driver, above the log thread).
  * It polls net_link_due() every tick, so a request is picked up within one. */
@@ -684,9 +700,10 @@ uint32_t net_link_request_join(const uint8_t *ssid, size_t ssid_len, const char 
 	if (iface == NULL || refused) {
 		return 0;
 	}
-	/* The PC validated both (S6.1); this is the board validating again.
-	 * WPA2's rule: 8 to 63 characters, or 64 hex digits. Refused here,
-	 * the link is left as it was: a bad request does not end a good one. */
+	/* The PC validated both (S6.1); this is the board validating again, by
+	 * length only (8 to 64): that a 64-character key is hex is checked by
+	 * proto's wifi_psk_valid before a request gets here. Refused here, the
+	 * link is left as it was: a bad request does not end a good one. */
 	if (ssid_len == 0 || ssid_len > sizeof(req_ssid)) {
 		say_failed(NL_WHY_NOT_FOUND);
 		return 0;
@@ -768,7 +785,9 @@ enum net_link_why net_link_why(void)
 
 const char *net_link_why_text(enum net_link_why w)
 {
-	/* S5.7's sentences, each under the panel's 47 characters. */
+	/* S5.7's sentences, and ours for what S5.7 has none: a scan that never
+	 * ran, a forget that failed, a radio that refused the join request. Each
+	 * under the panel's 47 characters. */
 	switch (w) {
 	case NL_WHY_WRONG_PSK:
 		return "Wrong WiFi password";
@@ -784,6 +803,8 @@ const char *net_link_why_text(enum net_link_why w)
 		return "Could not forget WiFi. Try again.";
 	case NL_WHY_SCAN:
 		return "Could not scan. Try again.";
+	case NL_WHY_RADIO:
+		return "Could not start WiFi. Try again.";
 	default:
 		return "";
 	}

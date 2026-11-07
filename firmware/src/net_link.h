@@ -21,7 +21,7 @@
 enum net_link_state { NL_OFF, NL_SCANNING, NL_JOINING, NL_UP, NL_FAILED };
 enum net_link_why {
 	NL_WHY_NONE, NL_WHY_WRONG_PSK, NL_WHY_NOT_FOUND, NL_WHY_NO_IP,
-	NL_WHY_WPA3_ONLY, NL_WHY_SELFTEST, NL_WHY_FORGET, NL_WHY_SCAN
+	NL_WHY_WPA3_ONLY, NL_WHY_SELFTEST, NL_WHY_FORGET, NL_WHY_SCAN, NL_WHY_RADIO
 };
 
 struct net_link_ap {
@@ -51,7 +51,7 @@ void net_link_request_scan(void);
 /* -EAGAIN while scanning, another negative errno when the scan never ran
  * (distinct from 0, an empty air). */
 int net_link_scan_results(struct net_link_ap *out, int max);
-/* Disconnect-and-wait first if associated (esp_wifi_drv.c:495). */
+/* Disconnect-and-wait first if associated (esp_wifi_drv.c:497). */
 /* Returns a ticket (never 0) naming THIS request, or 0 if it was refused.
  * Asking again replaces a request that has not started; the ticket of the
  * one that wins is the one net_link_run_ticket() later reports. */

@@ -435,6 +435,9 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[wifi] listen failed",
     "[wifi] discovery socket failed",
     "[wifi] scan failed",
+    # net_link.c join_run: the radio refused the connect request. An errno
+    # at most, which the echo cuts like any value; names no network.
+    "[wifi] connect refused",
     # wl_server.c (spec S5.8): the session's three fixed lines and the
     # verify-only candidate's one.
     "[wifi] session open",

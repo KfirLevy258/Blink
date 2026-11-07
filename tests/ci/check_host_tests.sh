@@ -114,7 +114,10 @@ run_one logo_parse   "logo_parse.c bootanim_dec.c" ""
 run_one logo_write   "logo_write.c logo_parse.c bootanim_dec.c $ROOT/tests/support/flash_area_fake.c" ""
 run_one msg_parse    "msg_parse.c burn5h.c" ""
 # The WiFi scan table: one entry a name, strongest first, at most 20.
-run_one net_link     ""                ""
+# net_link.c unchanged (the test #includes it) on a fake radio: the scan table,
+# and the join and rejoin scheduler (backoff, lost network, a requested join
+# over a rejoin, cancel, a refused board, the 60 s idle down).
+run_one net_link     ""                "-I$ROOT/tests/net_link/stub"
 run_one ota_parse    "ota_parse.c"     ""
 # The image over the session: ota_net.c unchanged, on a RAM slot 1 and the toy
 # hash. Every abort is driven through ota_net_service, the production trigger.

@@ -244,7 +244,7 @@ static void emit(const char *json)
  * sends one only to a board that lists this: an older board would drop it,
  * and the daemon would wait a day to ask again for nothing. */
 /* One line: tests/pc/test_board_caps.py reads the macro as one literal.
- * develop's four first, then the WiFi branch's three: order means nothing
+ * develop's seven first (svc to ask), then the WiFi branch's three: order means nothing
  * to the daemon, which reads the list as a set. */
 #define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"burn\",\"plan\",\"spendburn\",\"ask\",\"wifi\",\"logo\",\"pref\"]"
 
@@ -719,9 +719,9 @@ enum proto_src { PROTO_SRC_USB, PROTO_SRC_WIFI };
  *
  * Acks: off:0 once the erase is done, on both links. Over USB after EVERY
  * chunk: each byte lands in the 2 KB UART RX ring (RX_RING_SIZE), so the
- * daemon keeps four 256-byte chunks in flight and needs every ack to move;
- * a 32 KiB window would overflow the ring and lines would be dropped
- * silently (2026-11-07). Over WiFi at 16 KiB boundaries and at got == size,
+ * daemon sends one 256-byte chunk and waits for its ack (pc/logo_stream.py,
+ * WINDOW_USB = CHUNK_USB: stop-and-wait); a 32 KiB window would overflow
+ * the ring and lines would be dropped silently (2026-11-07). Over WiFi at 16 KiB boundaries and at got == size,
  * as the OTA stream does: TCP carries the window.
  */
 static bool logo_via_wifi;	/* the open stream's link; its bytes come only from there */
@@ -1021,7 +1021,7 @@ bad:
 
 #define WIFI_PORT 49731			/* D18 */
 #define WIFI_JOIN_DEADLINE_MS 60000
-#define WIFI_REQ_DEADLINE_MS 150000	/* queued behind a 30 s join, with room */
+#define WIFI_REQ_DEADLINE_MS 150000	/* queued behind a ~52 s join, with room */
 #define WIFI_WHY_BAD_INPUT "Invalid WiFi settings"
 #define WIFI_WHY_SAVE "Could not save the pairing"
 
@@ -1032,7 +1032,9 @@ static struct {
 	uint32_t ticket;	/* what net_link_request_join returned */
 	bool started;
 	int64_t req_deadline;	/* the request never started (queued, refused) */
-	int64_t deadline;	/* once started: scan 10 s + join 30 s, with room */
+	int64_t deadline;	/* once started: the join's worst case is about 52 s
+				 * (scan 15, disconnect 2, retries 3, association
+				 * 30, disconnect 2), under this 60 s deadline */
 	uint8_t ssid[32];
 	size_t ssid_len;
 	char psk[CFG_PSK_MAX];
@@ -1160,6 +1162,18 @@ static void wifi_send_state(const char *st_override, const char *why_override,
 	last_link = v.link[0];
 }
 
+/* What to tell the PC when the radio would not even try. A board whose cipher
+ * self-test failed (net_link_refuse_selftest) refuses every scan and join
+ * until reboot; "Network not found" and "Could not scan" sent the owner to
+ * retype a name and retry for ever, while the real reason showed only on the
+ * board's own Connection screen (PR 9 round 2). The pc/bridge.py matcher
+ * SCAN_FAIL_WHYS knows this sentence. */
+static const char *wifi_refused_why(enum net_link_why otherwise)
+{
+	return net_link_why_text(net_link_why() == NL_WHY_SELFTEST ?
+				 NL_WHY_SELFTEST : otherwise);
+}
+
 static void wifi_do_set(const char *json)
 {
 	char s[WIFI_S_BUF], p[WIFI_P_BUF], k[WIFI_K_BUF];
@@ -1207,7 +1221,7 @@ static void wifi_do_set(const char *json)
 	cand.ticket = net_link_request_join(cand.ssid, cand.ssid_len, cand.psk);
 	if (cand.ticket == 0) {		/* no radio, or refused: say so now */
 		wifi_cand_drop();
-		wifi_send_state("fail", net_link_why_text(NL_WHY_NOT_FOUND), false);
+		wifi_send_state("fail", wifi_refused_why(NL_WHY_NOT_FOUND), false);
 	}
 out:
 	wipe(ssid, sizeof(ssid));
@@ -1249,7 +1263,8 @@ static void wifi_do_forget(void)
 		return;
 	}
 	/* Flash next: the secrets are the urgent part. The radio's down is
-	 * queued behind a running join (up to 30 s) and reports on its own. */
+	 * queued behind a running join (up to about 52 s: scan, disconnect,
+	 * connect retries, association) and reports on its own. */
 	net_link_request_down();
 	if (cfg_clear_pairing() == 0) {
 		printk("[wifi] forgotten\n");
@@ -1283,7 +1298,7 @@ static void wifi_poll(void)
 		scan_n = net_link_scan_results(scan_tab, NET_LINK_SCAN_MAX);
 		if (scan_n < 0 && scan_n != -EAGAIN) {
 			/* Not "no networks": the radio never scanned. */
-			wifi_send_state("fail", net_link_why_text(NL_WHY_SCAN),
+			wifi_send_state("fail", wifi_refused_why(NL_WHY_SCAN),
 					false);
 			scan_sent = -1;
 		} else if (scan_n != -EAGAIN) {

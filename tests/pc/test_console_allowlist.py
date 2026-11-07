@@ -88,6 +88,8 @@ LINES = [
     ("[wifi] paired", "[wifi] paired", []),
     ("[wifi] forgotten MyNet", "[wifi] forgotten", ["MyNet"]),
     ("[wifi] forget failed", "[wifi] forget failed", []),
+    # net_link.c join_run: the radio refused the request; the errno is cut
+    ("[wifi] connect refused: -12", "[wifi] connect refused", ["-12"]),
     # wl_server.c -- the session lines; a peer's address riding on one is cut
     ("[wifi] session open", "[wifi] session open", []),
     ("[wifi] session closed 192.168.1.9", "[wifi] session closed",

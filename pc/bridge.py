@@ -109,6 +109,13 @@ def _proto_for_log(proto) -> str:
 JOIN_LATE_S = 60.0
 # net_link_why_text(NL_WHY_FORGET) in firmware/src/net_link.c, byte for byte.
 FORGET_FAIL_WHY = "Could not forget WiFi. Try again."
+# The two reasons a scan can fail with, from net_link_why_text(NL_WHY_SCAN)
+# and (NL_WHY_SELFTEST) in firmware/src/net_link.c, byte for byte. A board
+# whose cipher self-test failed refuses every scan for good, and used to say
+# "Could not scan. Try again." (and "Network not found" to a join), so the
+# owner retried forever; now it says the real reason, and the page shows it
+# at once instead of waiting out the 15 s scan timeout.
+SCAN_FAIL_WHYS = ("Could not scan. Try again.", "WiFi self-test failed")
 
 
 class _UsbLogoLink:
@@ -1159,11 +1166,12 @@ class Bridge:
         op, st = self._op, msg.get("st")
         usb = msg.get("link") == "usb"
         if (op is not None and op.kind == "scan" and st == "fail"
-                and msg.get("why") == "Could not scan. Try again."):
+                and msg.get("why") in SCAN_FAIL_WHYS):
             # The radio refused the scan and the board sends no wifi_net at
             # all; without this the page waited out 15 s and said "did not
-            # answer", or showed an empty list as "no networks".
-            return self._finish(op, error="Could not scan. Try again.")
+            # answer", or showed an empty list as "no networks". The text
+            # is one of the two fixed sentences above, never the wire's own.
+            return self._finish(op, error=msg["why"])
         if op is not None and op.kind == "forget":
             # Only the board's "off" answers a forget: an earlier state still
             # in flight is not the answer, and the pairing goes with it.
