@@ -480,11 +480,11 @@ and back to return. It is four tiles, each with an icon:
 | Tile | What it does |
 |---|---|
 | **Brightness** | Tap a level. It is kept across a power cycle |
-| **Theme** | The panel's colours: twelve built-in themes and one of your own (below) |
+| **Open settings** | Opens the settings page on your computer, where the theme, the logo and WiFi are set (below) |
 | **Focus** | One window big instead of two side by side: **Off**, **Session** or **Weekly**. The other window stays on screen as a single dim line under the big dial. Off remembers which window was big |
 | **Update** | The software update: **Up to date**, an offer to install, or **App is old** when the half on your computer is behind (see "Updates") |
 
-Theme and Focus need board firmware 1.4.0 or later. A board on 1.3.4 or
+Open settings and Focus need board firmware 1.4.0 or later. A board on 1.3.4 or
 earlier shows its old settings screen; update it to see these.
 
 ### Themes
@@ -538,22 +538,24 @@ theme.
 
 ### Making a theme on your computer
 
-On the board, **Settings > Theme > Edit on computer** opens the theme builder
-in your computer's browser. While the builder is open the button reads
-**Editing on your computer**, dimmed, and does nothing when pressed, so one
-edit stays in one tab; it reads **Edit on computer** again, ready to press,
-a moment after the builder closes (about 2 s after its tab does). It
-also comes back while the board has lost its connection to the computer,
-and is held again when the connection returns with the builder still
-open. (With an app from before this, the board says
-**Opened on your computer** for a few seconds and the button comes straight
-back.) On a computer with no browser to open (a server, or an SSH session),
-it says **On your computer, run: blink theme** instead, for 8 seconds.
-Running that yourself does the same thing:
+On the board, **Settings > Open settings** opens the settings page in your
+computer's browser; its **Themes** tab is the theme builder. While the page
+is open the tile reads **Editing on your computer**, dimmed, and does nothing
+when pressed, so one page stays in one tab; it reads **Open settings** again,
+ready to press, a moment after the page closes (about 2 s after its tab
+does). It also comes back while the board has lost its connection to the
+computer, and is held again when the connection returns with the page still
+open. On a computer with no browser to open (a server, or an SSH session),
+the board says **On your computer, run: blink settings** instead, for 8
+seconds. Running that yourself does the same thing:
 
 ```bash
-~/.blink/bin/blink theme
+~/.blink/bin/blink settings
 ```
+
+`blink theme` still opens the theme builder alone, from a terminal, for
+people who only want colours. It is a smaller page: the board's own tile
+never opens it, and it has no WiFi, logo or brightness controls.
 
 The builder is a page served by the app to your own browser and nobody else:
 it listens on 127.0.0.1 only, on a link that works once, and fetches nothing
@@ -564,11 +566,11 @@ theme it has not seen. Every change shows on the board as you make it, as a
 preview. **Save** keeps it. **Cancel**, closing the tab, or ten minutes
 without a change puts the board back on the theme it had. When it cannot
 be so, it says that instead of "Preview sent": a board still on firmware
-1.3.4 shows no preview (the builder and `blink theme` say so, and a saved
+1.3.4 shows no preview (the page and `blink theme` say so, and a saved
 theme is sent once the board is updated), and a preview that nothing has
 picked up after a few seconds, because the app is not running or the board
 is not plugged in, is named as not on the board. Once it has
-closed, **Edit on computer** opens a new one. On Windows, and on some Linux
+closed, **Open settings** opens a new one. On Windows, and on some Linux
 desktops, the builder's tab may open behind your other windows, with only
 the browser's taskbar button flashing. If a second tab does open on the same
 builder - from a board whose firmware predates the held button - only the
@@ -584,7 +586,7 @@ says what follows:
 |---|---|---|
 | You pressed Save to board | **Saved.** | Your board keeps *name*. |
 | You pressed Cancel | **Cancelled.** | Your board is back on its saved theme. |
-| The builder stopped (ten minutes idle, or the app quit) | **The builder stopped.** | Run blink theme on your computer to start it again. |
+| The builder stopped (ten minutes idle, or the app quit) | **The builder stopped.** | Run blink settings on your computer to start it again (blink theme, if you started it that way). |
 | A newer tab took over | **Continued in a newer tab.** | This tab has handed over to the newer one. |
 
 After **Save to board** or **Cancel** the popup counts down (**This tab closes
