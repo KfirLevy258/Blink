@@ -650,6 +650,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     blob = logo_encode.from_rgba(raw, bgc, int(hold))
                 else:
                     blob = logo_encode.from_gif(raw, bgc, int(hold), fit)
+        except logo_encode.EncoderBug:
+            # Our bug, not the owner's file. A fixed line: no image data.
+            print("[settings] logo encoder bug", file=sys.stderr)
+            return self._json(500, {"why": "Blink could not prepare this "
+                                    "image. Try another file."})
         except ValueError as e:
             msg = str(e)
             return self._json(400, {"why": msg[:1].upper() + msg[1:] + "."})
@@ -680,7 +685,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except settings_ops.BoardOpError as e:
             return self._json(409, {"why": str(e)})
         # The board answers logo_state either way. A failed flash erase
-        # leaves present:1, and a 200 then had the page drop the logo and
+        # leaves present:1, or reads "none" over a half-erased sector with
+        # err:1 set (proto.c's logo_state); both are handled below, and a 200 then had the page drop the logo and
         # say nothing while the next boot showed it again.
         if (not isinstance(state, dict) or state.get("present") != 0
                 or state.get("err") == 1):

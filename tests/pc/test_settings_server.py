@@ -14,7 +14,7 @@ import urllib.parse
 
 import pytest
 
-from pc import logo_encode, logo_preview, settings_ops, theme_server, user_config
+from pc import logo_encode, logo_preview, private_file, settings_ops, theme_server, user_config
 from tests.pc.test_theme_server import Clock, login, request
 from tests.support import gen_gif
 
@@ -778,3 +778,39 @@ def test_a_remove_with_err_one_is_an_error_even_if_present_is_zero(server, ops):
     ops.logo_remove = lambda: {"t": "logo_state", "present": 0, "err": 1}
     s, _, body = post(server, "/api/logo/remove", {}, login(server))
     assert s == 409 and "could not remove" in json.loads(body)["why"]
+
+
+def test_preview_is_refused_when_only_the_frame_count_differs(server, ops):
+    # Same bytes, other frames: mutating the match to bytes alone shows
+    # somebody else's picture as the board's.
+    c = login(server)
+    _sent(server, ops, c)
+    other = dict(ops.logo_state, frames=ops.logo_state["frames"] + 1)
+    ops.device = lambda: {"logo": other}
+    assert _preview(server, c)[0] == 404
+
+
+def test_save_without_a_board_answer_keeps_what_logo_write_would_report(home):
+    blob = logo_encode.from_rgba(bytes([1, 2, 3, 255]) * (320 * 240),
+                                 (0, 0, 0), 3000)
+    info = logo_encode.parse(blob)
+    logo_preview.save(home, blob, {})
+    want = {"bytes": logo_encode.HDR_LEN + info["blob_len"],
+            "frames": info["nframes"]}
+    raw = private_file.open_private(home, logo_preview.META_NAME)
+    assert json.loads(raw) == want
+    assert logo_preview.load_matching(home, dict(want, t="x", present=1))
+
+
+def test_an_encoder_bug_is_ours_and_is_said_so(server, ops, monkeypatch, capsys):
+    def bad(img, *a, **k):
+        raise ValueError("secret pixel detail")
+    monkeypatch.setattr(logo_encode, "parse", bad)
+    c = login(server)
+    s, _, body = _logo(server, c, bytes([9, 9, 9, 255]) * (320 * 240))
+    assert s == 500
+    why = json.loads(body)["why"]
+    assert why == "Blink could not prepare this image. Try another file."
+    out = capsys.readouterr()
+    assert "[settings] logo encoder bug" in out.err
+    assert "secret" not in out.err + out.out

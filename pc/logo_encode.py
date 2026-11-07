@@ -200,6 +200,14 @@ def check_limits(nframes, fps, hold_ms):
         raise ValueError(E_TOTAL)
 
 
+class EncoderBug(Exception):
+    """parse() refused an image encode_ban1 just made. Not a ValueError on
+    purpose: every ValueError here is a refusal of the owner's file and is
+    shown as one, and this is ours (a PackBits run across a rect, a rect
+    count past the cap). Round 2 found it reaching the owner as "The logo
+    data is damaged." with nothing in the log."""
+
+
 def build(frames565, fps, hold_ms, bg):
     check_limits(len(frames565), fps, hold_ms)
     blob = encode_ban1(frames565, fps)
@@ -208,7 +216,10 @@ def build(frames565, fps, hold_ms, bg):
     hdr = (hdr + bytes(bg) + b"\0").ljust(HDR_LEN, b"\0")
     img = hdr + blob
     img += b"\xff" * (-len(img) % ALIGN)
-    parse(img)                      # the round trip: refuse what we would not accept
+    try:
+        parse(img)                  # the round trip: refuse what we would not accept
+    except ValueError as e:
+        raise EncoderBug("encoder output refused by parse") from e
     return img
 
 
