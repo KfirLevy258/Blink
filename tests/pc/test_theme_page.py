@@ -2332,7 +2332,7 @@ def test_computer_switches_round_trip():
     assert r["msg"] == "This computer could not save that setting."
 
 
-def test_new_rows_are_disabled_with_their_sentences():
+def test_refresh_row_is_live_and_doze_is_disabled_with_their_sentences():
     r = builder_page.run("""
     await advance(300);
     const row = (id) => [$(id).disabled, $(id).getAttribute('aria-checked'), $($(id).getAttribute('aria-describedby')).textContent];

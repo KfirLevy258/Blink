@@ -276,16 +276,6 @@ def test_keep_figures_fresh_is_the_usage_refresh_setting(server, home,
     assert post(server, "/api/computer", {"usage_refresh": 1}, c)[0] == 400
 
 
-def test_switch_on_is_a_fresh_start(tmp_path):
-    from pc import usage_refresh
-    bh = str(tmp_path / ".blink")
-    st = usage_refresh.load_state(bh)
-    st.off_reason, st.fails = "cost", 3
-    usage_refresh.save_state(bh, st)
-    usage_refresh.switch_on(bh, str(tmp_path))
-    st = usage_refresh.load_state(bh)
-    assert st.off_reason == "" and st.fails == 0 and st.cleared_at
-
 # ------------------------------------------------------------ the logo route
 
 RAW = {"Content-Type": "application/octet-stream"}

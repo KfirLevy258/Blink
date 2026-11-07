@@ -763,7 +763,6 @@ def clear_off(blink_home, now=None, missing=False):
     save_state(blink_home, state)
 
 
-
 def switch_on(blink_home, home):
     """What turning the refresh on does besides the setting itself, for
     `blink config usage-refresh on` and the settings page's "Keep figures
@@ -789,6 +788,7 @@ def switch_on(blink_home, home):
                 remember_claude(blink_home, exe)
         except Exception:
             pass
+
 
 def _cache_at(view):
     """When this login's /usage cache was fetched, or None: the cache's own

@@ -2208,3 +2208,14 @@ def test_a_claude_found_too_old_clears_wasnt_found(tmp_path, monkeypatch):
     ur.save_state(str(t.blink), State(missing=True))
     t.w.tick_once()
     assert t.state().missing is False
+
+
+def test_switch_on_is_a_fresh_start(tmp_path):
+    from pc import usage_refresh
+    bh = str(tmp_path / ".blink")
+    st = usage_refresh.load_state(bh)
+    st.off_reason, st.fails = "cost", 3
+    usage_refresh.save_state(bh, st)
+    usage_refresh.switch_on(bh, str(tmp_path))
+    st = usage_refresh.load_state(bh)
+    assert st.off_reason == "" and st.fails == 0 and st.cleared_at
