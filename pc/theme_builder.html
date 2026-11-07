@@ -987,8 +987,8 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
 
   // ---------------------------------------------------------------- the board
   // render(), gauge(), arcPath(), el(), customDim and dotColours below are the
-  // old builder's, unchanged (tests/pc/test_theme_page.py pins three of them
-  // by hash): the preview is the board's own drawing and was reviewed as such.
+  // old builder's, unchanged (tests/pc/test_theme_page.py pins four of them
+  // by hash: gauge, arcPath, customDim and readableMix): the preview is the board's own drawing and was reviewed as such.
   var NS = 'http://www.w3.org/2000/svg';
   function el(tag, attrs, text) { var e = document.createElementNS(NS, tag); for (var k in attrs) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; return e; }
   function pt(cx, cy, r, deg) { var a = deg * Math.PI / 180; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
@@ -1005,10 +1005,12 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     svg.appendChild(el('text', { x: cx, y: cy + pctSize * .36, 'text-anchor': 'middle', 'font-family': 'Montserrat, sans-serif', 'font-size': pctSize, 'font-weight': 500, fill: '#' + txt }, Math.round(p) + '%'));
   }
 
-  // The screens beside usage, as the firmware draws them: arcs, rects, lines,
-  // text in Montserrat and the logo, no blur or gradient. Colours the
-  // firmware fixes (the boot screen's white and black, the connection
-  // screen's orange) are written as rgb() and names, not as the theme's
+  // The screens beside usage, drawn the way the firmware draws its own: arcs,
+  // rects, lines, text in Montserrat and the logo, no blur or gradient. The
+  // connection screen is the design's (docs/design/settings-page.md), not one
+  // the firmware has: firmware draws nothing after a join, and this preview
+  // is the page's own. Colours the firmware fixes (the boot screen's white
+  // and black) and the design's orange are written as rgb() and names, not as the theme's
   // hex: a six-digit literal in this script is a palette that did not come
   // from theme.c, and tests/pc/test_theme_builtins.py fails on one.
   var WHITE = 'white', BLACK = 'black', ORANGE = 'rgb(255,106,19)', GREY = 'rgb(138,145,153)';
@@ -1102,7 +1104,8 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       txtF(g, 160, 192, 12, GREY, 'No logo yet');
     }
   }
-  // Shown for a few seconds after a WiFi join succeeds: circles, a dashed
+  // The design's screen for a few seconds after a join (the board draws no
+  // such screen at this commit): circles, a dashed
   // line (an offset shift is cheap in LVGL) and two labels.
   function drawConnection(g, dim, track, pill) {
     g.appendChild(el('circle', { cx: 160, cy: 92, r: 70, fill: 'none', stroke: '#' + track, 'stroke-dasharray': '2 6' }));
@@ -1153,7 +1156,8 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       if ('logo' in s) st.logo = s.logo;
       render();
     },
-    // The connection screen for 4.2 s, then whatever the panels say.
+    // The design's connection screen, held by the page for 4.2 s, then
+    // whatever the panels say.
     connected: function () {
       clearTimeout(board.timer);
       st.screen = 'connection'; render();
@@ -2134,7 +2138,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   // What the board shows follows what is being edited: the start-up screen
   // while the Logo tab is open, its own Settings screen while the Board
   // panel has asked for it, the usage screen otherwise. The connection
-  // screen holds for its 4.2 s first.
+  // screen is held by the page for its 4.2 s first.
   function syncScreen() {
     if (board.timer) return;
     var logo = document.getElementById('tLogo').getAttribute('hidden') === null;
@@ -2199,7 +2203,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   var conn = (function () {
     var STEPS = ['sent', 'joined', 'proved', 'encrypted'];
     var NEED = 'Plug the board in with its USB cable to set up WiFi.';
-    var HOLD_MS = 4200;      // the board's connection screen holds this long too
+    var HOLD_MS = 4200;      // the page's own hold on its preview of the design's connection screen
     var busy = false, pick = null, saved = null, hold = null, scanning = 0;
     function g(id) { return document.getElementById(id); }
     function show(id, on) { if (on) g(id).removeAttribute('hidden'); else g(id).setAttribute('hidden', ''); }
@@ -2435,8 +2439,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   // preference (focus 0 / 1, through /api/pref). Weekly big is a preview only:
   // there is no weekly scope on the page (D61), because the board no longer
   // reads weekly_sel, so a control for it would persist a byte nothing draws.
-  // Burn view waits for feat/ultra-burn and is greyed until then. What the
-  // owner's own tap on a card is, a theme-less board write, is a flash write,
+  // What the owner's own tap on a card is, a theme-less board write, is a flash write,
   // so it goes out once per click and never from a drag.
   var VNOTE = {
     gauges: 'Both windows, side by side.',
@@ -2812,8 +2815,6 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   // The form is off until then; see loaded. Copy share code with it, which
   // copied "blink theme set dark", a theme the page had never read, under
   // a bar asking the owner to wait (review of fp/save-before-load, S1).
-  // Cancel stays on: it writes nothing of its own, only puts the board
-  // back on the theme it keeps.
   var FORM = 'main button, main input, #copy-code';
   // Cancel stays on: it writes nothing of its own, only puts the board back.
   document.querySelectorAll(FORM).forEach(function (e) { e.disabled = e.id !== 'cancel'; });

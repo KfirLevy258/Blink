@@ -7046,7 +7046,7 @@ def _theme_builder(home) -> int:
               " app or from another blink theme. Use its tab, or close it"
               " first; it stops by itself after ten minutes with no change."
               " If it is the app's, the board shows Editing on your"
-              " computer while it is open, and Edit on computer comes back"
+              " computer while it is open, and Open on PC comes back"
               " once its tab is closed.")
         return 1
     try:

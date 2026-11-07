@@ -1002,9 +1002,11 @@ def wait_for_link(explicit=None, poll_s=3.0, on_wait=None, home=None,
     failure), the WiFi step runs on that same poll, on its own backoff: 5 s
     doubling to 60 s, so a board on a charger is reached within seconds and a
     router that is off is not dialled every three. `autodetect` returns a
-    port, a list of ports or None; a port whose open or probe failed is left
-    out for 5, 10, 20, 40, 60 s (main() reports with chooser.port_failed) and
-    forgiven when the USB layout changes, because a charger board next to a
+    port, a list of ports or None; a port whose open raised is left out for
+    5, 10, 20, 40, 60 s once the machine is paired (main() reports with
+    chooser.port_failed; unpaired it is retried every 3 s), a port that
+    opened but never answered goes to `silent` with no timed backoff, and both
+    are forgiven when the USB layout changes, because a charger board next to a
     serial device that is never ours must not wait on that device forever
     (D51). `after_ota` polls the remembered address every 5 s for ten
     minutes: the new image's 90 s health deadline is met only by usage
@@ -1459,7 +1461,8 @@ def main(argv=None):
     force_wifi = os.environ.get("BLINK_FORCE_WIFI") == "1"
 
     # Ports asked politely under the CURRENT layout. Not a permanent blacklist:
-    # it is discarded when the layout changes (silent ports) or on success.
+    # it is cleared at the start of the patient pass, when both passes fail
+    # (the ports move to link_state.silent) and after a USB serial loss.
     asked = set()
     none_due = [0.0]
 
@@ -1580,9 +1583,10 @@ def main(argv=None):
             else:
                 # Silent, and not ours as far as we know. Leave it alone and
                 # look elsewhere. The failure record keeps it out of the
-                # candidates for 5 s, then 10, 20, 40, 60 (or until the USB
-                # layout changes), and the WiFi step gets the polls in
-                # between. The next try listens the other way round: a fast
+                # candidates: it goes into link_state.silent after both
+                # passes and stays there until the USB layout changes (no
+                # timed backoff; port_failed is for opens that raised), and
+                # the WiFi step gets the polls in between. The next try listens the other way round: a fast
                 # pass is followed by one long enough to hear an unprompted
                 # ping, the only thing a board still booting will send.
                 ser.close()
@@ -1652,7 +1656,7 @@ def main(argv=None):
             if err != last_err:
                 print(f"[bridge] {err}", file=sys.stderr)
                 last_err = err
-            # No sleep here: the failure record sits this port out for 5 s,
+            # No sleep here when paired: the failure record sits this port out for 5 s,
             # then 10 ... 60, and wait_for_link gives WiFi the polls between.
             # D51's 5..60 s sit-out only where a pairing exists: with none, a
             # busy port is retried every 3 s exactly as before WiFi did.
