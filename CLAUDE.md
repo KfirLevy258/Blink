@@ -86,12 +86,21 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**3281 passing, 1 skipped** (os.startfile, Windows only) as of 2026-10-31, on
-macOS. The same tree on the other two platforms the same day, each its own
-count: Ubuntu (Docker, x86_64) 3133 passed and 149 skipped, Windows (ARM64 VM)
-2962 passed and 314 skipped, none failing. The skips are platform tests and,
-on Windows, the builder-page tests that need Node. Re-run Ubuntu and Windows
-before claiming them for a new number. Everything in
+**On the WiFi branch (wifi/t5.6, 2026-11-07), each platform its own count:**
+macOS 3816 passed, 5 skipped (a foreground run of `tests/test_dev_sh.py` and
+`tests/pc/test_theme_cli.py` passes all 71; their Ctrl-C tests fail only when
+pytest is started in the background, where SIGINT is ignored); Ubuntu (Docker,
+x86_64, Python 3.12) 3603 passed, 215 skipped, 3 failed (the pixel-budget and
+the WiFi OTA pump tests are timing under Rosetta, 12 s against a 10 s budget;
+`test_learn_board_over_wifi_keeps_the_port_only_for_the_same_board[False]`
+fails every run); Ubuntu under Python 3.9 3393 passed, 220 skipped, 5 failed;
+Windows (ARM64 VM) 3378 passed, 431 skipped, 6 failed. The failures are open
+and listed in the Task 5.6 report; `host-tests` and `check_factory.sh` pass.
+The last all-green numbers, 2026-10-31, before the WiFi work: macOS 3281
+passed, 1 skipped (os.startfile, Windows only); Ubuntu 3133 passed and 149
+skipped; Windows 2962 passed and 314 skipped. The skips are platform tests
+and, on Windows, the builder-page tests that need Node. Re-run Ubuntu and
+Windows before claiming them for a new number. Everything in
 `pc/requirements.txt` is pinned on purpose, bitstring included, though
 nothing in `pc/` imports it; `numpy` and `Pillow` are only
 needed by the logo and boot-animation encoder tests. CI runs the same
@@ -157,6 +166,20 @@ before writing. On 2026-10-27 a scratch script imported
 its own and wrote a test theme into a real desk's `theme.json`.
 `tests/pc/__init__.py` now refuses a script import while HOME is the real
 one, but nothing else under `tests/` is guarded.
+
+## The network
+
+The board can also be reached over WiFi (TCP and UDP 49731; `docs/README-full.md`,
+"WiFi"). The rules that came with it: **the firmware never calls `connect()`**;
+the board only listens and answers, and the daemon dials. **A network buffer is
+a serial buffer** for the never-log rule: no bytes, slices, lengths, SSIDs,
+passwords, keys, nonces, tags or addresses in any log line, exception or
+stderr, at any level. The board's console is read with `tools/console_tail.py`,
+never `tools/passive_log.py` (it pre-sets DTR/RTS and reboots the board). And
+there is one console line policy: `logbook.tap_console_line` is the allowlist
+for BLINK_TAP and `console_tail` alike, so a line is a constant, a bare tag or
+`(board line)`, with no raw mode anywhere. The pairing file lives in
+`~/.blink/private` and only `pc/private_file.py` writes it.
 
 ## Hardware
 

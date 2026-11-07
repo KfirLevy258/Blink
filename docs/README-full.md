@@ -436,6 +436,42 @@ no hook interface, so its state comes from its own session log: a turn that
 started, finished or was interrupted. Codex permission prompts are not in that
 log, so a prompt shows as "working" until you answer it.
 
+## WiFi
+
+The board can talk to your computer over WiFi instead of the cable. It is
+the same display and the same daemon; only the link changes. The cable still
+wins: plug it in and the board uses it within seconds.
+
+Set it up with `blink settings`, which opens the settings page in your
+browser. The cable is needed once, to give the board the network name and
+password and to pair it with this computer (pairing makes a key that only
+this computer and this board hold). After that the board finds the computer
+on its own. The page also holds the display and board settings, and the
+logo. **Forget WiFi** on the page makes the board delete the network and the
+key.
+
+Limits:
+
+- 2.4 GHz networks only (ESP32). A router with one combined name usually
+  offers 2.4 GHz as well.
+- WPA2 and WPA2/WPA3 mixed networks. Not WPA3-only, not enterprise/802.1X,
+  not open networks, not captive portals.
+- Networks that isolate clients from each other (many guest and office
+  networks) cannot work: the computer cannot reach the board.
+- Changing networks needs the cable once.
+- The board shows HOST LOST when the computer sleeps or leaves the network,
+  as it does today when the cable is pulled.
+- Someone holding the board can read the WiFi password and the pairing key
+  from its flash (on every board), and with the key can read any session they
+  recorded earlier: there is no forward secrecy. Forget WiFi before giving a
+  board away; pairing again from the computer makes a new key.
+- WSL2 in NAT mode cannot receive the discovery answer (broadcast does not
+  cross the NAT); it relies on the remembered address.
+- A board with flash encryption (a fused unit) that is already on a desk
+  cannot get the WiFi feature by itself: its firmware has no radio and the
+  app refuses to write an encrypted chip over USB. It needs the factory
+  tool once.
+
 ## Settings on the board
 
 Settings is the screen beside the dials: swipe across from them to reach it,

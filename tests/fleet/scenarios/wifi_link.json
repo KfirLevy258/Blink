@@ -1,0 +1,12 @@
+{
+  "name": "wifi_link",
+  "link": "wifi",
+  "note": "The stale_age timeline over WiFi: the daemon runs with BLINK_FORCE_WIFI=1 and the desk's own pairing, and the board's console is read by tools/console_tail.py over the cable, which the daemon does not open. Percentages hold constant, the subject is the link. Only runs on a desk with a wifi_pair.json.",
+  "steps": [
+    {"at": 0,  "provider": "claude", "session_pct": 55.0, "weekly_pct": 30.0, "state": "running", "age_s": 0,     "stale": false},
+    {"at": 6,  "provider": "claude", "session_pct": 55.0, "weekly_pct": 30.0, "state": "running", "age_s": 1800,  "stale": true},
+    {"at": 12, "provider": "claude", "session_pct": 55.0, "weekly_pct": 30.0, "state": "running", "age_s": 14400, "stale": true}
+  ],
+  "duration_s": 20,
+  "expect": {"min_tx": 3, "min_board_usage": 3, "min_stale_lines": 2, "min_sleep_wakes": 0}
+}

@@ -47,7 +47,7 @@ what was proved, so commit first.
    manifest cache, which is why the firmware Install prompt (below) appears at
    most once.
 4. **The scenarios**, in name order: `overage`, `sleep_wake`, `stale_age`,
-   `usage_climb`.
+   `usage_climb`, `wifi_link` (a desk with a pairing only, see below).
 5. **The real-account pass**, unless `--no-real-account` was given.
 6. **The service is started again**, from a `finally`, on every path including
    the ones that raise.
@@ -299,6 +299,20 @@ python3 tools/fleet/run.py --only local-mac --scenarios my_scenario \
 A name that matches no file is refused rather than skipped, on both sides: a
 typo in `--scenarios` would otherwise produce a green result that proves less
 than the operator believes it does.
+
+### wifi_link
+
+`wifi_link.json` carries `"link": "wifi"` and replays the `stale_age`
+timeline over WiFi. For it the agent copies the desk's own
+`~/.blink/private/wifi_pair.json` into the sandbox home's `.blink/private`
+(through `pc/private_file.py`, so the copy is owner-only from its first byte),
+runs the daemon with `BLINK_FORCE_WIFI=1`, and runs
+`tools/console_tail.py --tap <the run's tap>` beside it: over WiFi the daemon
+does not open the cable, so the board's `[usage] session ` lines reach the
+tap only that way. The cable must therefore be plugged in, for the console
+only. A desk with no usable pairing skips the scenario and says so; it is
+left out of the results, not recorded as a pass. Pair a desk's board from
+`blink settings` before a release run if it should be covered.
 
 ## The real-account pass
 
