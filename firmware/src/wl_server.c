@@ -23,7 +23,8 @@
  * write the other's index to clear a ring.
  *
  * Nothing here prints a key, nonce, tag, address, length or byte
- * (CLAUDE.md): the console lines are four fixed strings.
+ * (CLAUDE.md): the console lines are five fixed strings and two that carry an
+ * errno and nothing else.
  */
 #include <zephyr/kernel.h>
 #include <zephyr/net/net_ip.h>
@@ -183,26 +184,74 @@ static void sock_opts(int fd)
 	zsock_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 }
 
-static void sockets_open(void)
+/* One console line per failure streak, not per retry: the retry is once a
+ * second and a socket pool that stays exhausted would fill the log. The line
+ * carries an errno only (CLAUDE.md), and sat silent before: the board showed
+ * WiFi up while the daemon logged "board not found" and the console said
+ * nothing about why. */
+static bool listen_said, disc_said;
+
+static void listener_open(void)
 {
 	struct sockaddr_in a = {
 		.sin_family = AF_INET,
 		.sin_port = htons(WL_PORT),
 		.sin_addr.s_addr = htonl(INADDR_ANY),
 	};
+	int rc = 0;
 
+	lsock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (lsock < 0) {
+		rc = errno;
+	} else if (zsock_bind(lsock, (struct sockaddr *)&a, sizeof(a)) ||
+		   zsock_listen(lsock, 1)) {
+		rc = errno;
+	}
+	if (rc != 0) {
+		close_fd(&lsock);
+		if (!listen_said) {
+			printk("[wifi] listen failed: %d\n", rc);
+			listen_said = true;
+		}
+		return;
+	}
+	listen_said = false;
+}
+
+/* Retried by tick() on the same 1 s schedule while the listener is up: the
+ * TCP side works by address without it, but a DHCP move leaves the daemon no
+ * way to find the board, and it used to stay closed until the network
+ * dropped. */
+static void discovery_open(void)
+{
+	struct sockaddr_in a = {
+		.sin_family = AF_INET,
+		.sin_port = htons(WL_PORT),
+		.sin_addr.s_addr = htonl(INADDR_ANY),
+	};
+	int rc = 0;
+
+	usock = zsock_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (usock < 0 || zsock_bind(usock, (struct sockaddr *)&a, sizeof(a))) {
+		rc = errno;
+		close_fd(&usock);
+		if (!disc_said) {
+			printk("[wifi] discovery socket failed: %d\n", rc);
+			disc_said = true;
+		}
+		return;
+	}
+	disc_said = false;
+}
+
+static void sockets_open(void)
+{
 	if (rng_dead || !cfg_paired()) {
 		return;
 	}
-	lsock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (lsock < 0 || zsock_bind(lsock, (struct sockaddr *)&a, sizeof(a)) ||
-	    zsock_listen(lsock, 1)) {
-		close_fd(&lsock);
-		return;
-	}
-	usock = zsock_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	if (usock < 0 || zsock_bind(usock, (struct sockaddr *)&a, sizeof(a))) {
-		close_fd(&usock);	/* the TCP side still works, by address */
+	listener_open();
+	if (lsock >= 0) {
+		discovery_open();
 	}
 }
 
@@ -554,9 +603,11 @@ static void tick(void)
 	}
 	if (lsock < 0 && !rng_dead && now >= open_after) {
 		sockets_open();
-		if (lsock < 0) {
-			open_after = now + 1000;	/* no 20 Hz retry loop */
-		}
+	} else if (lsock >= 0 && usock < 0 && now >= open_after) {
+		discovery_open();
+	}
+	if ((lsock < 0 || usock < 0) && !rng_dead && now >= open_after) {
+		open_after = now + 1000;	/* no 20 Hz retry loop */
 	}
 	/* USB spoke, or link_emit gave up on a full TX ring (it called
 	 * link_wifi_up(false)): the session ends here, with its socket. */
