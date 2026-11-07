@@ -749,19 +749,24 @@ static void logo_ack(uint32_t off, const char *err)
 /* After hello and welcome, and after every change: the page shows "Logo:
  * company, 48 KB, 12 frames" or "none" from it, and the daemon's stream is
  * done only when this follows its logo_end. */
-static void send_logo_state(void)
+static void logo_state_emit(bool err)
 {
-	char buf[96];
+	char buf[112];
 	uint32_t bytes = 0;
 	uint16_t frames = 0;
 	bool present = logo_write_state(&bytes, &frames);
 
 	snprintf(buf, sizeof(buf),
 		 "{\"t\":\"logo_state\",\"v\":%d,\"present\":%d,"
-		 "\"bytes\":%u,\"frames\":%u}",
+		 "\"bytes\":%u,\"frames\":%u%s}",
 		 PROTO_VERSION, present ? 1 : 0, (unsigned)bytes,
-		 (unsigned)frames);
+		 (unsigned)frames, err ? ",\"err\":1" : "");
 	emit(buf);
+}
+
+static void send_logo_state(void)
+{
+	logo_state_emit(false);
 }
 
 /* A whole number in [0, 2^32) off the wire, or false. */
@@ -895,8 +900,15 @@ static void logo_line(const char *type, const char *json, enum proto_src src)
 		}
 		if (logo_write_remove() == 0) {
 			printk("[logo] removed\n");
+			send_logo_state();
+		} else {
+			/* The erase failed, so what the partition holds is
+			 * unknown. err:1 says so on the wire: the state alone
+			 * could read "none" over a half-erased sector, and the
+			 * page cleared the logo and said nothing. */
+			printk("[logo] remove failed\n");
+			logo_state_emit(true);
 		}
-		send_logo_state();
 	}
 }
 
