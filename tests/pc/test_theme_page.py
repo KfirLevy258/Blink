@@ -2430,12 +2430,17 @@ def test_clear_drops_a_chosen_logo_without_touching_the_board():
     const had = [$('logoOn').hidden, $('logoOn').getAttribute('hidden')];
     const before = requests.length;
     $('lClear').click(); await advance(10);
+    // The chosen image must really be gone: Send does nothing, and the name
+    // is not left behind for the next paint.
+    $('lSend').click(); await advance(10);
     return { had, on: $('logoOn').getAttribute('hidden'), empty: $('logoEmpty').getAttribute('hidden'),
-             tag: $('lClear').tagName,
+             tag: $('lClear').tagName, name: $('lName').textContent,
+             sends: requests.slice(before).filter(x => x.method === 'POST' && x.path === '/api/logo').length,
              removes: requests.slice(before).filter(x => x.path === '/api/logo/remove').length };
     """, _live(**{"/api/logo?check=1": {"status": 200, "body": {"bytes": 51200}}}))
     assert r["had"][1] is None and r["tag"] == "BUTTON"
     assert r["on"] == "" and r["empty"] is None and r["removes"] == 0
+    assert r["sends"] == 0
 
 
 def test_the_scan_shows_a_spinner_until_the_list_arrives():
@@ -2454,10 +2459,17 @@ def test_the_scan_shows_a_spinner_until_the_list_arrives():
 def test_the_scan_spinner_goes_when_the_scan_fails():
     r = builder_page.run("""
     await advance(300);
+    const h = hold(); answer('/api/wifi/scan', () => h.p);
     $('c-move').click(); await advance(10);
-    return [$('c-scanning').getAttribute('hidden'), $('c-nets').getAttribute('aria-busy')];
+    const during = [$('c-scanning').getAttribute('hidden'), $('c-nets').getAttribute('aria-busy')];
+    h.release({ status: 500, body: { why: 'The board did not answer.' } }); await advance(10);
+    return { during, after: [$('c-scanning').getAttribute('hidden'), $('c-nets').getAttribute('aria-busy')],
+             msg: $('c-msg').textContent };
     """, _wifi(scan={"status": 500, "body": {"why": "The board did not answer."}}), search="?panel=connect")
-    assert r == ["", None]
+    # Shown while it waited, gone when it failed, and the reason on the page.
+    assert r["during"] == [None, "true"]
+    assert r["after"] == ["", None]
+    assert "The board did not answer." in r["msg"]
 
 
 def test_the_spinner_stops_for_reduced_motion_and_is_a_live_region():
@@ -2503,7 +2515,8 @@ def test_a_logo_without_a_matching_copy_says_there_is_no_preview():
              text: $('lBoardText').textContent, hidden: $('lHave').getAttribute('hidden') };
     """, _on_board(**{"/api/logo/preview": {"status": 404, "body": {}}}))
     assert r["imgs"] == 0 and r["hidden"] is None
-    assert "Sent from another computer, so no preview here." in r["text"]
+    assert "no preview of it on this computer" in r["text"]
+    assert "another computer" not in r["text"]
 
 
 def test_the_remove_confirm_sits_below_the_logo_note_not_beside_it():
@@ -2512,3 +2525,52 @@ def test_the_remove_confirm_sits_below_the_logo_note_not_beside_it():
     html = (Path(__file__).resolve().parents[2] / "pc" / "theme_builder.html").read_text()
     assert re.search(r"\.lhave \{[^}]*flex-wrap: wrap", html)
     assert re.search(r"\.lhave \.confirm \{ flex: 1 0 100%", html)
+
+
+# --- PR 9 review: a failed load says so; a changed logo is not left on show
+
+def test_a_failed_computer_or_device_load_says_why_not_defaults():
+    r = builder_page.run("""
+    await advance(300);
+    return { k: $('k-msg').textContent, b: $('b-msg').textContent,
+             kc: $('k-msg').className, bc: $('b-msg').className };
+    """, _live(**{"/api/computer": {"status": 500, "body": {
+        "why": "This computer's settings file could not be read."}},
+        "/api/device": {"status": 500, "body": {}}}), search="?panel=board")
+    assert r["k"] == "This computer's settings file could not be read."
+    assert r["b"] == "The app did not answer." and "bad" in r["kc"] + r["bc"]
+
+
+_SEE_AGAIN = """
+    document.hidden = false;
+    (document.listeners.visibilitychange || []).forEach(f => f()); await advance(10);
+"""
+
+
+def test_a_logo_removed_elsewhere_clears_the_preview():
+    r = builder_page.run("""
+    await advance(300);
+    const had = $('lHave').getAttribute('hidden');
+    answer('/api/device', () => ({ status: 200, body: { fw: '1.5.0', app: '1.5.0',
+                                   logo: { present: 0 } } }));
+    """ + _SEE_AGAIN + """
+    return { had, now: $('lHave').getAttribute('hidden'),
+             imgs: $('lBoardThumb').querySelectorAll('img').length };
+    """, _on_board(**{"/api/logo/preview": {"status": 200, "body": {}}}))
+    assert r["had"] is None and r["now"] == "" and r["imgs"] == 0
+
+
+def test_a_logo_changed_elsewhere_refetches_the_preview():
+    r = builder_page.run("""
+    await advance(300);
+    const asks = () => requests.filter(q => q.path === '/api/logo/preview').length;
+    const first = asks();
+    answer('/api/device', () => ({ status: 200, body: { fw: '1.5.0', app: '1.5.0',
+                                   logo: { present: 1, bytes: 4096, frames: 1 } } }));
+    """ + _SEE_AGAIN + """
+    const second = asks();
+    """ + _SEE_AGAIN + """
+    return { first, second, third: asks() };
+    """, _on_board(**{"/api/logo/preview": {"status": 200, "body": {}}}))
+    # Refetched when the size changed, not again when it did not.
+    assert (r["first"], r["second"], r["third"]) == (1, 2, 2)

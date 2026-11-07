@@ -2527,7 +2527,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   // encoding, asked for with ?check=1, not an estimate made here.
   var FITS = { fill: 1, large: .8, margin: .6 };
   var MAX_PICK = 20 * 1024 * 1024, MAX_GIF = 2 * 1024 * 1024 - 1024;
-  var lg = null, onBoard = false, boardLogo = null, lgBusy = false, checkSeq = 0, checkTimer = null, checkCtl = null;
+  var lg = null, onBoard = false, boardLogo = null, boardKey = null, lgBusy = false, checkSeq = 0, checkTimer = null, checkCtl = null;
   function byId(id) { return document.getElementById(id); }
   function vis(id, on) { if (on) byId(id).removeAttribute('hidden'); else byId(id).setAttribute('hidden', ''); }
   function lmsg(t, kind) { msgSet('lMsg', t, kind); }
@@ -2547,13 +2547,14 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     var bt = byId('lBoardThumb');
     while (bt.firstChild) bt.removeChild(bt.firstChild);
     if (onBoard && boardLogo) { var bi = document.createElement('img'); bi.setAttribute('src', boardLogo); bi.setAttribute('alt', 'The logo on the board'); bt.appendChild(bi); }
-    byId('lBoardText').textContent = !onBoard ? '' : boardLogo ? 'The logo on the board.' : 'A logo is on the board. Sent from another computer, so no preview here.';
+    byId('lBoardText').textContent = !onBoard ? '' : boardLogo ? 'The logo on the board.' : 'A logo is on the board. There is no preview of it on this computer.';
     board.show({ logo: lg ? { url: lg.url, w: lg.w, h: lg.h, bg: '#' + lg.bg, scale: FITS[lg.fit] }
                  : onBoard && boardLogo ? { url: boardLogo, w: 320, h: 240, bg: '#' + CLEAR, scale: 1 } : null });
   }
   // The daemon's copy of what it last sent, served only while the board
   // still reports that logo. A data URL, not a path: the page's CSP allows
   // no remote images and the route is behind the session cookie.
+  function logoKey(l) { return l.bytes + ':' + l.frames; }
   function loadBoardLogo() {
     fetch('/api/logo/preview', { credentials: 'same-origin' }).then(function (r) { return r.status === 200 ? r.blob() : null; })
       .then(function (b) { return b && b.size ? readDataURL(b) : null; })
@@ -2666,7 +2667,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     lgBusy = true; paintLogo(); lmsg('Sending to the board. A big logo takes about a minute.');
     sendLogo('/api/logo').then(function (j) {
       lgBusy = false;
-      if (j.status === 200 && j.logo && j.logo.present === 1) { onBoard = true; loadBoardLogo(); lmsg('The logo is on the board. It shows when the board starts.', 'ok'); }
+      if (j.status === 200 && j.logo && j.logo.present === 1) { onBoard = true; boardKey = logoKey(j.logo); loadBoardLogo(); lmsg('The logo is on the board. It shows when the board starts.', 'ok'); }
       else lmsg(j.why || 'The board refused the logo.', 'bad');
       paintLogo();
     }, function () { lgBusy = false; lmsg('The app did not answer.', 'bad'); paintLogo(); });
@@ -2676,7 +2677,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     confirm.ask(host, 'Remove the logo from the board? It starts with the BLINK animation only.', 'Remove it', function () {
       post('/api/logo/remove', null).then(function (j) {
         if (j.status !== 200) { lmsg(j.why || 'The board did not answer.', 'bad'); return; }
-        onBoard = false; boardLogo = null; lg = null; lmsg('');
+        onBoard = false; boardLogo = null; boardKey = null; lg = null; lmsg('');
         paintLogo(); byId('logoFile').focus();
       }, function () { lmsg('The app did not answer.', 'bad'); });
     });
@@ -2685,12 +2686,19 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   byId('lRemoveB').addEventListener('click', function () { removeLogo(byId('lRemoveB')); });
 
   // ---------------------------------------------------------------- Board
-  function getJSON(path) {
+  // `mid`: the message line that hears why a page of the app did not load. A
+  // silent null here showed the switches in their HTML defaults, and the next
+  // tap posted the opposite of what the file held.
+  function getJSON(path, mid) {
     var ctl = typeof AbortController === 'function' ? new AbortController() : null;
     var limit = ctl ? setTimeout(function () { ctl.abort(); }, REQUEST_MS) : null;
     return fetch(path, { credentials: 'same-origin', signal: ctl ? ctl.signal : undefined }).then(function (r) {
-      clearTimeout(limit); return r.status === 200 ? r.json() : null;
-    }, function () { clearTimeout(limit); return null; });
+      clearTimeout(limit);
+      if (r.status === 200) return r.json();
+      return r.json().then(function (j) { return j && j.why; }, function () { return null; }).then(function (why) {
+        msgSet(mid, why || 'The app did not answer.', 'bad'); return null;
+      });
+    }, function () { clearTimeout(limit); msgSet(mid, 'The app did not answer.', 'bad'); return null; });
   }
   function vnum(v) { return String(v || '').split('.').map(function (x) { return parseInt(x, 10) || 0; }); }
   function vless(a, b) { a = vnum(a); b = vnum(b); for (var i = 0; i < 3; i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) < (b[i] || 0); } return false; }
@@ -2705,7 +2713,15 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       if (typeof d.app === 'string') { st.versions = { board: d.fw, app: d.app }; render(); }
     }
     if (d.pref) applyPref(d.pref);
-    if (d.logo && d.logo.present === 1) { var was = onBoard; onBoard = true; paintLogo(); if (!was) loadBoardLogo(); }
+    // The board's report is the truth: a logo changed or removed elsewhere (a
+    // second tab, another computer, the board) must not leave this page's
+    // thumbnail on show. Refetch when the size or frames differ; the server
+    // 404s a copy that no longer matches.
+    var L = d.logo;
+    if (L && L.present === 1) {
+      var key = logoKey(L), fresh = !onBoard || key !== boardKey;
+      onBoard = true; boardKey = key; paintLogo(); if (fresh) loadBoardLogo();
+    } else if (L && L.present === 0 && onBoard) { onBoard = false; boardLogo = null; boardKey = null; paintLogo(); }
   }
   // The address and the saved network, from /api/wifi through Connect's paint.
   function deviceWifi(link, savedName, ip) {
@@ -2744,13 +2760,18 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     });
   });
   function loadBoardPanel() {
-    getJSON('/api/device').then(paintDevice);
-    getJSON('/api/computer').then(paintComputer);
+    getJSON('/api/device', 'b-msg').then(paintDevice);
+    getJSON('/api/computer', 'k-msg').then(paintComputer);
   }
+  // The board's logo can change under an open tab (another computer, the
+  // board's own Remove). Ask again on coming back into view, as ping does.
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && persistent && !finished) getJSON('/api/device', 'b-msg').then(paintDevice);
+  });
   // The rows that wait for another branch stay off whatever the form does.
   function soon() { document.querySelectorAll('[data-soon]').forEach(function (e) { e.disabled = true; }); }
 
-  // For the tasks that fill Connect and Board, and for the page's tests.
+  // For the page's tests (tests/pc/test_theme_page.py).
   window.blinkSettings = { board: board, panel: panel, status: status, confirm: confirm };
   document.getElementById('done').addEventListener('click', function () {
     if (finished) return;
@@ -2762,8 +2783,9 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
                  keep && (savedHere ? KEEP_AFTER_SAVE : KEEP_LINE), closeLine(CLOSE_AFTER_S)) && !keep) closeSoon();
     }, stopped);
   });
-  // ?panel=look|connect|board: the board's "Edit on computer" and
-  // `blink theme` open the page with that control open.
+  // ?panel=look|connect|board: `blink theme` (look) and `blink settings`
+  // (connect, by default) open the page with that control open; the board's
+  // Open on PC opens it with none.
   var want = /[?&]panel=(look|connect|board)\b/.exec(typeof location === 'undefined' ? '' : location.search || '');
   if (want) panel.open(want[1]);
 
