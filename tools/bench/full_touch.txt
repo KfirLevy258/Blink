@@ -83,7 +83,7 @@ mem
 # Task 6.1: the Theme screen is gone from the board; this tile asks the
 # computer to open the settings page, and held it reads the way it did on
 # the Theme screen.
-click "Open settings"
+click "Open on PC"
 expect theme_edit
 # Held now, as with a real builder open; the builder "ends", so the rest of
 # the run, and the desk after it, find the tile as it was.
@@ -112,6 +112,18 @@ tap back.swipe
 expect ui_state focus=off gf=off
 mem
 
+# The sixth tile and the Connection tile, each opened and left again, once
+# by the back button and once by the swipe (2026-11-07's six-tile grid).
+tap connection.open
+expect-widget "Link"
+tap settings.back
+tap about.open
+expect-widget "Board name"
+expect-widget "Up for"
+tap back.swipe
+expect ui_state scr=settings ov=none
+mem
+
 tap settings.back
 mem
 expect ui_state scr=gauges focus=off gf=off theme=0 stored=0
@@ -134,7 +146,7 @@ click "Off"
 expect ui_state focus=off
 click "<"
 expect ui_state ov=none
-click "Open settings"
+click "Open on PC"
 expect theme_edit
 wait-widget "Editing on your computer" 3
 fake edit_done

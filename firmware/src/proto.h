@@ -79,6 +79,10 @@ void proto_send_theme_edit(void);
 /* Which link protocol lines go over right now: 0 none, 1 USB, 2 WiFi. The
  * answer link_active() gives (link.h), for the panel. */
 uint8_t proto_link_kind(void);
+
+/* The board's id in hex, as hello says it ("unknown" with none). Settings >
+ * About names the board from its last four digits; never log it. */
+const char *proto_board_id_hex(void);
 /* {"t":"answer","v":2,"id":"refresh","a":"on"|"no"|"later"}: the answer to
  * the daemon's "Keep figures fresh?" (ask_prompt.h). */
 void proto_send_answer(enum ask_answer a);

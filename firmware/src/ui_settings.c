@@ -81,6 +81,8 @@ static lv_obj_t *confirm;	/* NULL when no dialog is up */
  * its own pointer, not `confirm`: upd_timer_cb() withdraws that one when the
  * update offer changes, and must never delete a question about WiFi. */
 static lv_obj_t *conn_ov, *conn_confirm, *conn_err;
+/* The About screen: a read-only page, built like Connection's. */
+static lv_obj_t *about_ov;
 
 /* Software-update widgets (all NULL when their owner is closed/absent). */
 static lv_obj_t *notice;	/* outcome popup on the top layer */
@@ -223,7 +225,7 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt, lv_color_t bg,
 }
 
 /* A full-width hairline rule at row y -- the grouped-list separator. */
-static void mk_line(lv_obj_t *parent, int y)
+static lv_obj_t *mk_line(lv_obj_t *parent, int y)
 {
 	lv_obj_t *l = lv_obj_create(parent);
 
@@ -234,6 +236,7 @@ static void mk_line(lv_obj_t *parent, int y)
 	lv_obj_set_style_border_width(l, 0, 0);
 	lv_obj_set_style_radius(l, 0, 0);
 	lv_obj_clear_flag(l, LV_OBJ_FLAG_SCROLLABLE);
+	return l;
 }
 
 /*
@@ -1347,12 +1350,13 @@ static void dl_overlay_show(const struct ota_ui *snap, bool rebooting)
 /* Paint one of upd_row.h's answers. The words and the colour live together
  * so a state cannot pick up the wrong pairing -- which is how "Up to date"
  * came to be drawn in green over an app that was a release behind. The label
- * budget is ~13 characters (see OTA_UI_AVAILABLE below). */
+ * budget is ~10 characters, the 82 px of the tile's state line (see
+ * OTA_UI_AVAILABLE below). */
 static void set_upd_row(lv_obj_t *lbl, enum upd_row row)
 {
 	switch (row) {
 	case UPD_ROW_READY:
-		lv_label_set_text(lbl, "Ready to install");
+		lv_label_set_text(lbl, "Ready");
 		lv_obj_set_style_text_color(lbl, COL_GREEN, 0);
 		break;
 	case UPD_ROW_APP_OLD:
@@ -1685,13 +1689,13 @@ static void upd_timer_cb(lv_timer_t *t)
 		 * here, but the half running on the customer's computer cannot
 		 * be reached from this screen at all, so this is the only place
 		 * it can be said. Amber, not green -- nothing is broken.
-		 * Budget is ~13 characters (see OTA_UI_AVAILABLE below). */
+		 * Budget is ~10 characters (see OTA_UI_AVAILABLE below). */
 		set_upd_row(upd_lbl, upd_row_idle(ota_badge(),
 						  proto_host_outdated()));
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		break;
 	case OTA_UI_CHECKING:
-		lv_label_set_text(upd_lbl, "Checking...");
+		lv_label_set_text(upd_lbl, "Checking");
 		lv_obj_set_style_text_color(upd_lbl, COL_DIM, 0);
 		lv_obj_add_state(upd_btn, LV_STATE_DISABLED);
 		break;
@@ -1704,12 +1708,15 @@ static void upd_timer_cb(lv_timer_t *t)
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		break;
 	case OTA_UI_AVAILABLE:
-		/* Version only. This is the tile's state line, 128 px under
-		 * "Update" (TILE_W - 16), and it ellipsizes past that. When it
-		 * sat beside the name in a 296 px row the size string made it
-		 * 23 characters and the two overlapped (user-reported
-		 * 2026-07-25). Keep any future state text within the 128. */
-		lv_label_set_text_fmt(upd_lbl, "Install %s", snap.version);
+		/* No version: this is the tile's state line, 82 px under
+		 * "Update" (TILE_TEXT_W), and it ellipsizes past that. "Install
+		 * 1.4.1" is 13 characters, about 95 px, and OTA allows a
+		 * 15-character version. The prompt and the install confirm
+		 * name the version. (Beside the name in a 296 px row the size
+		 * string once made it 23 characters and the two overlapped,
+		 * user-reported 2026-07-25.) Keep any future state text within
+		 * 82 px: about ten characters. */
+		lv_label_set_text(upd_lbl, "Available");
 		lv_obj_set_style_text_color(upd_lbl, COL_GREEN, 0);
 		lv_obj_clear_state(upd_btn, LV_STATE_DISABLED);
 		break;
@@ -1828,9 +1835,19 @@ static lv_obj_t *mk_back(lv_obj_t *parent, lv_event_cb_t cb)
 }
 
 /*
- * The Settings tiles: four equal 144 x 71 buttons, two by two, each an icon
- * over its name over its state. 71 px is 12.6 mm against a ~9 mm fingertip
- * (5.62 px/mm on this 2.8" panel).
+ * The Settings tiles: six equal 94 x 91 buttons, three by two, each an icon
+ * over its name over its state. 91 px is 16 mm and 94 is 16.7 mm against a
+ * ~9 mm fingertip (5.62 px/mm on this 2.8" panel).
+ *
+ * Six since 2026-11-07 (owner-approved layout): it was four 144 x 71 tiles
+ * and a 296 x 36 Connection bar, and About needed a sixth place. Three
+ * widths and two gaps have to make the 296 between the margins exactly --
+ * 94 and 7, as the Focus buttons found for 92 and 10 -- and the narrower
+ * tile is why every state string below is short: the state line is 82 px
+ * (TILE_W - 12) in the default 14 px Montserrat, "Ready to install" and
+ * "Install 1.10.0" no longer fit, and no smaller font is compiled in.
+ * The names are 14 px too, for the same reason: a 13 and an 11 would each
+ * cost a font's worth of flash for one pixel.
  *
  * They replaced two columns of 120 and 168 px rows with a chevron, which the
  * owner found uneven on the board (2026-10-28): measured on host LVGL, the
@@ -1849,27 +1866,33 @@ static lv_obj_t *mk_back(lv_obj_t *parent, lv_event_cb_t cb)
  * measured at 30 px once, 5.3 mm sitting 5 px apart, and one press covered
  * two of them -- which fired came down to where the pressure centroid fell.
  *
- * Inside the tile's 1 px border, top to bottom: 2 px, the icon (28), 2, the
- * name (16), 4, the state (16), 1 -- so 3 and 2 from the tile's edges. LVGL
- * places children inside the border, which is why the offsets below are one
- * short of those. The 4 above the state was 2 in the first draft and read as
- * one line run into the next.
+ * Inside the tile's 1 px border, top to bottom: 10 px, the icon (28), 4, the
+ * name (16), 4, the state (16), 11 -- the block is 68 px in 89, centred.
+ * LVGL places children inside the border, which is why the offsets below are
+ * one short of those. The 4 above the state was 2 in the first draft of the
+ * old tile and read as one line run into the next.
  */
-#define TILE_W 144
-#define TILE_H 71
-#define TILE_GAP 8
+#define TILE_W 94
+#define TILE_H 91
+#define TILE_GAP 7		/* between columns and between rows */
 #define TILE_TOP 46		/* clear of the title rule at y=40 */
-#define TILE_ICON_Y 2
-#define TILE_NAME_Y 32
-#define TILE_STATE_Y 52
+#define TILE_ICON_Y 10
+#define TILE_NAME_Y 42
+#define TILE_STATE_Y 62
+#define TILE_TEXT_W (TILE_W - 12)	/* a name or state; also the note */
 #define TILE_INNER_H (TILE_H - 2)	/* inside the border */
 /* With no state to show, the icon and name are one 46 px block, and they
  * sit on the tile's middle instead of over an empty line. */
 #define TILE_BARE_DY ((TILE_INNER_H - \
 		       (TILE_NAME_Y + FONT_LINE_H - TILE_ICON_Y)) / 2 - TILE_ICON_Y)
 
-BUILD_ASSERT(2 * TILE_W + TILE_GAP == 296,
+BUILD_ASSERT(3 * TILE_W + 2 * TILE_GAP == 296,
 	     "the settings tiles no longer fill the 296 px between margins");
+BUILD_ASSERT(TILE_TOP + 2 * TILE_H + TILE_GAP <= 240,
+	     "the second row of settings tiles runs off the panel");
+BUILD_ASSERT(TILE_ICON_Y + 28 <= TILE_NAME_Y &&
+	     TILE_NAME_Y + FONT_LINE_H <= TILE_STATE_Y,
+	     "a settings tile's icon, name and state overlap");
 BUILD_ASSERT(TILE_STATE_Y + FONT_LINE_H < TILE_INNER_H,
 	     "the tile's state line runs into its border");
 
@@ -1937,7 +1960,7 @@ static void tile_fit(lv_obj_t *state)
 	lv_obj_align(name, LV_ALIGN_TOP_MID, 0, TILE_NAME_Y + dy);
 }
 
-/* Tile k of four, left to right and then down. */
+/* Tile k of six, left to right and then down. */
 static lv_obj_t *mk_tile(lv_obj_t *parent, int k, const lv_image_dsc_t *icon,
 			 const char *name, const char *state,
 			 lv_event_cb_t cb, lv_obj_t **state_out)
@@ -1945,8 +1968,8 @@ static lv_obj_t *mk_tile(lv_obj_t *parent, int k, const lv_image_dsc_t *icon,
 	lv_obj_t *tile = lv_btn_create(parent);
 
 	lv_obj_set_size(tile, TILE_W, TILE_H);
-	lv_obj_align(tile, LV_ALIGN_TOP_LEFT, 12 + (k % 2) * (TILE_W + TILE_GAP),
-		     TILE_TOP + (k / 2) * (TILE_H + TILE_GAP));
+	lv_obj_align(tile, LV_ALIGN_TOP_LEFT, 12 + (k % 3) * (TILE_W + TILE_GAP),
+		     TILE_TOP + (k / 3) * (TILE_H + TILE_GAP));
 	lv_obj_add_style(tile, &st_row, 0);
 	/* Not scrollable: a horizontal drag on a SCROLLABLE button is eaten as
 	 * a scroll and the tap never fires. */
@@ -1955,8 +1978,8 @@ static lv_obj_t *mk_tile(lv_obj_t *parent, int k, const lv_image_dsc_t *icon,
 	 * Gestures BUBBLE from a tile, up to panel_gesture_cb, as they do from
 	 * the theme tiles and the Focus choices. Stopped here, a back swipe had
 	 * to start on bare panel, and the four tiles cover 296 x 150 of it:
-	 * that left y 40-46 and 196-240. tile_was_a_tap(), first in all four
-	 * callbacks, keeps the same swipe from opening the tile it began on.
+	 * that left y 40-46 and 196-240 (now the six cover 296 x 189, leaving
+	 * 40-46 and 235-240). tile_was_a_tap(), first in every tile's callback, keeps the same swipe from opening the tile it began on.
 	 */
 	lv_obj_add_flag(tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
 	lv_obj_add_event_cb(tile, cb, LV_EVENT_CLICKED, NULL);
@@ -1986,7 +2009,7 @@ static lv_obj_t *mk_tile(lv_obj_t *parent, int k, const lv_image_dsc_t *icon,
 	 * content-sized one simply grows -- so an "Install 1.10.0-beta.2"
 	 * (15 version characters, ota.h) wrapped instead, its second line
 	 * drawn over the tile's bottom border. */
-	lv_obj_set_size(sl, TILE_W - 16, FONT_LINE_H);
+	lv_obj_set_size(sl, TILE_TEXT_W, FONT_LINE_H);
 	lv_label_set_long_mode(sl, LV_LABEL_LONG_DOT);
 	lv_obj_align(sl, LV_ALIGN_TOP_MID, 0, TILE_STATE_Y);
 	lv_obj_set_user_data(sl, t);
@@ -2061,6 +2084,9 @@ static void sub_closed_cb(void *unused)
 		conn_ov = NULL;
 		conn_confirm = NULL;
 		conn_err = NULL;
+	} else if (about_ov != NULL) {
+		mem_stats_report("about-close");
+		about_ov = NULL;
 	} else {
 		return;
 	}
@@ -2075,8 +2101,8 @@ static void sub_closed_cb(void *unused)
  * button, a swipe after it -- find sub_closing set and do nothing more. */
 static void sub_close(void)
 {
-	if ((bright_ov == NULL && focus_ov == NULL && conn_ov == NULL) ||
-	    sub_closing) {
+	if ((bright_ov == NULL && focus_ov == NULL && conn_ov == NULL &&
+	     about_ov == NULL) || sub_closing) {
 		return;
 	}
 	sub_closing = true;
@@ -2136,7 +2162,7 @@ void ui_settings_apply_bright(uint8_t pct)
 static void show_bright(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (bright_ov || focus_ov || theme_ov || confirm || conn_ov ||
+	if (bright_ov || focus_ov || theme_ov || confirm || conn_ov || about_ov ||
 	    panel == NULL) {
 		return;
 	}
@@ -2317,12 +2343,19 @@ BUILD_ASSERT(THEME_GRID_Y + 3 * THEME_TILE_H + 2 * THEME_TILE_GAP <= 240,
  */
 #define EDIT_RUN_MS 8000
 
-static const char *const edit_name = "Edit on computer";
-static const char *const edit_waiting = "Opening on your computer";
-static const char *const edit_opened = "Opened on your computer";
-/* The held slot. The same length and shape as the two above, so it wraps
- * to the same two lines in the slot's 124 px; drawn dim, the way a control
- * that is waiting on something else looks everywhere else in Settings. */
+/* The tile is "Open on PC" over "In browser" (edit_state_at_rest). The two
+ * answers are one word each: the note takes the tile's whole 82 px, and
+ * "Opening on your computer" wrapped to three lines in it. ASCII "..." and
+ * not the ellipsis, which the built-in fonts do not have
+ * (tests/test_panel_strings.py). */
+static const char *const edit_name = "Open on PC";
+static const char *const edit_state_at_rest = "In browser";
+static const char *const edit_waiting = "Opening...";
+static const char *const edit_opened = "Opened";
+/* The held slot, drawn dim, the way a control that is waiting on something
+ * else looks everywhere else in Settings. Three lines in the tile's 82 px,
+ * and the fallback below five: both fit the 89 px inside the tile, which is
+ * what "Opening on your computer" cost on the old 144 px one. */
 static const char *const edit_holding = "Editing on your computer";
 /* The command comes last, after a colon, so it reads as the thing to type
  * with nothing to mark it out. It was "Run `blink theme` on your computer",
@@ -2395,24 +2428,26 @@ static bool tile_was_a_tap(void)
 }
 
 /*
- * The Open settings tile says what is happening in its own name label,
- * where the icon and the name were, rather than in the tile's one-line
- * state label. Two reasons, both measured on 2026-11-07: the state label is
- * 128 px wide and dotted, so "On your computer, run: blink settings" lost
+ * The Open on PC tile says what is happening in its own name label,
+ * where the icon, the name and the state were, rather than in the tile's
+ * one-line state label. Two reasons, both measured on 2026-11-07: the state
+ * label is one dotted line, so "On your computer, run: blink settings" lost
  * the one word the owner has to type; and the bench's widget list names a
  * control by its FIRST label child, so a note
- * in the state label could not be waited for. The tile's state label is
- * never shown; it is only the handle mk_tile gives back.
+ * in the state label could not be waited for. While a note is up the state
+ * label ("In browser") is hidden under it; it is also the handle mk_tile
+ * gives back.
  */
 static void edit_tile_paint(void)
 {
 	lv_obj_t *name = lv_obj_get_user_data(theme_edit_lbl);
 	lv_obj_t *icon = lv_obj_get_user_data(name);
 
+	lv_obj_set_flag(theme_edit_lbl, LV_OBJ_FLAG_HIDDEN, edit_note != NULL);
 	if (edit_note != NULL) {
 		lv_label_set_text(name, edit_note);
 		lv_label_set_long_mode(name, LV_LABEL_LONG_WRAP);
-		lv_obj_set_width(name, TILE_W - 16);
+		lv_obj_set_width(name, TILE_TEXT_W);
 		lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
 		lv_obj_set_style_text_color(name, edit_h.held ? COL_DIM :
 					    COL_TEXT, 0);
@@ -2420,11 +2455,11 @@ static void edit_tile_paint(void)
 		lv_obj_add_flag(icon, LV_OBJ_FLAG_HIDDEN);
 		return;
 	}
-	lv_label_set_text(name, "Open settings");
+	lv_label_set_text(name, edit_name);
 	lv_obj_set_width(name, LV_SIZE_CONTENT);
 	lv_obj_remove_local_style_prop(name, LV_STYLE_TEXT_COLOR, 0);
 	lv_obj_remove_local_style_prop(name, LV_STYLE_TEXT_ALIGN, 0);
-	lv_obj_align(name, LV_ALIGN_TOP_MID, 0, TILE_NAME_Y + TILE_BARE_DY);
+	lv_obj_align(name, LV_ALIGN_TOP_MID, 0, TILE_NAME_Y);
 	lv_obj_clear_flag(icon, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -2880,7 +2915,7 @@ static void show_theme(bool fresh)
 	int n = theme_list(ids);
 	int pages = theme_pages();
 
-	if (theme_ov || bright_ov || focus_ov || confirm || conn_ov ||
+	if (theme_ov || bright_ov || focus_ov || confirm || conn_ov || about_ov ||
 	    panel == NULL) {
 		return;
 	}
@@ -3169,7 +3204,7 @@ void ui_settings_apply_focus(void)
 static void show_focus(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (focus_ov || bright_ov || theme_ov || confirm || conn_ov ||
+	if (focus_ov || bright_ov || theme_ov || confirm || conn_ov || about_ov ||
 	    panel == NULL) {
 		return;
 	}
@@ -3262,7 +3297,8 @@ static bool sub_can_open(void)
 	 * swipe is the common case, and an open queued in the one loop pass
 	 * before do_close would run against a panel being torn down. */
 	return theme_ov == NULL && bright_ov == NULL && focus_ov == NULL &&
-	       conn_ov == NULL && confirm == NULL && !sub_closing && !closing;
+	       conn_ov == NULL && about_ov == NULL && confirm == NULL &&
+	       !sub_closing && !closing;
 }
 
 /*
@@ -3272,8 +3308,9 @@ static bool sub_can_open(void)
  * Built like Brightness: the panel emptied under it and rebuilt when it
  * closes, so the screen costs the pool one overlay and its labels while it is
  * open. A snapshot taken when it opens; it does not tick. The tile that opens
- * it is the fifth, laid across the bottom (build_panel says where the footer
- * went).
+ * it is the fifth tile, bottom middle. Its facts are laid out as rows, key
+ * left and value right (kv_row), and the "Blink x | App y" version line that
+ * used to close it is on About.
  */
 static void conn_close_cb(lv_event_t *e)
 {
@@ -3336,7 +3373,9 @@ static void conn_yes_cb(lv_event_t *e)
 		conn_err = lv_label_create(conn_ov);
 		lv_label_set_text(conn_err, net_link_why_text(NL_WHY_FORGET));
 		lv_obj_set_style_text_color(conn_err, COL_RED, 0);
-		lv_obj_align(conn_err, LV_ALIGN_TOP_LEFT, 12, 148);
+		lv_obj_set_width(conn_err, 296);
+		lv_obj_set_style_text_align(conn_err, LV_TEXT_ALIGN_CENTER, 0);
+		lv_obj_align(conn_err, LV_ALIGN_TOP_LEFT, 12, 184);
 	}
 }
 
@@ -3371,6 +3410,37 @@ static void conn_forget_cb(lv_event_t *e)
 	lv_obj_align(no, LV_ALIGN_BOTTOM_MID, 0, -18);
 }
 
+/* The shell of Connection and About: a full-panel overlay with the back
+ * button, the title and the title rule, as every sub-screen has. */
+static lv_obj_t *sub_overlay(lv_event_cb_t back_cb, lv_event_cb_t gesture_cb,
+			     const char *name)
+{
+	lv_obj_t *ov = lv_obj_create(panel);
+
+	lv_obj_set_size(ov, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_style_bg_color(ov, COL_BG, 0);
+	lv_obj_set_style_bg_opa(ov, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(ov, 0, 0);
+	lv_obj_set_style_radius(ov, 0, 0);
+	lv_obj_set_style_pad_all(ov, 0, 0);
+	lv_obj_clear_flag(ov, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(ov, gesture_cb, LV_EVENT_GESTURE, NULL);
+	lv_obj_center(ov);
+
+	mk_back(ov, back_cb);
+
+	lv_obj_t *title = lv_label_create(ov);
+
+	lv_label_set_text(title, name);
+	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+	lv_obj_set_style_text_color(title, COL_TEXT, 0);
+	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 11);
+
+	mk_line(ov, 40);
+	return ov;
+}
+
 /* A row of text: a transparent clickable object holding the label, because
  * the bench's widget listing names an object by its first label child
  * (the widget lister's label_of) and would show a bare label as ''. Inert, and
@@ -3393,92 +3463,170 @@ static void conn_row(const char *txt, int y, lv_color_t col, bool wrap)
 	lv_label_set_text(l, txt);
 	lv_obj_set_width(l, 296);
 	lv_label_set_long_mode(l, wrap ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_DOT);
+	lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_set_style_text_color(l, col, 0);
+}
+
+/*
+ * A label-left, value-right row of an info screen (Connection, About), 36 px
+ * tall from `top`, with a hairline under it unless it is the last. A
+ * transparent clickable object holds both labels for the reason conn_row
+ * says: the bench's widget list names it by its first label, the key. The
+ * value is 180 px and dotted, so a 32-character network name is cut and
+ * does not run into the key ("Board name" is 82 px of the other 92).
+ */
+#define KV_H 36
+#define KV_X 24
+#define KV_W 272
+#define KV_VAL_W 180
+
+static lv_obj_t *kv_row(lv_obj_t *ov, int top, const char *key,
+			const char *val, bool last)
+{
+	lv_obj_t *r = lv_obj_create(ov);
+
+	lv_obj_set_size(r, KV_W, KV_H);
+	lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_border_width(r, 0, 0);
+	lv_obj_set_style_pad_all(r, 0, 0);
+	lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
+	lv_obj_add_flag(r, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_align(r, LV_ALIGN_TOP_LEFT, KV_X, top);
+
+	lv_obj_t *k = lv_label_create(r);
+
+	lv_label_set_text(k, key);
+	lv_obj_set_style_text_color(k, COL_DIM, 0);
+	lv_obj_align(k, LV_ALIGN_LEFT_MID, 0, 0);
+
+	lv_obj_t *v = lv_label_create(r);
+
+	lv_label_set_text(v, val);
+	lv_obj_set_width(v, KV_VAL_W);
+	lv_label_set_long_mode(v, LV_LABEL_LONG_DOT);
+	lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_RIGHT, 0);
+	lv_obj_set_style_text_color(v, COL_TEXT, 0);
+	lv_obj_align(v, LV_ALIGN_RIGHT_MID, 0, 0);
+	if (!last) {
+		lv_obj_t *rule = mk_line(ov, top + KV_H);
+
+		lv_obj_set_size(rule, KV_W, 1);
+		lv_obj_align(rule, LV_ALIGN_TOP_LEFT, KV_X, top + KV_H);
+	}
+	return v;
 }
 
 static void show_conn(void)
 {
-	char ssid[33], psk[1], raw[48], row[64];
-	int y = 72;
+	char ssid[33], psk[1], raw[48];
+	int top = 48;
 
 	if (bright_ov || focus_ov || theme_ov || confirm || conn_ov ||
-	    panel == NULL) {
+	    about_ov || panel == NULL) {
 		return;
 	}
 	panel_empty();		/* see sub_closed_cb() */
-	conn_ov = lv_obj_create(panel);
-	lv_obj_set_size(conn_ov, LV_PCT(100), LV_PCT(100));
-	lv_obj_set_style_bg_color(conn_ov, COL_BG, 0);
-	lv_obj_set_style_bg_opa(conn_ov, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_width(conn_ov, 0, 0);
-	lv_obj_set_style_radius(conn_ov, 0, 0);
-	lv_obj_set_style_pad_all(conn_ov, 0, 0);
-	lv_obj_clear_flag(conn_ov, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_clear_flag(conn_ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
-	lv_obj_add_event_cb(conn_ov, conn_gesture_cb, LV_EVENT_GESTURE, NULL);
-	lv_obj_center(conn_ov);
-
-	mk_back(conn_ov, conn_close_cb);
-
-	lv_obj_t *title = lv_label_create(conn_ov);
-
-	lv_label_set_text(title, "Connection");
-	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
-	lv_obj_set_style_text_color(title, COL_TEXT, 0);
-	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 11);
-
-	mk_line(conn_ov, 40);
+	conn_ov = sub_overlay(conn_close_cb, conn_gesture_cb, "Connection");
 
 	uint8_t lk = proto_link_kind();
-
-	conn_row(lk == 2 ? "Link: WiFi" : lk == 1 ? "Link: USB cable" :
-		 "Link: none", 50, COL_TEXT, false);
 
 	/* D28: credentials alone decide whether Forget is offered, so a 1.3.4
 	 * unit's leftover WiFi can still be wiped. The password is not wanted
 	 * here: a 1-byte buffer takes none of it. */
 	bool have = cfg_get_wifi(raw, sizeof(raw), psk, sizeof(psk));
 
+	kv_row(conn_ov, top, "Link", lk == 2 ? "WiFi" : lk == 1 ? "USB cable" :
+	       "None", false);
+	top += KV_H;
 	if (!have) {
-		conn_row("Set up WiFi on the computer: blink settings", y,
-			 COL_DIM, true);
+		kv_row(conn_ov, top, "WiFi", "Not set up", false);
+		conn_row("To use WiFi, tap Open on PC and set it up in the"
+			 " browser.", top + KV_H + 14, COL_DIM, true);
 	} else {
 		fmt_ascii(raw, ssid, sizeof(ssid));
-		snprintf(row, sizeof(row), "Network: %s", ssid);
-		conn_row(row, y, COL_TEXT, false);
-		y += 22;
-		if (net_link_ip(raw, sizeof(raw))) {
-			snprintf(row, sizeof(row), "Address: %s", raw);
-			conn_row(row, y, COL_TEXT, false);
-			y += 22;
+		bool ip = net_link_ip(raw, sizeof(raw));
+
+		kv_row(conn_ov, top, "Network", ssid, !ip);
+		top += KV_H;
+		if (ip) {
 			int rssi = net_link_rssi();
 
-			conn_row(rssi > -60 ? "Signal: good" :
-				 rssi > -75 ? "Signal: fair" : "Signal: weak",
-				 y, COL_TEXT, false);
+			kv_row(conn_ov, top, "Address", raw, false);
+			top += KV_H;
+			kv_row(conn_ov, top, "Signal", rssi > -60 ? "Good" :
+			       rssi > -75 ? "Fair" : "Weak", true);
 		}
 		if (net_link_state() == NL_FAILED) {
-			conn_row(net_link_why_text(net_link_why()), 132,
+			conn_row(net_link_why_text(net_link_why()), top + 8,
 				 COL_RED, false);
 		}
 		lv_obj_t *fb = mk_btn(conn_ov, "Forget WiFi", COL_TRACK,
 				      conn_forget_cb, NULL);
 
-		lv_obj_align(fb, LV_ALIGN_BOTTOM_MID, 0, -18);
+		lv_obj_set_size(fb, 120, 32);
+		lv_obj_align(fb, LV_ALIGN_BOTTOM_MID, 0, -6);
 	}
+}
 
-	/* The version pair, which used to be the Settings footer. */
-	if (proto_host_version()[0]) {
-		snprintf(row, sizeof(row), "Blink %s  |  App %s",
-			 BLINK_FW_VERSION, proto_host_version());
-	} else {
-		snprintf(row, sizeof(row), "Blink %s", BLINK_FW_VERSION);
+/*
+ * Settings > About (owner-approved 2026-11-07): what a person reads out to
+ * say which board and which software they have. Read-only, built like
+ * Connection and opened by the sixth tile; it is a snapshot, not a clock --
+ * "Up for" is whole minutes and is read once, when the screen opens.
+ */
+static void about_close_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	sub_close();
+}
+
+static void about_gesture_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
+		sub_close();
 	}
-	lv_obj_t *ver = lv_label_create(conn_ov);
+}
 
-	lv_label_set_text(ver, row);
-	lv_obj_set_style_text_color(ver, COL_DIM, 0);
-	lv_obj_align(ver, LV_ALIGN_TOP_MID, 0, 166);
+static void show_about(void)
+{
+	char v[40];
+	int top = 48;
+
+	if (bright_ov || focus_ov || theme_ov || confirm || conn_ov ||
+	    about_ov || panel == NULL) {
+		return;
+	}
+	panel_empty();		/* see sub_closed_cb() */
+	about_ov = sub_overlay(about_close_cb, about_gesture_cb, "About");
+
+	/* Never logged: the board's id is its identity. */
+	fmt_board_name(proto_board_id_hex(), v, sizeof(v));
+	kv_row(about_ov, top, "Board name", v, false);
+	top += KV_H;
+	snprintf(v, sizeof(v), "Blink %s", BLINK_FW_VERSION);
+	kv_row(about_ov, top, "Version", v, false);
+	top += KV_H;
+	kv_row(about_ov, top, "App on PC", proto_host_version()[0] ?
+	       proto_host_version() : "Not connected", false);
+	top += KV_H;
+	fmt_uptime(k_uptime_get() / 1000, v, sizeof(v));
+	kv_row(about_ov, top, "Up for", v, true);
+}
+
+static void about_open_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	show_about();
+}
+
+static void about_row_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (tile_was_a_tap() && sub_can_open()) {
+		lv_async_call(about_open_cb, NULL);
+	}
 }
 
 static void conn_open_cb(void *unused)
@@ -3660,6 +3808,7 @@ static void do_close(void (*pump)(void))
 	conn_ov = NULL;
 	conn_confirm = NULL;
 	conn_err = NULL;
+	about_ov = NULL;
 	rebuild_owed = false;	/* the next open is built in the theme */
 	bright_ov = NULL;
 	lv_obj_update_layout(lv_screen_active());
@@ -3773,7 +3922,7 @@ static void back_cb(lv_event_t *e)
 	 * reaches past the overlay's edge, and a press landing there must not
 	 * close the panel out from under it. */
 	if (confirm == NULL && bright_ov == NULL && theme_ov == NULL &&
-	    focus_ov == NULL && conn_ov == NULL) {
+	    focus_ov == NULL && conn_ov == NULL && about_ov == NULL) {
 		close_panel();
 	}
 }
@@ -3782,7 +3931,7 @@ static void panel_gesture_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
 	if (confirm == NULL && bright_ov == NULL && theme_ov == NULL &&
-	    focus_ov == NULL && conn_ov == NULL &&
+	    focus_ov == NULL && conn_ov == NULL && about_ov == NULL &&
 	    lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
 		close_panel();
 	}
@@ -3817,6 +3966,7 @@ static void rebuild_cb(void *unused)
 	bool bright_was_open = bright_ov != NULL;
 	bool focus_was_open = focus_ov != NULL;
 	bool conn_was_open = conn_ov != NULL;
+	bool about_was_open = about_ov != NULL;
 	lv_obj_t *scr = lv_obj_get_parent(panel);
 
 	upd_btn = NULL;
@@ -3832,6 +3982,7 @@ static void rebuild_cb(void *unused)
 	bright_ov = NULL;
 	conn_ov = NULL;
 	conn_err = NULL;
+	about_ov = NULL;
 	focus_forget();
 	lv_obj_del(panel);
 	panel = NULL;
@@ -3844,6 +3995,8 @@ static void rebuild_cb(void *unused)
 		show_focus(NULL);
 	} else if (conn_was_open) {
 		show_conn();
+	} else if (about_was_open) {
+		show_about();
 	}
 }
 
@@ -3918,21 +4071,6 @@ static void build_panel(lv_obj_t *parent_scr)
 	 * screen moves under it, in ui_slide_run(). */
 	lv_obj_set_pos(panel, 0, 0);
 
-/*
- * The fifth tile, "Connection": full width, 36 px, under the two rows of
- * tiles. There is no grid room for a third row of 71 px, and the footer that
- * used to sit here (the version pair and "Keep the cable connected") is gone
- * from this screen to make the room: the version pair moved onto the
- * Connection screen, and the cable line is said by the update itself ("Keep
- * the cable connected." on the download screen, dl_sub), at the moment it
- * applies. Task 0.2 measured this very layout at 3400 B of LVGL pool left,
- * over the 2320 B floor.
- */
-#define CONN_Y (TILE_TOP + 2 * TILE_H + TILE_GAP + 4)
-#define CONN_H 36
-
-BUILD_ASSERT(CONN_Y + CONN_H <= 240,
-	     "the Connection tile no longer fits on the panel");
 	/* No green edge seam here. It existed as a left-edge cue back when the
 	 * back control was a bare chevron that was easy to miss; the control is
 	 * now a bordered 60 x 36 button that announces itself, so the seam was
@@ -3952,8 +4090,11 @@ BUILD_ASSERT(CONN_Y + CONN_H <= 240,
 	char sub[56];
 
 	/*
-	 * Four tiles, two by two (see mk_tile), and the Connection tile under
-	 * them (see CONN_Y). There is no room for a third pair.
+	 * Six tiles, three by two (see mk_tile). Connection and About used to
+	 * be a wide bar under four tiles; the footer that came before it, the
+	 * version pair, is on About now, and the cable line is said by the
+	 * update itself ("Keep the cable connected." on the download screen,
+	 * dl_sub), at the moment it applies.
 	 *
 	 * The update tile's state is set by upd_timer_cb() at the end of this,
 	 * so it starts empty -- and laid out bare -- like the row before it.
@@ -3961,34 +4102,18 @@ BUILD_ASSERT(CONN_Y + CONN_H <= 240,
 	snprintf(sub, sizeof(sub), "%d%%", backlight_get());
 	mk_tile(panel, 0, &settings_icon_bright, "Brightness", sub,
 		bright_row_cb, &pct_lbl);
-	mk_tile(panel, 1, &settings_icon_theme, "Open settings", "",
+	mk_tile(panel, 1, &settings_icon_laptop, edit_name, edit_state_at_rest,
 		theme_edit_cb, &theme_edit_lbl);
 	edit_paint();	/* a note outlives the panel it was drawn on */
 	mk_tile(panel, 2, &settings_icon_focus, "Focus", focus_name(),
 		focus_row_cb, &focus_sub);
 	upd_btn = mk_tile(panel, 3, &settings_icon_update, "Update", "",
 			  upd_cb, &upd_lbl);
-
-	/*
-	 * The Connection tile, across the bottom. mk_tile() lays out a 144 x
-	 * 71 tile; this one is re-fitted by hand: icon left, name centred, the
-	 * link on the right. The state is "WiFi" only while a session is live.
-	 */
-	lv_obj_t *ct = mk_tile(panel, 4, &settings_icon_link, "Connection",
-			       proto_link_kind() == 2 ? "WiFi" :
-			       proto_link_kind() == 1 ? "USB" : "None",
-			       conn_row_cb, NULL);
-	lv_obj_t *c_icon = lv_obj_get_child(ct, 0);
-	lv_obj_t *c_name = lv_obj_get_child(ct, 1);
-	lv_obj_t *c_state = lv_obj_get_child(ct, 2);
-
-	lv_obj_set_size(ct, 2 * TILE_W + TILE_GAP, CONN_H);
-	lv_obj_align(ct, LV_ALIGN_TOP_LEFT, 12, CONN_Y);
-	lv_obj_align(c_icon, LV_ALIGN_LEFT_MID, 6, 0);
-	lv_obj_align(c_name, LV_ALIGN_CENTER, 0, 0);
-	lv_obj_set_width(c_state, 60);
-	lv_obj_align(c_state, LV_ALIGN_RIGHT_MID, -4, 0);
-	lv_obj_clear_flag(c_state, LV_OBJ_FLAG_HIDDEN);
+	mk_tile(panel, 4, &settings_icon_link, "Connection",
+		proto_link_kind() == 2 ? "WiFi" :
+		proto_link_kind() == 1 ? "USB" : "None", conn_row_cb, NULL);
+	mk_tile(panel, 5, &settings_icon_info, "About", BLINK_FW_VERSION,
+		about_row_cb, NULL);
 
 	upd_timer_cb(NULL);	/* correct the row before the first tick */
 }
@@ -4418,7 +4543,8 @@ void ui_settings_bench_state(struct ui_settings_bench *out)
 	out->open = panel != NULL;
 	out->sub = confirm || conn_confirm ? "confirm" :
 		   bright_ov ? "brightness" : theme_ov ? "theme" :
-		   focus_ov ? "focus" : conn_ov ? "connection" : "none";
+		   focus_ov ? "focus" : conn_ov ? "connection" :
+		   about_ov ? "about" : "none";
 	out->modal = wn ? "whatsnew" : dl_overlay ? "download" :
 		     upd_prompt ? "prompt" : ask_box ? "ask" :
 		     notice ? "notice" : "none";

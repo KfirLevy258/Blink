@@ -267,6 +267,11 @@ const char *net_link_why_text(enum net_link_why w)
 	return w == NL_WHY_FORGET ? "Could not forget WiFi. Try again." : "";
 }
 
+const char *proto_board_id_hex(void)
+{
+	return "a4cf12d3b07e";	/* made up: no real id belongs in a fixture */
+}
+
 const char *proto_host_version(void)
 {
 	return "1.3.4";

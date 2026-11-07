@@ -150,8 +150,8 @@ def test_the_layout_literals_are_still_where_the_targets_assume():
     assert re.search(r"lv_obj_set_size\(pg, 60, 36\);\s*"
                      r"lv_obj_align\(pg, LV_ALIGN_TOP_RIGHT, -6, 2\);", c)
     assert "12 + i * (FOCUS_BTN_W + FOCUS_BTN_GAP), FOCUS_BTN_Y);" in c
-    assert "LV_ALIGN_TOP_LEFT, 12 + (k % 2) * (TILE_W + TILE_GAP)," in c
-    assert "TILE_TOP + (k / 2) * (TILE_H + TILE_GAP));" in c  # tiles
+    assert "LV_ALIGN_TOP_LEFT, 12 + (k % 3) * (TILE_W + TILE_GAP)," in c
+    assert "TILE_TOP + (k / 3) * (TILE_H + TILE_GAP));" in c  # tiles
 
 
 def test_the_theme_ids_match_theme_h():

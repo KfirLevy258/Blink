@@ -149,9 +149,9 @@ HEARTBEAT_S = 60       # the daemon's usage poll
 # the edge zones, the back button, the brightness stops -- are pinned by the
 # same test in the calls that set them.
 FW_LAYOUT = {
-    "TILE_W": 144,
-    "TILE_H": 71,
-    "TILE_GAP": 8,
+    "TILE_W": 94,
+    "TILE_H": 91,
+    "TILE_GAP": 7,
     "TILE_TOP": 46,
     "BRIGHT_STOPS": 5,
     "THEME_SLOTS": 6,
@@ -189,15 +189,16 @@ P_SETTINGS_ZONE = rect_center(SCREEN_W - 44, (SCREEN_H - 150) // 2, 44, 150)
 P_EYE_ZONE = rect_center(0, (SCREEN_H - 150) // 2, 44, 150)
 # mk_back: 60 x 36 at (6, 2), the same on Settings and every screen in it.
 P_BACK = rect_center(6, 2, 60, 36)
-# mk_tile: tile k of four, two by two from (12, TILE_TOP) -- Brightness,
-# Open settings, then Focus and Update.
+# mk_tile: tile k of six, three by two from (12, TILE_TOP) -- Brightness,
+# Open on PC, Focus; then Update, Connection, About.
 def _tile(k):
-    x = 12 + (k % 2) * (_L["TILE_W"] + _L["TILE_GAP"])
-    y = _L["TILE_TOP"] + (k // 2) * (_L["TILE_H"] + _L["TILE_GAP"])
+    x = 12 + (k % 3) * (_L["TILE_W"] + _L["TILE_GAP"])
+    y = _L["TILE_TOP"] + (k // 3) * (_L["TILE_H"] + _L["TILE_GAP"])
     return rect_center(x, y, _L["TILE_W"], _L["TILE_H"])
 
 
 P_BRIGHT_ROW, P_FOCUS_ROW = _tile(0), _tile(2)
+P_CONN_ROW, P_ABOUT_ROW = _tile(4), _tile(5)
 
 
 def bright_stop(i):
@@ -287,6 +288,10 @@ def _targets():
             0.3, f"brightness stop {i + 1} ({20 + 20 * i}%)")
     add("focus.open", "tap", [P_FOCUS_ROW], on_settings, {"ov": "focus"},
         0.6, "the Focus tile")
+    add("connection.open", "tap", [P_CONN_ROW], on_settings,
+        {"ov": "connection"}, 0.6, "the Connection tile")
+    add("about.open", "tap", [P_ABOUT_ROW], on_settings, {"ov": "about"},
+        0.6, "the About tile")
     for i, name in enumerate(FOCUS_NAMES):
         add(f"focus.{name}", "tap", [focus_btn(i)], {"ov": "focus"},
             {"ov": "focus", "focus": name}, 0.4, f"Focus: {name}")
@@ -480,9 +485,7 @@ VERSION_HOLES = {
         ("ver",),
     "Updating to %s...": ("ver",),
     "Downloading version %s...": ("ver",),
-    "Install %s": ("ver",),
     "Blink %s": ("ver",),
-    "Blink %s  |  App %s": ("ver", "ver"),
     "%d change%s since %s": ("plural", "ver"),
     "%d change%s": ("plural",),
 }
@@ -868,7 +871,8 @@ def shown_where(where):
 _STATE_WORDS = {
     "scr": ("gauges", "settings", "connecting", "eyes"),
     # The Connection screen arrives with Task 1.5; the spike tile reports it now.
-    "ov": ("none", "brightness", "theme", "focus", "confirm", "connection"),
+    "ov": ("none", "brightness", "theme", "focus", "confirm", "connection",
+           "about"),
     "modal": ("none", "notice", "whatsnew", "prompt", "ask", "download"),
     "focus": FOCUS_NAMES,
     "edit": ("name", "waiting", "opened", "run", "held"),

@@ -158,7 +158,7 @@ wait 3.5
 # Task 6.1): the tile's label is freed by Brightness, and an answer, a timer
 # or a done arriving meanwhile must not paint through it.
 tap settings.open
-click "Open settings"
+click "Open on PC"
 expect theme_edit
 click "Brightness"
 expect ui_state ov=brightness
@@ -169,7 +169,7 @@ click "<"
 expect ui_state scr=gauges
 wait 1.6
 
-# --- "Open settings", held while its builder is open (owner, 2026-10-30:
+# --- "Open on PC", held while its builder is open (owner, 2026-10-30:
 # "the edit on computer button should re-appear ... only once the page is
 # not active / closed"). This tool greets as a daemon that promises the
 # done (caps "edit_done", "editing":0), so an ok 1 holds the slot, reading
@@ -186,7 +186,7 @@ wait 1.6
 # first allowed for it (2026-10-29). A board keeps real time.
 tap settings.open
 # ok: held, and a press on the held slot sends nothing.
-click "Open settings"
+click "Open on PC"
 expect theme_edit
 wait-widget "Editing on your computer" 3
 expect ui_state edit=held
@@ -201,7 +201,7 @@ expect ui_state scr=settings edit=held
 # The builder ended: the button is back at once, and asks again.
 fake edit_done
 expect ui_state edit=name
-click "Open settings"
+click "Open on PC"
 expect theme_edit
 wait-widget "Editing on your computer" 3
 # Greeted again by a new daemon process: its builder went with the old one.
@@ -217,9 +217,9 @@ expect ui_state edit=name
 # In flight: no answer yet, so a second press sends nothing, and after 5 s
 # the fallback; a press on the fallback asks again, and its ok holds.
 edit-reply hold
-click "Open settings"
+click "Open on PC"
 expect theme_edit
-click "Opening on your computer"
+click "Opening..."
 expect no theme_edit
 wait-widget "On your computer, run: blink" 10
 expect ui_state edit=run
@@ -232,23 +232,23 @@ expect ui_state edit=name
 # A daemon from before the hold: "Opened" for 3 s, then the name, and a
 # press at any time asks again, as on 2026-10-29.
 fake welcome old
-click "Open settings"
+click "Open on PC"
 expect theme_edit
-wait-widget "Opened on your computer" 3
+wait-widget "Opened" 3
 wait 5
 expect ui_state edit=name
-click "Open settings"
+click "Open on PC"
 expect theme_edit
-wait-widget "Opened on your computer" 3
-click "Opened on your computer"
+wait-widget "Opened" 3
+click "Opened"
 expect theme_edit
-wait-widget "Opened on your computer" 3
+wait-widget "Opened" 3
 fake edit_done
 expect ui_state edit=name
 fake welcome shut
 # no: the fallback, read for 8 s, then the name on its own, never held.
 edit-reply no
-click "Open settings"
+click "Open on PC"
 expect theme_edit
 wait-widget "On your computer, run: blink" 3
 wait 12

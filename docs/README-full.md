@@ -549,18 +549,19 @@ Limits:
 ## Settings on the board
 
 Settings is the screen beside the dials: swipe across from them to reach it,
-and back to return. It is five tiles, each with an icon:
+and back to return. It is six tiles, three by two, each with an icon:
 
 | Tile | What it does |
 |---|---|
 | **Brightness** | Tap a level. It is kept across a power cycle |
-| **Open settings** | Opens the settings page on your computer, where the theme, the logo and WiFi are set (below) |
+| **Open on PC** | Opens the settings page on your computer, where the theme, the logo and WiFi are set (below) |
 | **Focus** | One window big instead of two side by side: **Off**, **Session** or **Weekly**. The other window stays on screen as a single dim line under the big dial. Off remembers which window was big |
-| **Update** | The software update: **Up to date**, an offer to install, or **App is old** when the half on your computer is behind (see "Updates") |
-| **Connection** | A wide row under the other four: how the board is reaching your computer now, **USB**, **WiFi** or **None** (see "WiFi") |
+| **Update** | The software update: **Up to date**, **Available** when there is something to install, or **App is old** when the half on your computer is behind (see "Updates") |
+| **Connection** | How the board is reaching your computer now, **USB**, **WiFi** or **None**; tap it for the network, address and signal, and to forget the WiFi (see "WiFi") |
+| **About** | The board's name (**Blink-** and the last four characters of its id), the firmware version, the app version on your computer, and how long the board has been on |
 
-Focus needs board firmware 1.4.0 or later; Open settings and Connection come
-with the WiFi firmware (a 1.4.0 board still shows a Theme tile). A board on
+Focus needs board firmware 1.4.0 or later; Open on PC, Connection and About
+come with the WiFi firmware (a 1.4.0 board still shows a Theme tile). A board on
 1.3.4 or earlier shows its old settings screen; update it to see these.
 
 ### Themes
@@ -614,10 +615,10 @@ theme.
 
 ### Making a theme on your computer
 
-On the board, **Settings > Open settings** opens the settings page in your
+On the board, **Settings > Open on PC** opens the settings page in your
 computer's browser; its **Themes** tab is the theme builder. While the page
 is open the tile reads **Editing on your computer**, dimmed, and does nothing
-when pressed, so one page stays in one tab; it reads **Open settings** again,
+when pressed, so one page stays in one tab; it reads **Open on PC** again,
 ready to press, a moment after the page closes (about 2 s after its tab
 does). It also comes back while the board has lost its connection to the
 computer, and is held again when the connection returns with the page still
@@ -646,7 +647,7 @@ be so, it says that instead of "Preview sent": a board still on firmware
 theme is sent once the board is updated), and a preview that nothing has
 picked up after a few seconds, because the app is not running or the board
 is not plugged in, is named as not on the board. Once it has
-closed, **Open settings** opens a new one. On Windows, and on some Linux
+closed, **Open on PC** opens a new one. On Windows, and on some Linux
 desktops, the builder's tab may open behind your other windows, with only
 the browser's taskbar button flashing. If a second tab does open on the same
 builder - from a board whose firmware predates the held button - only the

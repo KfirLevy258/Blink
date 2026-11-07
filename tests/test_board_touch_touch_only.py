@@ -127,11 +127,13 @@ def test_skip_missing_skips_a_tap_whose_screen_is_not_showing():
 
 # The labels the bench scripts may name. Today's Settings screen, from
 # firmware/src/ui_settings.c (mk_tile and the back button), plus the Connection
-# tile the spike adds (Task 0.2) and Settings > Connection proper (Task 1.5).
+# tile the spike adds (Task 0.2), Settings > Connection proper (Task 1.5) and
+# the About tile and screen (the six-tile grid, 2026-11-07).
 # A literal list on purpose: a script that names a widget nobody has is a
 # script that skips or fails on the bench without saying why.
-WIDGETS = {"Brightness", "Open settings", "Focus", "Update", "<",
-           "Connection", "Forget WiFi", "Link: WiFi", "Cancel"}
+WIDGETS = {"Brightness", "Open on PC", "Focus", "Update", "<",
+           "Connection", "Forget WiFi", "Link", "Cancel", "About",
+           "Board name", "Up for"}
 
 
 @pytest.mark.parametrize("path", SCRIPTS, ids=lambda p: p.name)

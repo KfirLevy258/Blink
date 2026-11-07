@@ -8,15 +8,15 @@ expect ui_state ov=brightness
 click "<"
 expect ui_state ov=none
 mem
-click "Open settings"
+click "Open on PC"
 expect ui_state scr=settings edit=waiting|held
-wait-widget "Opening on your computer" 3
+wait-widget "Opening..." 3
 widgets
 mem
 click "Connection"
 expect ui_state ov=connection
 widgets
-expect-widget "Link: WiFi"
+expect-widget "Link"
 click "Forget WiFi"
 expect ui_state ov=confirm
 mem

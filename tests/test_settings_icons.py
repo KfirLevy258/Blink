@@ -63,6 +63,15 @@ def test_every_icon_array_is_aligned_for_lvgl():
     c = (SRC / "settings_icons.c").read_text(encoding="utf-8")
     arrays = re.findall(r"^static const uint8_t (icon_\w+_map)\[\](.*?)=",
                         c, re.M)
-    assert len(arrays) == 5
+    assert len(arrays) == 6
     for name, attrs in arrays:
         assert "aligned(LV_DRAW_BUF_ALIGN)" in attrs, name
+
+
+def test_the_six_tiles_have_their_icons_and_the_old_theme_icon_is_gone():
+    gen = _gen()
+    names = [n for n, _ in gen.ICONS]
+    assert names == ["bright", "laptop", "focus", "update", "link", "info"]
+    h = (SRC / "settings_icons.h").read_text(encoding="utf-8")
+    assert "settings_icon_theme" not in h
+    assert "settings_icon_laptop" in h and "settings_icon_info" in h

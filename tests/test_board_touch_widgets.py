@@ -117,7 +117,7 @@ def test_the_widget_commands_parse_with_their_words_whole():
         "click \"What's new\"\n"
         'click index 7\n'
         'click --index 3\n'
-        'expect-widget "Opened on your computer"\n'
+        'expect-widget "Opened"\n'
         'wait-widget "Later" 2.5\n'
         'fake ota_avail 1.4.0\n'
         'fake ota_avail 1.4.0 1.4.0\n'
@@ -134,7 +134,7 @@ def test_the_widget_commands_parse_with_their_words_whole():
         ("click", ("What's new",)),
         ("click_index", (7,)),
         ("click_index", (3,)),
-        ("expect_widget", ("Opened on your computer",)),
+        ("expect_widget", ("Opened",)),
         ("wait_widget", ("Later", 2.5)),
         ("fake", ("ota_avail", "1.4.0")),
         ("fake", ("ota_avail", "1.4.0", "1.4.0")),
@@ -217,7 +217,7 @@ def test_the_default_script_has_a_click_by_label_pass():
     steps = bt.parse_script((ROOT / "tools" / "bench" / "full_touch.txt")
                             .read_text(encoding="utf-8"))
     clicked = [s.args[0] for s in steps if s.cmd == "click"]
-    for label in ("Focus", "Session", "Off", "Open settings", "Brightness",
+    for label in ("Focus", "Session", "Off", "Open on PC", "Brightness",
                   "<"):
         assert label in clicked, label
     # Task 6.1: no Theme tile and no theme screen to click through.
@@ -646,9 +646,9 @@ def test_every_label_the_shipped_scripts_click_is_printable():
         for s in steps:
             if s.cmd == "click":
                 assert allow.allowed(s.args[0]), (name, s.args[0])
-    for label in ("BLINK", "Settings", "Update", "Open settings", "Focus",
-                  "Brightness", "Opening on your computer",
-                  "Opened on your computer",
+    for label in ("BLINK", "Settings", "Update", "Open on PC", "Focus",
+                  "Brightness", "Opening...", "Opened", "About",
+                  "Board name", "Up for",
                   "On your computer, run: blink", "What's new", "Back",
                   "Yes, do it", "Cancel", "Later", "Update now", "OK", "*",
                   "Updated to 1.3.4", "Couldn't check for updates."):
@@ -1332,11 +1332,11 @@ def test_the_connection_screen_says_what_the_spec_says():
     """S5.7's copy, verbatim, in the firmware: the bench scripts click these
     words, and the board keeps 47 characters of any failure line."""
     src = (SRC / "ui_settings.c").read_text(encoding="utf-8")
-    for words in ("Connection", "Link: WiFi", "Link: USB cable",
-                  "Network: %s", "Address: %s", "Signal: good",
-                  "Signal: fair", "Signal: weak", "Forget WiFi", "Forget",
-                  "Cancel",
-                  "Set up WiFi on the computer: blink settings",
+    for words in ("Connection", "Link", "WiFi", "USB cable", "Network",
+                  "Address", "Signal", "Good", "Fair", "Weak", "Not set up",
+                  "Forget WiFi", "Forget", "Cancel",
+                  # Two literals in the C, split at a line end.
+                  "To use WiFi, tap Open on PC and set it up in the",
                   "Forget this network?\\nThe board goes back to USB."):
         assert f'"{words}"' in src, words
     # Source-level only: this greps the firmware, it does not walk the
@@ -1354,8 +1354,9 @@ def test_the_connection_screen_says_what_the_spec_says():
 
 def test_the_settings_tile_is_open_settings_and_nothing_is_called_theme():
     c = (SRC / "ui_settings.c").read_text()
-    assert re.search(r'mk_tile\(panel, 1, &settings_icon_theme, "Open settings"'
-                     r',[^;]*theme_edit_cb, &theme_edit_lbl\);', c)
+    assert re.search(r'mk_tile\(panel, 1, &settings_icon_laptop, edit_name,'
+                     r'[^;]*theme_edit_cb, &theme_edit_lbl\);', c)
+    assert 'edit_name = "Open on PC"' in c and '"Open settings"' not in c
     assert not re.search(r'mk_tile\([^;]*"Theme"', c)
     # The Theme screen stays compiled for the tests, and nothing opens it.
     assert "theme_row_cb" not in c and "theme_open_cb" not in c
@@ -1379,9 +1380,26 @@ def test_the_session_script_clicks_the_tile_and_expects_the_hold_copy():
     steps = bt.parse_script((ROOT / "tools" / "bench" / "session_touch.txt")
                             .read_text(encoding="utf-8"))
     cmds = [(s.cmd, s.args) for s in steps]
-    i = cmds.index(("click", ("Open settings",)))
+    i = cmds.index(("click", ("Open on PC",)))
     assert cmds[i + 1][0] == "expect" and cmds[i + 1][1][0] == "ui_state"
     assert cmds[i + 1][1][1]["scr"] == "settings"
     assert cmds[i + 1][1][1]["edit"] in ("waiting|held", ("waiting", "held"))
-    assert ("wait_widget", ("Opening on your computer", 3.0)) in cmds
+    assert ("wait_widget", ("Opening...", 3.0)) in cmds
 
+
+
+def test_the_six_tile_grid_and_the_about_screen_are_in_the_firmware():
+    src = (SRC / "ui_settings.c").read_text(encoding="utf-8")
+    for words in ("About", "Board name", "Version", "App on PC",
+                  "Not connected", "Up for", "Open on PC", "In browser",
+                  "Opening...", "Opened", "Ready", "Available"):
+        assert f'"{words}"' in src, words
+    assert "mk_tile(panel, 5, &settings_icon_info, \"About\"" in src
+    assert "about" in bt._STATE_WORDS["ov"]
+    # The board's id never reaches a log line: About only formats it.
+    assert "printk" not in src.split("static void show_about")[1].split(
+        "static void about_open_cb")[0]
+    assert "board_id" not in "".join(
+        ln for ln in src.splitlines() if "printk" in ln)
+    for name in ("connection.open", "about.open"):
+        assert name in bt.TARGETS

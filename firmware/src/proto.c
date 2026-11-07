@@ -275,6 +275,13 @@ static const char *board_id_hex(void)
 	return idhex;
 }
 
+/* For Settings > About, which shows only the last four digits and never
+ * logs it. */
+const char *proto_board_id_hex(void)
+{
+	return board_id_hex();
+}
+
 static bool pref_refused;	/* set only while pref_set_line answers a refusal */
 
 void proto_send_pref(void)
