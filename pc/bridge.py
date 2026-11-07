@@ -350,6 +350,13 @@ class Bridge:
             # that restarts picks the choice back up without the user
             # touching anything.
             want = msg.get("provider")
+            # What the board holds, for the settings page's first paint
+            # (GET /api/device "pref"). Not from a refused pref_set (ok 0):
+            # that line carries the values the board kept, but the page
+            # hears the refusal through the op and need not be told twice.
+            if self._ops is not None and msg.get("ok") != 0:
+                self._ops.note_device(pref={k: msg[k] for k in (
+                    "provider", "focus", "bright", "view") if k in msg})
             if self._set_preferred and isinstance(want, str):
                 if self._set_preferred(want):
                     print(f"[bridge] main source: {want}", file=sys.stderr)

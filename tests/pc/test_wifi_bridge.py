@@ -394,3 +394,16 @@ def test_a_refused_pref_set_answers_the_page_at_once(tmp_path):
     t.join(1)
     assert not t.is_alive()
     assert isinstance(box["e"], settings_ops.BoardOpError)
+
+
+def test_the_boards_pref_is_published_for_the_pages_first_paint(tmp_path):
+    b, ops, *_ = make(tmp_path, caps=("pref",))
+    assert "pref" not in ops.device()
+    b.on_message({"t": "pref", "v": 1, "provider": "codex", "focus": 1,
+                  "bright": 60, "view": 0, "board_id": "abcd", "ok": 1})
+    assert ops.device()["pref"] == {"provider": "codex", "focus": 1,
+                                    "bright": 60, "view": 0}
+    # A refused pref_set's line is not a change of state.
+    b.on_message({"t": "pref", "v": 1, "provider": "claude", "focus": 0,
+                  "bright": 20, "view": 0, "ok": 0})
+    assert ops.device()["pref"]["bright"] == 60

@@ -2278,9 +2278,9 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     });
   }
   // What the board says it holds now (its pref line): the provider, Focus on
-  // or off, and the brightness level. The page asks nothing at load: the
-  // board reports these only when something is set, so nothing is marked
-  // until the owner has chosen.
+  // or off, and the brightness level. At load they come from /api/device
+  // ("pref": the last pref line the daemon saw, which the board sends after
+  // every hello); with no board heard yet nothing is marked.
   function applyPref(p) {
     if (p.bright != null) { st.bright = +p.bright; press('[data-b]', 'b', String(st.bright)); }
     if (typeof p.provider === 'string') press('[data-src]', 'src', p.provider);
@@ -2476,6 +2476,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       byId('devTag').className = 'tag' + (old ? ' old' : ''); vis('devTag', true);
       if (typeof d.app === 'string') { st.versions = { board: d.fw, app: d.app }; render(); }
     }
+    if (d.pref) applyPref(d.pref);
     if (d.logo && d.logo.present === 1) { onBoard = true; paintLogo(); }
   }
   // The address and the saved network, from /api/wifi through Connect's paint.

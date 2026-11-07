@@ -2307,3 +2307,18 @@ def test_new_rows_are_disabled_with_their_sentences():
     assert r["refresh"] == [True, "false", "Runs Claude Code's own /usage now and then. Sends no messages."]
     assert r["doze"] == [True, "false", "Dims the board after 4 hours with nothing running"]
     assert r["posts"] == 0
+
+
+def test_the_boards_current_pref_is_marked_at_load():
+    r = builder_page.run("""
+    await advance(300);
+    return { b: document.querySelectorAll('[data-b]').map(x => x.getAttribute('aria-pressed')),
+             src: document.querySelectorAll('[data-src]').map(x => x.getAttribute('aria-pressed')),
+             cards: document.querySelectorAll('.vw').map(x => x.getAttribute('aria-pressed')),
+             posts: """ + _POSTS + """.length };
+    """, _live(**{"/api/device": {"status": 200, "body": {
+        "id": "ab12", "fw": "1.5.0", "app": "1.5.0", "pref": {
+            "provider": "codex", "focus": 1, "bright": 60, "view": 0}}}}))
+    assert r["b"] == ["false", "false", "true", "false", "false"]
+    assert r["src"] == ["false", "true"]
+    assert r["cards"][1] == "true" and r["posts"] == 0
