@@ -133,9 +133,9 @@ A 3D-printable case gives the bare board a home on your desk. The files are on *
 
 ## Connecting it
 
-Blink reads your usage over the **USB cable**, from Claude Code itself. Plug the board into your computer and run the setup below; your usage streams over the cable, and the same connection handles updates.
+Blink reads your usage from Claude Code itself and sends it to the board over the **USB cable**, which is the default. Plug the board into your computer and run the setup below; the same connection handles updates. The cable can be swapped for **WiFi**, an opt-in second link you set up from the settings page (see "WiFi"); the board then keeps working on a phone charger.
 
-The device never joins your network, never signs in to anything, and never holds a credential - the numbers come from the Claude Code already running on your machine.
+The device never signs in to anything and never holds a credential for Claude or Codex - the numbers come from the Claude Code already running on your machine. Unless you set up WiFi, it never joins a network at all; if you do, it joins only the one you give it, and talks only to your computer, encrypted.
 
 **Which port, and what if you have two boards.** It does not scan. The daemon
 writes down the board it connected to, so every later start opens that port
@@ -390,6 +390,22 @@ firmware slots and the settings partition are exactly where they were.
 Edition and logo are independent - a company unit is still a Claude or a
 Codex one.
 
+### Your own logo, from the settings page
+
+Any board can show a logo, set without opening the case: the settings page's
+**Look > Logo** tab takes a picture or an animation and sends it to the board
+over the cable or WiFi, with a preview of how it will sit (Fill, Large, With
+margin or Auto) and **Replace** and **Clear** for the one already there.
+
+| Format | Limits |
+|---|---|
+| PNG, JPG, SVG | A still, shown for 3 s; the file up to 2 MB |
+| GIF (animated) | The file up to 2 MB, up to 180 frames, 15 s long and 2048 px on a side |
+
+Whatever the format, the encoded logo has to fit the board's 512 KB logo
+partition; the page says so when it does not, and the board keeps the logo it
+had.
+
 ### Tested without a board
 
 `tests/ci/check_factory.sh` runs both scripts, unmodified, on every push: it
@@ -440,7 +456,7 @@ Blink is two halves that ship as one release: the firmware on the board, and the
 
 Blink checks for a new release as soon as it starts up, and if it finds one it asks you - **Update now** or **Later** - right on the gauge screen. One tap installs both halves. If the release also carries a newer app, the screen says so, and that half goes first: the new app is what knows how to drive the new firmware.
 
-The board has no network of its own, so the app does the work. It downloads the release, checks it against the hash the release publishes, and writes it over the same cable - then reads it back off the chip to confirm what landed there. The screen goes dark for about four minutes while that happens; it tells you first, and comes back on the new version. Because this route writes the running slot directly it has no automatic rollback, which is a fair trade when the machine that can reflash it is the one already plugged in.
+The board never downloads anything, so the app does the work. It downloads the release, checks it against the hash the release publishes, and writes it over whichever link the board is on, the cable or the encrypted WiFi link - then reads it back off the chip to confirm what landed there. The screen goes dark for about four minutes while that happens; it tells you first, and comes back on the new version. Because this route writes the running slot directly it has no automatic rollback, which is a fair trade when the machine that can reflash it is the one already plugged in.
 
 You get a confirmation on screen once the new version is up.
 
@@ -516,13 +532,25 @@ The board can talk to your computer over WiFi instead of the cable. It is
 the same display and the same daemon; only the link changes. The cable still
 wins: plug it in and the board uses it within seconds.
 
-Set it up with `blink settings`, which opens the settings page in your
-browser. The cable is needed once, to give the board the network name and
-password and to pair it with this computer (pairing makes a key that only
-this computer and this board hold). After that the board finds the computer
-on its own. The page also holds the display and board settings, and the
-logo. **Forget WiFi** on the page makes the board delete the network and the
-key.
+Set it up from the settings page: **Settings > Open on PC** on the board, or
+`blink settings` in a terminal. Open the **Connect** tab and press **Move to
+WiFi** (it reads **Change network** once a network is saved), pick the network
+from the list the board finds and type its password. The cable is needed once,
+to give the board the network name and password and to pair it with this
+computer (pairing makes a key that only this computer and this board hold).
+After that the board finds the computer on its own, the link is encrypted, and
+firmware updates go over it too (see "Updates"). The page also holds the
+display and board settings, and the logo.
+
+**Forget WiFi** makes the board delete the network and the key. It is on the
+page's Connect tab, and on the board itself: **Settings > Connection**, then
+the forget button on the detail screen, then **Forget** to confirm.
+
+**Plugging the cable into a WiFi board.** The cable wins and the board uses
+it within seconds. Known fault: on the owner's desk the board restarted about
+4 s after the daemon opened the port, four times in five. It comes back on its
+own and nothing is lost; the measurements are in
+[docs/open-bugs/usb-plug-restarts-a-wifi-board.md](open-bugs/usb-plug-restarts-a-wifi-board.md).
 
 Limits:
 
@@ -559,6 +587,17 @@ and back to return. It is six tiles, three by two, each with an icon:
 | **Update** | The software update: **Up to date**, **Available** when there is something to install, or **App is old** when the half on your computer is behind (see "Updates") |
 | **Connection** | How the board is reaching your computer now, **USB**, **WiFi** or **None**; tap it for the network, address and signal, and to forget the WiFi (see "WiFi") |
 | **About** | The board's name (**Blink-** and the last four characters of its id), the firmware version, the app version on your computer, and how long the board has been on |
+
+<table>
+  <tr>
+    <td width="50%"><img src="img/screen-settings.png" alt="The board's Settings screen: six tiles, Brightness, Open on PC, Focus, Update, Connection and About."></td>
+    <td width="50%"><img src="img/screen-about.png" alt="The About screen: board name, firmware version, app version on the computer and time up."></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Settings</b></sub>&nbsp;</td>
+    <td align="center"><sub><b>About</b></sub>&nbsp;</td>
+  </tr>
+</table>
 
 Focus needs board firmware 1.4.0 or later; Open on PC, Connection and About
 come with the WiFi firmware (a 1.4.0 board still shows a Theme tile). A board on
@@ -612,6 +651,15 @@ were apart, the board's choice wins - it is the one in front of you - and
 `blink theme show` says so, naming the theme that was set here. A board
 other than the last one the computer talked to is sent the computer's
 theme.
+
+### The settings page
+
+<img src="img/settings-page.png" alt="The settings page: the board drawn in the middle, linked to this computer by USB cable, with WiFi not set up, and Look, Connect and Board tabs under it.">
+
+The page has three tabs: **Look** (themes, the theme builder and the logo),
+**Connect** (WiFi) and **Board** (brightness, Focus and the screen shown).
+
+<img src="img/settings-page-look.png" alt="The Look tab: twelve built-in themes on the left, the board preview in the middle, colour pickers and arc settings on the right.">
 
 ### Making a theme on your computer
 

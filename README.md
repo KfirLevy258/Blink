@@ -35,7 +35,7 @@ I build them, test them and post them.
 
 ## What it is
 
-BLINK is a small touchscreen that shows the same numbers as Claude Code's `/usage` command, always in view: your **5-hour session** and your **7-day week**, each as a dial that turns from green to amber to red, with a countdown to its reset. It plugs into your computer over USB, sets itself up in one command, and keeps itself updated.
+BLINK is a small touchscreen that shows the same numbers as Claude Code's `/usage` command, always in view: your **5-hour session** and your **7-day week**, each as a dial that turns from green to amber to red, with a countdown to its reset. It plugs into your computer over USB, or talks to it over WiFi if you set that up, sets itself up in one command, and keeps itself updated.
 
 ## Open source
 
@@ -67,12 +67,14 @@ this.
 - **It sleeps when your computer does.** About thirty seconds after the computer stops answering, the screen closes its eyes and dozes; it opens them the moment the computer is back. A tap while it sleeps shows the last figures.
 - **Claude Desktop too.** With Desktop alone the dials show percentages, a five-hour countdown whenever Desktop is holding a reset time, and a weekly countdown once one has been learned. Desktop keeps that reset time only while a window is running and clears it in between, so the countdown comes and goes; the fill rate covers the gaps. The dials follow Desktop's own refresh - about every 5 minutes while you are using it, up to 15 when it sits idle - where Claude Code updates them live.
 - **Nothing to sign in to.** It reads figures Claude Code and Codex have already written to disk. It needs no credential, and sends nothing about you anywhere. The one optional extra, status-page alerts, reads the public status pages and is off until you turn it on.
-- **Themes.** Twelve built in, three of them light for a bright room, and one of your own: seven colours, arc width and ends, made in a builder that opens in your browser from the board's own Settings (or `blink theme`) and previews on the panel as you edit. A custom theme travels as a short share code.
+- **Themes.** Twelve built in, three of them light for a bright room, and one of your own: seven colours, arc width and ends, made in a builder that opens in your browser from the board's own Settings (Open on PC, or `blink settings`) and previews on the panel as you edit. A custom theme travels as a short share code.
 - **Focus.** One window big instead of two - session or weekly - with the other kept as a line under it.
 - **A burn view where there is no five-hour limit.** Claude Ultra accounts have no five-hour window (from 2026-10-30), so a session dial would have nothing to show. There, BLINK draws the last five hours of Claude Code output instead: the total, an arrow for whether you are speeding up or easing off, and a bar for every quarter-hour, labelled with the hour. Pro and Max keep the session dial, and the weekly dial is the same on every plan.
-- **Settings on the board.** Brightness, Theme, Focus and Update, four tiles on the screen beside the dials.
+- **Cable or WiFi.** USB is the default. WiFi is an opt-in second link, set up from the settings page: pick your network, type its password, and the board talks to your computer over an encrypted link, even when it is running from a phone charger. Updates go over it too.
+- **A settings page on your computer.** The board's *Open on PC* tile (or `blink settings`) opens a page in your browser for the theme, your own logo (PNG, JPG, SVG or an animated GIF), WiFi and the board's preferences.
+- **Settings on the board.** Six tiles on the screen beside the dials: Brightness, Open on PC, Focus, Update, Connection and About.
 - **Status pages, per provider.** Optional: each provider's page says when that provider's own service is having trouble, so you know it is not your machine.
-- **Updates over the cable.** A new release asks on screen; one tap installs both the firmware and the app. Both halves are signed.
+- **Updates over the cable or WiFi.** A new release asks on screen; one tap installs both the firmware and the app. Both halves are signed.
 - **Cheap, open hardware.** An ESP32 "Cheap Yellow Display" (~$12) and a 3D-printed case.
 - **Company units.** A unit built for a company shows its logo - a still or a short clip - after the boot animation, written once at the factory.
 
@@ -104,12 +106,35 @@ bar per quarter-hour, and an arrow comparing this hour with the one before.
 
 *Rendered by the shipping firmware's own drawing code, not mocked up.*
 
+### Settings
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/img/screen-settings.png" alt="The board's Settings screen: six tiles, Brightness, Open on PC, Focus, Update, Connection and About."></td>
+    <td width="50%"><img src="docs/img/screen-about.png" alt="The About screen: board name, firmware version, app version on the computer and time up."></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Settings</b></sub>&nbsp;</td>
+    <td align="center"><sub><b>About</b></sub>&nbsp;</td>
+  </tr>
+</table>
+
+### The settings page
+
+<img src="docs/img/settings-page.png" alt="The settings page in a browser: the board drawn in the middle, linked to this computer by USB cable, with WiFi not set up, and Look, Connect and Board tabs under it.">
+
+Tap *Open on PC* in the board's Settings, or run `blink settings`, and the page
+opens in your browser. **Connect** moves the board to WiFi (the cable is needed
+once to hand it the network and pair it; details in the
+[full README](docs/README-full.md#wifi)), **Board** holds its preferences, and
+**Look** holds the theme builder and the logo.
+
 ### The theme builder
 
 <img src="docs/img/theme-builder.png" alt="The theme builder in a browser: a preview of the board on the left, here showing the burn view, with switches for Gauges or Focus mode and for the session gauge or the burn view; the twelve built-in themes and the colour pickers on the right; Save to board, Cancel and Copy share code along the top.">
 
-Tap *Edit on computer* in the board's Theme settings, or run `blink theme`, and
-the builder opens in your browser. Pick a built-in theme or choose the seven
+It is the **Look** tab of the settings page. `blink theme` opens the builder
+alone. Pick a built-in theme or choose the seven
 colours yourself; every change shows on the board as a preview until you save
 or cancel. The preview beside it can show either left half, the session gauge
 or the burn view, so a theme can be judged on both. Readability checks under
