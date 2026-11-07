@@ -165,8 +165,16 @@ def test_the_password_is_not_kept(tmp_path):
     holders = [r for r in gc.get_referrers(pw) if type(r).__name__ != "frame"]
     assert holders == []
     hexpw = pw.encode().hex()
-    hits = [m for m in sent if pw in repr(m) or hexpw in repr(m)]
-    assert [m["t"] for m in hits] == ["wifi_set"]
+    # A plain loop, not a comprehension: before Python 3.12 (PEP 709) a
+    # comprehension that names pw is a nested function, which makes pw a
+    # closure cell of this very test, and gc.get_referrers above reported
+    # that cell as a holder on 3.9 and 3.11 (Ubuntu, Windows) -- the test
+    # holding its own password, not the daemon.
+    hits = []
+    for m in sent:
+        if pw in repr(m) or hexpw in repr(m):
+            hits.append(m["t"])
+    assert hits == ["wifi_set"]
     assert pw not in repr(box) and pw not in repr(verified)
 
 
