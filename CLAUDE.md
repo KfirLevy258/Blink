@@ -86,8 +86,8 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**On the WiFi branch (wifi/platfix, 2026-11-07), each platform its own count,
-all on one tree and none failing:** macOS 3816 passed, 5 skipped (run in the
+**2026-11-07, each platform its own count, all on one tree and none
+failing:** macOS 3816 passed, 5 skipped (run in the
 foreground: `tests/test_dev_sh.py` and `tests/pc/test_theme_cli.py` have
 Ctrl-C tests that fail when pytest is started in the background, where SIGINT
 is ignored); Ubuntu (Docker, x86_64, Python 3.12) 3606 passed, 215 skipped;
