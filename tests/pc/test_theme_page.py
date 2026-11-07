@@ -1500,6 +1500,20 @@ def test_an_unknown_panel_query_opens_nothing():
     assert r == ["false"] * 3
 
 
+def test_settings_preview_draws_the_boards_six_tiles():
+    r = builder_page.run("""
+    await advance(300);
+    const api = window.blinkSettings;
+    api.board.show({ screen: 'settings', link: 'wifi' });
+    const names = [...document.querySelectorAll('svg text')].map(t => t.textContent);
+    return names;
+    """, SAVED_DARK)
+    for want in ("Brightness", "Open on PC", "In browser", "Focus", "Update",
+                 "Connection", "WiFi", "About"):
+        assert want in r
+    assert "Open settings" not in r and "Keep the cable connected" not in r
+
+
 def test_board_show_moves_the_board_and_status_says_its_steps():
     r = builder_page.run("""
     await advance(300);

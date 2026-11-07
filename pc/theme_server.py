@@ -1025,7 +1025,7 @@ class BuilderServer:
         k = secrets.token_urlsafe(32)
         with self._lock:
             # Only links this method minted: the token a `blink settings`
-            # run printed is spoken for, and a press of Open settings on the
+            # run printed is spoken for, and a press of Open on PC on the
             # board must not turn it into "replaced" (final review, page
             # minor 8).
             for old in [o for o in self._links if o in self._minted]:
@@ -1310,7 +1310,7 @@ class Launcher:
         # The settings page; see BuilderServer. A way to the board makes it
         # one: the page sends no pref_set and loads no Board panel unless
         # /api/state says persistent, and the daemon built this with
-        # board_ops alone, so the page the board's Open settings opened
+        # board_ops alone, so the page the board's Open on PC opened
         # dropped every brightness click without a request and ended on its
         # first Save (owner, 2026-11-07, board on WiFi: no pref_set logged).
         self.persistent = persistent or board_ops is not None

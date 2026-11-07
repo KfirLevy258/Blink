@@ -796,7 +796,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
         </div>
         <div class="onboard">
           <b style="font-weight:500">On the board<span class="new">New</span></b>
-          <p>The board's Settings screen swaps its Theme button for Open settings, which opens this page on your computer.</p>
+          <p>The board's Settings screen swaps its Theme button for Open on PC, which opens this page on your computer.</p>
           <button type="button" class="btn" id="showSet" aria-pressed="false">Show it on the board</button>
         </div>
         <div class="stack">
@@ -1048,14 +1048,16 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 4.5 }, s)));
       for (var i = 0; i < 8; i++) { var a = i * Math.PI / 4; P('M' + (cx + 7.5 * Math.cos(a)).toFixed(1) + ' ' + (cy + 7.5 * Math.sin(a)).toFixed(1) + ' L' + (cx + 10 * Math.cos(a)).toFixed(1) + ' ' + (cy + 10 * Math.sin(a)).toFixed(1)); }
     }
-    if (kind === 'open') { P('M' + (cx - 10) + ' ' + (cy + 6) + ' h20 M' + (cx - 8) + ' ' + (cy + 4) + ' v-11 h16 v11'); P('M' + (cx - 2) + ' ' + (cy + 1) + ' l5 -5 M' + (cx - .5) + ' ' + (cy - 4) + ' h3.5 v3.5'); }
+    if (kind === 'laptop-out') { P('M' + (cx - 10) + ' ' + (cy + 6) + ' h20 M' + (cx - 8) + ' ' + (cy + 4) + ' v-11 h16 v11'); P('M' + (cx - 2) + ' ' + (cy + 1) + ' l5 -5 M' + (cx - .5) + ' ' + (cy - 4) + ' h3.5 v3.5'); }
     if (kind === 'focus') { g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 9 }, s))); g.appendChild(el('circle', { cx: cx, cy: cy, r: 3.5, fill: '#' + c })); }
+    if (kind === 'info') { g.appendChild(el('circle', Object.assign({ cx: cx, cy: cy, r: 9 }, s))); P('M' + cx + ' ' + (cy - 5) + ' v.1 M' + cx + ' ' + (cy - 1.5) + ' v6'); }
+    if (kind === 'link') { P('M' + (cx - 1) + ' ' + (cy + 3) + ' l4 -4 a3.5 3.5 0 0 1 5 5 l-3 3 a3.5 3.5 0 0 1 -5 0'); P('M' + (cx + 1) + ' ' + (cy - 3) + ' l-4 4 a3.5 3.5 0 0 1 -5 -5 l3 -3 a3.5 3.5 0 0 1 5 0'); }
     if (kind === 'update') { P('M' + (cx + 8) + ' ' + (cy - 2) + ' A8.5 8.5 0 1 0 ' + (cx + 7) + ' ' + (cy + 5)); P('M' + (cx + 9) + ' ' + (cy - 8) + ' V' + (cy - 2) + ' H' + (cx + 3)); }
   }
   // The board's own Settings screen (ui_settings.c): Back, the title, a rule
-  // at y 40, four 144 x 71 tiles from (12, 46) and the footer. A tile's
-  // second line is drawn only when the page has the figure: the page shows
-  // nothing it was not told.
+  // at y 40 and six 94 x 91 tiles (gap 7) from (12, 46), three across. A
+  // tile's second line is drawn only when the page has the figure: the page
+  // shows nothing it was not told. A tile with none centres icon and name.
   function drawSettings(g, dim) {
     var card = mix(st.bg, st.text, .06), line = mix(st.bg, st.text, .1);
     g.appendChild(el('rect', { x: 6, y: 4, width: 60, height: 32, rx: 6, fill: '#' + card, stroke: '#' + line }));
@@ -1063,16 +1065,16 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     txt(g, 160, 26, 14, st.text, 'Settings', { 'font-weight': 600 });
     g.appendChild(el('rect', { x: 0, y: 40, width: 320, height: 1, fill: '#' + line }));
     var focus = st.view === 'focus' ? (st.fw === 'weekly' ? 'Weekly' : 'Session') : 'Off';
-    [['sun', 'Brightness', st.bright == null ? '' : st.bright + '%'], ['open', 'Open settings', 'On your computer'],
-     ['focus', 'Focus', focus], ['update', 'Update', '']].forEach(function (t, k) {
-      var x = 12 + (k % 2) * 152, y = 46 + Math.floor(k / 2) * 79, hi = k === 1;
-      g.appendChild(el('rect', { x: x + .5, y: y + .5, width: 143, height: 70, rx: 8, fill: '#' + card, stroke: '#' + (hi ? st.g1 : line), 'stroke-width': hi ? 1.5 : 1 }));
-      tileIcon(g, t[0], x + 72, y + 16, hi ? st.g1 : st.text);
-      txt(g, x + 72, y + 45, 13, st.text, t[1], { 'font-weight': 500 });
-      if (t[2]) txt(g, x + 72, y + 63, 11.5, dim, t[2]);
+    [['sun', 'Brightness', st.bright == null ? '' : st.bright + '%'], ['laptop-out', 'Open on PC', 'In browser'],
+     ['focus', 'Focus', focus], ['update', 'Update', ''],
+     ['link', 'Connection', st.link === 'wifi' ? 'WiFi' : st.link === 'usb' ? 'USB' : ''],
+     ['info', 'About', st.versions ? st.versions.board : '']].forEach(function (t, k) {
+      var x = 12 + (k % 3) * 101, y = 46 + Math.floor(k / 3) * 98, hi = k === 1, dy = t[2] ? 0 : 11;
+      g.appendChild(el('rect', { x: x + .5, y: y + .5, width: 93, height: 90, rx: 8, fill: '#' + card, stroke: '#' + (hi ? st.g1 : line), 'stroke-width': hi ? 1.5 : 1 }));
+      tileIcon(g, t[0], x + 47, y + 24 + dy, hi ? st.g1 : st.text);
+      txt(g, x + 47, y + 55 + dy, 13, st.text, t[1], { 'font-weight': 500 });
+      if (t[2]) txt(g, x + 47, y + 75, 11.5, dim, t[2]);
     });
-    if (st.versions) txt(g, 160, 216, 12, dim, 'Blink ' + st.versions.board + '  |  App ' + st.versions.app);
-    txt(g, 160, 234, 12, dim, 'Keep the cable connected');
   }
   // The start-up screen: the logo fitted on its background, or the BLINK mark
   // the boot animation ends on.

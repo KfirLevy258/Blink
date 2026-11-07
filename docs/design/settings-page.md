@@ -342,7 +342,7 @@ marks a capability the board or app does not have yet.
 - **Fields:** Name; Brightness 20/40/60/80/100% (the levels the board
   stores; the board dims live); "Firmware 1.4.1" with "Up to date".
 - **On the board** (New): "The board's Settings screen swaps its Theme
-  button for Open settings, which opens this page on your computer." with
+  button for Open on PC, which opens this page on your computer." with
   the button "Show it on the board" / "Show the usage screen".
 - **Details:** Address ("USB, COM5" or the WiFi address), Saved WiFi, and
   "Forget WiFi", which confirms with "Forget Home-2G? The board deletes the
@@ -378,7 +378,7 @@ marks a capability the board or app does not have yet.
   - Not the USB trident, which reads as a fork at this size, and never a
     plug standing up, which reads as the "Encrypted" padlock.
 - **Settings screen** (`ui_settings.c`): Back, "Settings", four 144×71
-  tiles (Brightness, **Open settings / On your computer**, Focus, Update),
+  tiles (Brightness, **Open on PC / On your computer**, Focus, Update),
   and the footer "Blink 1.4.1 | App 1.4.1" / "Keep the cable connected".
 - **Start-up screen:** the logo fitted on its background, or the BLINK mark
   with "No logo yet".
@@ -434,7 +434,7 @@ marks a capability the board or app does not have yet.
   automatic on the board.
 - **"New" items need firmware or daemon work first:**
   - sending a logo over USB (today the logo is factory-only, esptool);
-  - the board's Open settings tile;
+  - the board's Open on PC tile;
   - the doze switch;
   - usage refresh, until feat/usage-refresh ships.
 - **Google Fonts:** the mock loads them. The shipped page must not.

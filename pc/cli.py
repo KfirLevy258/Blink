@@ -4303,7 +4303,7 @@ def _install_steps_run(home, rec, named, kept_wsl, step, down):
     _warn_if_claude_too_old(desk)
     _hint_wsl(desk)
     # Nothing opens here (D4): the page opens from the board or this command.
-    print("To set up WiFi and the display, press Open settings on the board"
+    print("To set up WiFi and the display, press Open on PC on the board"
           " or run: blink settings")
     return 0
 

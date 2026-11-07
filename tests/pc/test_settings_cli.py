@@ -164,7 +164,7 @@ def test_install_opens_nothing_and_says_how(tmp_path, capsys, monkeypatch):
     (tmp_path / ".claude").mkdir(exist_ok=True)
     assert cli.main(["install"]) == 0
     out = capsys.readouterr().out.rstrip("\n").splitlines()
-    assert out[-1] == ("To set up WiFi and the display, press Open settings"
+    assert out[-1] == ("To set up WiFi and the display, press Open on PC"
                        " on the board or run: blink settings")
     assert not os.path.exists(req_path())
 

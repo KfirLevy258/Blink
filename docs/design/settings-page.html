@@ -704,7 +704,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       </div>
       <div class="onboard">
         <b style="font-weight:500">On the board<span class="new">New</span></b>
-        <p>The board's Settings screen swaps its Theme button for Open settings, which opens this page on your computer.</p>
+        <p>The board's Settings screen swaps its Theme button for Open on PC, which opens this page on your computer.</p>
         <button type="button" class="btn" id="showSet" aria-pressed="false">Show it on the board</button>
       </div>
       <div class="stack">
@@ -906,7 +906,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
   }
   // The board's own Settings screen (ui_settings.c): back button, title,
   // a rule at y 40, four 144 x 71 tiles two by two from (12, 46), and the
-  // two-line footer. The Theme tile is replaced by Open settings.
+  // two-line footer. The Theme tile is replaced by Open on PC.
   function icon(g, kind, cx, cy, c) {
     var s = { fill: 'none', stroke: '#' + c, 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
     function P(d) { g.appendChild(el('path', Object.assign({ d: d }, s))); }
@@ -921,7 +921,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
     g.appendChild(el('path', { d: 'M39 14 L33 20 L39 26', fill: 'none', stroke: '#' + st.text, 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
     txt(g, 160, 26, 14, st.text, 'Settings', { 'font-weight': 600 });
     g.appendChild(el('rect', { x: 0, y: 40, width: 320, height: 1, fill: '#' + line }));
-    [['sun', 'Brightness', st.bright + '%'], ['open', 'Open settings', 'On your computer'], ['focus', 'Focus', { two: 'Off', burn: 'Off', session: 'Session', weekly: 'Weekly' }[st.vw]], ['update', 'Update', 'Up to date']].forEach(function (t, k) {
+    [['sun', 'Brightness', st.bright + '%'], ['open', 'Open on PC', 'On your computer'], ['focus', 'Focus', { two: 'Off', burn: 'Off', session: 'Session', weekly: 'Weekly' }[st.vw]], ['update', 'Update', 'Up to date']].forEach(function (t, k) {
       var x = 12 + (k % 2) * 152, y = 46 + Math.floor(k / 2) * 79, hi = k === 1;
       g.appendChild(el('rect', { x: x + .5, y: y + .5, width: 143, height: 70, rx: 8, fill: '#' + card, stroke: '#' + (hi ? st.g1 : line), 'stroke-width': hi ? 1.5 : 1 }));
       icon(g, t[0], x + 72, y + 16, hi ? st.g1 : st.text);
@@ -969,7 +969,7 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
       title = st.logo ? 'Board preview: start-up screen with your logo.' : 'Board preview: start-up screen, no logo yet.';
     } else if (st.screen === 'settings') {
       drawSettings(g, dim);
-      title = "Board preview: the board's Settings screen, with Brightness, Open settings, Focus and Update.";
+      title = "Board preview: the board's Settings screen, with Brightness, Open on PC, Focus and Update.";
     } else {
       drawMain(g, dim, track, pill);
       title = st.vw === 'burn' ? 'Board preview: burn view, ' + fmtTok(BURN.reduce(function (a, b) { return a + b; }, 0)) + ' tokens in five hours, rising; weekly ' + wordPct(st.p2) + '.'

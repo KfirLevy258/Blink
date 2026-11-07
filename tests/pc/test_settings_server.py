@@ -612,7 +612,7 @@ def test_a_non_ascii_digit_hold_is_a_400_not_a_crash(server, ops, capsys):
 
 
 def test_the_page_the_board_opens_is_the_settings_page(home, ops):
-    # Owner, 2026-11-07, board on WiFi: Open settings on the board opened
+    # Owner, 2026-11-07, board on WiFi: Open on PC on the board opened
     # the page, a brightness click changed nothing and no pref_set was
     # written. The daemon's Launcher was built with board_ops but not
     # persistent, so /api/state said persistent false, the page's prefSet
