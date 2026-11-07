@@ -718,3 +718,57 @@ def test_first_frame_of_an_animation_is_what_is_kept():
     assert len(logo_encode.parse(blob, frames=True)["frames"]) == 3
     png = logo_preview.png_from_565(kept[0])
     assert zlib.decompress(png[png.index(b"IDAT") + 4:png.index(b"IEND") - 8])[1:4] == bytes([255, 0, 0])
+
+
+# --------------------------------------------- PR 9 review: remove and preview
+
+
+def test_a_remove_the_board_did_not_do_is_an_error_and_keeps_the_copy(
+        server, ops, home, capsys):
+    c = login(server)
+    _sent(server, ops, c)
+    ops.logo_remove = lambda: {"t": "logo_state", "present": 1}
+    s, _, body = post(server, "/api/logo/remove", {}, c)
+    assert s == 409 and "could not remove" in json.loads(body)["why"]
+    assert os.path.exists(os.path.join(home, "private", logo_preview.PNG_NAME))
+    assert "[settings] the board still reports its logo" in capsys.readouterr().err
+
+
+def test_a_preview_that_could_not_be_saved_is_logged_not_hidden(
+        server, ops, monkeypatch, capsys):
+    def boom(*a):
+        raise OSError("disk full")
+    monkeypatch.setattr(logo_preview, "save", boom)
+    c = login(server)
+    _sent(server, ops, c)       # the send itself still succeeds
+    err = capsys.readouterr().err
+    assert "[settings] logo preview not kept" in err and "disk full" not in err
+
+
+def test_a_preview_bug_is_not_swallowed(server, ops, monkeypatch):
+    def boom(*a):
+        raise TypeError("bug")
+    monkeypatch.setattr(logo_preview, "save", boom)
+    c = login(server)
+    with pytest.raises(http.client.RemoteDisconnected):
+        _logo(server, c, bytes([255, 0, 0, 255]) * (320 * 240))
+
+
+def test_an_unreadable_preview_copy_is_logged_once(
+        server, ops, home, monkeypatch, capsys):
+    c = login(server)
+    _sent(server, ops, c)
+    monkeypatch.setattr(logo_preview, "_said", [False])
+    path = os.path.join(home, "private", logo_preview.META_NAME)
+    with open(path, "wb") as f:
+        f.write(b"not json")
+    assert _preview(server, c)[0] == 404 and _preview(server, c)[0] == 404
+    assert capsys.readouterr().err.count("logo preview could not be read") == 1
+
+
+def test_no_copy_at_all_is_not_trouble(server, ops, capsys):
+    monkeypatch_said = logo_preview._said
+    monkeypatch_said[0] = False
+    ops.device = lambda: {"logo": {"present": 1, "bytes": 5, "frames": 1}}
+    assert _preview(server, login(server))[0] == 404
+    assert "could not be read" not in capsys.readouterr().err

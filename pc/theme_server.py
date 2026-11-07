@@ -48,8 +48,9 @@ import time
 import urllib.parse
 import webbrowser
 
-from pc import (logo_encode, logo_preview, settings_ops, status_page, theme, update,
-                usage_refresh, user_config, wifi_pair)
+from pc import (logo_encode, logo_preview, private_file, settings_ops,
+                status_page, theme, update, usage_refresh, user_config,
+                wifi_pair)
 
 IDLE_S = 600            # 10 minutes with no edit (plan, revision 2026-10-25)
 # A reload fires pagehide too, then loads the page again, and the builder
@@ -667,17 +668,27 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if isinstance(state, dict) and state.get("present") == 1:
             try:
                 logo_preview.save(self.builder.home, blob, state)
-            except Exception:       # the preview is a courtesy, the send is done
-                pass
+            except (OSError, ValueError, private_file.NotPrivate):
+                # The preview is a courtesy, the send is done. A programming
+                # error (not these three) is allowed to surface instead.
+                print("[settings] logo preview not kept", file=sys.stderr)
         self._json(200, {"logo": state, "bytes": len(blob)})
 
     def _post_logo_remove(self):
         try:
             state = self.builder.board_ops.logo_remove()
-            logo_preview.remove(self.builder.home)
-            self._json(200, {"logo": state})
         except settings_ops.BoardOpError as e:
-            self._json(409, {"why": str(e)})
+            return self._json(409, {"why": str(e)})
+        # The board answers logo_state either way. A failed flash erase
+        # leaves present:1, and a 200 then had the page drop the logo and
+        # say nothing while the next boot showed it again.
+        if not isinstance(state, dict) or state.get("present") != 0:
+            print("[settings] the board still reports its logo after remove",
+                  file=sys.stderr)
+            return self._json(409, {"why": (
+                "The board could not remove the logo. Try again.")})
+        logo_preview.remove(self.builder.home)
+        self._json(200, {"logo": state})
 
     # -- POST
 

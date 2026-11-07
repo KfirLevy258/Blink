@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import struct
+import sys
 import zlib
 
 from pc import logo_encode, private_file
@@ -64,18 +65,29 @@ def save(home, blob, state=None):
     private_file.write_private(home, META_NAME, json.dumps(meta).encode())
 
 
+_said = [False]
+
+
 def load_matching(home, state):
     """The PNG bytes when the board's logo_state is the logo we sent, else
     None. Any trouble reading is "no preview", never an error."""
     if not isinstance(state, dict) or state.get("present") != 1:
         return None
     try:
-        meta = json.loads(private_file.open_private(home, META_NAME) or b"")
+        raw = private_file.open_private(home, META_NAME)
+        if raw is None:
+            return None             # nothing was sent from here: not trouble
+        meta = json.loads(raw)
         if (meta.get("bytes"), meta.get("frames")) != (
                 state.get("bytes"), state.get("frames")):
             return None
         png = private_file.open_private(home, PNG_NAME)
     except (OSError, ValueError, AttributeError, private_file.NotPrivate):
+        # "No preview" for the page, but said once: this runs on every poll
+        # of the board's logo, and a silent unreadable copy was invisible.
+        if not _said[0]:
+            _said[0] = True
+            print("[settings] logo preview could not be read", file=sys.stderr)
         return None
     return png if png and len(png) <= MAX_PNG else None
 
