@@ -1,6 +1,7 @@
 """tools/wifi_probe.py against the loopback fake board, never the network."""
 import importlib.util
 import io
+import os
 import re
 from pathlib import Path
 
@@ -83,7 +84,12 @@ def test_new_key_file_is_owner_only_and_never_overwrites(tmp_path):
     p = tmp_path / "new"
     out = io.StringIO()
     assert _load().main(["--new-key-file", str(p)], out=out) == 0
-    assert (p.stat().st_mode & 0o777) == 0o600 and len(bytes.fromhex(p.read_text())) == 32
+    assert len(bytes.fromhex(p.read_text())) == 32
+    # The mode is POSIX's: NTFS reports 0o666 for any writable file whatever
+    # its ACL. The daemon's own pairing file goes through pc/private_file,
+    # whose ACLs are proved by the windows_real tests in test_private_file.py.
+    if os.name == "posix":
+        assert (p.stat().st_mode & 0o777) == 0o600
     assert _load().main(["--new-key-file", str(p)], out=io.StringIO()) == 2
 
 
