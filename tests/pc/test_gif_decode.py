@@ -220,7 +220,10 @@ def test_the_pixel_budget_refuses_a_swarm_of_big_frames_fast(monkeypatch):
     with pytest.raises(gd.GifError, match="too large"):
         _got(data, max_frames=180)
     assert len(calls) <= 17
-    assert time.perf_counter() - t < 10.0       # a hang guard only
+    # A hang guard only; the call count above is the real bound. Sixteen
+    # 4 Mi-pixel LZW decodes took 12 s under Docker's x86_64 emulation with
+    # three suites running (2026-11-06), against about 1 s on macOS.
+    assert time.perf_counter() - t < 60.0
     # the panel-sized worst case still fits the budget
     assert 180 * 320 * 240 <= gd.GIF_MAX_PIXELS
 
