@@ -30,6 +30,7 @@ static const struct {
 	const char *version;
 	const char *lines;
 } NOTES[] = {
+	{ "1.5.0", "Works over your home WiFi\nKeeps figures fresh, if you ask" },
 	{ "1.4.1", "12 themes, light ones, your own\nBurn view for Ultra, Codex Pro" },
 	{ "1.3.4", "Works on Windows on Arm\nClearer install messages" },
 	{ "1.3.3", "A dropped update finishes itself\nThe board asks again if one fails" },
