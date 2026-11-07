@@ -87,12 +87,12 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 other CI scripts have no such dependency.
 
 **2026-11-07, each platform its own count, all on one tree and none
-failing:** macOS 3816 passed, 5 skipped (run in the
+failing:** macOS 3819 passed, 5 skipped (run in the
 foreground: `tests/test_dev_sh.py` and `tests/pc/test_theme_cli.py` have
 Ctrl-C tests that fail when pytest is started in the background, where SIGINT
-is ignored); Ubuntu (Docker, x86_64, Python 3.12) 3606 passed, 215 skipped;
-Ubuntu under Python 3.9 (python:3.9-slim) 3398 passed, 220 skipped; Windows
-(ARM64 VM, x64 Python 3.11) 3383 passed, 432 skipped. `host-tests` and
+is ignored); Ubuntu (Docker, x86_64, Python 3.12) 3609 passed, 215 skipped;
+Ubuntu under Python 3.9 (python:3.9-slim) 3401 passed, 220 skipped; Windows
+(ARM64 VM, x64 Python 3.11) 3386 passed, 432 skipped. `host-tests` and
 `check_factory.sh` pass. Python 3.9 matters beyond its count: before 3.12 a
 comprehension is a nested function, so a test that searches for a value in
 one makes that value a closure cell of the test itself (the WiFi password
