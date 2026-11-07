@@ -70,17 +70,25 @@ def page_parts():
     return t.root, "".join(t.script)
 
 
+def need(*tools):
+    """The path of the first tool, after skipping the test when any is
+    missing. CI sets BLINK_REQUIRE_NODE so a runner image that loses its
+    node fails instead of turning every page test into a skip; a missing
+    compiler still skips (windows-latest has no `cc`)."""
+    paths = [shutil.which(t) for t in tools]
+    if "node" in tools and paths[tools.index("node")] is None \
+            and os.environ.get("BLINK_REQUIRE_NODE"):
+        pytest.fail("BLINK_REQUIRE_NODE is set and there is no node")
+    if None in paths:
+        pytest.skip("needs " + " and ".join(tools))
+    return paths[0]
+
+
 def run(scenario, answers=None, tmp=None, search=""):
     """The scenario's return value. `answers` maps a path to the
     {"status": n, "body": {...}} the server gives it; anything not named
     answers 200 {"ok": true}."""
-    node = shutil.which("node")
-    if node is None:
-        # CI sets BLINK_REQUIRE_NODE so a runner image that loses its node
-        # fails here instead of turning every page test into a skip.
-        if os.environ.get("BLINK_REQUIRE_NODE"):
-            pytest.fail("BLINK_REQUIRE_NODE is set and there is no node")
-        pytest.skip("needs node")
+    node = need("node")
     markup, script = page_parts()
     case = {"markup": markup, "script": script, "scenario": scenario,
             "answers": answers or {}, "search": search}

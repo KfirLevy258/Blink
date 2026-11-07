@@ -1582,13 +1582,14 @@ def main(argv=None):
                 ser.reset_input_buffer()
             else:
                 # Silent, and not ours as far as we know. Leave it alone and
-                # look elsewhere. The failure record keeps it out of the
-                # candidates: it goes into link_state.silent after both
-                # passes and stays there until the USB layout changes (no
-                # timed backoff; port_failed is for opens that raised), and
-                # the WiFi step gets the polls in between. The next try listens the other way round: a fast
-                # pass is followed by one long enough to hear an unprompted
-                # ping, the only thing a board still booting will send.
+                # look elsewhere. `asked` keeps it out of this round's
+                # candidates; after both passes it goes into
+                # link_state.silent and stays out until the USB layout
+                # changes (no timed backoff: port_failed is only for opens
+                # that raised), and the WiFi step gets the polls in between.
+                # The next try listens the other way round: a fast pass is
+                # followed by one long enough to hear an unprompted ping,
+                # the only thing a board still booting will send.
                 ser.close()
                 asked.add(port)
                 nxt = next((p for p in candidate_ports() if p not in asked), None)

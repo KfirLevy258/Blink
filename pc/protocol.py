@@ -288,7 +288,8 @@ TAP_ENUMS = {
     "why": frozenset({
         "", "Wrong WiFi password", "Network not found",
         "No address from the router", "WPA3-only networks are not supported",
-        "WiFi self-test failed", "Could not forget WiFi. Try again."}),
+        "WiFi self-test failed", "Could not forget WiFi. Try again.",
+        "Could not scan. Try again.", "Could not start WiFi"}),
     "err": frozenset({"", "unconfirmed", "refused", "failed"}),
     # The board's `answer` (ASK_ANSWERS, below; test_protocol holds the two
     # equal): a board-to-host string, so only our own three words.

@@ -538,9 +538,8 @@ def test_the_ported_decisions_match_burn5h_c_line_for_line(tmp_path):
     """Total, rate, direction, bar heights and the hour of each bucket, run
     through burn5h.c compiled for the host and through the page's functions
     on the same inputs. The ports are exact or this fails."""
+    builder_page.need("cc", "node")
     cc, node = shutil.which("cc"), shutil.which("node")
-    if cc is None or node is None:
-        pytest.skip("needs a C compiler and node")
     vectors = _burn_vectors()
     lines = [f'\tburn5h_fmt_tokens({k}u, n, sizeof n);'
              f' printf("fmt %u %s\\n", {k}u, n);' for k in _FMT_KS]

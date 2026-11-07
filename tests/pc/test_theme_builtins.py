@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support import builder_page
+
 from pc import cli
 from pc import theme
 from pc import theme_builtins
@@ -329,9 +331,8 @@ def test_the_builders_status_dot_follows_the_boards_rule(tmp_path):
     functions through node. The ubuntu and macOS CI runners have both, so
     it runs there; windows-latest has gcc but no `cc` on PATH, so it skips
     there, cleanly."""
+    builder_page.need("cc", "node")
     cc, node = shutil.which("cc"), shutil.which("node")
-    if cc is None or node is None:
-        pytest.skip("needs a C compiler and node")
     cases = [(b["c"][0], b["c"][4], b["c"][5]) for b in _served()]
     cases += _DOT_CUSTOM
     body = "\n".join(
@@ -383,9 +384,8 @@ def test_the_builders_link_grey_follows_the_boards_grey(tmp_path):
     theme's is theme_derive() -> custom_grey(), ported as customGrey().
     Both run here on the same colours, the C through a compiler and the
     page's functions through node."""
+    builder_page.need("cc", "node")
     cc, node = shutil.which("cc"), shutil.which("node")
-    if cc is None or node is None:
-        pytest.skip("needs a C compiler and node")
     for b in _served():
         assert b["grey"] == theme.theme_builtins.BUILTINS[b["id"]]["grey"]
     cases = [(b["c"][0], b["c"][1]) for b in _served()]

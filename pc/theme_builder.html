@@ -2300,6 +2300,9 @@ select.name { appearance: none; padding-right: 40px; cursor: pointer;
         if (mine !== scanning) return;
         done(); g('c-go').disabled = busy;
         if (j.status === 200) { say(''); list(j.nets); }
+        // A scan refused by a failed self-test arrives as the board's bare
+        // reason, which has no full stop and no next step of its own.
+        else if (j.why === 'WiFi self-test failed') note('WiFi self-test failed. Restart the board and try again.');
         else note(j.why || 'The board did not answer.');
       }, function () { if (mine !== scanning) return; done(); g('c-go').disabled = busy; note('The app did not answer.'); });
     }
