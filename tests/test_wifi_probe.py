@@ -51,7 +51,11 @@ def test_probe_talks_to_the_fake_board(run):
 def test_probe_fails_when_the_board_closes_on_a_length(run):
     rc, text, _ = run("--lengths", ping_interval_s=0.2, close_on_length=200)
     assert rc == 1
-    assert text.splitlines()[-1] == "fail: length 200"
+    # The probe names the last length it sent before it saw the close, and
+    # says the true one is that or up to 2 lower: it pumps 25 ms per frame.
+    # Under Docker's emulation on Python 3.9 (2026-11-07) the close landed
+    # one frame late and it said 201.
+    assert text.splitlines()[-1] in {"fail: length %d" % n for n in (200, 201, 202)}
 
 
 def test_probe_reports_the_impostor_as_a_fixed_failure(run):
