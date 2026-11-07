@@ -662,6 +662,21 @@ def _one_pass(name, env, tap, seconds, port, deps, label, tail=False):
 
 def run_scenario(path, board, workroot, port, deps,
                  poll_interval=POLL_INTERVAL_S, real_blink_home=None):
+    """_run_scenario, and then the desk's pairing key is taken back out of
+    the sandbox home, however the scenario ended. The home is shared by
+    every later scenario in the run and stays behind in the run directory,
+    and neither needs the key (review of wifi/platfix, 2026-11-07). Removed
+    after every scenario, not only WiFi ones: the run loop's own check
+    installs a copy too."""
+    try:
+        return _run_scenario(path, board, workroot, port, deps,
+                             poll_interval, real_blink_home)
+    finally:
+        wifi_pair.remove(str(Path(sandbox_home(workroot)) / ".blink"))
+
+
+def _run_scenario(path, board, workroot, port, deps,
+                  poll_interval=POLL_INTERVAL_S, real_blink_home=None):
     """One scenario end to end: spawn, wait it out, stop, read, judge.
 
     A scenario with `host_silence_s` runs in TWO passes with the daemon gone

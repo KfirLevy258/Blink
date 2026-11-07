@@ -82,8 +82,12 @@ def test_wifi_scenario_forces_wifi_and_runs_the_tail_beside_the_daemon(tmp_path)
         def kill(self): pass
         def wait(self, timeout=None): return 0
 
+    paired_at_spawn = []
+
     def spawn(cmd, env, cwd):
         cmds.append((cmd, env))
+        paired_at_spawn.append(
+            wifi_pair.load(str(tmp_path / "w" / "home" / ".blink")) is not None)
         return Proc()
 
     deps = agent.Deps(spawn=spawn, sleep=lambda s: None,
@@ -94,4 +98,9 @@ def test_wifi_scenario_forces_wifi_and_runs_the_tail_beside_the_daemon(tmp_path)
     tail = [c for c in cmds if any("console_tail" in a for a in c[0])]
     assert daemon and daemon[0][1]["BLINK_FORCE_WIFI"] == "1"
     assert tail and "--tap" in tail[0][0] and tail[0][0][-1] == "/dev/ttyX"
-    assert wifi_pair.load(str(tmp_path / "w" / "home" / ".blink"))
+    # There while the daemon ran; gone once the scenario is over, so the
+    # shared sandbox home and the run directory do not keep the key.
+    assert paired_at_spawn and all(paired_at_spawn)
+    assert wifi_pair.load(str(tmp_path / "w" / "home" / ".blink")) is None
+    assert not (tmp_path / "w" / "home" / ".blink" / "private"
+                / "wifi_pair.json").exists()
