@@ -167,7 +167,11 @@ mbedtls_src() {
 		printf '%s\n' "$BLINK_MBEDTLS_SRC"
 		return 0
 	fi
-	# shellcheck source=tools/lib_zephyr.sh
+	# Not followed: the CI shellcheck run lists tests/ci/*.sh only, and
+	# lib_zephyr.sh is bash-aware (shopt) and sources the workspace's own
+	# scripts, so it is not sh-clean input. Same reason the tools/ scripts
+	# that source it are checked with -e SC1091 (installer.yml).
+	# shellcheck disable=SC1091
 	. "$ROOT/tools/lib_zephyr.sh"
 	ws=$(blink_zephyr_ws) || return 1
 	for d in "$ws/modules/crypto/mbedtls" "$ws/modules/crypto/mbedtls-3.6"; do
