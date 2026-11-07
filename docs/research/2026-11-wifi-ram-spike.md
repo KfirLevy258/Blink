@@ -328,3 +328,43 @@ are not stated elsewhere in this record):
   stacks table)
 
 For Task 5.1: `OTA_IMAGE_MAX` = 1318912 (the swap-move usable size above).
+
+## Bench proof on the final tree (Tasks 5.4 and 6.5 step 1)
+
+Measured 2026-11-07 on the bench board (`FLASH_CRYPT_CNT = 0`, claude
+edition), tree `624333f`, the real daemon from source (`blink_main.py run`,
+`BLINK_FORCE_WIFI=1`, `BLINK_OTA_DIR` pointing at a fixture), the board on the
+Mac's USB port (not a charger). The fixture is this tree built with only
+`version.h` and the sign version bumped to 1.4.9, never committed. Nothing
+here holds a network name, an address or a key.
+
+| Check | Result |
+|---|---|
+| Plain `burn.sh --edition claude`, then pair through the settings server (`/api/wifi/join`) | `[wifi] radio up`, `[wifi] joined`, `[wifi] paired`, `[wifi] verified`; no selftest failure |
+| `popups_touch.txt` on USB (touch-inject build) | stops at line 265 on its host-harness-only `fake boot_notice`, as it did on the spike's baseline; headroom up to there: confirm-close 3936 B, settings-close 4496 B |
+| `session_touch.txt`, `--touch-only --skip-missing`, daemon on WiFi | all expectations held; headroom gauges 5832, settings 6264, brightness 5784, forget 5496, connection 6648, settings-close 5576 B; no `session closed` |
+| `download_touch.txt`, `--touch-only --loop 30`, during the stream | ran one full loop and part of a second, until the board rebooted into the new image (the fixture is 1177044 B, 53 s, shorter than 30 loops); no `[wifi] session closed`, no `Update failed`, no out-of-memory line, input queue full 0. The loop printed no `[mem]` rows (the injector emits them on screen changes only), so there is no S11 table for the stream beyond the widget walk, which listed 15 widgets |
+| OTA over WiFi, A to fixture 1.4.9, real daemon | `ota_begin` to `ota_end` 53 s (about 22 kB/s). From `ota_end`: board's `[wifi] joined` 66 s later, the daemon reconnected 1 s after that (its retry cadence is 31 s; the link-lost call came 30 s after `ota_end`), `[ota] image confirmed` 2 s after the join and about 68 s after `ota_end`; the first usage went out 6 s after the reconnect. Confirm-after-boot gap: under 10 s of the 90 s window |
+| Swap | the new image was up about 66 s after `ota_end` on this plaintext board |
+| Same version offered again | the daemon answered `board has 1.4.9, release has 1.4.9 -- nothing to do` and sent `ota_none` |
+| Settings server, GIF logo over WiFi (generated 8-frame GIF, 85128 B in, 177792 B encoded) | `?check=1` 200; send 200 in 5.6 s, `logo_state present 1 frames 8`; `logo/remove` 200, `present 0` |
+| `pref_set` of each field over WiFi through `/api/pref` | bright 20, 40, 60, 80 and 100, focus 0 and 1, main_src claude and codex each answered with the matching `pref`; view 1 is accepted and not kept (the board ignores it, `view` stays 0). Restored to 100 / off / claude |
+
+Observations:
+- The first connect after a daemon start or a reboot sometimes logs
+  `handshake refused` or `board not found` once, and succeeds 5 to 9 s later.
+- The brief's own `session_touch.txt` clicks "Open settings", which asks the
+  real daemon for the theme builder. Run once without the opener patched, that
+  would open a browser tab on the owner's Mac; every later run used the daemon
+  with `pc.theme_server.open_url` replaced by a no-op (a scratch wrapper).
+- An `ota_avail`/`ota_none` abort returns the panel to AVAILABLE without a
+  failed notice; recorded from Task 5.1's board run, not re-timed here.
+- Step 5, the swap wording: the panel says "This takes a few minutes." (not
+  "about 2 minutes"). It stays: the comment above it records 121 s on an
+  encrypted part and says why it is vague on purpose, and this run measured
+  only a plaintext board. No wording change.
+
+Not done here: the 24 h desk run (needs the owner), a router cut mid-transfer,
+a newer image offered during the test boot (the confirm lands about 6 s after
+the reconnect, too soon to tap; Task 5.1 proved `err:"unconfirmed"` with a
+never-healthy image), the heap-low restart, and the fused unit.
