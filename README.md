@@ -206,3 +206,9 @@ BLINK keeps no credential and never sends your usage or your sessions anywhere. 
 <sub>Free to build for yourself. Never to sell.</sub>&nbsp;<br>
 <sub>Built units at <a href="https://blink-buddy.com">blink-buddy.com</a>.</sub>&nbsp;
 </div>
+
+
+<div align="center">
+  <p>If BLINK is useful to you, you can support its development.</p>
+  <a href="https://buymeacoffee.com/levy.kfir"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="50" width="181"></a>
+</div>
