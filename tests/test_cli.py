@@ -5025,3 +5025,33 @@ def test_turning_the_refresh_on_keeps_wasnt_found_while_it_still_is_not(
     monkeypatch.setattr(ur, "find_claude", lambda home: "/x/claude")
     assert cli.main(["config", "usage-refresh", "on"]) == 0
     assert ur.load_state(cli.blink_home()).missing is False
+
+
+def test_version_says_what_it_is(capsys):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--version"])
+    assert e.value.code == 0
+    assert capsys.readouterr().out.strip() == f"blink {cli.RELEASE_VERSION}"
+
+
+def test_version_fails_when_the_daemon_cannot_load(monkeypatch, capsys):
+    """Issue #11 (2026-11-19): the 1.5.0 Linux build answered --version on
+    Ubuntu 24.04 and then crash-looped, because pyserial's termios module
+    needed a newer glibc and nothing loaded it until the daemon ran.
+    pc/update.py's self-test is that one command, so it let the binary in.
+    The daemon's import now happens first, and a failure is not exit 0."""
+    monkeypatch.setitem(sys.modules, "claude_usage_bridge", None)
+    with pytest.raises(ImportError):
+        cli.main(["--version"])
+    assert "blink" not in capsys.readouterr().out
+
+
+def test_the_updater_refuses_a_binary_whose_version_command_fails(tmp_path):
+    """The other half: what the installed updater does with that exit."""
+    from pc import update
+
+    class _Dead:
+        returncode = 1
+        stdout = ""
+
+    assert update._self_test("x", "9.9.9", run=lambda *a, **k: _Dead()) is False
