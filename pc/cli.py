@@ -7251,12 +7251,35 @@ def cmd_run(args) -> int:
     return 0
 
 
+class _Version(argparse._VersionAction):
+    """--version, after loading the daemon it is the version of.
+
+    pc/update.py runs `<new binary> --version` before it lets a download
+    replace the installed program, and through 1.5.0 the answer came from
+    argparse alone. The 1.5.0 Linux build answered it on Ubuntu 24.04 and
+    then could not start: pyserial's termios module wanted a newer glibc
+    than the machine had, and nothing loads pyserial until the daemon runs
+    (issue #11, 2026-11-19). The self-test passed a binary whose service
+    crash-looped, which is the one thing it is there to refuse.
+
+    So the import the daemon makes happens here first. If it fails, this
+    exits non-zero with the traceback and the updater that asked keeps the
+    program it has. Updaters already installed ask the same question, so
+    they are covered by what the NEW binary does with it. Importing does
+    nothing else: tests/test_import_is_inert.py.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        import claude_usage_bridge  # noqa: F401
+        super().__call__(parser, namespace, values, option_string)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="blink", description="Blink desk gauge: setup and bridge.")
     # Also the self-test in pc/update.py: a replacement binary has to run and
     # say what it is before it is allowed to become the login service's target.
-    parser.add_argument("--version", action="version",
+    parser.add_argument("--version", action=_Version,
                         version=f"blink {RELEASE_VERSION}")
     sub = parser.add_subparsers(dest="cmd")
     install_p = sub.add_parser(
