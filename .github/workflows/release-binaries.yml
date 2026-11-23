@@ -37,7 +37,15 @@ jobs:
           # rather than fixing the label. Intel Macs are still a supported
           # target; the runner that builds for them just moved.
           - {os: macos-15-intel, label: macos-x86_64}
-          - {os: ubuntu-latest, label: linux-x86_64}
+          # ubuntu-24.04, never ubuntu-latest. The label is a moving target and
+          # the binary inherits the runner's glibc as its minimum: -latest
+          # moved to 26.04 between the 1.4.1 and 1.5.0 builds, setup-python
+          # gave it a Python whose termios module wants GLIBC_2.42, and 1.5.0
+          # could not open a serial port on Ubuntu 24.04 (issue #11). The
+          # glibc step below fails the build if this pin ever stops holding.
+          # Moving it to a newer release drops customers; see
+          # tools/check_glibc_floor.py before doing that.
+          - {os: ubuntu-24.04, label: linux-x86_64}
           - {os: windows-latest, label: windows-x86_64}
     defaults:
       run:
@@ -56,6 +64,13 @@ jobs:
         with:
           python-version: '3.11'
       - run: sh tools/build_binary.sh
+
+      # Before anything runs the binary: it runs fine HERE whatever glibc it
+      # was built against, which is how 1.5.0 passed every step below and
+      # still failed on a customer's Ubuntu 24.04 (issue #11).
+      - name: it must not need a newer glibc than we support
+        if: runner.os == 'Linux'
+        run: python tools/check_glibc_floor.py dist/blink
 
       # The tag is the product's version, and the binary has to know it: the
       # self-test in pc/update.py refuses to install a replacement that does

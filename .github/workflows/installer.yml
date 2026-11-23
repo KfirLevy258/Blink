@@ -126,13 +126,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # ubuntu-24.04 because release-binaries.yml builds the shipped Linux
+        # binary there, and why it does is written beside its matrix. The
+        # jobs below that take this artifact name the same runner.
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - run: sh tools/build_binary.sh
+
+      # The same check the release makes, here so a pull request finds out
+      # rather than a release (issue #11).
+      - name: it must not need a newer glibc than we support
+        if: runner.os == 'Linux'
+        run: python tools/check_glibc_floor.py dist/blink
 
       # The old smoke test was `./dist/blink* status || true`, which asserted
       # nothing: it swallowed every failure, and on the Windows runner the
@@ -204,7 +213,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
         scenario:
           - no-claude          # Claude Code never installed
           - no-settings        # ~/.claude exists, settings.json does not
@@ -253,7 +262,7 @@ jobs:
         # prints a version, and Windows will not execute one named .exe. The
         # Windows-specific half -- renaming a running executable out of the
         # way -- is covered by tests/pc/test_update.py.
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -405,13 +414,13 @@ jobs:
           # 2.1.100 is not arbitrary: 2.1.0 does not carry rate_limits at all
           # and 2.1.100 does, so this is near the real floor. Anything older is
           # a version this product cannot work on, whatever the README says.
-          - {label: old, version: '2.1.100', experimental: false, os: ubuntu-latest}
-          - {label: stable, version: 'stable', experimental: false, os: ubuntu-latest}
-          - {label: latest, version: 'latest', experimental: false, os: ubuntu-latest}
+          - {label: old, version: '2.1.100', experimental: false, os: ubuntu-24.04}
+          - {label: stable, version: 'stable', experimental: false, os: ubuntu-24.04}
+          - {label: latest, version: 'latest', experimental: false, os: ubuntu-24.04}
           # The preview channel: an early warning, never a merge blocker. A
           # contract change landing in `next` is exactly the signal worth
           # having weeks before it reaches customers.
-          - {label: next, version: 'next', experimental: true, os: ubuntu-latest}
+          - {label: next, version: 'next', experimental: true, os: ubuntu-24.04}
           # The same real CLI on the other two platforms. What this adds is
           # not the contract (same package) but the LOCATION: the installer
           # and Claude Code have to agree on where settings.json lives on a
