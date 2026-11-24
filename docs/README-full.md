@@ -795,9 +795,29 @@ repository.
 
 `~/.blink/bin/blink status` first: it names the service state, every source it
 reads and the age of each reading. Then a replug of the board. If neither
-helps, email **support@blink-buddy.com** with that output
-and the tail of `~/.blink/bridge.log` (neither contains a credential or any
-message text).
+helps, run `~/.blink/bin/blink support` and email the zip it writes to
+**support@blink-buddy.com**. It holds the main rows of `blink status`, the
+app's and board's versions (the board's as the app last recorded it), the
+system and service state, and the newest 256 KB of `bridge.log` and `bridge.log.1`, and
+it goes on the Desktop (`~/.blink` when there is no Desktop folder), named
+for the day; a second run that day writes `-2` beside the first rather than
+over it. It reads only: it does not stop or restart the service and does
+not open the board's port.
+
+What goes in is cut by an allowlist (`pc/support.py`). Only the status rows
+support reads are kept, never the Wire row. A log line is kept only if it
+starts with one of the app's own tags. Within a kept line or row, a word
+survives only if the app's own code prints that word somewhere, and is not
+the account's or the computer's name. In the status and system files a
+version number also survives straight after "App", "Code", "firmware",
+"Python" or "version"; the log keeps no number at all. Every other token
+shows as `<x>` or `<path>`. Lines that are not the app's own
+(a whole message logged by a version before 2026-10-30, a traceback) are
+left out and only counted. This is a filter, not a proof that nothing
+private is left, so open the zip and read it before sending; that is why it
+says where it wrote it. If `blink support` itself fails, email what it
+printed. Don't send `blink status` or `bridge.log` by hand, because neither
+is filtered.
 
 Every line in that log carries the local date and time it was written. The
 file is capped at 4 MB and the four previous ones are kept beside it as
