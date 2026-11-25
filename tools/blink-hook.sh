@@ -13,13 +13,18 @@
 # transcript path, not the assistant's message, and not the path above the
 # project directory.
 #
-# The tool name is the third widening (issue #18, docs/sessions-card-design.md).
-# The sessions card tells "Editing" from "Running a tool", and only the name of
-# the tool in flight can say which. It is the TOP-LEVEL `tool_name` and
-# nothing under `tool_input`: the name is a word Claude Code or Codex chose
-# (or an MCP server's tool name, which is the one part a third party picks,
-# and why it is sanitised exactly as the project name is); the arguments are
-# the person's content -- file paths, commands, text -- and are never read.
+# The tool's class is the third widening (issue #18,
+# docs/sessions-card-design.md). The sessions card tells "Editing" from
+# "Running a tool", and only the name of the tool in flight can say which, so
+# the name is READ -- the TOP-LEVEL `tool_name` and nothing under
+# `tool_input` -- but what is WRITTEN is one of the two words "edit" and
+# "other", never the name (see the PreToolUse branch at the bottom). The name
+# is a word Claude Code or Codex chose, or an MCP server's tool name, which is
+# the one part a third party picks, and why it is sanitised exactly as the
+# project name is even though it is never stored; the arguments are the
+# person's content -- file paths, commands, text -- and are never read. Until
+# 2026-11-25 (review of PR #34) the install disclosure said the name itself
+# was recorded ("Edit, Bash"), which this file never did.
 #
 # The pid is the only item on that list that does not come from the payload at
 # all: it is a number about the machine, not about the work, and it stays on

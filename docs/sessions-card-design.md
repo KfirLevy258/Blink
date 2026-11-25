@@ -77,11 +77,15 @@ time and pages through the rest, with a page indicator.
 
 ### The tool name
 
-Telling editing from running a tool needs the tool. The hook shim records
+Telling editing from running a tool needs the tool. The hook shim reads
 the TOP-LEVEL `tool_name` of a PreToolUse event, sanitised in the pattern
-exactly as the project name is, and never reads `tool_input`. The shim's
-header and the install disclosure say so in the same change. A slot from an
-older shim has no `tool` and reads as `Working`.
+exactly as the project name is, and never reads `tool_input`. It does not
+write the name: the slot's `tool` is a class, `"edit"` for Edit, Write,
+MultiEdit, NotebookEdit and apply_patch and `"other"` for anything else, and
+no other word can reach the state directory. The shim's header and the
+install disclosure say so; until 2026-11-25 (review of PR #34) the
+disclosure said the name itself was recorded ("Edit, Bash"), which the shim
+never did. A slot from an older shim has no `tool` and reads as `Working`.
 
 ### Context per session
 

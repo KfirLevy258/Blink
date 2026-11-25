@@ -3125,9 +3125,10 @@ def _announce(home=None, wsl_name=None, named=False):
         print("             It records the event name, the time, and the session and")
         print("             agent ids Claude Code generates -- used to tell concurrent")
         print("             sessions apart -- the project folder's name (never the")
-        print("             path above it), and when a tool starts, that tool's")
-        print("             name (Edit, Bash). No prompt, no tool arguments, no")
-        print("             file paths, no message text.")
+        print("             path above it), and when a tool starts, whether it is")
+        print("             a file edit or not (the word edit or other, never the")
+        print("             tool's name). No prompt, no tool arguments, no file")
+        print("             paths, no message text.")
         print(f"  Creates    {home.state_dir}")
         print("             one small file per open session, deleted when it ends.")
         print(f"  Changes    {settings_path(home)}")
@@ -3407,7 +3408,8 @@ def _announce_wsl_files(home, name) -> None:
     print("             by usage, to count its spend: see below), and one")
     print("             small file per open session (event name, time,")
     print("             session and agent ids, the project folder's name, and")
-    print("             the name of a tool being started). Nothing in it")
+    print("             whether a tool being started edits files: the word")
+    print("             edit or other, never the tool's name). Nothing in it")
     print("             leaves this machine.")
     # "Leaves ... alone" was said whatever was recorded, and over a native
     # record install --wsl then took Blink out of Windows' own settings.json

@@ -1535,6 +1535,138 @@ def test_a_failing_sampler_with_a_message_never_stops_or_prints(capsys):
     assert "secret-figure-73" not in err and "sample" not in err
 
 
+def _daemon_srow_logger():
+    """The RepeatsBy the daemon really builds for srow, rebuilt from its own
+    source, plus the proof that main() wires it: `srow_frames` is assigned a
+    RepeatsBy, registered in _REPEATED under "srow" and flushed with .due().
+    The key is read from the daemon, not copied here, so changing it changes
+    what these tests exercise."""
+    from pc import logbook
+    tree = _daemon_tree()
+    built = None
+    registered = False
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            continue
+        name = node.targets[0].id
+        if (name == "srow_frames" and isinstance(node.value, ast.Call)
+                and node.value.func.attr == "RepeatsBy"):
+            built = [ast.literal_eval(a) for a in node.value.args]
+        if name == "_REPEATED" and isinstance(node.value, ast.Dict):
+            for k, v in zip(node.value.keys, node.value.values):
+                if (isinstance(k, ast.Constant) and k.value == "srow"
+                        and isinstance(v, ast.Name)
+                        and v.id == "srow_frames"):
+                    registered = True
+    assert built is not None, "the daemon builds no srow_frames"
+    assert registered, "srow is not in _REPEATED"
+    assert "srow_frames.due()" in ast.unparse(tree)
+    by, fields, label = built
+    # Only what the transcript allowlist keeps for srow: never nm or cx.
+    assert by in protocol.TAP_FIELDS["srow"]
+    assert set(fields) <= protocol.TAP_FIELDS["srow"]
+    return logbook.RepeatsBy(by, fields, label)
+
+
+def test_the_daemon_counts_unchanged_session_rows_instead_of_logging_them():
+    """The heartbeat re-sends the page every minute; logged in full that was
+    about 1440 `-> srow` lines a day with one session, 10-20 thousand with
+    four (review of PR #34, 2026-11-25). Through the same RepeatsBy the
+    daemon builds: a day of heartbeats over an unchanged four-row page logs
+    each row once, and a real change -- a session that ends -- still logs."""
+    r = _daemon_srow_logger()
+    logged = []
+    wire = []
+    fetch = _RowsFetch([_row(f"S{k}", age=10 + k) for k in range(4)])
+    b, sent, _, _ = _rows_bridge(fetch=fetch)
+
+    def heartbeats(count):
+        for _ in range(count):
+            b.poll_once()
+            b.poll_if_changed()
+            wire.extend(_srows(sent))
+            for m in _srows(sent):
+                if r.worth_logging(m):
+                    logged.append(protocol.log_name(m))
+            del sent[:]
+
+    heartbeats(1)
+    assert logged == ["srow"] * 4
+    heartbeats(1439)
+    # The board was told every minute; the log was not.
+    assert len(wire) >= 1440 * 4
+    assert logged == ["srow"] * 4, len(logged)
+
+    fetch.rows = fetch.rows[:3]
+    heartbeats(5)
+    assert logged == ["srow"] * 7
+
+
+def test_an_empty_session_list_and_a_page_turn_are_each_logged():
+    r = _daemon_srow_logger()
+    rows = [_row(f"p{i}", age=i) for i in range(9)]
+    fetch = _RowsFetch([])
+    b, sent, _, _ = _rows_bridge(fetch=fetch)
+    logged = []
+
+    def drain():
+        logged.extend(protocol.log_name(m) for m in _srows(sent)
+                      if r.worth_logging(m))
+        del sent[:]
+
+    for _ in range(3):
+        b.poll_once()
+        b.poll_if_changed()
+        drain()
+    assert logged == ["srow"]  # the n=0 line, once
+
+    fetch.rows = rows
+    b.on_message({"t": "spage", "v": 2, "p": 2})  # the last page, one row
+    drain()
+    after_first_page = len(logged)
+    assert after_first_page == 2  # the n=0 line, then n=1 differs
+    b.on_message({"t": "spage", "v": 2, "p": 0})
+    drain()
+    after_first_page = len(logged)
+    assert after_first_page == 6  # page 0: n=4, pg=0 -- four new rows
+    b.on_message({"t": "spage", "v": 2, "p": 0})
+    drain()
+    assert len(logged) == after_first_page  # same page again: counted only
+    b.on_message({"t": "spage", "v": 2, "p": 1})
+    drain()
+    assert len(logged) > after_first_page  # pg differs: logged
+
+
+def test_the_daemons_writer_logs_srow_only_through_the_repeats_gate():
+    """The tests above run a RepeatsBy rebuilt from the daemon's config, so
+    they would still pass if the writer (`send`, inside main) stopped asking
+    it. Read the writer itself: an `if kind in _REPEATED` whose test is
+    `_REPEATED[kind].worth_logging(m)` guards a print of log_name(m) -- the
+    type and nothing else -- and no other print of a message precedes it."""
+    send = next(n for n in ast.walk(_main_node())
+                if isinstance(n, ast.FunctionDef) and n.name == "send")
+    gates = [n for n in ast.walk(send) if isinstance(n, ast.If)
+             and "kind in _REPEATED" == ast.unparse(n.test)]
+    assert len(gates) == 1, "the writer has no _REPEATED dispatch"
+    gate = gates[0]
+    inner = [n for n in gate.body if isinstance(n, ast.If)]
+    assert len(inner) == 1
+    assert ast.unparse(inner[0].test) == "_REPEATED[kind].worth_logging(m)"
+    prints = [ast.unparse(n) for n in ast.walk(inner[0])
+              if isinstance(n, ast.Call)
+              and getattr(n.func, "id", None) == "print"]
+    assert len(prints) == 1 and "protocol.log_name(m)" in prints[0]
+    # The fall-through branch must not log srow: it is an elif on the gate.
+    assert gate.orelse and isinstance(gate.orelse[0], ast.If)
+    assert "srow" not in ast.unparse(gate.orelse[0].test)
+
+
+def test_the_session_row_log_key_never_holds_a_name_or_context():
+    fields = _daemon_srow_logger()._make()._fields
+    assert "nm" not in fields and "cx" not in fields
+
+
 def test_srow_lines_log_and_redact_without_the_name(capsys):
     b, sent, _, _ = _rows_bridge([_row("Secret-Project", ctx=55)])
     b.poll_once()
