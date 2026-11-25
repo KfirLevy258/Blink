@@ -31,8 +31,8 @@ import sys
 import time
 from typing import NamedTuple
 
-from pc import (claude_home, install_codex_hooks, install_hooks,
-                install_statusline, ota, protocol, status_page,
+from pc import (claude_home, desktop_chat_activity, install_codex_hooks,
+                install_hooks, install_statusline, ota, protocol, status_page,
                 statusline_source, update, usage_refresh, user_config,
                 wifi_pair, win_driver, wsl)
 from pc import theme as theme_mod
@@ -1032,6 +1032,12 @@ def _light_rows(desk):
     if desk.desktop and not desk.hooks.light:
         missing.append("the activity light for Desktop's Code tab -- "
                        + _hooks_gap(desk.hooks))
+    # The Desktop chat light (pc/desktop_chat_activity) is deliberately not
+    # listed here. These rows answer "what do Blink's hooks give this desk",
+    # and a desk whose hooks are broken is told it has no activity light; a
+    # best-effort chat row beside that line would read as a contradiction at
+    # the end of an install. `blink status` reports the chat light on its own
+    # lines, where it cannot be mistaken for the hooks' light.
     return shown, missing
 
 
@@ -5919,6 +5925,9 @@ def cmd_status(args) -> int:
             if stale:
                 print(f"            {_shim_repair_line(stale, bridge_running)}")
 
+    for line in _desktop_chat_lines(desk):
+        print(line)
+
     # The most useful support answer: is fresh data actually arriving?
     #
     # A FRESH payload wins on any desk: something is rendering the status
@@ -5994,6 +6003,43 @@ def cmd_status(args) -> int:
             _session_window_line(*_claude_page(desk, plan))
             _codex_session_line(normalizer.merge(codex) if codex else None)
     return 0
+
+
+def _desktop_chat_lines(desk):
+    """status's two Desktop chat rows, apart from the hooks' session count
+    on the Activity row, which stays the hooks' alone (_live_sessions).
+
+    Only where Claude Desktop is installed: on a desk without it, "not
+    available on this Desktop version" would name a program that is not
+    there. One watcher, polled once at the wall clock. A single poll cannot
+    see a write (the first one only takes the baseline), so "busy" here
+    comes from Desktop's analytics queue alone; the daemon, polling every
+    2 s, sees both. Each row is guarded on its own, so a watcher that
+    raises costs those rows and never the rest of status.
+    """
+    if not (desk.desktop or desk.desktop_installed):
+        return []
+    lines = []
+    chat = None
+    busy = None
+    try:
+        chat = desktop_chat_activity.DesktopChatActivity(
+            blink_home=blink_home())
+        busy = chat.poll(time.time())
+    except Exception:
+        chat = None
+    try:
+        said = chat.availability() if chat is not None else None
+    except Exception:
+        said = None
+    word = {desktop_chat_activity.AVAILABLE: "available (best effort)",
+            desktop_chat_activity.UNAVAILABLE:
+                "not available on this Desktop version",
+            desktop_chat_activity.OFF: "turned off"}.get(said, "unknown")
+    lines.append(f"Desktop chat light: {word}")
+    if said == desktop_chat_activity.AVAILABLE and busy is not None:
+        lines.append("Desktop chat: " + ("busy" if busy else "idle"))
+    return lines
 
 
 def _refresh_status(wsl_home, claude_ver=None) -> str:
@@ -6900,6 +6946,18 @@ _CONFIG = {
          "nothing else has fresh figures and someone is at the computer. It",
          "sends no messages and uses no quota."),
         ("The bridge will not run Claude Code.",)),
+    # On unless turned off (desktop_chat_activity.DEFAULT_ON). The on-text
+    # says what is read because the watcher looks inside Desktop's own data
+    # folder, which holds the conversations: it lists and stats there, and
+    # from the analytics queue keeps only each event's name and time.
+    "desktop-chat-light": _Setting(
+        desktop_chat_activity.SETTING, desktop_chat_activity.config_state,
+        "light the activity dot while a Claude Desktop chat is answering"
+        " (best effort)",
+        ("The bridge will look at the names, sizes and times of Claude",
+         "Desktop's own files, and the name and time of each analytics",
+         "event. It reads no conversation, and nothing leaves the computer."),
+        ("The activity light comes only from Claude Code and Codex.",)),
 }
 
 
@@ -6913,9 +6971,12 @@ def cmd_config(args) -> int:
         return "unreadable" if on is None else ("on" if on else "off")
 
     if name is None:
+        # The name column is as wide as the longest name plus two:
+        # "desktop-chat-light" is 18, and ran into the state at 14.
+        wide = max(len(n) for n in _CONFIG) + 2
         for n, setting in _CONFIG.items():
             # 12 wide: "unreadable" is ten, and ran into the description.
-            print(f"{n:<14}{state(setting):<12}{setting.what}")
+            print(f"{n:<{wide}}{state(setting):<12}{setting.what}")
         return 0
     setting = _CONFIG[name]
     if value is not None:

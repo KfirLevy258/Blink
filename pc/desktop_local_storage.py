@@ -1,4 +1,4 @@
-"""Claude Desktop's five-hour usage record, and only that.
+"""Claude Desktop's five-hour usage record, and nothing else of a person's.
 
 The reasoning about this source lives here rather than in the provider, the
 way pc/statusline_source backs pc/providers/claude_cli. The provider is then
@@ -15,10 +15,18 @@ panel rather than an error if they are missed:
     and the next turn the stored percentage describes a window that no longer
     exists. The provider, not this module, decides what to publish then.
 
-This store holds no conversation content -- its other keys are onboarding
-flags, experiment toggles, activation checklists and an analytics queue. That
-is why it is the store this project reads. Anything that changes it to read a
-different one has to re-establish that property first.
+This store is not free of what a person wrote. Besides onboarding flags,
+experiment toggles and activation checklists it holds composer drafts
+(`composer-draft:*` keys: the text of a message typed and not yet sent) and an
+analytics queue whose events carry account and conversation ids. An earlier
+version of this docstring said otherwise; the drafts were found when the
+store was surveyed for the Desktop chat light. So the rule is about what is
+read, not about what is there: this project reads only the ochre_heron_tide
+usage record here and, for the Desktop chat light (pc/desktop_chat_activity),
+only each analytics event's name and time. Nothing else in the store is
+decoded into anything kept. Anything that reads another key has to
+re-establish first that it carries nothing of a conversation, a draft
+included.
 """
 import json
 

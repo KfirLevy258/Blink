@@ -94,6 +94,9 @@ from pc.providers import base
 PROVIDER_ID = "claude"
 SRC_ID = "cli"
 
+# The session name a busy Claude Desktop chat is counted under (see scan()).
+CHAT_LABEL = "Desktop chat"
+
 # The native home's slot folder, as the hook shim spells it. Not expanded
 # here: a module-level expanduser is evaluated at import, before a test can
 # move HOME, and this provider DELETES files under it (tests/conftest.py).
@@ -526,7 +529,8 @@ class ClaudeStateProvider(base.ProviderParser):
     its numbers actually are. It contributes execution fields and nothing else.
     """
 
-    def __init__(self, path=None, now=time.time, sweep=True, home=None):
+    def __init__(self, path=None, now=time.time, sweep=True, home=None,
+                 chat=None):
         # None: the state folder of claude_home.current() -- ~/.blink/state
         # (STATE_DIR) natively, the drop folder's for Claude Code in WSL.
         if path is None:
@@ -535,6 +539,11 @@ class ClaudeStateProvider(base.ProviderParser):
         self._dir = path
         self._now = now
         self._sweep = sweep
+        # Anything with poll(now) -> bool: pc/desktop_chat_activity's watcher
+        # in the daemon (ingest.default_providers), None everywhere else.
+        # `blink status` counts hook sessions with a provider of its own and
+        # leaves this None, so its count stays the hooks' alone.
+        self._chat = chat
 
     def get_provider_id(self) -> str:
         return PROVIDER_ID
@@ -778,6 +787,29 @@ class ClaudeStateProvider(base.ProviderParser):
             counts[state] = counts.get(state, 0) + 1
             if sess_name:
                 names.setdefault(state, []).append(sess_name)
+        # A Claude Desktop chat that is answering counts as one more running
+        # session, and only ever as running. Desktop runs no hooks for a
+        # chat, so the watcher guesses from its writes, and the end of a
+        # reply shows up only after the quiet hold that keeps the light from
+        # flickering mid-answer: about 20 s on Windows and 50 s on macOS
+        # (pc/desktop_chat_activity, measured 2026-10-01/02). A finish that
+        # late and that uncertain cannot say "your turn", so the chat never
+        # adds idle, waiting, failed or agents; it lights the dot and then
+        # lets it go. A future sessions card (#18) would show it as a
+        # "Desktop chat" row with no context percentage.
+        #
+        # Here and not in session_states(): the Codex union de-duplicates
+        # hook sessions by id and the hooks census in `blink status` counts
+        # them, and a guess with no session id belongs in neither.
+        if self._chat is not None:
+            try:
+                busy = bool(self._chat.poll(now_epoch))
+            except Exception:
+                busy = False
+            if busy:
+                counts[base.STATE_RUNNING] = (
+                    counts.get(base.STATE_RUNNING, 0) + 1)
+                names.setdefault(base.STATE_RUNNING, []).append(CHAT_LABEL)
         return counts, names, agents
 
     def poll(self, now_epoch):
