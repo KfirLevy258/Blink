@@ -31,8 +31,8 @@ import sys
 import time
 from typing import NamedTuple
 
-from pc import (claude_home, install_codex_hooks, install_hooks,
-                install_statusline, ota, protocol, status_page,
+from pc import (claude_home, desktop_chat_activity, install_codex_hooks,
+                install_hooks, install_statusline, ota, protocol, status_page,
                 statusline_source, update, usage_refresh, user_config,
                 wifi_pair, win_driver, wsl)
 from pc import theme as theme_mod
@@ -1032,6 +1032,12 @@ def _light_rows(desk):
     if desk.desktop and not desk.hooks.light:
         missing.append("the activity light for Desktop's Code tab -- "
                        + _hooks_gap(desk.hooks))
+    # The Desktop chat light (pc/desktop_chat_activity) is deliberately not
+    # listed here. These rows answer "what do Blink's hooks give this desk",
+    # and a desk whose hooks are broken is told it has no activity light; a
+    # best-effort chat row beside that line would read as a contradiction at
+    # the end of an install. `blink status` reports the chat light on its own
+    # lines, where it cannot be mistaken for the hooks' light.
     return shown, missing
 
 
@@ -5250,7 +5256,18 @@ def cmd_uninstall(_args) -> int:
               *_spend_count_files(),
               # The usage refresh's state (when it last ran, why it turned
               # itself off) and any temp name a write of it left.
-              *_usage_refresh_files()):
+              *_usage_refresh_files(),
+              # The daemon's Desktop chat reading for `blink status`
+              # (pc/desktop_chat_activity.READING_FILE), and a pid-scoped
+              # temp name a killed write left. Harmless if kept -- it ages
+              # out in two minutes -- but uninstall takes what the app made.
+              os.path.join(blink_home(), desktop_chat_activity.READING_FILE),
+              # glob.escape: a Blink home with a "[" or "*" in it (a user
+              # name can hold one) is a pattern otherwise, and the leftover
+              # temp would match nothing and stay behind.
+              *glob.glob(glob.escape(os.path.join(
+                  blink_home(), desktop_chat_activity.READING_FILE))
+                  + ".*.tmp")):
         _rm(p)
     # The folder `claude -p /usage` runs in, and whatever Claude Code left
     # in it, subfolders included: the flat _rm_tree refused a folder holding
@@ -5919,6 +5936,9 @@ def cmd_status(args) -> int:
             if stale:
                 print(f"            {_shim_repair_line(stale, bridge_running)}")
 
+    for line in _desktop_chat_lines(desk):
+        print(line)
+
     # The most useful support answer: is fresh data actually arriving?
     #
     # A FRESH payload wins on any desk: something is rendering the status
@@ -5994,6 +6014,108 @@ def cmd_status(args) -> int:
             _session_window_line(*_claude_page(desk, plan))
             _codex_session_line(normalizer.merge(codex) if codex else None)
     return 0
+
+
+def _desktop_chat_lines(desk, watcher=None):
+    """status's Desktop chat rows, apart from the hooks' session count on
+    the Activity row, which stays the hooks' alone (_live_sessions).
+
+    Only where Claude Desktop is installed: on a desk without it, "not
+    available on this Desktop version" would name a program that is not
+    there.
+
+    The availability row always comes from a watcher of status's own,
+    polled once: whether the setting is off and whether Desktop's folders
+    are the shape the watcher can read are both answered by one look.
+
+    Whether a chat is answering is not, so it is not status's own watcher
+    that says it. The watcher's rule (pc/desktop_chat_activity) is that
+    only an IndexedDB write seen BETWEEN two polls can switch the light on;
+    the analytics queue's pending "sent" can only keep an already-lit light
+    on, because on its own it turned the light on for a chat that had
+    stopped answering long before (owner's review of the chat light,
+    2026-11-25). A one-shot poll only takes the baseline, so under that
+    rule it can never be busy, and printing its False as "idle" would be a
+    claim status cannot back -- the same desk could be lit on the board
+    while status said idle. Until 2026-11-25 this row was built from that
+    one poll and so said "busy" from the queue alone, the very fault the
+    rule was changed to remove. On macOS the watcher says nothing at all
+    until it has learned a churn sub-folder, several minutes in, which a
+    status run never lasts.
+
+    The watcher with that history is the running daemon's, and status is
+    another process. So the daemon's watcher writes its verdict to one
+    small file in the Blink home (desktop_chat_activity.READING_FILE:
+    the availability word, busy as a yes/no, the time it was written and
+    the daemon's own pid, nothing observed in Desktop's folders), and with
+    no `watcher` the busy/idle row is read from it. Only a reading younger
+    than READING_MAX_AGE_S counts, only while its writer is the daemon
+    still running, and only when both the daemon and status's own look say
+    "available". Until 2026-11-25 the time stamp alone decided, so after a
+    restart this row could print the old daemon's "busy" for up to two
+    minutes (a reviewer's finding). Now a new daemon's first poll removes
+    the old reading, and read_reading refuses one whose writer's pid is
+    gone: os.kill(pid, 0) on macOS and Linux, and on Windows, where
+    os.kill would terminate the process it asked about, OpenProcess and
+    GetExitCodeProcess, which only look; a Windows check that cannot tell
+    refuses the reading too. On Windows itself that check is (not yet
+    measured on a desk). With no
+    such reading -- the app is not running, has just started and not yet
+    written, or is a version that does not write the file -- there is no
+    busy/idle row: status cannot know, and a guess is a claim it cannot
+    back.
+
+    `watcher`, when given, is a watcher that has already been polling --
+    a test's, standing in for the daemon's -- so its next poll has a
+    baseline and its True/False means what the board shows. A caller that
+    hands in a fresh watcher would be repeating the one-shot fault, so do
+    not.
+
+    Each step is guarded on its own, so a watcher or a reading that raises
+    costs those rows and never the rest of status.
+    """
+    if not (desk.desktop or desk.desktop_installed):
+        return []
+    lines = []
+    busy = None
+    if watcher is not None:
+        try:
+            busy = watcher.poll(time.time())
+        except Exception:
+            busy = None
+        try:
+            said = watcher.availability()
+        except Exception:
+            said = None
+    else:
+        try:
+            chat = desktop_chat_activity.DesktopChatActivity(
+                blink_home=blink_home())
+        except Exception:
+            chat = None
+        try:
+            # availability() takes its one poll itself when none has run.
+            said = chat.availability() if chat is not None else None
+        except Exception:
+            said = None
+        try:
+            reading = desktop_chat_activity.read_reading(blink_home())
+        except Exception:
+            reading = None
+        if (reading is not None
+                and reading.get("availability")
+                == desktop_chat_activity.AVAILABLE):
+            busy = reading.get("busy")
+    word ={desktop_chat_activity.AVAILABLE: "available (best effort)",
+            desktop_chat_activity.UNAVAILABLE:
+                "not available on this Desktop version",
+            desktop_chat_activity.OFF: "turned off"}.get(said, "unknown")
+    lines.append(f"Desktop chat light: {word}")
+    # A bool and nothing else: a watcher whose poll answered something
+    # stranger has not told us either word.
+    if said == desktop_chat_activity.AVAILABLE and isinstance(busy, bool):
+        lines.append("Desktop chat: " + ("busy" if busy else "idle"))
+    return lines
 
 
 def _refresh_status(wsl_home, claude_ver=None) -> str:
@@ -6176,9 +6298,15 @@ def _wire_line(home=None, reachable=True):
         extra.update(burn={"claude": watch.burn_source(),
                            "codex": CodexBurnReader()},
                      plan_source=watch.view)
+    # publish_chat=False: this bus is one poll, and its chat watcher must not
+    # touch desktop_chat.json, the running daemon's reading, which is what
+    # the Desktop chat row above was just read from. A publishing watcher's
+    # first poll removes that file (it takes it for an earlier daemon's), so
+    # with True every --wire run would blank status's busy/idle line until
+    # the daemon's next heartbeat.
     bus = ingest.IngestionBus(
         verdict=session_verdict.SessionVerdict(persist=False),
-        counter=counter, **extra)
+        counter=counter, publish_chat=False, **extra)
     msg = bus.poll()
     _session_window_line(bus.claude_page(), bus.verdict())
     from pc.providers import codex_cli
@@ -6984,6 +7112,25 @@ _CONFIG = {
          "nothing else has fresh figures and someone is at the computer. It",
          "sends no messages and uses no quota."),
         ("The bridge will not run Claude Code.",)),
+    # On unless turned off (desktop_chat_activity.DEFAULT_ON). The on-text
+    # says what is read because the watcher looks inside Desktop's own data
+    # folder, which holds the conversations: it lists and stats there, and
+    # of the analytics queue it uses only each event's name and time. "Uses",
+    # not "keeps": the queue is read through the Local Storage parser
+    # (pc/leveldb.py, _parse_cache), which holds whole parsed Local Storage
+    # files in the daemon's memory for the life of the process, up to 16
+    # files or 4 MB, account and conversation ids included (owner's review
+    # of the chat light, 2026-11-25). Nothing of it is written out, logged
+    # or sent; the on-text's promise is about what leaves the computer and
+    # what is looked at, and both still hold.
+    "desktop-chat-light": _Setting(
+        desktop_chat_activity.SETTING, desktop_chat_activity.config_state,
+        "light the activity dot while a Claude Desktop chat is answering"
+        " (best effort)",
+        ("The bridge will look at the names, sizes and times of Claude",
+         "Desktop's own files, and the name and time of each analytics",
+         "event. It reads no conversation, and nothing leaves the computer."),
+        ("The activity light comes only from Claude Code and Codex.",)),
 }
 
 
@@ -6997,9 +7144,12 @@ def cmd_config(args) -> int:
         return "unreadable" if on is None else ("on" if on else "off")
 
     if name is None:
+        # The name column is as wide as the longest name plus two:
+        # "desktop-chat-light" is 18, and ran into the state at 14.
+        wide = max(len(n) for n in _CONFIG) + 2
         for n, setting in _CONFIG.items():
             # 12 wide: "unreadable" is ten, and ran into the description.
-            print(f"{n:<14}{state(setting):<12}{setting.what}")
+            print(f"{n:<{wide}}{state(setting):<12}{setting.what}")
         return 0
     setting = _CONFIG[name]
     if value is not None:
