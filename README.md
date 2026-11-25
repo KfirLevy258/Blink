@@ -149,7 +149,13 @@ A new release asks on screen; one tap installs both the firmware and the app, an
 ~/.blink/bin/blink status
 ```
 
-That one command says whether the service is running, whether Claude Code and Codex are being read, and how old the numbers are. If the panel is dark or wrong, unplug the board and plug it back in first - the app finds it again on its own. If that does not fix it, email **support@blink-buddy.com** with the output of `blink status` and the last lines of `~/.blink/bridge.log`; nothing in either is a secret.
+That one command says whether the service is running, whether Claude Code and Codex are being read, and how old the numbers are. If the panel is dark or wrong, unplug the board and plug it back in first - the app finds it again on its own. If that does not fix it, run this and email the file it makes to **support@blink-buddy.com**:
+
+```bash
+~/.blink/bin/blink support
+```
+
+It collects the main rows of `blink status`, the app's recent log and the versions into one zip on your Desktop, and prints where it put it (if it finds no Desktop folder, it says so and prints the full location). It keeps only the text the app writes itself and shows anything filled in (names, folders, numbers, ids) as `<x>`, even when it is made of ordinary words or punctuation. Some of the app's own log lines keep only their time and tag. That is a filter, not a guarantee, so open the zip and read it before you send it. It leaves the app running, and a second run writes a new file beside the first. If `blink support` itself fails, email us what it printed instead. Don't send `blink status` or `~/.blink/bridge.log` by hand: they are not filtered.
 
 **If the board says the app is old.** The board and the app ship together, so normally they match. If they have come apart - the board on a later version than the computer - the board's own update screen cannot fix it, because the half that is behind is the half it cannot reach. `blink status` says so and names the cure:
 

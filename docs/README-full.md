@@ -795,9 +795,58 @@ repository.
 
 `~/.blink/bin/blink status` first: it names the service state, every source it
 reads and the age of each reading. Then a replug of the board. If neither
-helps, email **support@blink-buddy.com** with that output
-and the tail of `~/.blink/bridge.log` (neither contains a credential or any
-message text).
+helps, run `~/.blink/bin/blink support` and email the zip it writes to
+**support@blink-buddy.com**. It holds the main rows of `blink status`, the
+app's and board's versions (the board's as the app last recorded it), the
+system and service state, and the newest 256 KB of `bridge.log` and `bridge.log.1`, and
+it goes on the Desktop (the OneDrive Desktop on Windows when Explorer uses
+it, the folder `user-dirs.dirs` names on Linux), named for the day. When no
+Desktop folder can be found it goes in `~/.blink`, and the command says so
+and prints the full location. A second run that day writes `-2` beside the first rather than
+over it. It reads only: it does not stop or restart the service and does
+not open the board's port.
+
+What goes in is cut by an allowlist (`pc/support.py`). Only the status rows
+support reads are kept, never the Wire row, and a continuation line only
+under the few rows that print one. A log line is kept only if it starts with
+one of the app's own tags. Within a kept line or row, only the text the app
+writes itself survives. Each of its log and status lines has a fixed shape,
+written out in `pc/support.py` with no docstring or comment in it: the
+line's own text, with a gap wherever the app fills something in. A line is
+matched against those shapes from its first character, and a test derives
+the list again from the source and fails when the two differ. Whatever
+fills a gap (a folder, a project or network name, an id, a number) shows as
+`<x>` or `<path>`. That holds even when it is made of ordinary words, or is
+word for word a phrase the app prints elsewhere, such as a WSL distribution
+named "not running".
+What follows a shape is masked as well, except at five places in
+`blink status` where the app adds its own fixed text to a row (`JOINS`).
+When two shapes fit the same line, only the text both call the app's own is
+kept, so a value that happens to spell out a longer line of the app's is
+still masked. In a log line, anything after a shape that ends early counts
+as a value too. Some log tags (`[bridge]`, `[update]`, `[wifi]`,
+`[watchdog]`, `[cfg]`, `[status]`, `[plan]`) are also printed with one bare
+value after them, such as an error message, and that value could be word
+for word another line under the same tag. So a line under one of those tags
+keeps its time and its tag and nothing else, the type of a message sent to
+or from the board included (an error message can read `-> usage` too). When
+a value holds the text that should close its gap, such as a WSL
+distribution whose name contains `), `, the rest of the line is masked. A
+gap is masked whatever it holds,
+letters from any alphabet, digits or bare punctuation; only its spacing is
+kept.
+A word that is the account's or the computer's name is masked inside the
+app's own text too. A version number survives in two places only: the App
+row and the Claude Code row. The board's firmware version is in system.txt,
+from what the app last recorded. system.txt keeps a version only when its
+whole value is one, the system and machine only when they are on a short
+list, and the log keeps no number at all. Lines that are not the app's own
+(a whole message logged by a version before 2026-10-30, a traceback) are
+left out and only counted. This is a filter, not a proof that nothing
+private is left, so open the zip and read it before sending; that is why it
+says where it wrote it. If `blink support` itself fails, email what it
+printed. Don't send `blink status` or `bridge.log` by hand, because neither
+is filtered.
 
 Every line in that log carries the local date and time it was written. The
 file is capped at 4 MB and the four previous ones are kept beside it as
