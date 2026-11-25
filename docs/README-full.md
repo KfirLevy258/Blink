@@ -795,9 +795,43 @@ repository.
 
 `~/.blink/bin/blink status` first: it names the service state, every source it
 reads and the age of each reading. Then a replug of the board. If neither
-helps, email **support@blink-buddy.com** with that output
-and the tail of `~/.blink/bridge.log` (neither contains a credential or any
-message text).
+helps, run `~/.blink/bin/blink support` and email the zip it writes to
+**support@blink-buddy.com**. It holds the main rows of `blink status`, the
+app's and board's versions (the board's as the app last recorded it), the
+system and service state, and the newest 256 KB of `bridge.log` and
+`bridge.log.1`. It goes on the Desktop (the OneDrive Desktop on Windows when
+Explorer uses it, the folder `user-dirs.dirs` names on Linux), named for the
+day. When there is no Desktop folder, or it refuses the file (macOS does
+when Terminal was not given access to the Desktop), the zip goes in
+`~/.blink`, and the command says so and prints the full location. A second
+run that day writes `-2` beside the first rather than over it. It reads
+only: it does not stop or restart the service and does not open the board's
+port.
+
+What goes in is cut by an allowlist (`pc/support.py`). A log line is kept
+only if it starts with one of the app's own tags, and it keeps its time, its
+tag and the one fixed phrase it opens with, from that tag's short list, so
+`[bridge] -> usage` reads as it was written and `[bridge] connected on` is
+followed by `<x>`. Everything after the phrase (a folder, a project or
+network name, an id, a number) is that one `<x>`, whatever it says: a
+network that happens to be called "network" is masked like any other. The
+board's own console lines keep their tag and nothing else. A status row
+keeps its label and an opening phrase from one more fixed list the same
+way; rows the app is not known to print, the Wire row and every indented
+continuation line are left out. What is written is the phrase as the app
+lists it, so no word in the file comes from your computer. What is left
+over: a line whose first words were filled in and spell a whole listed
+phrase would show that phrase.
+A version number survives in two places only: straight after the App label
+and the Claude Code label. The board's firmware version is in system.txt,
+which keeps a version only when its whole value is one, and the system and
+machine only when they are on a short list. The log keeps no number at all.
+Lines that are not the app's own (a whole message logged by a version before
+2026-10-30, a traceback) are left out and only counted. This is a filter,
+not a proof that nothing private is left, so open the zip and read it before
+sending; that is why it says where it wrote it. If `blink support` itself
+fails, email what it printed. Don't send `blink status` or `bridge.log` by
+hand, because neither is filtered.
 
 Every line in that log carries the local date and time it was written. The
 file is capped at 4 MB and the four previous ones are kept beside it as

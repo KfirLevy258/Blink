@@ -7227,6 +7227,117 @@ def cmd_settings(args, opener=None, clock=time.monotonic,
     return 0
 
 
+def cmd_support(_args) -> int:
+    """Write a redacted support bundle and say what went into it (#20).
+
+    Reads only: `blink status` (run here, in-process, with its output
+    captured), the tail of bridge.log, and the versions. It never stops,
+    starts or restarts the service -- an owner runs this precisely when the
+    panel looks wrong, and a restart would change what support is shown --
+    and it opens no serial port, which the running daemon holds. Every line
+    of every file is cut by pc/support.py's phrase lists; see its docstring.
+    """
+    import io
+    import platform
+    from pc import support
+
+    home = _home()
+
+    buf = io.StringIO()
+    status_dropped = 0
+    try:
+        # wire=False: the Wire row is the usage message itself.
+        with contextlib.redirect_stdout(buf):
+            cmd_status(argparse.Namespace(wire=False))
+        status_text, status_dropped = support.status_rows(buf.getvalue())
+    except Exception as e:
+        # The type alone: an exception's message can carry what it was
+        # reading, and the rows printed before it are not trusted half-way.
+        status_text = f"blink status could not run ({type(e).__name__})\n"
+
+    if _skip_service():
+        service = "not checked"
+    else:
+        try:
+            service = backend().status()
+        except Exception as e:
+            service = f"could not check ({type(e).__name__})"
+    # The firmware version the daemon wrote down at the board's last hello
+    # (board.json). Asking the board itself would mean opening the port the
+    # running daemon holds. Only a version-shaped value is written; the
+    # port and the board id beside it in that file never are.
+    firmware = "unknown"
+    try:
+        from claude_usage_bridge import remembered_board
+        fw = remembered_board(blink_home()).get("fw")
+        if isinstance(fw, str):
+            firmware = fw
+    except Exception:
+        pass
+    # platform.system() and machine() only: platform.platform() and
+    # release() carry the kernel build, and node() is the computer's name.
+    # A version field keeps only a whole version, system and machine only
+    # an answer from a fixed list, and the service state only the phrase
+    # the Bridge row of status.txt may open with.
+    field = support.system_field
+    system_text = "\n".join((
+        field("App version", RELEASE_VERSION, version=True),
+        field("Firmware", firmware, version=True),
+        field("System", platform.system(), allowed=support.SYSTEMS),
+        field("Machine", platform.machine(), allowed=support.MACHINES),
+        field("Python", platform.python_version(), version=True),
+        field("Frozen", "yes" if getattr(sys, "frozen", False) else "no",
+              allowed=("yes", "no")),
+        field("Service", service),
+    )) + "\n"
+
+    lines, dropped, found = support.log_tail(blink_home())
+
+    def write(out_dir):
+        return support.build_bundle(out_dir, status_text, system_text,
+                                    lines, dropped + status_dropped)
+
+    # The Desktop, where an owner will find it. It can be missing (a
+    # server, a redirected Desktop we could not find) and it can be there
+    # and refuse the write: macOS does when Terminal was denied access to
+    # the Desktop folder, and that was a traceback here. Either way the
+    # file goes in ~/.blink, which this app can always write.
+    path = None
+    desktop = support.desktop_dir(home)
+    if desktop:
+        try:
+            path = write(desktop)
+        except OSError:
+            pass
+    on_desktop = path is not None
+    if not on_desktop:
+        try:
+            path = write(blink_home())
+        except OSError as e:
+            print(f"Could not write the support file ({type(e).__name__}).")
+            return 1
+
+    print("Collected   blink status")
+    print("Collected   system info")
+    if found:
+        print("Collected   bridge.log (redacted)")
+    else:
+        print("Skipped     bridge.log (none yet)")
+    print(f"Wrote       {support.show_path(path, home)}")
+    if not on_desktop:
+        # ~/.blink is a hidden folder, and an owner who is not technical
+        # will not find it by looking, so say where the file is in full.
+        print()
+        print("The Desktop folder could not be used, so the file is in the")
+        print("hidden Blink folder instead. Its full location is:")
+        print(f"            {path}")
+    print()
+    print("Send this file to support.")
+    print("Open it first to see what is inside; email it to"
+          " support@blink-buddy.com.")
+    return 0
+
+
 def cmd_run(args) -> int:
     """The daemon. This is what the login service starts.
 
@@ -7329,6 +7440,8 @@ def main(argv=None) -> int:
     settings_p.add_argument("panel", nargs="?",
                             choices=["look", "connect", "board"],
                             help="Which panel to open (default: connect)")
+    sub.add_parser("support",
+                   help="Collect a redacted file to send to support")
     run_p = sub.add_parser("run", help="Run the bridge in the foreground")
     run_p.add_argument("--port", default=None,
                        help="Serial port (default: find the board)")
@@ -7351,6 +7464,7 @@ def main(argv=None) -> int:
         "config": cmd_config,
         "theme": cmd_theme,
         "settings": cmd_settings,
+        "support": cmd_support,
         "run": cmd_run,
     }[args.cmd](args)
 
