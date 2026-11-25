@@ -1465,6 +1465,22 @@ def main(argv=None):
     # (the ports move to link_state.silent) and after a USB serial loss.
     asked = set()
     none_due = [0.0]
+    # The silent ports as last written to link.json, None before the first
+    # write. `blink status` reads them to say a board has no BLINK firmware
+    # (issue #16), so the record must move as soon as the set does, not on
+    # the next 60 s beat: a port joins it only after both hello passes heard
+    # nothing, and leaves it the moment the USB layout changes -- a board
+    # re-plugged into the same socket must not be called blank while it is
+    # being probed again.
+    silent_written = [None]
+
+    def write_none():
+        cur = sorted(link_state.silent)
+        try:
+            link_status.write(blink_home, "none", None, silent=cur)
+        except OSError:
+            return
+        silent_written[0] = cur
 
     def waiting_tick():
         # Upkeep, and the link record while no link exists: "none" every 60 s
@@ -1472,12 +1488,10 @@ def main(argv=None):
         # "app not reporting". status_line turns it into a sentence by whether
         # a pairing exists.
         _upkeep()
-        if time.monotonic() >= none_due[0]:
+        if (time.monotonic() >= none_due[0]
+                or sorted(link_state.silent) != silent_written[0]):
             none_due[0] = time.monotonic() + 60.0
-            try:
-                link_status.write(blink_home, "none", None)
-            except OSError:
-                pass
+            write_none()
 
     def choose(after_ota=False):
         # Every road to here is a link lost or none yet. Fail the settings
@@ -1486,12 +1500,24 @@ def main(argv=None):
         board_ops.link_down()
         # Lambdas, not the functions, so a test that replaces
         # candidate_ports or usb_topology on this module is heard.
-        return wait_for_link(
-            args.port, on_wait=waiting_tick, home=blink_home,
-            force_wifi=force_wifi, autodetect=lambda: candidate_ports(),
-            topology=lambda: usb_topology(), chooser=link_state,
-            exists=lambda p: os.path.exists(p),
-            prefer=lambda: known.get("port"), after_ota=after_ota)
+        try:
+            return wait_for_link(
+                args.port, on_wait=waiting_tick, home=blink_home,
+                force_wifi=force_wifi, autodetect=lambda: candidate_ports(),
+                topology=lambda: usb_topology(), chooser=link_state,
+                exists=lambda p: os.path.exists(p),
+                prefer=lambda: known.get("port"), after_ota=after_ota)
+        finally:
+            # wait_for_link clears the silent set on a layout change and can
+            # return a port on that same poll, before any waiting_tick:
+            # without this the record would go on naming a re-plugged board
+            # blank for the whole of its new probe. On the first call
+            # silent_written is None, so this always writes: a link.json
+            # from the daemon before this one (a restart, an update) is
+            # still fresh for 180 s and may name this very port silent,
+            # while this process is about to probe it from the beginning.
+            if sorted(link_state.silent) != silent_written[0]:
+                write_none()
 
     via, target = choose()
     # False on the fast pass (answer my welcome), True on the patient one

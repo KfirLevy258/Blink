@@ -6203,7 +6203,7 @@ def _age(seconds: float) -> str:
 
 
 def board_lines(known, ports, undriven=(), blink_cmd="blink",
-                can_update=True):
+                can_update=True, silent=()):
     """The Board lines of `blink status`, from what the app remembers and
     what is plugged in right now.
 
@@ -6218,9 +6218,26 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
     `ports`. They are reported in every branch rather than only in the empty
     one: a desk can hold a working board AND a second one Windows has not
     driven, and the working board's line would otherwise hide it.
+
+    `silent` is pc.link_status.silent_ports(): the ports the running daemon
+    gave up on after both hello passes. Only when every port here is in it
+    is a device reported as not answering; a port still being probed, or no
+    daemon to ask, keeps "none identified yet".
     """
     port = known.get("port")
     here = [d for d, _ in ports]
+    # The step anybody can take, for a device that stayed quiet. Never a
+    # flash command: see the silent branch below for why.
+    # With several devices listed "Unplug it" has nothing to point at
+    # (the plural lines above it say "devices" and "one"), so that case
+    # names the thing to unplug: the reader's own BLINK, not the Arduino
+    # beside it.
+    def replug(what="it"):
+        return [f"            Unplug {what} and plug it back in.",
+                "            If it stays this way, email"
+                " support@blink-buddy.com",
+                "            Include what this command prints:"
+                f" {blink_cmd} status"]
     chip = dict(ports)
     out = []
     if not ports and undriven:
@@ -6233,7 +6250,18 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
         if port:
             out.append(f"            last seen on {port}")
         return out
-    if port and port in here:
+    # The remembered port names a socket, not a device. While the daemon
+    # reports it silent, nothing on it has answered as a BLINK through both
+    # passes, so the id and firmware remembered for that name are not
+    # printed against it: an Arduino clone plugged in where the BLINK used
+    # to be takes the same port name, and it was being shown as the BLINK
+    # with a firmware diagnosis of its own (refused in the review of #16).
+    # A quiet remembered port is treated like any other quiet port below,
+    # which is also where a BLINK that is crash-looping on its old port
+    # gets the "or isn't starting" reading. With a link up the record
+    # carries no silent ports, so a working board is always identified.
+    identified = bool(port) and port in here and port not in silent
+    if identified:
         ident = []
         if known.get("board_id"):
             ident.append(f"id {known['board_id']}")
@@ -6241,6 +6269,45 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
             ident.append(f"firmware {known['fw']}")
         tail = f" -- {', '.join(ident)}" if ident else ""
         out.append(f"Board       {port} ({chip[port]}){tail}")
+    elif here and all(d in silent for d in here):
+        # Every port here opened and stayed quiet through BOTH hello passes:
+        # the 1.5 s one and the 11 s one, which is long enough to hear even a
+        # board still booting (PROBE_PATIENT_S). The daemon puts a port in
+        # its silent set only then and reports it in link.json, because
+        # status itself never opens a port the daemon holds. Until issue #16
+        # this read "none identified yet" for ever, which the owner in #12
+        # took for "still working on it" and had to ask a chatbot about.
+        #
+        # What it says is what was measured and no more. The first wording,
+        # "This board has no BLINK firmware yet." followed by
+        # tools/burn-claude.sh, was refused in review for three reasons:
+        #   - burn-claude.sh stops without the Zephyr toolchain and the
+        #     private signing key, so a customer cannot run it (the same
+        #     thing that blocked #21), and the README's "Programming a unit"
+        #     it pointed at is the factory section;
+        #   - any quiet CH340 or CP210x lands here, an Arduino clone plugged
+        #     in while the BLINK runs over WiFi included, and it was being
+        #     told to take BLINK firmware;
+        #   - a BLINK that is crash-looping, or a fused one that is not
+        #     booting, is as silent as a blank one, and an owner whose board
+        #     ran yesterday must not read this as "re-flash it".
+        # So: a device that isn't answering as a BLINK, the two readings if
+        # it is one, and the step anybody can take. No flash command.
+        seen = ", ".join(f"{d} ({c})" for d, c in ports)
+        out.append(f"Board       {seen}")
+        if len(ports) == 1:
+            out.append("            A USB serial device here isn't answering"
+                       " as a BLINK.")
+            out.append("            If it is your BLINK, it has no firmware"
+                       " or isn't starting.")
+        else:
+            out.append("            The USB serial devices here aren't"
+                       " answering as a BLINK.")
+            out.append("            If one is your BLINK, it has no firmware"
+                       " or isn't starting.")
+        out += replug("it" if len(ports) == 1 else "your BLINK")
+        if port:
+            out.append(f"            last seen on {port}")
     elif here:
         seen = ", ".join(f"{d} ({c})" for d, c in ports)
         out.append(f"Board       none identified yet -- looking at {seen}")
@@ -6250,7 +6317,7 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
         out.append("Board       not plugged in"
                    + (f" (last seen on {port})" if port else ""))
     others = [(d, c) for d, c in ports if d != port]
-    if port and port in here and others:
+    if identified and others:
         names = ", ".join(f"{d} ({c})" for d, c in others)
         out.append(f"            other serial devices: {names}"
                    " -- asked once, not BLINK, left alone")
@@ -6301,9 +6368,14 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
 def _board_lines():
     try:
         from claude_usage_bridge import describe_ports, remembered_board
+        from pc import link_status
+        # A stale or missing link.json (no daemon running) gives no silent
+        # ports, so nothing is called blank on a guess.
+        silent = link_status.silent_ports(link_status.read(blink_home()))
         return board_lines(remembered_board(blink_home()), describe_ports(),
                            win_driver.undriven_boards(), command_to_type(),
-                           can_update=_update_reaches_the_service())
+                           can_update=_update_reaches_the_service(),
+                           silent=silent)
     except Exception as e:
         return [f"Board       could not list serial ports: {e}"]
 
