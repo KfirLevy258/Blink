@@ -6203,7 +6203,7 @@ def _age(seconds: float) -> str:
 
 
 def board_lines(known, ports, undriven=(), blink_cmd="blink",
-                can_update=True):
+                can_update=True, silent=()):
     """The Board lines of `blink status`, from what the app remembers and
     what is plugged in right now.
 
@@ -6218,6 +6218,11 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
     `ports`. They are reported in every branch rather than only in the empty
     one: a desk can hold a working board AND a second one Windows has not
     driven, and the working board's line would otherwise hide it.
+
+    `silent` is pc.link_status.silent_ports(): the ports the running daemon
+    gave up on after both hello passes. Only when every port here is in it
+    does a board get called blank; a port still being probed, or no daemon
+    to ask, keeps "none identified yet".
     """
     port = known.get("port")
     here = [d for d, _ in ports]
@@ -6241,6 +6246,42 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
             ident.append(f"firmware {known['fw']}")
         tail = f" -- {', '.join(ident)}" if ident else ""
         out.append(f"Board       {port} ({chip[port]}){tail}")
+    elif here and all(d in silent for d in here):
+        # Every port here opened and stayed quiet through BOTH hello passes:
+        # the 1.5 s one and the 11 s one, which is long enough to hear even a
+        # board still booting (PROBE_PATIENT_S). The daemon puts a port in
+        # its silent set only then and reports it in link.json, because
+        # status itself never opens a port the daemon holds. Until issue #16
+        # this read "none identified yet" for ever, which the owner in #12
+        # took for "still working on it" and had to ask a chatbot about.
+        #
+        # It names the step and never takes it: burn.sh checks
+        # FLASH_CRYPT_CNT before it writes a byte, and a plaintext image on
+        # a fused chip is a board that will not boot (CLAUDE.md).
+        #
+        # Silence is all the daemon measured, and a board whose BLINK
+        # firmware is crash-looping, or a fused board that is not booting,
+        # is just as silent as a blank one. So the line gives both readings
+        # and the flash step is conditional: an owner whose board ran BLINK
+        # yesterday must not read this as "re-flash it". The plural form
+        # keeps the step plural too ("each"), as the owner asked in review.
+        seen = ", ".join(f"{d} ({c})" for d, c in ports)
+        out.append(f"Board       {seen}")
+        if len(ports) == 1:
+            out.append("            Not answering: no BLINK firmware yet,"
+                       " or it isn't starting.")
+            out.append("            If it has none, put it on from a BLINK"
+                       " checkout with:")
+        else:
+            out.append("            None is answering: no BLINK firmware yet,"
+                       " or they aren't starting.")
+            out.append("            For each one with none, put it on from a"
+                       " BLINK checkout with:")
+        out.append("            tools/burn-claude.sh (or tools/burn-codex.sh)")
+        out.append("            It checks the chip's eFuses before writing"
+                   " anything.")
+        if port:
+            out.append(f"            last seen on {port}")
     elif here:
         seen = ", ".join(f"{d} ({c})" for d, c in ports)
         out.append(f"Board       none identified yet -- looking at {seen}")
@@ -6301,9 +6342,14 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
 def _board_lines():
     try:
         from claude_usage_bridge import describe_ports, remembered_board
+        from pc import link_status
+        # A stale or missing link.json (no daemon running) gives no silent
+        # ports, so nothing is called blank on a guess.
+        silent = link_status.silent_ports(link_status.read(blink_home()))
         return board_lines(remembered_board(blink_home()), describe_ports(),
                            win_driver.undriven_boards(), command_to_type(),
-                           can_update=_update_reaches_the_service())
+                           can_update=_update_reaches_the_service(),
+                           silent=silent)
     except Exception as e:
         return [f"Board       could not list serial ports: {e}"]
 

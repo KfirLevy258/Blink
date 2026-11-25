@@ -44,3 +44,30 @@ def test_write_is_atomic_and_home_resolved_in_function(tmp_path):
     assert ls.read(str(tmp_path / "missing")) is None
     (tmp_path / "link.json").write_text("{")
     assert ls.read(str(tmp_path)) is None
+
+
+def test_silent_ports_round_trip(tmp_path):
+    ls.write(str(tmp_path), "none", None, now=lambda: NOW,
+             silent={"COM7", "COM3"})
+    rec = ls.read(str(tmp_path), now=lambda: NOW)
+    assert rec["silent"] == ["COM3", "COM7"]
+    assert ls.silent_ports(rec) == ["COM3", "COM7"]
+
+
+def test_silent_ports_empty_set_writes_no_key(tmp_path):
+    ls.write(str(tmp_path), "none", None, now=lambda: NOW, silent=[])
+    assert "silent" not in json.load(open(tmp_path / "link.json"))
+
+
+def test_silent_ports_damaged_entries_dropped():
+    rec = {"link": "none", "silent": ["COM3", 7, None, "", "evil\x1b[2J",
+                                      "x" * 500, ["COM4"]]}
+    assert ls.silent_ports(rec) == ["COM3"]
+    assert ls.silent_ports({"silent": "COM3"}) == []
+    assert ls.silent_ports({"silent": {"COM3": 1}}) == []
+
+
+def test_silent_ports_old_record_and_none():
+    assert ls.silent_ports({"link": "none", "ip": None, "t": NOW}) == []
+    assert ls.silent_ports(None) == []
+    assert ls.silent_ports([]) == []

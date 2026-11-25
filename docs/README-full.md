@@ -799,6 +799,20 @@ helps, email **support@blink-buddy.com** with that output
 and the tail of `~/.blink/bridge.log` (neither contains a credential or any
 message text).
 
+If the Board line says "Not answering: no BLINK firmware yet, or it isn't
+starting", the app found a USB-serial chip and nothing on it answered, neither
+within 1.5 seconds nor within 11, which is long enough to hear a board that is
+still booting. Silence is all it measured: a blank board reads this way, and so
+does one whose firmware is not starting. If the board has run BLINK before,
+unplug it and plug it back in, and write to us if it stays this way rather than
+re-flashing it. If it has never had BLINK, put the firmware on from a BLINK
+checkout with
+`tools/burn-claude.sh` (or `tools/burn-codex.sh`), as in
+[Programming a unit](#programming-a-unit). The app never flashes a board by
+itself; the script checks the chip's eFuses first. Until the running app has
+listened that long, or when it is not running, the line keeps saying "none
+identified yet".
+
 Every line in that log carries the local date and time it was written. The
 file is capped at 4 MB and the four previous ones are kept beside it as
 `bridge.log.1` through `bridge.log.4`, so it uses at most 20 MB and holds
