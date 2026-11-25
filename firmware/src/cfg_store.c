@@ -43,6 +43,29 @@ static K_MUTEX_DEFINE(cfg_lock);
 
 static const struct flash_area *fa;
 
+/*
+ * The token's last four bytes are quiet hours (issue #17).
+ *
+ * The record had no spare byte inside any seal, and a new field appended
+ * behind crc would have needed a fourth seal and a fourth reader, for four
+ * bytes. The token is dead weight: no firmware since 2026-10-27 reads one
+ * except to erase it at boot (main.c), and release.sh never shipped the
+ * WiFi build that wrote one, so every board in the field holds an empty
+ * token -- zeros -- there. Zeros read as quiet hours off, 22:00 to 07:00,
+ * so an update from any older layout arrives with quiet hours off and
+ * nothing else moved. The bytes sit inside 1.3.4's seal, so a downgrade to
+ * 1.3.4 or 1.4.x keeps them sealed and writes them back unchanged: those
+ * images see a token that is empty (or, with quiet hours set, still empty
+ * -- token[0] is 0), and they too only ever erase one.
+ *
+ * CFG_TOKEN_MAX stays 320 because the frozen legacy layouts below, and
+ * tests/cfg_store's copies of them, are sized by it. A legacy token longer
+ * than 315 characters loses its tail on the way in; nothing reads a token,
+ * so nothing is lost that anything could use. The _Static_asserts after
+ * the struct pin every offset that was already on flash.
+ */
+#define REC_TOKEN_LEN (CFG_TOKEN_MAX - 4)
+
 struct rec {
 	uint32_t magic;
 	uint32_t seq;
@@ -53,7 +76,11 @@ struct rec {
 	int32_t tz_min;
 	char ssid[CFG_SSID_MAX];
 	char psk[CFG_PSK_MAX];
-	char token[CFG_TOKEN_MAX];
+	char token[REC_TOKEN_LEN];
+	uint8_t quiet_on;		/* only 1 means on; see cfg_get_quiet */
+	uint8_t quiet_from;		/* half-hour index + 1, 1..48; 0 = unset */
+	uint8_t quiet_until;		/* the same */
+	uint8_t quiet_spare;		/* always 0 */
 	char ap_psk[CFG_AP_PSK_MAX];
 	uint8_t ota_state;		/* 0 idle, 1 install started (cleared on next boot) */
 	char ota_target[CFG_OTA_VER_MAX]; /* version the install aimed at */
@@ -100,6 +127,34 @@ struct rec {
 	uint8_t pair_key[CFG_PAIR_KEY_LEN];	/* secret, never logged */
 	uint32_t crc;		/* over everything above, always last */
 } __packed;
+
+/*
+ * The layout every board already carries, pinned. These are the values the
+ * struct had before quiet hours took the token's tail (computed from it on
+ * 2026-11-24): 1.3.4 finds its seal at 471, 1.4.x its own at 503, and the
+ * record is 544 bytes. A field that moved any of them would turn an update
+ * into a blank record. Plain _Static_assert, not BUILD_ASSERT: the host
+ * test compiles this file against tests/cfg_store/stub, which has no
+ * BUILD_ASSERT, and C11 has the same thing under its own name.
+ */
+_Static_assert(offsetof(struct rec, quiet_on) == 114 + 316,
+	       "quiet hours sit in the token's last four bytes");
+_Static_assert(offsetof(struct rec, ap_psk) == 434, "ap_psk moved");
+_Static_assert(offsetof(struct rec, crc_134) == 471, "1.3.4's seal moved");
+_Static_assert(offsetof(struct rec, crc_143) == 503, "1.4.x's seal moved");
+_Static_assert(sizeof(struct rec) == 544, "the record changed size");
+/*
+ * The theme and Focus, pinned by name as well. crc_134 and crc_143 already
+ * fix them between the two seals, but on 2026-11-25 the board check
+ * (tools/bench/full_touch.txt line 129) found a rig board on theme 2 where
+ * the script expects Dark, and the first question was whether the token
+ * change had moved the stored theme. It had not -- nothing in the bench
+ * script or in quiet hours writes a theme, and the board takes one only
+ * from a computer's theme line -- and these say so where the next person
+ * with that question will look.
+ */
+_Static_assert(offsetof(struct rec, theme_id) == 475, "the theme moved");
+_Static_assert(offsetof(struct rec, focus_on) == 501, "Focus moved");
 
 /* Which seal slot_load() read a record through: decides what cfg_init may
  * take from the other slot. The layouts older than 1.3.4 count as 1.3.4 --
@@ -248,6 +303,11 @@ static bool slot_load(int off, struct rec *out, enum rec_layout *layout)
 	 * The theme and Focus fields after it are whatever was on flash (a
 	 * 1.3.4 record pads with zeros, the sector beyond reads erased), so
 	 * they are zeroed: Dark, Focus off.
+	 *
+	 * Quiet hours are not zeroed here: they are inside this seal, the
+	 * last four bytes of what 1.3.4 calls its token. A record 1.3.4
+	 * wrote holds zeros there (off), and one 1.3.4 wrote back after a
+	 * downgrade holds whatever we left, sealed -- the owner's schedule.
 	 */
 	{
 		uint32_t seal;
@@ -280,6 +340,9 @@ static bool slot_load(int off, struct rec *out, enum rec_layout *layout)
 		out->tz_min = pl.tz_min;
 		memcpy(out->ssid, pl.ssid, sizeof(out->ssid));
 		memcpy(out->psk, pl.psk, sizeof(out->psk));
+		/* The destination's size: 316 of the old 320 token bytes. The
+		 * last four would land on quiet hours, which stay the memset's
+		 * zeros -- off -- as they do in every reader below. */
 		memcpy(out->token, pl.token, sizeof(out->token));
 		memcpy(out->ap_psk, pl.ap_psk, sizeof(out->ap_psk));
 		out->ota_state = pl.ota_state;
@@ -589,8 +652,20 @@ bool cfg_get_token(char *tok, size_t len)
 		k_mutex_unlock(&cfg_lock);
 		return false;
 	}
-	strncpy(tok, cfg.token, len - 1);
-	tok[len - 1] = '\0';
+	/*
+	 * Bounded by the field, not only by the caller's buffer. main.c asks
+	 * with a CFG_TOKEN_MAX buffer, four bytes more than the field now
+	 * holds, and a token read off an older layout need not have a NUL
+	 * inside the field's 316 bytes: a plain strncpy(len - 1) would then run
+	 * on into the quiet-hours bytes and the setup AP's password.
+	 */
+	size_t n = strnlen(cfg.token, sizeof(cfg.token));
+
+	if (n > len - 1) {
+		n = len - 1;
+	}
+	memcpy(tok, cfg.token, n);
+	tok[n] = '\0';
 	k_mutex_unlock(&cfg_lock);
 	return true;
 }
@@ -934,7 +1009,8 @@ int cfg_reset(void)
 	 * is no window where the record on flash is unstamped.
 	 *
 	 * The memset takes the WiFi pairing with it, and the two erases below
-	 * take it off both sectors, as cfg_clear_pairing does.
+	 * take it off both sectors, as cfg_clear_pairing does. Quiet hours go
+	 * with it too: zeros, which read as off, 22:00 to 07:00.
 	 */
 	uint8_t ed = cfg.edition;
 	uint8_t locked = cfg.edition_locked;
@@ -1069,6 +1145,79 @@ int cfg_set_focus(uint8_t on, uint8_t win)
 		/* Put back, as cfg_set_theme does, and for the same reason. */
 		cfg.focus_on = was_on;
 		cfg.focus_win = was_win;
+	}
+	k_mutex_unlock(&cfg_lock);
+	return rc;
+}
+
+/*
+ * Quiet hours (issue #17), in the token's last four bytes -- see struct rec.
+ *
+ * The times are stored as a half-hour index plus one, so that 0, which every
+ * board in the field holds there, means "never set" rather than midnight.
+ * Read the same way as Focus: only 1 means on, and a time of 0 or past 48 (a
+ * later firmware's finer step after a downgrade, a flipped bit, the tail of a
+ * long token an old WiFi build left) reads as the default rather than as a
+ * time Settings' half-hour picker cannot show. tests/cfg_store plants such
+ * bytes.
+ */
+#define QUIET_FROM_DEFAULT_MIN (22 * 60)
+#define QUIET_UNTIL_DEFAULT_MIN (7 * 60)
+#define QUIET_STEP_MIN 30
+#define QUIET_SLOTS (24 * 60 / QUIET_STEP_MIN)	/* 48 */
+
+static uint16_t quiet_min(uint8_t stored, uint16_t dflt)
+{
+	if (stored == 0 || stored > QUIET_SLOTS) {
+		return dflt;
+	}
+	return (uint16_t)((stored - 1) * QUIET_STEP_MIN);
+}
+
+void cfg_get_quiet(uint8_t *on, uint16_t *from_min, uint16_t *until_min)
+{
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	*on = cfg.quiet_on == 1 ? 1 : 0;
+	*from_min = quiet_min(cfg.quiet_from, QUIET_FROM_DEFAULT_MIN);
+	*until_min = quiet_min(cfg.quiet_until, QUIET_UNTIL_DEFAULT_MIN);
+	k_mutex_unlock(&cfg_lock);
+}
+
+int cfg_set_quiet(uint8_t on, uint16_t from_min, uint16_t until_min)
+{
+	uint8_t was_on, was_from, was_until, from, until;
+	int rc;
+
+	if (on > 1 || from_min >= 24 * 60 || until_min >= 24 * 60 ||
+	    from_min % QUIET_STEP_MIN != 0 || until_min % QUIET_STEP_MIN != 0) {
+		return -EINVAL;
+	}
+	from = (uint8_t)(from_min / QUIET_STEP_MIN + 1);
+	until = (uint8_t)(until_min / QUIET_STEP_MIN + 1);
+
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	/* cfg_set_focus's short-circuit, on the RAW bytes for its reason: a
+	 * stray byte that reads as the default still differs from the value
+	 * being chosen, so that choice is written and cleans it off flash.
+	 * The same holds for a never-set 0 when the default is chosen: one
+	 * write, after which the stored bytes say what the screen shows. */
+	if (cfg.quiet_on == on && cfg.quiet_from == from &&
+	    cfg.quiet_until == until) {
+		k_mutex_unlock(&cfg_lock);
+		return 0;
+	}
+	was_on = cfg.quiet_on;
+	was_from = cfg.quiet_from;
+	was_until = cfg.quiet_until;
+	cfg.quiet_on = on;
+	cfg.quiet_from = from;
+	cfg.quiet_until = until;
+	rc = persist();
+	if (rc != 0) {
+		/* Put back, as cfg_set_theme does, and for the same reason. */
+		cfg.quiet_on = was_on;
+		cfg.quiet_from = was_from;
+		cfg.quiet_until = was_until;
 	}
 	k_mutex_unlock(&cfg_lock);
 	return rc;

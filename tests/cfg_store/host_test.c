@@ -693,6 +693,202 @@ static void edition_latch_untouched_by_clear_pairing(void)
 	named("edition_latch_untouched_by_clear_pairing", f);
 }
 
+/* --- Quiet hours (issue #17), in the token's last four bytes --- */
+
+/*
+ * Where the contract puts them: the last four of the 320 bytes 1.3.4 calls
+ * its token. Taken from the frozen layout, not from cfg_store.c, so a field
+ * that moved them would fail here rather than move the test along with it.
+ */
+#define QUIET_OFF (offsetof(struct rec_134, token) + 316)
+
+static bool quiet_is(uint8_t on, uint16_t from, uint16_t until)
+{
+	uint8_t o = 9;
+	uint16_t f = 9999, u = 9999;
+
+	cfg_get_quiet(&o, &f, &u);
+	return o == on && f == from && u == until;
+}
+
+/*
+ * Raw quiet-hours bytes into every record on the fake flash that 1.3.4's
+ * seal covers, resealed -- what a newer firmware, a flipped bit or the tail
+ * of an old long token would leave. Every seal the record had, inner first,
+ * so a whole record stays whole.
+ */
+static void plant_quiet(uint8_t on, uint8_t from, uint8_t until)
+{
+	const int slots[] = { SLOT_A, SLOT_B };
+	const size_t crc_134_off = offsetof(struct rec_134, crc);
+
+	for (int i = 0; i < 2; i++) {
+		uint8_t *r = fake_flash + slots[i];
+		bool s134 = sealed_at(slots[i], crc_134_off);
+		bool s143 = sealed_at(slots[i], CRC_143_OFF);
+		bool whole = slot_whole_wifi(slots[i]);
+		uint32_t crc;
+
+		if (!s134) {
+			continue;
+		}
+		r[QUIET_OFF] = on;
+		r[QUIET_OFF + 1] = from;
+		r[QUIET_OFF + 2] = until;
+		crc = crc32_ieee(r, crc_134_off);
+		memcpy(r + crc_134_off, &crc, sizeof(crc));
+		if (s143) {
+			crc = crc32_ieee(r, CRC_143_OFF);
+			memcpy(r + CRC_143_OFF, &crc, sizeof(crc));
+		}
+		if (whole) {
+			crc = crc32_ieee(r, WIFI_CRC_OFF);
+			memcpy(r + WIFI_CRC_OFF, &crc, sizeof(crc));
+		}
+	}
+}
+
+static void quiet_hours(void)
+{
+	int f = failures, before;
+	struct cfg_theme th;
+	char tok[CFG_TOKEN_MAX], long_tok[400];
+
+	/* Every older layout arrives with quiet hours off: its token was
+	 * empty, so the four bytes are zeros. */
+	desk_in(SLOT_A);
+	CHECK(quiet_is(0, 1320, 420), "quiet, from 1.3.4: off, 22:00 to 07:00");
+	check_desk_settings("quiet, from 1.3.4");
+	{
+		struct rec_143 x = desk_143(7);
+
+		memset(fake_flash, 0xFF, sizeof(fake_flash));
+		write_143(SLOT_A, &x);
+		CHECK(cfg_init() == 0 && quiet_is(0, 1320, 420),
+		      "quiet, from 1.4.x: off, 22:00 to 07:00");
+		cfg_get_theme(&th);
+		CHECK(th.id == 7 && th.w == 12 && cfg_get_focus_on() == 1 &&
+		      cfg_get_focus_win() == 1,
+		      "quiet, from 1.4.x: theme and Focus kept");
+		check_desk_settings("quiet, from 1.4.x");
+	}
+	desk_in(SLOT_A);
+	CHECK(set_p1() == 0 && cfg_set_focus(1, 1) == 0 && cfg_init() == 0 &&
+	      slot_whole_wifi(SLOT_A) && slot_whole_wifi(SLOT_B),
+	      "quiet, current layout: (both sectors hold a whole record)");
+	CHECK(quiet_is(0, 1320, 420) && cfg_paired() &&
+	      cfg_get_focus_on() == 1,
+	      "quiet, current layout: off, defaults, pairing and Focus kept");
+
+	/* Set, and back after a reboot. */
+	CHECK(cfg_set_quiet(1, 1380, 360) == 0 && quiet_is(1, 1380, 360),
+	      "quiet: on, 23:00 to 06:00, stored");
+	CHECK(cfg_init() == 0 && quiet_is(1, 1380, 360),
+	      "quiet: survives a reboot");
+	/* Not check_desk_settings(): the pairing above replaced the desk's
+	 * network with P1's, on purpose. */
+	{
+		int32_t tz = 0;
+
+		CHECK(cfg_get_bright_pct() == 60 && cfg_get_weekly_sel() == 1 &&
+		      cfg_get_main_src() == CFG_MAIN_SRC_CODEX &&
+		      cfg_get_edition() == CFG_EDITION_CODEX &&
+		      cfg_edition_locked() && cfg_get_tz(&tz) && tz == -300,
+		      "quiet, reboot: brightness, source, edition, timezone kept");
+	}
+	CHECK(pairing_is(P1_SSID, sizeof(P1_SSID), P1_PSK, P1_KEY) &&
+	      cfg_get_focus_on() == 1 && cfg_get_focus_win() == 1,
+	      "quiet, reboot: pairing and Focus kept");
+
+	/* The bytes are where 1.3.4's token ended, and its seal holds. */
+	{
+		struct rec_134 seen;
+		const uint8_t *q;
+
+		CHECK(boot_134(&seen), "quiet: 1.3.4 accepts the record written");
+		q = (const uint8_t *)&seen + QUIET_OFF;
+		CHECK(q[0] == 1 && q[1] == 1380 / 30 + 1 && q[2] == 360 / 30 + 1 &&
+		      q[3] == 0,
+		      "quiet: the bytes sit in the old token's last four");
+		CHECK(seen.token[0] == '\0' && seen.bright_pct == 60 &&
+		      seen.edition_locked == 1,
+		      "quiet: 1.3.4 sees an empty token and every setting");
+
+		/* 1.3.4 writes BOTH slots (a brightness step, twice), so no
+		 * record of ours is left to rescue anything from, and an
+		 * update back still has the schedule: 1.3.4 carried its
+		 * "token" bytes through, under its own seal. */
+		seen.seq++;
+		seen.bright_pct = 80;
+		write_134(SLOT_A, &seen);
+		write_134(SLOT_B, &seen);
+		CHECK(cfg_init() == 0 && cfg_get_bright_pct() == 80 &&
+		      quiet_is(1, 1380, 360),
+		      "quiet, downgrade write then update: the schedule comes back");
+	}
+
+	/* Bytes this build never writes read as the defaults. */
+	plant_quiet(2, 0, 49);
+	CHECK(cfg_init() == 0 && quiet_is(0, 1320, 420),
+	      "quiet: on=2, index 0, index 49 read as off, 22:00, 07:00");
+	plant_quiet(1, 49, 0);
+	CHECK(cfg_init() == 0 && quiet_is(1, 1320, 420),
+	      "quiet: on=1 with index 49 and 0 reads as on, the default times");
+	plant_quiet(1, 1, 48);
+	CHECK(cfg_init() == 0 && quiet_is(1, 0, 1410),
+	      "quiet: index 1 and 48 are 00:00 and 23:30");
+	before = fake_writes;
+	CHECK(cfg_set_quiet(1, 1320, 420) == 0 && fake_writes > before &&
+	      quiet_is(1, 1320, 420),
+	      "quiet: choosing what a stray byte read as is still written");
+
+	/* Refusals write nothing and move nothing. */
+	before = fake_writes;
+	CHECK(cfg_set_quiet(2, 1320, 420) == -EINVAL &&
+	      cfg_set_quiet(1, 1440, 420) == -EINVAL &&
+	      cfg_set_quiet(1, 1320, 1440) == -EINVAL &&
+	      cfg_set_quiet(1, 45, 420) == -EINVAL &&
+	      cfg_set_quiet(1, 1320, 45) == -EINVAL &&
+	      fake_writes == before && quiet_is(1, 1320, 420),
+	      "quiet: on=2, 1440, 45 refused, nothing written or changed");
+
+	/* The same choice again writes nothing. */
+	CHECK(cfg_set_quiet(1, 1320, 420) == 0 && fake_writes == before,
+	      "quiet: storing the same choice again writes nothing");
+
+	/* Off keeps the times. */
+	CHECK(cfg_set_quiet(0, 1320, 420) == 0 && cfg_init() == 0 &&
+	      quiet_is(0, 1320, 420), "quiet: off, and still after a reboot");
+
+	/* A refused erase puts RAM back. */
+	fake_erase_rc = -5;
+	CHECK(cfg_set_quiet(1, 60, 120) != 0 && quiet_is(0, 1320, 420),
+	      "quiet, failed write: refused, RAM is the one on flash");
+	fake_erase_rc = 0;
+	before = fake_writes;
+	CHECK(cfg_set_quiet(1, 60, 120) == 0 && fake_writes > before &&
+	      cfg_init() == 0 && quiet_is(1, 60, 120),
+	      "quiet, failed write, retried: written and survives a reboot");
+
+	/* The token's accessors never reach the quiet bytes. */
+	memset(long_tok, 't', sizeof(long_tok) - 1);
+	long_tok[sizeof(long_tok) - 1] = '\0';
+	CHECK(cfg_set_token(long_tok) == 0 && quiet_is(1, 60, 120),
+	      "quiet: a 399-char token stored leaves quiet hours alone");
+	CHECK(cfg_get_token(tok, sizeof(tok)) && strlen(tok) == 315,
+	      "quiet: the token read back stops at its own 315 characters");
+	CHECK(cfg_clear_token() == 0 && !cfg_get_token(tok, sizeof(tok)) &&
+	      quiet_is(1, 60, 120) && cfg_init() == 0 && quiet_is(1, 60, 120),
+	      "quiet: clearing the token leaves quiet hours alone");
+
+	/* A factory reset takes them back to the defaults. */
+	CHECK(cfg_reset() == 0 && quiet_is(0, 1320, 420),
+	      "quiet, reset: off, 22:00 to 07:00");
+	CHECK(cfg_init() == 0 && quiet_is(0, 1320, 420),
+	      "quiet, reset: still after a reboot");
+	named("quiet_hours", f);
+}
+
 int main(void)
 {
 	char msg[160];
@@ -1028,6 +1224,7 @@ int main(void)
 	power_cut_every_byte_both_slots();
 	factory_reset_clears_pairing();
 	edition_latch_untouched_by_clear_pairing();
+	quiet_hours();
 
 	printf(failures ? "\n%d FAILED\n" : "\nall cfg_store checks passed\n",
 	       failures);

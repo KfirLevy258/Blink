@@ -636,6 +636,10 @@ static void run_usb(void)
 
 			net_time_local(&hh, &mm);
 			usage_view_set_clock(hh, mm);
+			/* Quiet hours: dim to 20% inside the window, back to the
+			 * owner's level outside it. Rate-limited on its own too,
+			 * because the doze (ui_sleep.c) calls it every frame gap. */
+			backlight_tick();
 		}
 		lv_timer_handler();
 		k_sleep(K_MSEC(10));

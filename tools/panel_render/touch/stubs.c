@@ -14,6 +14,7 @@
 #include "ota.h"
 #include "proto.h"
 #include "net_link.h"
+#include "net_time.h"
 #include "ui_boot.h"
 #include "ui_theme.h"
 #include "theme.h"
@@ -91,6 +92,47 @@ uint8_t backlight_get(void)
 void backlight_step(int dir)
 {
 	bright = backlight_next_level(bright, dir);
+}
+
+/* The host has no PWM and no daemon clock, so quiet hours never dim
+ * anything here: the schedule only has to store and read back, for the
+ * settings screen that edits it. */
+void backlight_tick(void)
+{
+}
+
+void backlight_quiet_changed(void)
+{
+}
+
+/* Quiet hours in RAM: off, 22:00 to 07:00 (minutes since midnight) until the
+ * settings screen sets them. */
+static uint8_t quiet_on;
+static uint16_t quiet_from = 1320, quiet_until = 420;
+
+void cfg_get_quiet(uint8_t *on, uint16_t *from_min, uint16_t *until_min)
+{
+	*on = quiet_on;
+	*from_min = quiet_from;
+	*until_min = quiet_until;
+}
+
+int cfg_set_quiet(uint8_t on, uint16_t from_min, uint16_t until_min)
+{
+	quiet_on = on;
+	quiet_from = from_min;
+	quiet_until = until_min;
+	return 0;
+}
+
+/* The Quiet hours page asks whether the board has the time yet, to say so in
+ * its hint. touch.sh does not compile net_time.c, so the harness answers as a
+ * board that has not been told the time: the page draws its "waits" line. */
+bool net_time_local(int *hh, int *mm)
+{
+	(void)hh;
+	(void)mm;
+	return false;
 }
 
 /* --- OTA: the state ota.c keeps, moved the way proto.c and main.c move it --

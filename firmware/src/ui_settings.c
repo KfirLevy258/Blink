@@ -43,6 +43,7 @@
 #include "settings_icons.h"
 #include "edit_hold.h"
 #include "usage_layout.h"	/* FONT_LINE_H */
+#include "net_time.h"		/* net_time_local, for the Quiet hours hint */
 
 /*
  * Roles in the active theme (theme.c), read when drawn. The comments give
@@ -98,6 +99,34 @@ static lv_obj_t *notice;	/* outcome popup on the top layer */
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 static const char *bench_nt;
 #define bench_nt_clear() (bench_nt = NULL)
+/*
+ * Bench builds: has ui_settings_attach() run? Until it has, ui_state says
+ * busy=1, because nothing a press can reach exists yet.
+ *
+ * The board check (tools/board_touch.py playing tools/bench/full_touch.txt)
+ * failed on six runs through 2026-11-25 at script line 21, `tap
+ * settings.open`: expected scr=settings ov=none, the board said scr=gauges
+ * ov=none. The bench's summary of that run counted exactly one `[boot]`
+ * printk line, no `[bl]` line, no bootloader lines, and no out-of-memory or
+ * input-queue-full lines. `[bl]` comes from backlight_init and `[boot]
+ * edition:` once per boot as the splash starts (bootclip.c), so the bench
+ * had attached while the boot splash was still playing: not a crash, and
+ * not a reboot it caused.
+ *
+ * During the splash ui_boot.c pumps proto_service(), so touch_inject.c
+ * already answers ui_state, and with no panel up it says scr=gauges (its
+ * else-branch), modal=none, slp=0, busy=0. The bench's opening `expect
+ * ui_state scr=gauges modal=none slp=0` passed at once, and the tap after
+ * it was played onto the splash, where there is no edge zone yet, or was
+ * thrown away by ui_settings_drop_pending() at the top of run_usb()
+ * (main.c). The clip is 52 frames at 12 fps, about 4.3 s, and the first tap
+ * comes about 1 s after the bench attaches, so an attach in the first ~3 s
+ * of the splash lost it. busy=1 is the honest answer until attach:
+ * board_touch.py's wait_state() waits for busy==0 (3 s for an `expect`,
+ * settle + 3 s for a target), and tw_click_parse refuses a click as busy,
+ * which is what both should do during boot.
+ */
+static bool bench_attached;
 #else
 #define bench_nt_clear() ((void)0)
 #endif
@@ -276,6 +305,23 @@ static lv_obj_t *focus_note;	/* the Focus screen's line under its choices */
 static lv_obj_t *focus_btn[FOCUS_CHOICES];
 static void focus_forget(void);
 static lv_obj_t *seg[BRIGHT_STOPS];
+/*
+ * The Quiet hours page is up inside bright_ov in place of the levels page
+ * (see "Quiet hours" below). While it is, bright_big and seg[] are NULL, and
+ * every path that forgets bright_ov calls quiet_forget() as well, which
+ * clears this and the page's own pointers.
+ */
+static bool quiet_page;
+static void quiet_forget(void);
+static void quiet_row(lv_obj_t *parent);
+static void quiet_build(void);
+static void quiet_back(void);
+static void quiet_hint_paint(void);
+/* The Focus buttons' look, which the Quiet hours page wears too. */
+static lv_style_t focus_st_btn;	/* every choice */
+static lv_style_t focus_st_on;	/* ...and the chosen one, as LV_STATE_CHECKED */
+static bool focus_styles_made;	/* both styles above hold properties */
+static void focus_styles(void);
 
 static void bright_refresh(void)
 {
@@ -1466,6 +1512,12 @@ static void upd_timer_cb(lv_timer_t *t)
 
 	ota_ui_get(&snap);
 
+	/* The Quiet hours page's hint turns from "Waits for the time" into the
+	 * usual line when the daemon's time message lands with the page
+	 * already open. A no-op unless the page is up, and it redraws only
+	 * when the answer changes. */
+	quiet_hint_paint();
+
 	/*
 	 * Screen-level state first, and unconditionally.
 	 *
@@ -2074,6 +2126,7 @@ static void sub_closed_cb(void *unused)
 		for (int i = 0; i < BRIGHT_STOPS; i++) {
 			seg[i] = NULL;
 		}
+		quiet_forget();
 		bright_ov = NULL;
 	} else if (focus_ov != NULL) {
 		mem_stats_report("focus-close");
@@ -2133,9 +2186,19 @@ static void bright_gesture_cb(lv_event_t *e)
 	/* The same swipe that closes the panel closes this first. Without it
 	 * the gesture would bubble past an overlay that is covering the panel
 	 * and shut the whole thing, which is not what the motion looks like it
-	 * should do from here. */
+	 * should do from here.
+	 *
+	 * On the Quiet hours page the swipe goes back to the levels, not out
+	 * of Brightness: everywhere in this file the right swipe does what
+	 * the back arrow in the corner does, and on that page the arrow goes
+	 * to the levels. One gesture with two meanings on one screen would be
+	 * the thing to learn twice. */
 	if (lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
-		bright_close();
+		if (quiet_page) {
+			quiet_back();
+		} else {
+			bright_close();
+		}
 	}
 }
 
@@ -2158,26 +2221,14 @@ void ui_settings_apply_bright(uint8_t pct)
 	bright_refresh();
 }
 
-static void show_bright(lv_event_t *e)
+/*
+ * The levels page: everything inside bright_ov while the Quiet hours page is
+ * not up. Its own function because it is built twice -- when the screen
+ * opens, and when the Quiet hours page goes back to it (quiet_back_cb), in
+ * the same overlay, which is emptied in between.
+ */
+static void bright_levels(void)
 {
-	ARG_UNUSED(e);
-	if (bright_ov || focus_ov || theme_ov || confirm || conn_ov || about_ov ||
-	    panel == NULL) {
-		return;
-	}
-	panel_empty();		/* see sub_closed_cb() */
-	bright_ov = lv_obj_create(panel);
-	lv_obj_set_size(bright_ov, LV_PCT(100), LV_PCT(100));
-	lv_obj_set_style_bg_color(bright_ov, COL_BG, 0);
-	lv_obj_set_style_bg_opa(bright_ov, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_width(bright_ov, 0, 0);
-	lv_obj_set_style_radius(bright_ov, 0, 0);
-	lv_obj_set_style_pad_all(bright_ov, 0, 0);
-	lv_obj_clear_flag(bright_ov, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_clear_flag(bright_ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
-	lv_obj_add_event_cb(bright_ov, bright_gesture_cb, LV_EVENT_GESTURE, NULL);
-	lv_obj_center(bright_ov);
-
 	mk_back(bright_ov, bright_close_cb);
 
 	lv_obj_t *title = lv_label_create(bright_ov);
@@ -2218,13 +2269,427 @@ static void show_bright(lv_event_t *e)
 				    (void *)(intptr_t)lvl);
 	}
 
-	lv_obj_t *hint = lv_label_create(bright_ov);
-
-	lv_label_set_text(hint, "Tap a level");
-	lv_obj_set_style_text_color(hint, COL_DIM, 0);
-	lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 210);
+	/* Where "Tap a level" was: the row that opens Quiet hours. The stops
+	 * say what they are by their shape, and the line under them is the
+	 * one place left on this screen for a second control. */
+	quiet_row(bright_ov);
 
 	bright_refresh();	/* paints the stops and the readout */
+}
+
+static void show_bright(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (bright_ov || focus_ov || theme_ov || confirm || conn_ov || about_ov ||
+	    panel == NULL) {
+		return;
+	}
+	panel_empty();		/* see sub_closed_cb() */
+	quiet_forget();		/* it always opens on the levels */
+	bright_ov = lv_obj_create(panel);
+	lv_obj_set_size(bright_ov, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_style_bg_color(bright_ov, COL_BG, 0);
+	lv_obj_set_style_bg_opa(bright_ov, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(bright_ov, 0, 0);
+	lv_obj_set_style_radius(bright_ov, 0, 0);
+	lv_obj_set_style_pad_all(bright_ov, 0, 0);
+	lv_obj_clear_flag(bright_ov, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(bright_ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(bright_ov, bright_gesture_cb, LV_EVENT_GESTURE, NULL);
+	lv_obj_center(bright_ov);
+
+	bright_levels();
+}
+
+/* --- Quiet hours: a second page inside the brightness screen ---------- */
+
+/*
+ * Quiet hours dim the panel to BACKLIGHT_QUIET_PCT between two times of day,
+ * and the level the owner picked comes back at Until (backlight.c keeps both;
+ * cfg_store holds the schedule in minutes since local midnight, in 30-minute
+ * steps). Issue #17.
+ *
+ * A page of the Brightness screen rather than a seventh tile: the six-tile
+ * grid fills the panel exactly (see TILE_W), and the schedule is about the
+ * same light the stops set. It REPLACES the stops inside bright_ov instead of
+ * stacking another overlay on them: Brightness over the whole settings panel
+ * was measured at the LVGL pool's limit (30,632 B of 30,632, see the comment
+ * over sub_closing), so the levels page is emptied first and built again on
+ * the way back. That is also why this page is spare -- about twenty objects,
+ * eight more than the levels page it stands in for (not yet measured on a
+ * desk; the "quiet-open" [mem] line is there to measure it).
+ *
+ * The board has no clock of its own: the time of day comes from the daemon
+ * (net_time.c), so until it has arrived the schedule does nothing, and the
+ * page says so instead of the usual hint.
+ */
+#define QUIET_ROW_Y	206	/* 4 px under the stops, which end at 202 */
+#define QUIET_ROW_H	32
+#define QUIET_STEP_MIN	30
+#define QUIET_DAY_MIN	1440
+#define QUIET_SW_Y	48	/* the Off/On pair */
+#define QUIET_SW_W	143	/* two 143s and a 10 make the 296 */
+#define QUIET_SW_GAP	10
+#define QUIET_CTL_H	44	/* every control on the page: 7.8 mm */
+#define QUIET_FROM_Y	102
+#define QUIET_UNTIL_Y	152
+#define QUIET_STEP_W	56	/* '-' and '+': 56 x 44, 10.0 x 7.8 mm */
+#define QUIET_MINUS_X	112
+#define QUIET_PLUS_X	252	/* ends at 308, the right margin */
+#define QUIET_HINT_Y	206
+
+BUILD_ASSERT(QUIET_ROW_Y + QUIET_ROW_H <= 240,
+	     "the Quiet hours row runs off the panel");
+BUILD_ASSERT(2 * QUIET_SW_W + QUIET_SW_GAP == 296,
+	     "the Off/On pair no longer fills the 296 px between margins");
+BUILD_ASSERT(QUIET_SW_Y + QUIET_CTL_H < QUIET_FROM_Y &&
+	     QUIET_FROM_Y + QUIET_CTL_H < QUIET_UNTIL_Y &&
+	     QUIET_UNTIL_Y + QUIET_CTL_H < QUIET_HINT_Y,
+	     "the Quiet hours controls overlap");
+BUILD_ASSERT(QUIET_PLUS_X + QUIET_STEP_W == 308,
+	     "the '+' buttons no longer end at the right margin");
+/* The hint below spells the figure out, so the two cannot drift apart. */
+BUILD_ASSERT(BACKLIGHT_QUIET_PCT == 20,
+	     "the Quiet hours hint says 20%; say the new figure");
+
+/*
+ * Every pointer into the Quiet hours page. All NULL unless quiet_page is
+ * set, and forgotten (quiet_forget) wherever bright_ov is, so a tap's
+ * repaint never writes through a deleted label.
+ */
+static lv_obj_t *quiet_sw[2];		/* Off, On */
+static lv_obj_t *quiet_from_lbl;
+static lv_obj_t *quiet_until_lbl;
+static lv_obj_t *quiet_hint;
+static int quiet_hint_shown = -1;	/* which hint quiet_hint holds */
+
+static void quiet_forget(void)
+{
+	quiet_page = false;
+	quiet_sw[0] = NULL;
+	quiet_sw[1] = NULL;
+	quiet_from_lbl = NULL;
+	quiet_until_lbl = NULL;
+	quiet_hint = NULL;
+	quiet_hint_shown = -1;
+}
+
+static void quiet_hhmm(char *buf, size_t n, uint16_t min)
+{
+	snprintf(buf, n, "%02u:%02u", (unsigned)(min / 60), (unsigned)(min % 60));
+}
+
+/* 0: the usual line, 1: no time of day yet, 2: From equals Until. The
+ * last because backlight_quiet_now() reads two equal times as an empty
+ * window, never as a whole day, and the page should not look like it is
+ * about to dim when it never will. */
+static int quiet_hint_kind(void)
+{
+	uint8_t on;
+	uint16_t from, until;
+	int hh, mm;
+
+	cfg_get_quiet(&on, &from, &until);
+	if (!net_time_local(&hh, &mm)) {
+		return 1;
+	}
+	return from == until ? 2 : 0;
+}
+
+static void quiet_hint_paint(void)
+{
+	static const char *const words[] = {
+		"Dims the screen to 20% between these times",
+		"Waits for the time from your computer",
+		"Same time twice: it never dims",
+	};
+	int k;
+
+	if (quiet_hint == NULL) {
+		return;
+	}
+	k = quiet_hint_kind();
+	if (k == quiet_hint_shown) {
+		return;		/* nothing changed: no redraw */
+	}
+	lv_label_set_text(quiet_hint, words[k]);
+	quiet_hint_shown = k;
+}
+
+static void quiet_refresh(void)
+{
+	uint8_t on;
+	uint16_t from, until;
+	char b[8];
+
+	cfg_get_quiet(&on, &from, &until);
+	for (int i = 0; i < 2; i++) {
+		if (quiet_sw[i] == NULL) {
+			continue;
+		}
+		if ((i == 1) == (on != 0)) {
+			lv_obj_add_state(quiet_sw[i], LV_STATE_CHECKED);
+		} else {
+			lv_obj_clear_state(quiet_sw[i], LV_STATE_CHECKED);
+		}
+	}
+	if (quiet_from_lbl) {
+		quiet_hhmm(b, sizeof(b), from);
+		lv_label_set_text(quiet_from_lbl, b);
+	}
+	if (quiet_until_lbl) {
+		quiet_hhmm(b, sizeof(b), until);
+		lv_label_set_text(quiet_until_lbl, b);
+	}
+	quiet_hint_paint();
+}
+
+/* Store a schedule, let the backlight answer the tap now rather than at its
+ * next 1 s tick, and repaint. A failed write is not logged: a new console tag
+ * would have to join logbook.CONSOLE_TAGS (tests/pc/test_console_allowlist.py
+ * holds the two lists equal), and the repaint shows what the store still
+ * holds, which is the truth. */
+static void quiet_store(uint8_t on, uint16_t from, uint16_t until)
+{
+	(void)cfg_set_quiet(on, from, until);
+	backlight_quiet_changed();
+	quiet_refresh();
+}
+
+/* A press on this page counts only as a tap, and not once the screen is
+ * closing or going back: the same guard as focus_pick_cb, for the same
+ * reason -- LVGL 9 sends CLICKED on the release of a swipe. */
+static bool quiet_tap_ok(void)
+{
+	return tile_was_a_tap() && !sub_closing && quiet_page;
+}
+
+static void quiet_sw_cb(lv_event_t *e)
+{
+	uint8_t want = (uint8_t)(intptr_t)lv_event_get_user_data(e);
+	uint8_t on;
+	uint16_t from, until;
+
+	if (!quiet_tap_ok()) {
+		return;
+	}
+	cfg_get_quiet(&on, &from, &until);
+	if ((on != 0) == (want != 0)) {
+		return;		/* a flash write that buys nothing */
+	}
+	quiet_store(want, from, until);
+}
+
+/* user_data: bit 0 says Until (else From), bit 1 says '+' (else '-'). */
+static void quiet_step_cb(lv_event_t *e)
+{
+	int k = (int)(intptr_t)lv_event_get_user_data(e);
+	int d = (k & 2) ? QUIET_STEP_MIN : QUIET_DAY_MIN - QUIET_STEP_MIN;
+	uint8_t on;
+	uint16_t from, until;
+
+	if (!quiet_tap_ok()) {
+		return;
+	}
+	cfg_get_quiet(&on, &from, &until);
+	/* Wraps at midnight both ways: 23:30 + 30 is 00:00, and 00:00 - 30
+	 * is 23:30, so either button reaches every time. */
+	if (k & 1) {
+		until = (uint16_t)((until + d) % QUIET_DAY_MIN);
+	} else {
+		from = (uint16_t)((from + d) % QUIET_DAY_MIN);
+	}
+	quiet_store(on, from, until);
+}
+
+/*
+ * The page switches, both ways. Deferred through lv_async_call because the
+ * caller is a click on an object the switch deletes -- the row on the levels
+ * page, or the back button here -- exactly as show_bright() is deferred from
+ * its tile. Each re-checks what it finds when it runs: the screen can have
+ * closed, been rebuilt in a new theme (rebuild_cb reopens the levels page),
+ * or already switched on a second tap.
+ */
+static void quiet_open_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	if (bright_ov == NULL || quiet_page || sub_closing) {
+		return;
+	}
+	/* The levels page's pointers go before its objects do:
+	 * ui_settings_apply_bright() can run bright_refresh() at any time. */
+	bright_big = NULL;
+	for (int i = 0; i < BRIGHT_STOPS; i++) {
+		seg[i] = NULL;
+	}
+	lv_obj_clean(bright_ov);
+	quiet_page = true;
+	quiet_build();
+	mem_stats_report("quiet-open");
+}
+
+static void quiet_back_async(void *unused)
+{
+	ARG_UNUSED(unused);
+	if (bright_ov == NULL || !quiet_page || sub_closing) {
+		return;
+	}
+	quiet_forget();		/* clears quiet_page too */
+	lv_obj_clean(bright_ov);
+	bright_levels();
+}
+
+static void quiet_row_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	/* The row sits under the stops, where a back swipe can start. */
+	if (!tile_was_a_tap() || sub_closing) {
+		return;
+	}
+	(void)lv_async_call(quiet_open_cb, NULL);	/* a failure: tap again */
+}
+
+static void quiet_back(void)
+{
+	(void)lv_async_call(quiet_back_async, NULL);	/* as above */
+}
+
+static void quiet_back_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	quiet_back();
+}
+
+/*
+ * The row on the levels page: one full-width button, "Quiet hours" on the
+ * left and the schedule ("Off", or "22:00 - 07:00") on the right. 296 x 32
+ * is 52.7 x 5.7 mm -- shorter than every other target here, because the
+ * stops above it are pinned (tools/board_touch.py) and 240 px is all there
+ * is; its width is what makes it easy to hit.
+ */
+static void quiet_row(lv_obj_t *parent)
+{
+	uint8_t on;
+	uint16_t from, until;
+	char a[8], b[8], v[20];
+	lv_obj_t *row = lv_btn_create(parent);
+
+	lv_obj_set_size(row, 296, QUIET_ROW_H);
+	lv_obj_align(row, LV_ALIGN_TOP_LEFT, 12, QUIET_ROW_Y);
+	lv_obj_add_style(row, &st_row, 0);	/* a tile's look; set in build_panel */
+	lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+	/* Bubbles, as the stops do: a back swipe begun here must still reach
+	 * bright_gesture_cb. quiet_row_cb's tap test stops it opening too. */
+	lv_obj_add_flag(row, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(row, quiet_row_cb, LV_EVENT_CLICKED, NULL);
+
+	lv_obj_t *name = lv_label_create(row);
+
+	lv_label_set_text(name, "Quiet hours");
+	lv_obj_align(name, LV_ALIGN_LEFT_MID, 10, 0);
+
+	cfg_get_quiet(&on, &from, &until);
+	quiet_hhmm(a, sizeof(a), from);
+	quiet_hhmm(b, sizeof(b), until);
+	snprintf(v, sizeof(v), "%s - %s", a, b);
+
+	lv_obj_t *val = lv_label_create(row);
+
+	lv_label_set_text(val, on ? v : "Off");
+	lv_obj_add_style(val, &st_row_dim, 0);
+	lv_obj_align(val, LV_ALIGN_RIGHT_MID, -10, 0);
+}
+
+/* One of the page's controls: the Focus buttons' look (focus_st_btn, and
+ * focus_st_on when CHECKED), at least 44 px tall. */
+static lv_obj_t *quiet_btn(int x, int y, int w, const char *txt,
+			   lv_event_cb_t cb, int user)
+{
+	lv_obj_t *b = lv_btn_create(bright_ov);
+
+	lv_obj_remove_style_all(b);
+	lv_obj_add_style(b, &focus_st_btn, 0);
+	lv_obj_add_style(b, &focus_st_on, LV_STATE_CHECKED);
+	lv_obj_set_size(b, w, QUIET_CTL_H);
+	lv_obj_align(b, LV_ALIGN_TOP_LEFT, x, y);
+	/* As on the Focus screen: not scrollable, or a drag eats the tap;
+	 * gestures bubble to bright_gesture_cb, and quiet_tap_ok() keeps the
+	 * swipe from also pressing the button it began on. */
+	lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_add_flag(b, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, (void *)(intptr_t)user);
+
+	lv_obj_t *l = lv_label_create(b);
+
+	lv_label_set_text(l, txt);
+	lv_obj_center(l);
+	return b;
+}
+
+/* "From" or "Until", a '-', the time, a '+'. Returns the time label. */
+static lv_obj_t *quiet_time_row(int y, const char *name, int until)
+{
+	lv_obj_t *n = lv_label_create(bright_ov);
+
+	lv_label_set_text(n, name);
+	lv_obj_set_style_text_color(n, COL_DIM, 0);
+	lv_obj_align(n, LV_ALIGN_TOP_LEFT, 12, y + (QUIET_CTL_H - FONT_LINE_H) / 2);
+
+	quiet_btn(QUIET_MINUS_X, y, QUIET_STEP_W, LV_SYMBOL_MINUS,
+		  quiet_step_cb, until);
+	quiet_btn(QUIET_PLUS_X, y, QUIET_STEP_W, LV_SYMBOL_PLUS,
+		  quiet_step_cb, until | 2);
+
+	/* Centred in the 84 px between the two buttons. */
+	lv_obj_t *t = lv_label_create(bright_ov);
+
+	lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);
+	lv_obj_set_style_text_color(t, COL_TEXT, 0);
+	lv_obj_set_width(t, QUIET_PLUS_X - QUIET_MINUS_X - QUIET_STEP_W);
+	lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_align(t, LV_ALIGN_TOP_LEFT, QUIET_MINUS_X + QUIET_STEP_W,
+		     y + (QUIET_CTL_H - 20) / 2);
+	return t;
+}
+
+static void quiet_build(void)
+{
+	/* The Focus screen's two styles, refilled in the active theme. Safe
+	 * here: Focus and Brightness are never up together, and no object
+	 * refers to the styles once the last Focus screen or Quiet hours page
+	 * has been deleted -- which the clean before this call did. */
+	focus_styles();
+
+	/* Back goes to the levels page, not out of Brightness: this page is
+	 * one level down, and the arrow says "where I came from". */
+	mk_back(bright_ov, quiet_back_cb);
+
+	lv_obj_t *title = lv_label_create(bright_ov);
+
+	lv_label_set_text(title, "Quiet hours");
+	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+	lv_obj_set_style_text_color(title, COL_TEXT, 0);
+	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+	mk_line(bright_ov, 40);
+
+	quiet_sw[0] = quiet_btn(12, QUIET_SW_Y, QUIET_SW_W, "Off",
+				quiet_sw_cb, 0);
+	quiet_sw[1] = quiet_btn(12 + QUIET_SW_W + QUIET_SW_GAP, QUIET_SW_Y,
+				QUIET_SW_W, "On", quiet_sw_cb, 1);
+
+	quiet_from_lbl = quiet_time_row(QUIET_FROM_Y, "From", 0);
+	quiet_until_lbl = quiet_time_row(QUIET_UNTIL_Y, "Until", 1);
+
+	/* The longest line is 42 characters, about 290 px at the ~6.9 px a
+	 * character the Focus notes measured -- inside the 320 unbounded,
+	 * so it is left content-sized rather than dotted. */
+	quiet_hint = lv_label_create(bright_ov);
+	lv_obj_set_style_text_color(quiet_hint, COL_DIM, 0);
+	lv_obj_align(quiet_hint, LV_ALIGN_TOP_MID, 0, QUIET_HINT_Y);
+	quiet_hint_shown = -1;
+
+	quiet_refresh();
 }
 
 /* --- The theme screen ------------------------------------------------- */
@@ -3061,9 +3526,8 @@ static const char *const focus_notes[FOCUS_CHOICES] = {
 	"Weekly big, session as a line",
 };
 
-static lv_style_t focus_st_btn;	/* every choice */
-static lv_style_t focus_st_on;	/* ...and the chosen one, as LV_STATE_CHECKED */
-static bool focus_styles_made;	/* both styles above hold properties */
+/* focus_st_btn and focus_st_on are declared at the top of the file, beside
+ * focus_btn: the Quiet hours page, earlier in the file, uses them too. */
 
 /* 0 off, 1 session, 2 weekly: what the store says now. */
 static int focus_choice(void)
@@ -3797,6 +4261,7 @@ static void do_close(void (*pump)(void))
 	for (int i = 0; i < BRIGHT_STOPS; i++) {
 		seg[i] = NULL;
 	}
+	quiet_forget();
 	theme_ov = NULL;	/* these die with the panel too */
 	theme_grid = NULL;
 	theme_edit_lbl = NULL;
@@ -3975,6 +4440,9 @@ static void rebuild_cb(void *unused)
 	for (int i = 0; i < BRIGHT_STOPS; i++) {
 		seg[i] = NULL;
 	}
+	/* The Quiet hours page goes with it, and Brightness comes back on its
+	 * levels page: show_bright() always opens there. */
+	quiet_forget();
 	theme_ov = NULL;
 	theme_grid = NULL;
 	theme_edit_lbl = NULL;
@@ -4519,6 +4987,13 @@ void ui_settings_attach(lv_obj_t *scr)
 	mk_edge_zone(scr, LV_ALIGN_RIGHT_MID, zone_settings_cb);
 	mk_edge_zone(scr, LV_ALIGN_LEFT_MID, zone_anim_cb);
 	mk_page_zone(scr);
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	/* The zones exist now, so ui_state may stop saying busy (see
+	 * bench_attached). main.c calls this immediately before run_usb(),
+	 * with no proto_service() or lv_timer_handler() in between, so no
+	 * stroke can start between here and ui_settings_drop_pending(). */
+	bench_attached = true;
+#endif
 
 	/* The OTA watcher runs from here on, not from the panel build: the boot
 	 * prompt, the download bar and the outcome popup are all screen-level
@@ -4547,8 +5022,10 @@ void ui_settings_bench_state(struct ui_settings_bench *out)
 	out->modal = wn ? "whatsnew" : dl_overlay ? "download" :
 		     upd_prompt ? "prompt" : ask_box ? "ask" :
 		     notice ? "notice" : "none";
-	out->busy = want_open || want_close || want_page != 0 || closing ||
-		    sub_closing || theme_closing;
+	/* !bench_attached: the boot splash is still up and nothing a tap can
+	 * reach exists; see the flag's declaration (2026-11-25). */
+	out->busy = !bench_attached || want_open || want_close ||
+		    want_page != 0 || closing || sub_closing || theme_closing;
 	out->theme_page = theme_page;
 	out->edit = edit_note == edit_holding ? "held" :
 		    edit_note == edit_waiting ? "waiting" :

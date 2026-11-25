@@ -588,7 +588,7 @@ and back to return. It is six tiles, three by two, each with an icon:
 
 | Tile | What it does |
 |---|---|
-| **Brightness** | Tap a level. It is kept across a power cycle |
+| **Brightness** | Tap a level. It is kept across a power cycle. **Quiet hours**, the row under the levels, is a switch, **Off** or **On**, with a **From** and an **Until** time set in half-hour steps (22:00 to 07:00 to begin with). Between them the screen dims to 20%, and your chosen brightness returns at Until. The board has no clock of its own: it needs the time from your computer, and until the app has sent it quiet hours do nothing and the page says so |
 | **Open on PC** | Opens the settings page on your computer, where the theme, the logo and WiFi are set (below) |
 | **Focus** | One window big instead of two side by side: **Off**, **Session** or **Weekly**. The other window stays on screen as a single dim line under the big dial. Off remembers which window was big |
 | **Update** | The software update: **Up to date**, **Available** when there is something to install, or **App is old** when the half on your computer is behind (see "Updates") |
