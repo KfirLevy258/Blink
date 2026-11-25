@@ -101,13 +101,15 @@ Pillow, so on a machine whose system `python3` lacks them, run it as
 `BLINK_PYTHON=$PWD/.venv-test/bin/python sh tests/ci/check_factory.sh`. The
 other CI scripts have no such dependency.
 
-**2026-11-07, after origin/develop (4fcc3e4) merged into the WiFi branch,
-each platform its own count, all on one tree and none failing:** macOS 5628
-passed, 6 skipped (run in the foreground: `tests/test_dev_sh.py` and
-`tests/pc/test_theme_cli.py` have Ctrl-C tests that fail when pytest is
-started in the background, where SIGINT is ignored); Ubuntu (Docker, x86_64,
-Python 3.12) 5364 passed, 270 skipped; Ubuntu under Python 3.9 (python:3.9-slim) 5152 passed, 275 skipped; Windows
-(ARM64 VM, x64 Python 3.11) 5029 passed, 595 skipped. `host-tests` and `check_factory.sh` pass.
+**2026-11-08, the 1.5.0 release tree (0015b54), each platform its own count,
+all on one tree and none failing:** macOS 5708 passed, 6 skipped (run in the
+foreground: `tests/test_dev_sh.py` and `tests/pc/test_theme_cli.py` have
+Ctrl-C tests that fail when pytest is started in the background, where
+SIGINT is ignored); Ubuntu (Docker, x86_64, Python 3.12) 5432 passed, 282
+skipped; Windows (ARM64 VM, x64 Python 3.11) 5096 passed, 608 skipped.
+`host-tests` and `check_factory.sh` pass. Python 3.9 was last counted on
+2026-11-07, after origin/develop (4fcc3e4) merged into the WiFi branch:
+5152 passed, 275 skipped.
 Python 3.9 matters beyond its count: before 3.12 a comprehension is a nested
 function, so a test that searches for a value in one makes that value a
 closure cell of the test itself (the WiFi password check fell into it).
