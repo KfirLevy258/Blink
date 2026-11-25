@@ -243,10 +243,15 @@ static void emit(const char *json)
  * line and answers it with an `answer` line (ask_prompt.h). The daemon
  * sends one only to a board that lists this: an older board would drop it,
  * and the daemon would wait a day to ask again for nothing. */
+/* sessions: this firmware draws the sessions card (docs/sessions-card-design.md)
+ * from the daemon's `srow` lines and asks for a page with `spage`. The daemon
+ * sends srow only to a board that lists this; an older board would drop every
+ * row, and the card would never have anything to show. */
 /* One line: tests/pc/test_board_caps.py reads the macro as one literal.
- * develop's seven first (svc to ask), then the WiFi branch's three: order means nothing
- * to the daemon, which reads the list as a set. */
-#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"burn\",\"plan\",\"spendburn\",\"ask\",\"wifi\",\"logo\",\"pref\"]"
+ * develop's seven first (svc to ask), then the WiFi branch's three, then
+ * sessions: order means nothing to the daemon, which reads the list as a
+ * set, but a shipped cap keeps its place. */
+#define BOARD_CAPS "\"caps\":[\"svc\",\"theme\",\"edit_done\",\"burn\",\"plan\",\"spendburn\",\"ask\",\"wifi\",\"logo\",\"pref\",\"sessions\"]"
 
 /*
  * The board's id, as hello and pref both say it: hwinfo's device id in hex,
@@ -295,9 +300,10 @@ void proto_send_pref(void)
 	 * had nothing but board.json's memory to say which board it was --
 	 * and a remembered id must never decide whose theme wins.
 	 *
-	 * 217 bytes at its widest ("claude", a 32-digit id, bright 100, ok
-	 * and the ten caps), measured by tests/pc/test_board_caps.py, which
-	 * fails if it outgrows this. It was 119 in 128 before Task 6.3 added
+	 * 228 bytes at its widest ("claude", a 32-digit id, bright 100, ok
+	 * and the eleven caps), measured by tests/pc/test_board_caps.py, which
+	 * fails if it outgrows this. "sessions" took it from 217 (issue #18,
+	 * 2026-11-24), still 28 under the buffer. It was 119 in 128 before Task 6.3 added
 	 * focus, bright, view, ok and the logo and pref caps, 185 on the WiFi
 	 * branch alone, and 151 on develop alone (burn, plan, spendburn, ask);
 	 * the merge of the two put both sets on one line. A cap costs its name's
@@ -336,9 +342,10 @@ static void send_hello(void)
 	uint32_t cause = 0;
 	(void)hwinfo_get_reset_cause(&cause);
 
-	/* 203 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
-	 * "1.4.0", the ten caps), measured by tests/pc/test_board_caps.py,
-	 * which fails if it outgrows this; a truncated hello is not JSON. It
+	/* 214 bytes at its widest (a 32-digit id, reset 0xffffffff, fw
+	 * "1.4.0", the eleven caps), measured by tests/pc/test_board_caps.py,
+	 * which fails if it outgrows this; a truncated hello is not JSON.
+	 * "sessions" added 11 to the 203 of ten caps (2026-11-24). It
 	 * was 171 on the WiFi branch alone and 180 on develop alone, each in a
 	 * 192 B buffer; with both sets of caps it is over that, so the buffer
 	 * is 256. A cap costs its name's length plus 3 B and a two-digit minor
@@ -405,6 +412,24 @@ void proto_send_answer(enum ask_answer a)
 	if (ask_prompt_line(buf, sizeof(buf), PROTO_VERSION, a) > 0) {
 		emit(buf);
 	}
+}
+
+void proto_send_spage(int p)
+{
+	/* 31 bytes at its widest, page 249 (FMT_SPAGE_MAX). Held to the
+	 * wire's range here, so whatever the card computes, the daemon is
+	 * never asked for a page it would have to refuse. */
+	char buf[40];
+
+	if (p < 0) {
+		p = 0;
+	}
+	if (p > FMT_SPAGE_MAX) {
+		p = FMT_SPAGE_MAX;
+	}
+	snprintf(buf, sizeof(buf), "{\"t\":\"spage\",\"v\":%d,\"p\":%d}",
+		 PROTO_VERSION, p);
+	emit(buf);
 }
 
 void proto_send_theme_edit(void)
@@ -1975,6 +2000,26 @@ static void dispatch(const char *json, enum proto_src src)
 		msg_get_str(json, "label", lbl, sizeof(lbl));
 		num(json, "n", &n, 0, 9999);
 		usage_view_set_session(lbl, (int)n);
+	} else if (strcmp(type, "srow") == 0) {
+		/*
+		 * One row of the sessions card (docs/sessions-card-design.md),
+		 * its own line because the usage frame is at 454 of the 512
+		 * this parser accepts. Sent only to a board whose caps say
+		 * "sessions": the asked page when its content changes, at once
+		 * on our spage, after every hello and with the heartbeat.
+		 * Validated whole by msg_parse_srow(); a refused line leaves
+		 * the table as it was. Nothing of it is logged, not even a
+		 * refusal: a row carries a project's name, and a console line
+		 * the board has never printed would need a place on
+		 * pc/logbook.py's allowlist first. A row arrives with every
+		 * heartbeat, so a refused one shows as a card that does not
+		 * change, which the daemon side's tests are there to prevent.
+		 */
+		struct msg_srow r;
+
+		if (msg_parse_srow(json, &r)) {
+			usage_view_set_srow(&r, k_uptime_get());
+		}
 	} else if (strcmp(type, "svc") == 0) {
 		/*
 		 * What the provider's public status page says. The contract is
@@ -2268,6 +2313,9 @@ void proto_service(void)
 		printk("[proto] host went away%s\n",
 		       host_bye ? " (said bye)" : "");
 		usage_view_set_status(USAGE_STATUS_DISCONNECTED);
+		/* The sessions it described went with it: the card must not go
+		 * on naming them, or counting their ages up. */
+		usage_view_clear_srows();
 		host_seen = false;
 		host_lost = !host_bye;
 		host_bye = false;

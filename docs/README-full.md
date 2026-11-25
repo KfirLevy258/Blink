@@ -41,6 +41,10 @@ Blink is a small desk display that shows how much of your Claude Code usage you'
 
 Beside the dials is a small pip telling you whether anything is waiting on you - across every Claude Code and Codex session you have open, one light: amber the moment a session has finished or is asking permission, a green pulse while everything is still working, red when something is stuck or rate-limited. Under them, a countdown to each window's reset.
 
+### Sessions card
+
+Tap the marks in the top-left corner and the board lists every open session, one row each, four to a page: its project folder's name, what it is doing (Needs you, Session failed, Editing, Running a tool, Working, Idle), how long it has been doing it, and for Claude Code how full its context is. Sessions that need you come first. The back button closes it. The context figure is the last one Claude Code's status line showed for that session while the bridge was looking; a session it has not seen yet shows no bar rather than an empty one. Codex rows have no context bar yet. Needs firmware that lists `sessions` in its capabilities; older boards are sent nothing new.
+
 It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the setup once, and it sits on your desk and keeps itself up to date.
 
 ### Where the numbers come from
@@ -256,7 +260,7 @@ Blink has to change.
 | | |
 |---|---|
 | Changes | two keys in `~/.claude/settings.json`: `statusLine.command`, and one entry under `hooks` for each of ten Claude Code lifecycle events (`SessionStart`, `PreToolUse`, `Stop`, ... - the activity light is derived from them). Your own hooks are left in place |
-| Creates | `~/.blink/` (readable by you alone) - a copy of the program, the status line script, the hook script, and a `state/` directory holding one small file per open session (event name, time, and the session and agent ids Claude Code generates - nothing else) |
+| Creates | `~/.blink/` (readable by you alone) - a copy of the program, the status line script, the hook script, and a `state/` directory holding one small file per open session (event name, time, the session and agent ids Claude Code generates, the project folder's name without the path above it, and on `PreToolUse` the tool's name - nothing else; never the tool's arguments) |
 | Creates | a login item, so the bridge starts with your session (a LaunchAgent on macOS, a user systemd unit on Linux, a Scheduled Task on Windows) |
 | Creates | `usage-refresh.json` in `~/.blink/` (when the last refresh ran, how many runs in a row failed and since when, the reason if BLINK turned it off, when you last turned it back on, whether the service could not find Claude Code, the path of the `claude` your terminal found, and for the board's question how many times it was answered, when it was last sent and whether you said no) and an empty `refresh/` folder there for the run to start in. Both are created only once the refresh is turned on or asked about; `blink uninstall` removes them. The on/off answer itself is the `usage-refresh` key in `config.json`. See "Keeping figures fresh" |
 | Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Nothing is installed system-wide |

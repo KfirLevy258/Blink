@@ -546,6 +546,130 @@ void fmt_uptime(int64_t secs, char *buf, size_t buflen)
 	}
 }
 
+const char *fmt_srow_words(enum fmt_srow_kind k)
+{
+	switch (k) {
+	case FMT_SROW_WAIT:	return "Needs you";
+	case FMT_SROW_FAIL:	return "Session failed";
+	case FMT_SROW_EDIT:	return "Editing";
+	case FMT_SROW_TOOL:	return "Running a tool";
+	case FMT_SROW_IDLE:	return "Idle";
+	default:		return "Working";
+	}
+}
+
+enum fmt_pip_tone fmt_srow_tone(enum fmt_srow_kind k)
+{
+	/* Through the pip kinds rather than beside them, so the card's red is
+	 * the dots' red by construction and not by a second table. */
+	switch (k) {
+	case FMT_SROW_WAIT:	return fmt_pip_tone(FMT_PIP_WAITING);
+	case FMT_SROW_FAIL:	return fmt_pip_tone(FMT_PIP_FAILED);
+	case FMT_SROW_IDLE:	return fmt_pip_tone(FMT_PIP_FINISHED);
+	default:		return fmt_pip_tone(FMT_PIP_RUNNING);
+	}
+}
+
+enum fmt_pip_tone fmt_ctx_tone(int cx)
+{
+	if (cx >= 90) {
+		return FMT_TONE_RED;
+	}
+	if (cx >= 60) {
+		return FMT_TONE_AMBER;
+	}
+	return FMT_TONE_GREEN;
+}
+
+void fmt_srow_age(int32_t secs, char *buf, size_t buflen)
+{
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	if (secs < 0) {
+		secs = 0;
+	}
+	if (secs > FMT_SAGE_MAX) {
+		secs = FMT_SAGE_MAX;
+	}
+	if (secs < 60) {
+		snprintf(buf, buflen, "%ds", (int)secs);
+	} else if (secs < 3600) {
+		snprintf(buf, buflen, "%dm", (int)(secs / 60));
+	} else {
+		snprintf(buf, buflen, "%dh %02dm", (int)(secs / 3600),
+			 (int)((secs % 3600) / 60));
+	}
+}
+
+void fmt_srow_name(const char *nm, char pv, char *buf, size_t buflen)
+{
+	char ascii[FMT_SNAME_MAX * 3];
+	size_t i = 0;
+
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	if (nm != NULL && nm[0] != '\0') {
+		fmt_ascii(nm, ascii, sizeof(ascii));
+		/* A name that is only blanks (U+00A0 comes out of fmt_ascii as a
+		 * space) is no name: the row would lead with nothing. */
+		while (ascii[i] == ' ') {
+			i++;
+		}
+		if (ascii[i] != '\0') {
+			snprintf(buf, buflen, "%s", &ascii[i]);
+			return;
+		}
+	}
+	snprintf(buf, buflen, "%s", pv == 'c' ? "Claude session" :
+		 pv == 'x' ? "Codex session" : "Session");
+}
+
+int fmt_spage_count(int tot)
+{
+	if (tot < 0) {
+		tot = 0;
+	}
+	if (tot > FMT_STOT_MAX) {
+		tot = FMT_STOT_MAX;
+	}
+	if (tot == 0) {
+		return 1;
+	}
+	return (tot + FMT_SROWS_PER_PAGE - 1) / FMT_SROWS_PER_PAGE;
+}
+
+int fmt_spage_clamp(int pg, int tot)
+{
+	int last = fmt_spage_count(tot) - 1;
+
+	if (pg < 0) {
+		return 0;
+	}
+	return pg > last ? last : pg;
+}
+
+bool fmt_spage_can(int pg, int tot, int delta)
+{
+	int to;
+
+	if (delta != 1 && delta != -1) {
+		return false;
+	}
+	to = pg + delta;
+	return to >= 0 && to < fmt_spage_count(tot);
+}
+
+void fmt_spage_indicator(int pg, int tot, char *buf, size_t buflen)
+{
+	if (buf == NULL || buflen == 0) {
+		return;
+	}
+	snprintf(buf, buflen, "%d of %d", fmt_spage_clamp(pg, tot) + 1,
+		 fmt_spage_count(tot));
+}
+
 void fmt_board_name(const char *id, char *buf, size_t buflen)
 {
 	size_t n = strlen(id);

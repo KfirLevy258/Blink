@@ -17,9 +17,10 @@ import time
 
 from pc import (burn_reader, claude_account, claude_plan, cowork_audit,
                 desktop_idb, desktop_paths, normalizer, protocol,
-                session_verdict, spend_count, weekly_anchor)
+                session_rows, session_verdict, spend_count, weekly_anchor)
 from pc.providers import base
 from pc.providers import claude_cli
+from pc.providers import codex_state
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
 from pc.providers.claude_desktop_ls import ClaudeDesktopLocalStorageProvider
@@ -251,6 +252,11 @@ class IngestionBus:
         # second time could pick a different winner and name a project that
         # does not belong to the state on the panel.
         self._session_pair = ("", 0)
+        # The sessions card's rows (pc/session_rows.Row), every live session
+        # in the card's order, as the last poll() read them -- for the same
+        # reason as _session_pair: a row answers for the poll the usage line
+        # came from. See session_rows().
+        self._session_rows = []
         # The plan message for the pair the last poll() chose, or None while
         # this bus has never seen a plan -- see plan_msg().
         self._plan = None
@@ -617,6 +623,9 @@ class IngestionBus:
             # but the board is still captioning its Claude page SPEND. The
             # "windows" this produces is what takes that caption down.
             self._plan = protocol.plan_for(primary, secondary)
+        # Before the return below: the card lists the sessions the hooks
+        # see, and a desk with hooks and no usage reading yet still has them.
+        self._session_rows = self._collect_rows(now)
         if primary is None:
             return None
         msg = protocol.frame_to_usage(primary, now, secondary)
@@ -625,6 +634,69 @@ class IngestionBus:
         self._session_pair = _pair_from(
             primary, secondary, msg.get("state", base.STATE_UNKNOWN))
         return msg
+
+    def _collect_rows(self, now):
+        """The sessions card's rows for this poll; [] when nothing reads.
+
+        Claude's are the reading this poll's ClaudeStateProvider already
+        made (last_session_details), so they cannot disagree with the light
+        on the panel. Codex's are read here, without sweeping: codex_cli's
+        own scan, earlier in this poll, is the one that collects, and a
+        second sweeper would only be a second place for it to go wrong. The
+        context figures are the status-line provider's memory. A provider
+        this bus does not have -- a scenario's, a test's -- gives {}.
+
+        Contained like a provider: the card is a bonus on the poll, never
+        its cost. A failure is said by type, once, as poll_frames says one.
+        """
+        claude, codex, ctx = {}, {}, {}
+        try:
+            for p in self._providers:
+                if isinstance(p, ClaudeStateProvider) and not claude:
+                    claude = p.last_session_details()
+                elif isinstance(p, CodexCliProvider) and not codex:
+                    codex = codex_state.details(
+                        now, path=getattr(p, "_state_dir", None), sweep=False)
+                elif isinstance(p, ClaudeCliProvider) and not ctx:
+                    ctx = p.context_by_session()
+            return session_rows.build_rows(claude, codex, ctx)
+        except Exception as e:
+            if not getattr(self, "_rows_failed", False):
+                self._rows_failed = True
+                print(f"[ingest] sessions card rows failed"
+                      f" ({type(e).__name__})", file=sys.stderr)
+            return []
+
+    def session_rows(self):
+        """Every live session as a pc/session_rows.Row, in the card's order,
+        as the last poll() read them. Not on the usage line, for the reason
+        session_pair() gives: the Bridge pages these into srow lines."""
+        return self._session_rows
+
+    def sample_context(self):
+        """Let each provider that has one take its between-polls sample
+        (claude_cli.ClaudeCliProvider.sample_context, the sessions card's
+        per-session context); True when any figure moved.
+
+        Asked by the Bridge on every pass of the daemon's serial loop, about
+        every 0.2 s, so it must cost a stat and say nothing: no log line,
+        not even once, and nothing a provider raises gets past here. The
+        rows themselves are still built by poll(), on the next fast tick
+        (at most FAST_POLL_INTERVAL_S, 2 s, later), from the memory this
+        fills: building them here as well would read the Codex state folder
+        five times a second for a row the board is sent on that tick
+        anyway. A provider without the method -- every one but the status
+        line's, a scenario's -- is skipped."""
+        moved = False
+        for p in self._providers:
+            sample = getattr(p, "sample_context", None)
+            if sample is None:
+                continue
+            try:
+                moved = bool(sample()) or moved
+            except Exception:
+                pass
+        return moved
 
     def credit_refresh(self, activity_for):
         """Wire `activity_for(fetched_at)` (RefreshWatch's): the time to
@@ -968,6 +1040,12 @@ class _BusFetch:
 
     def session_pair(self):
         return self._bus.session_pair()
+
+    def session_rows(self):
+        return self._bus.session_rows()
+
+    def sample_context(self):
+        return self._bus.sample_context()
 
     def burn_pages(self):
         return self._bus.burn_pages()

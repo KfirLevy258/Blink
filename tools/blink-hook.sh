@@ -5,10 +5,21 @@
 # We record which event fired, for which session, and when.
 #
 # WHAT IS CAPTURED, exactly: an event name, a session id, an agent id, the
-# PROJECT DIRECTORY NAME, a clock reading, and this hook's PARENT PROCESS ID.
-# Nothing else is read from the payload -- not the prompt, not the tool
-# arguments, not the transcript path, not the assistant's message, and not the
-# path above the project directory.
+# PROJECT DIRECTORY NAME, a clock reading, this hook's PARENT PROCESS ID, and
+# on PreToolUse only the CLASS of the tool's name ("edit" for Edit, Write,
+# MultiEdit, NotebookEdit and apply_patch; "other" for anything else -- the
+# name itself is read to decide that and never written). Nothing else is read
+# from the payload -- not the prompt, not the tool arguments, not the
+# transcript path, not the assistant's message, and not the path above the
+# project directory.
+#
+# The tool name is the third widening (issue #18, docs/sessions-card-design.md).
+# The sessions card tells "Editing" from "Running a tool", and only the name of
+# the tool in flight can say which. It is the TOP-LEVEL `tool_name` and
+# nothing under `tool_input`: the name is a word Claude Code or Codex chose
+# (or an MCP server's tool name, which is the one part a third party picks,
+# and why it is sanitised exactly as the project name is); the arguments are
+# the person's content -- file paths, commands, text -- and are never read.
 #
 # The pid is the only item on that list that does not come from the payload at
 # all: it is a number about the machine, not about the work, and it stays on
@@ -147,6 +158,28 @@ _projname() {
 &/g' |
 		sed -n -e '1{/[{].*[{]/q;}' \
 			-e '2{s|^"cwd"[[:space:]]*:[[:space:]]*"[^"]*[/\]\([0-9A-Za-z][0-9A-Za-z._-]\{0,23\}\)".*|\1|p;}'
+}
+
+# The TOOL'S NAME, for the sessions card's "Editing" / "Running a tool".
+#
+# _projname's shape exactly, and every reason given above it applies here
+# unchanged: the class is the sanitiser (no `"` or `\` can reach the JSON
+# string, the first character must be alphanumeric, 24 bytes at most, and a
+# value that does not match produces nothing, so the key is omitted); the
+# FIRST occurrence, because PreToolUse carries tool_input verbatim and a
+# tool's own arguments can hold a "tool_name" of their own (an MCP tool that
+# drives another tool); and the line-1 brace guard, because with no top-level
+# key the first occurrence is a nested one, and a nested value is exactly the
+# tool argument the header promises is never read.
+#
+# No path to strip, so the value is the whole string. An MCP tool name
+# (mcp__server__tool) is usually over 24 bytes and is then simply not
+# recorded: a PreToolUse with no name still reads as "Running a tool".
+_toolname() {
+	sed 's/"tool_name"/\
+&/g' |
+		sed -n -e '1{/[{].*[{]/q;}' \
+			-e '2{s/^"tool_name"[[:space:]]*:[[:space:]]*"\([0-9A-Za-z][0-9A-Za-z._-]\{0,23\}\)".*/\1/p;}'
 }
 
 # Private to the user. These files name the sessions someone has open, and
@@ -354,8 +387,30 @@ SubagentStart|SubagentStop)
 	0*) ;;
 	*) pidval=",\"pid\":$PPID" ;;
 	esac
-	printf '{"event":"%s","t":%s%s%s}' "$event" "$(date +%s)" "$pidval" \
-		"$nameval" 2>/dev/null \
+	# The tool's name, on PreToolUse only: it is the one event whose tool is
+	# IN FLIGHT. PostToolUse names a tool that has finished, and recording it
+	# there would keep a session "Editing" after the edit was done. The sed
+	# runs only on this event, so every other event pays nothing for it.
+	# Appended AFTER the existing keys, and omitted rather than empty when
+	# nothing matched, for the reasons the name gives above.
+	toolval=''
+	if [ "$event" = PreToolUse ]; then
+		# Written as a CLASS, never as the name. The card needs one bit --
+		# editing or not -- and the name itself is the one piece of this
+		# that a third party (an MCP server) picks. tests/ci/check_hook_shim.sh
+		# case 3 holds the promise that a payload's "Bash" never reaches the
+		# state directory, and a class keeps it: only the two words below
+		# can ever be written, whatever the payload said.
+		tool=$(printf '%s' "$input" | _toolname)
+		case $tool in
+		'') ;;
+		Edit | Write | MultiEdit | NotebookEdit | apply_patch)
+			toolval=',"tool":"edit"' ;;
+		*) toolval=',"tool":"other"' ;;
+		esac
+	fi
+	printf '{"event":"%s","t":%s%s%s%s}' "$event" "$(date +%s)" "$pidval" \
+		"$nameval" "$toolval" 2>/dev/null \
 		> "$DIR/$sid.state.$$.tmp" &&
 		mv -f "$DIR/$sid.state.$$.tmp" "$DIR/$sid.state" 2>/dev/null
 	;;

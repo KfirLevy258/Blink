@@ -253,6 +253,8 @@ living in two places.
 - **Naming the most recent of several.** See the assumption above.
 - **Anything about the dot itself.** Colour and pulse are unchanged. This
   design only fills the line under it.
+- **A list of every session.** Built since as the sessions card, a tap on the
+  dots: see `docs/sessions-card-design.md` (2026-11-24, issue #18).
 
 ---
 

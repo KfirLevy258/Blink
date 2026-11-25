@@ -765,6 +765,55 @@ int main(void)
 	check_focus();
 	test_spend_page();
 
+	/*
+	 * The sessions card and the tap that opens it
+	 * (docs/sessions-card-design.md). usage_layout.h also holds these as
+	 * _Static_asserts, so a board build refuses them too; here a failure
+	 * names the rule and prints both numbers.
+	 */
+	{
+		int tap_x1 = SESS_TAP_X + SESS_TAP_W + SESS_TAP_EXT;
+		int tap_y1 = SESS_TAP_Y + SESS_TAP_H + SESS_TAP_EXT;
+		int last_pip_x1 = PIP_X0 + (PIP_MAX - 1) * PIP_PITCH + PIP_SZ;
+
+		EXPECT_EQ(SESS_BAR_H + SESS_ROWS * SESS_ROW_H + SESS_STRIP_H, SCR_H);
+		EXPECT_EQ(SESS_ROWS, FMT_SROWS_PER_PAGE);
+		EXPECT_EQ(SESS_STRIP_Y + SESS_STRIP_H, SCR_H);
+		CHECK(tap_x1 < BRAND_X0,
+		      "the sessions tap, extension included, stops short of the brand");
+		EXPECT_EQ(BRAND_X0, 134);
+		CHECK(SESS_TAP_X + SESS_TAP_W >= last_pip_x1,
+		      "the sessions tap covers every pip the row can draw");
+		CHECK(SESS_TAP_X + SESS_TAP_W >= PIP_WALL_X,
+		      "the sessions tap covers the row up to its wall");
+		CHECK(tap_y1 <= GAUGE_ARC_Y,
+		      "the sessions tap stops above the rings");
+		/* The left edge zone (ui_settings.c mk_edge_zone): 44x150 centred
+		 * on the left edge. A press there opens the boot clip. */
+		CHECK(tap_y1 <= (SCR_H - 150) / 2,
+		      "the sessions tap stays clear of the left edge zone");
+		CHECK(SESS_TAP_H + 2 * SESS_TAP_EXT >= 40,
+		      "the sessions tap is a finger's height (40 px with extension)");
+		CHECK(SESS_LINE2_Y + FONT_LINE_H + 4 <= SESS_ROW_H,
+		      "a sessions row's two lines fit its 44 px");
+		CHECK(SESS_PAD_X + SESS_WORDS_W <= SESS_BAR_X,
+		      "the state words stop before the context bar");
+		CHECK(SESS_BAR_X + SESS_BAR_W + 6 + SESS_PCT_W + SESS_PAD_X <= SCR_W,
+		      "the bar and its figure fit inside the right margin");
+		CHECK(SESS_PAD_X + SESS_NAME_W + SESS_AGE_W + SESS_PAD_X <= SCR_W,
+		      "the name and the duration share the first line");
+		CHECK(SESS_BTN_H + 4 <= SESS_STRIP_H,
+		      "the page buttons fit the strip");
+		CHECK(2 * SESS_BTN_W + 2 * SESS_PAD_X < SCR_W - 60,
+		      "the page buttons leave the indicator room between them");
+		CHECK(BUDGET_FITS(SESS_WORDS_W, "Session failed"),
+		      "the widest state words fit their box");
+		CHECK(BUDGET_FITS(SESS_AGE_W, "99h 59m"),
+		      "the widest duration fits its box");
+		CHECK(BUDGET_FITS(SESS_PCT_W, "100%"),
+		      "the widest context figure fits its box");
+	}
+
 	printf(failures ? "\n%d FAILED\n" : "\nall layout checks passed\n",
 	       failures);
 	return failures ? 1 : 0;
