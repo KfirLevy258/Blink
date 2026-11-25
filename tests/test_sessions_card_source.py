@@ -146,10 +146,10 @@ def test_ui_state_is_busy_until_the_gauges_are_attached():
     not yet measured on a desk). ui_state is busy until ui_settings_attach
     has run, so the bench's wait_state waits the clip out."""
     src = _src("ui_settings.c")
-    assert "bench_attached();" in _func(src, "ui_settings_attach")
+    assert "bench_attached = true;" in _func(src, "ui_settings_attach")
     bench = _func(src, "ui_settings_bench_state")
     busy = re.search(r"out->busy = (.*?);", bench, re.S).group(1)
-    assert re.match(r"\s*!attached\s*\|\|", busy), busy
+    assert re.match(r"\s*!bench_attached\s*\|\|", busy), busy
     # main.c attaches only after the splash, in both of its boot paths.
     main = _src("main.c")
     assert main.count("ui_settings_attach(") == 2

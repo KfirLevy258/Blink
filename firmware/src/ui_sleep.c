@@ -12,6 +12,7 @@
 #include <zephyr/sys/printk.h>
 #include <lvgl.h>
 
+#include "backlight.h"
 #include "bootclip.h"
 #include "proto.h"
 #include "sleep_gate.h"
@@ -91,18 +92,36 @@ static bool woken(void)
 	return wake_when() || ui_settings_busy();
 }
 
+/*
+ * The two stop callbacks double as the quiet-hours tick while a clip plays.
+ * ui_boot_play_clip pumps the protocol and LVGL between frames itself and
+ * never reaches service() below, and the close and loop clips are where a
+ * doze spends almost all of its time -- so without a tick here a dozing board
+ * would dim only when someone tapped it into a peek. The callback is asked
+ * once per frame; backlight_tick holds itself to once a second. The opening
+ * clip passes no callback, and is short enough not to matter.
+ */
 static bool awake_now(void)
 {
+	backlight_tick();
 	return woken();
 }
 
 static bool awake_or_tap(void)
 {
+	backlight_tick();
 	return woken() || tapped;
 }
 
 static void service(void)
 {
+	/*
+	 * Quiet hours, through the whole doze and the peek. A board whose
+	 * laptop is shut for the night is dozing (HOST LOST), so this is the
+	 * main case the schedule exists for -- and the main loop's 1 s tick,
+	 * which calls this too, does not run while ui_sleep_run has the loop.
+	 */
+	backlight_tick();
 	proto_service();
 	lv_timer_handler();
 	k_sleep(K_MSEC(5));

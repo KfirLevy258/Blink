@@ -12,12 +12,14 @@ for an app we do not control is exactly the kind of code that should never be
 able to stop it.
 """
 import dataclasses
+import os
 import sys
 import time
 
 from pc import (burn_reader, claude_account, claude_plan, cowork_audit,
-                desktop_idb, desktop_paths, normalizer, protocol,
-                session_rows, session_verdict, spend_count, weekly_anchor)
+                desktop_chat_activity, desktop_idb, desktop_paths, normalizer,
+                protocol, session_rows, session_verdict, spend_count,
+                weekly_anchor)
 from pc.providers import base
 from pc.providers import claude_cli
 from pc.providers import codex_state
@@ -51,7 +53,16 @@ FIRST_RETRY_AFTER_S = 60.0
 MAX_RETRY_AFTER_S = 900.0
 
 
-def default_providers(counter=None, plan=None, home=None, sweep=True):
+def _blink_home():
+    # cli.blink_home(), repeated rather than imported (cli is the heavy end
+    # of the program, and claude_home repeats it for the same reason).
+    # Resolved per call: a lookup at import would point at the real home
+    # before tests/conftest.py could move it (tests/test_sandbox.py).
+    return os.path.join(os.path.expanduser("~"), ".blink")
+
+
+def default_providers(counter=None, plan=None, home=None, sweep=True,
+                      publish_chat=True):
     """Every provider shipped today, in preference order.
 
     Order is not the merge rule -- pc/normalizer merges by recency per field,
@@ -66,11 +77,35 @@ def default_providers(counter=None, plan=None, home=None, sweep=True):
 
     `home` is IngestionBus's: whose drop folder the Claude Code providers
     read.
+
+    The activity provider also carries the Claude Desktop chat watcher, so a
+    chat that is answering lights the dot as one running session. Only this
+    one: `blink status` and the Codex union build their own
+    ClaudeStateProvider with no watcher, so their counts stay the hooks'.
+    The watcher reads its on/off setting from the native ~/.blink, the
+    folder config.json is in whatever claude_home says about Claude Code.
+
+    `publish_chat` has the watcher write its verdict to the Blink home
+    (desktop_chat_activity.READING_FILE), which is how `blink status`, a
+    process of its own, learns whether a chat is busy. True is the daemon's
+    case: the bridge builds its bus with the default. `blink status --wire`
+    also builds these providers, for one poll, and passes False, so a
+    one-shot look can never touch the daemon's reading. Any other one-shot
+    caller must pass False too: a publishing watcher's first poll writes no
+    verdict, but it does remove the reading already there (an earlier
+    daemon's, as far as it can know), which from a one-shot caller would
+    blank the running daemon's busy/idle line in `blink status` until that
+    daemon's next heartbeat (desktop_chat_activity, DesktopChatActivity.
+    _publish). As of 2026-11-25 the bridge's build_bus is the only caller
+    that leaves it True.
     """
+    chat = desktop_chat_activity.DesktopChatActivity(
+        blink_home=_blink_home(), publish=publish_chat)
     return [ClaudeCliProvider(counter=counter, plan=plan, home=home),
             ClaudeDesktopProvider(),
             ClaudeDesktopLocalStorageProvider(),
-            ClaudeStateProvider(home=home, sweep=sweep), CodexCliProvider(),
+            ClaudeStateProvider(home=home, sweep=sweep, chat=chat),
+            CodexCliProvider(),
             # LAST: it only ever offers a remembered projection, and every
             # source above it is polled first so any of them carrying a real
             # weekly reset is what observe() below learns from this cycle.
@@ -94,7 +129,7 @@ class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
                  now=time.time, burn=None, verdict=DEFAULT_VERDICT,
                  account=None, counter=None, plan_source=None, home=None,
-                 read_only=False):
+                 read_only=False, publish_chat=True):
         """`plan_source`, when given, is where the bus's one reader of
         Claude Code's config takes its view from instead of the file: a
         WSL home's pc/wsl_watch.WslWatch.view, which answers from memory,
@@ -118,7 +153,11 @@ class IngestionBus:
         nothing -- those providers were built by the caller, who gives a
         ClaudeCliProvider its counter directly -- and is asked only for
         spend_burn()'s buckets: a scenario's bus passes the scenario's
-        stand-in (scripted.ScriptedSpendCount) for exactly that."""
+        stand-in (scripted.ScriptedSpendCount) for exactly that.
+
+        `publish_chat` goes to default_providers when the bus builds its
+        own: True for the daemon, False for `blink status --wire`'s one
+        poll. Unused with `providers` given."""
         # The login watch (pc/claude_account), made here only for the
         # shipped providers. A bus built from a scenario exists to replay the
         # same timeline on any desk, and whoever happens to be signed in to
@@ -157,7 +196,8 @@ class IngestionBus:
                 counter = spend_count.SpendCounter()
             self._counter = counter
             self._providers = default_providers(counter, self._plan_reader,
-                                                home, sweep=not read_only)
+                                                home, sweep=not read_only,
+                                                publish_chat=publish_chat)
         else:
             self._providers = list(providers)
         self._preferred = preferred_provider

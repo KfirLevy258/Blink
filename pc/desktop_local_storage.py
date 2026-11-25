@@ -1,4 +1,4 @@
-"""Claude Desktop's five-hour usage record, and only that.
+"""Claude Desktop's five-hour usage record, the one value used here.
 
 The reasoning about this source lives here rather than in the provider, the
 way pc/statusline_source backs pc/providers/claude_cli. The provider is then
@@ -15,10 +15,27 @@ panel rather than an error if they are missed:
     and the next turn the stored percentage describes a window that no longer
     exists. The provider, not this module, decides what to publish then.
 
-This store holds no conversation content -- its other keys are onboarding
-flags, experiment toggles, activation checklists and an analytics queue. That
-is why it is the store this project reads. Anything that changes it to read a
-different one has to re-establish that property first.
+This store is not free of what a person wrote. Besides onboarding flags,
+experiment toggles and activation checklists it holds composer drafts
+(`composer-draft:*` keys: the text of a message typed and not yet sent) and an
+analytics queue whose events carry account and conversation ids. An earlier
+version of this docstring said otherwise; the drafts were found when the
+store was surveyed for the Desktop chat light. So the rule is about what is
+used, not about what is there: this project uses only the ochre_heron_tide
+usage record here and, for the Desktop chat light (pc/desktop_chat_activity),
+only each analytics event's name and time. Anything that uses another key has
+to re-establish first that it carries nothing of a conversation, a draft
+included.
+
+"Uses" is the honest word, not "keeps". To reach either key pc/leveldb parses
+the store's files whole, and its parse cache (_parse_cache) holds those
+parsed files in the daemon's memory while the daemon runs, up to 16 files
+and 4 MB at a time with the least recently used dropped first, drafts and the
+queue's account and conversation ids among them. That cache
+predates the chat light; the usage record has always been read through it.
+Nothing from it is written to disk, logged, printed or sent, and nothing
+leaves the computer. An earlier wording here said nothing else was "kept",
+which the cache made untrue.
 """
 import json
 

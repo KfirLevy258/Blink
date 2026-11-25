@@ -31,8 +31,8 @@ import sys
 import time
 from typing import NamedTuple
 
-from pc import (claude_home, install_codex_hooks, install_hooks,
-                install_statusline, ota, protocol, status_page,
+from pc import (claude_home, desktop_chat_activity, install_codex_hooks,
+                install_hooks, install_statusline, ota, protocol, status_page,
                 statusline_source, update, usage_refresh, user_config,
                 wifi_pair, win_driver, wsl)
 from pc import theme as theme_mod
@@ -1032,6 +1032,12 @@ def _light_rows(desk):
     if desk.desktop and not desk.hooks.light:
         missing.append("the activity light for Desktop's Code tab -- "
                        + _hooks_gap(desk.hooks))
+    # The Desktop chat light (pc/desktop_chat_activity) is deliberately not
+    # listed here. These rows answer "what do Blink's hooks give this desk",
+    # and a desk whose hooks are broken is told it has no activity light; a
+    # best-effort chat row beside that line would read as a contradiction at
+    # the end of an install. `blink status` reports the chat light on its own
+    # lines, where it cannot be mistaken for the hooks' light.
     return shown, missing
 
 
@@ -5258,7 +5264,18 @@ def cmd_uninstall(_args) -> int:
               *_spend_count_files(),
               # The usage refresh's state (when it last ran, why it turned
               # itself off) and any temp name a write of it left.
-              *_usage_refresh_files()):
+              *_usage_refresh_files(),
+              # The daemon's Desktop chat reading for `blink status`
+              # (pc/desktop_chat_activity.READING_FILE), and a pid-scoped
+              # temp name a killed write left. Harmless if kept -- it ages
+              # out in two minutes -- but uninstall takes what the app made.
+              os.path.join(blink_home(), desktop_chat_activity.READING_FILE),
+              # glob.escape: a Blink home with a "[" or "*" in it (a user
+              # name can hold one) is a pattern otherwise, and the leftover
+              # temp would match nothing and stay behind.
+              *glob.glob(glob.escape(os.path.join(
+                  blink_home(), desktop_chat_activity.READING_FILE))
+                  + ".*.tmp")):
         _rm(p)
     # The folder `claude -p /usage` runs in, and whatever Claude Code left
     # in it, subfolders included: the flat _rm_tree refused a folder holding
@@ -5927,6 +5944,9 @@ def cmd_status(args) -> int:
             if stale:
                 print(f"            {_shim_repair_line(stale, bridge_running)}")
 
+    for line in _desktop_chat_lines(desk):
+        print(line)
+
     # The most useful support answer: is fresh data actually arriving?
     #
     # A FRESH payload wins on any desk: something is rendering the status
@@ -6002,6 +6022,108 @@ def cmd_status(args) -> int:
             _session_window_line(*_claude_page(desk, plan))
             _codex_session_line(normalizer.merge(codex) if codex else None)
     return 0
+
+
+def _desktop_chat_lines(desk, watcher=None):
+    """status's Desktop chat rows, apart from the hooks' session count on
+    the Activity row, which stays the hooks' alone (_live_sessions).
+
+    Only where Claude Desktop is installed: on a desk without it, "not
+    available on this Desktop version" would name a program that is not
+    there.
+
+    The availability row always comes from a watcher of status's own,
+    polled once: whether the setting is off and whether Desktop's folders
+    are the shape the watcher can read are both answered by one look.
+
+    Whether a chat is answering is not, so it is not status's own watcher
+    that says it. The watcher's rule (pc/desktop_chat_activity) is that
+    only an IndexedDB write seen BETWEEN two polls can switch the light on;
+    the analytics queue's pending "sent" can only keep an already-lit light
+    on, because on its own it turned the light on for a chat that had
+    stopped answering long before (owner's review of the chat light,
+    2026-11-25). A one-shot poll only takes the baseline, so under that
+    rule it can never be busy, and printing its False as "idle" would be a
+    claim status cannot back -- the same desk could be lit on the board
+    while status said idle. Until 2026-11-25 this row was built from that
+    one poll and so said "busy" from the queue alone, the very fault the
+    rule was changed to remove. On macOS the watcher says nothing at all
+    until it has learned a churn sub-folder, several minutes in, which a
+    status run never lasts.
+
+    The watcher with that history is the running daemon's, and status is
+    another process. So the daemon's watcher writes its verdict to one
+    small file in the Blink home (desktop_chat_activity.READING_FILE:
+    the availability word, busy as a yes/no, the time it was written and
+    the daemon's own pid, nothing observed in Desktop's folders), and with
+    no `watcher` the busy/idle row is read from it. Only a reading younger
+    than READING_MAX_AGE_S counts, only while its writer is the daemon
+    still running, and only when both the daemon and status's own look say
+    "available". Until 2026-11-25 the time stamp alone decided, so after a
+    restart this row could print the old daemon's "busy" for up to two
+    minutes (a reviewer's finding). Now a new daemon's first poll removes
+    the old reading, and read_reading refuses one whose writer's pid is
+    gone: os.kill(pid, 0) on macOS and Linux, and on Windows, where
+    os.kill would terminate the process it asked about, OpenProcess and
+    GetExitCodeProcess, which only look; a Windows check that cannot tell
+    refuses the reading too. On Windows itself that check is (not yet
+    measured on a desk). With no
+    such reading -- the app is not running, has just started and not yet
+    written, or is a version that does not write the file -- there is no
+    busy/idle row: status cannot know, and a guess is a claim it cannot
+    back.
+
+    `watcher`, when given, is a watcher that has already been polling --
+    a test's, standing in for the daemon's -- so its next poll has a
+    baseline and its True/False means what the board shows. A caller that
+    hands in a fresh watcher would be repeating the one-shot fault, so do
+    not.
+
+    Each step is guarded on its own, so a watcher or a reading that raises
+    costs those rows and never the rest of status.
+    """
+    if not (desk.desktop or desk.desktop_installed):
+        return []
+    lines = []
+    busy = None
+    if watcher is not None:
+        try:
+            busy = watcher.poll(time.time())
+        except Exception:
+            busy = None
+        try:
+            said = watcher.availability()
+        except Exception:
+            said = None
+    else:
+        try:
+            chat = desktop_chat_activity.DesktopChatActivity(
+                blink_home=blink_home())
+        except Exception:
+            chat = None
+        try:
+            # availability() takes its one poll itself when none has run.
+            said = chat.availability() if chat is not None else None
+        except Exception:
+            said = None
+        try:
+            reading = desktop_chat_activity.read_reading(blink_home())
+        except Exception:
+            reading = None
+        if (reading is not None
+                and reading.get("availability")
+                == desktop_chat_activity.AVAILABLE):
+            busy = reading.get("busy")
+    word ={desktop_chat_activity.AVAILABLE: "available (best effort)",
+            desktop_chat_activity.UNAVAILABLE:
+                "not available on this Desktop version",
+            desktop_chat_activity.OFF: "turned off"}.get(said, "unknown")
+    lines.append(f"Desktop chat light: {word}")
+    # A bool and nothing else: a watcher whose poll answered something
+    # stranger has not told us either word.
+    if said == desktop_chat_activity.AVAILABLE and isinstance(busy, bool):
+        lines.append("Desktop chat: " + ("busy" if busy else "idle"))
+    return lines
 
 
 def _refresh_status(wsl_home, claude_ver=None) -> str:
@@ -6184,9 +6306,15 @@ def _wire_line(home=None, reachable=True):
         extra.update(burn={"claude": watch.burn_source(),
                            "codex": CodexBurnReader()},
                      plan_source=watch.view)
+    # publish_chat=False: this bus is one poll, and its chat watcher must not
+    # touch desktop_chat.json, the running daemon's reading, which is what
+    # the Desktop chat row above was just read from. A publishing watcher's
+    # first poll removes that file (it takes it for an earlier daemon's), so
+    # with True every --wire run would blank status's busy/idle line until
+    # the daemon's next heartbeat.
     bus = ingest.IngestionBus(
         verdict=session_verdict.SessionVerdict(persist=False),
-        counter=counter, **extra)
+        counter=counter, publish_chat=False, **extra)
     msg = bus.poll()
     _session_window_line(bus.claude_page(), bus.verdict())
     from pc.providers import codex_cli
@@ -6211,7 +6339,7 @@ def _age(seconds: float) -> str:
 
 
 def board_lines(known, ports, undriven=(), blink_cmd="blink",
-                can_update=True):
+                can_update=True, silent=()):
     """The Board lines of `blink status`, from what the app remembers and
     what is plugged in right now.
 
@@ -6226,9 +6354,26 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
     `ports`. They are reported in every branch rather than only in the empty
     one: a desk can hold a working board AND a second one Windows has not
     driven, and the working board's line would otherwise hide it.
+
+    `silent` is pc.link_status.silent_ports(): the ports the running daemon
+    gave up on after both hello passes. Only when every port here is in it
+    is a device reported as not answering; a port still being probed, or no
+    daemon to ask, keeps "none identified yet".
     """
     port = known.get("port")
     here = [d for d, _ in ports]
+    # The step anybody can take, for a device that stayed quiet. Never a
+    # flash command: see the silent branch below for why.
+    # With several devices listed "Unplug it" has nothing to point at
+    # (the plural lines above it say "devices" and "one"), so that case
+    # names the thing to unplug: the reader's own BLINK, not the Arduino
+    # beside it.
+    def replug(what="it"):
+        return [f"            Unplug {what} and plug it back in.",
+                "            If it stays this way, email"
+                " support@blink-buddy.com",
+                "            Include what this command prints:"
+                f" {blink_cmd} status"]
     chip = dict(ports)
     out = []
     if not ports and undriven:
@@ -6241,7 +6386,30 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
         if port:
             out.append(f"            last seen on {port}")
         return out
-    if port and port in here:
+    # The remembered port names a socket, not a device, so a record that
+    # calls it silent outranks the id and firmware remembered for that
+    # name: nothing on it answered as a BLINK through both passes.
+    #
+    # This is a guard on what is read from disk, not a state today's daemon
+    # writes. The daemon never puts the remembered port into its silent
+    # set: when that port stays quiet through the patient pass,
+    # may_reset_port() allows a reset and the daemon goes on to treat the
+    # port as connected, so it is never among the ports given up on. The
+    # consequences, stated so nobody reads more into the branch below:
+    #   - a BLINK that is crash-looping on the port it used before is still
+    #     shown here as identified, with its remembered id and firmware.
+    #     The "or isn't starting" line reaches it only on a port the app
+    #     has not seen it on (a different socket, a new machine, a deleted
+    #     board.json);
+    #   - likewise an Arduino clone plugged in where the BLINK used to be is
+    #     shown under the BLINK's remembered name until something else
+    #     identifies. That was so before issue #16 and is not changed here.
+    # link.json is still a file, and a later daemon may report differently,
+    # so the check stays: a port reported silent is never printed as the
+    # identified board. With a link up the record carries no silent ports,
+    # so a working board is always identified.
+    identified = bool(port) and port in here and port not in silent
+    if identified:
         ident = []
         if known.get("board_id"):
             ident.append(f"id {known['board_id']}")
@@ -6249,6 +6417,45 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
             ident.append(f"firmware {known['fw']}")
         tail = f" -- {', '.join(ident)}" if ident else ""
         out.append(f"Board       {port} ({chip[port]}){tail}")
+    elif here and all(d in silent for d in here):
+        # Every port here opened and stayed quiet through BOTH hello passes:
+        # the 1.5 s one and the 11 s one, which is long enough to hear even a
+        # board still booting (PROBE_PATIENT_S). The daemon puts a port in
+        # its silent set only then and reports it in link.json, because
+        # status itself never opens a port the daemon holds. Until issue #16
+        # this read "none identified yet" for ever, which the owner in #12
+        # took for "still working on it" and had to ask a chatbot about.
+        #
+        # What it says is what was measured and no more. The first wording,
+        # "This board has no BLINK firmware yet." followed by
+        # tools/burn-claude.sh, was refused in review for three reasons:
+        #   - burn-claude.sh stops without the Zephyr toolchain and the
+        #     private signing key, so a customer cannot run it (the same
+        #     thing that blocked #21), and the README's "Programming a unit"
+        #     it pointed at is the factory section;
+        #   - any quiet CH340 or CP210x lands here, an Arduino clone plugged
+        #     in while the BLINK runs over WiFi included, and it was being
+        #     told to take BLINK firmware;
+        #   - a BLINK that is crash-looping, or a fused one that is not
+        #     booting, is as silent as a blank one, and an owner whose board
+        #     ran yesterday must not read this as "re-flash it".
+        # So: a device that isn't answering as a BLINK, the two readings if
+        # it is one, and the step anybody can take. No flash command.
+        seen = ", ".join(f"{d} ({c})" for d, c in ports)
+        out.append(f"Board       {seen}")
+        if len(ports) == 1:
+            out.append("            A USB serial device here isn't answering"
+                       " as a BLINK.")
+            out.append("            If it is your BLINK, it has no firmware"
+                       " or isn't starting.")
+        else:
+            out.append("            The USB serial devices here aren't"
+                       " answering as a BLINK.")
+            out.append("            If one is your BLINK, it has no firmware"
+                       " or isn't starting.")
+        out += replug("it" if len(ports) == 1 else "your BLINK")
+        if port:
+            out.append(f"            last seen on {port}")
     elif here:
         seen = ", ".join(f"{d} ({c})" for d, c in ports)
         out.append(f"Board       none identified yet -- looking at {seen}")
@@ -6258,7 +6465,7 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
         out.append("Board       not plugged in"
                    + (f" (last seen on {port})" if port else ""))
     others = [(d, c) for d, c in ports if d != port]
-    if port and port in here and others:
+    if identified and others:
         names = ", ".join(f"{d} ({c})" for d, c in others)
         out.append(f"            other serial devices: {names}"
                    " -- asked once, not BLINK, left alone")
@@ -6309,9 +6516,14 @@ def board_lines(known, ports, undriven=(), blink_cmd="blink",
 def _board_lines():
     try:
         from claude_usage_bridge import describe_ports, remembered_board
+        from pc import link_status
+        # A stale or missing link.json (no daemon running) gives no silent
+        # ports, so nothing is called blank on a guess.
+        silent = link_status.silent_ports(link_status.read(blink_home()))
         return board_lines(remembered_board(blink_home()), describe_ports(),
                            win_driver.undriven_boards(), command_to_type(),
-                           can_update=_update_reaches_the_service())
+                           can_update=_update_reaches_the_service(),
+                           silent=silent)
     except Exception as e:
         return [f"Board       could not list serial ports: {e}"]
 
@@ -6908,6 +7120,25 @@ _CONFIG = {
          "nothing else has fresh figures and someone is at the computer. It",
          "sends no messages and uses no quota."),
         ("The bridge will not run Claude Code.",)),
+    # On unless turned off (desktop_chat_activity.DEFAULT_ON). The on-text
+    # says what is read because the watcher looks inside Desktop's own data
+    # folder, which holds the conversations: it lists and stats there, and
+    # of the analytics queue it uses only each event's name and time. "Uses",
+    # not "keeps": the queue is read through the Local Storage parser
+    # (pc/leveldb.py, _parse_cache), which holds whole parsed Local Storage
+    # files in the daemon's memory for the life of the process, up to 16
+    # files or 4 MB, account and conversation ids included (owner's review
+    # of the chat light, 2026-11-25). Nothing of it is written out, logged
+    # or sent; the on-text's promise is about what leaves the computer and
+    # what is looked at, and both still hold.
+    "desktop-chat-light": _Setting(
+        desktop_chat_activity.SETTING, desktop_chat_activity.config_state,
+        "light the activity dot while a Claude Desktop chat is answering"
+        " (best effort)",
+        ("The bridge will look at the names, sizes and times of Claude",
+         "Desktop's own files, and the name and time of each analytics",
+         "event. It reads no conversation, and nothing leaves the computer."),
+        ("The activity light comes only from Claude Code and Codex.",)),
 }
 
 
@@ -6921,9 +7152,12 @@ def cmd_config(args) -> int:
         return "unreadable" if on is None else ("on" if on else "off")
 
     if name is None:
+        # The name column is as wide as the longest name plus two:
+        # "desktop-chat-light" is 18, and ran into the state at 14.
+        wide = max(len(n) for n in _CONFIG) + 2
         for n, setting in _CONFIG.items():
             # 12 wide: "unreadable" is ten, and ran into the description.
-            print(f"{n:<14}{state(setting):<12}{setting.what}")
+            print(f"{n:<{wide}}{state(setting):<12}{setting.what}")
         return 0
     setting = _CONFIG[name]
     if value is not None:
@@ -7235,6 +7469,97 @@ def cmd_settings(args, opener=None, clock=time.monotonic,
     return 0
 
 
+def cmd_support(_args) -> int:
+    """Write a redacted support bundle and say what went into it (#20).
+
+    Reads only: `blink status` (run here, with its output captured), the
+    tail of bridge.log and the versions. It never stops, starts or restarts
+    the service (an owner runs this when the panel looks wrong, and a
+    restart would change what support is shown) and it opens no serial
+    port, which the running daemon holds. Every line of every file is cut
+    by pc/support.py's phrase lists; see its docstring.
+    """
+    import io
+    import platform
+    from pc import support
+
+    home = _home()
+    buf = io.StringIO()
+    status_dropped = 0
+    try:
+        # wire=False: the Wire row is the usage message itself.
+        with contextlib.redirect_stdout(buf):
+            cmd_status(argparse.Namespace(wire=False))
+        status_text, status_dropped = support.status_rows(buf.getvalue())
+    except Exception as e:
+        # The type alone: an exception's message can carry what it was
+        # reading, and the rows printed before it are not trusted half-way.
+        status_text = f"blink status could not run ({type(e).__name__})\n"
+
+    # Every version is asked for here, never read back out of the captured
+    # status: a value printed there can hold a line break, and "App
+    # 42.17.93" on a line of its own was once copied in as the app's
+    # version. The firmware's is the one the daemon wrote down at the
+    # board's last hello (board.json); asking the board would mean opening
+    # the port. The port and board id beside it in that file are not read.
+    firmware = claude = service = "unknown"
+    try:
+        from claude_usage_bridge import remembered_board
+        firmware = remembered_board(blink_home()).get("fw")
+        claude = ".".join(str(n) for n in claude_version()[1] or ())
+        service = "not checked" if _skip_service() else backend().status()
+    except Exception:
+        pass
+    # platform.system() and machine() only: platform.platform() carries the
+    # kernel build and node() is the computer's name.
+    field = support.system_field
+    system_text = "\n".join((
+        field("App version", RELEASE_VERSION),
+        field("Firmware", firmware),
+        field("Claude Code", claude),
+        field("Python", platform.python_version()),
+        field("System", platform.system(), support.SYSTEMS),
+        field("Machine", platform.machine(), support.MACHINES),
+        field("Frozen", "yes" if getattr(sys, "frozen", False) else "no",
+              ("yes", "no")),
+        "Service     " + support.keep_phrase(
+            str(service), support.STATUS_PHRASES["Bridge"]))) + "\n"
+
+    lines, dropped, found = support.log_tail(blink_home())
+    # The Desktop, where an owner will find it. It can be missing (a
+    # server, a redirected Desktop we could not find) or refuse the write:
+    # macOS does when Terminal was denied access to the Desktop folder, and
+    # that was a traceback here. Either way the file goes in ~/.blink.
+    desktop = support.desktop_dir(home)
+    path = None
+    for out_dir in (desktop, blink_home()) if desktop else (blink_home(),):
+        try:
+            path = support.build_bundle(out_dir, status_text, system_text,
+                                        lines, dropped + status_dropped)
+            break
+        except OSError as e:
+            failed = type(e).__name__
+    if path is None:
+        print(f"Could not write the support file ({failed}).")
+        return 1
+
+    print("Collected   blink status")
+    print("Collected   system info")
+    print("Collected   bridge.log (redacted)" if found
+          else "Skipped     bridge.log (none yet)")
+    print(f"Wrote       {support.show_path(path, home)}")
+    if out_dir != desktop:
+        # ~/.blink is hidden, and an owner who is not technical will not
+        # find it by looking, so say where the file is in full.
+        print("\nThe Desktop folder could not be used, so the file is in the\n"
+              "hidden Blink folder instead. Its full location is:\n"
+              f"            {path}")
+    print("\nSend this file to support.\n"
+          "Open it first to see what is inside; email it to"
+          " support@blink-buddy.com.")
+    return 0
+
+
 def cmd_run(args) -> int:
     """The daemon. This is what the login service starts.
 
@@ -7337,6 +7662,8 @@ def main(argv=None) -> int:
     settings_p.add_argument("panel", nargs="?",
                             choices=["look", "connect", "board"],
                             help="Which panel to open (default: connect)")
+    sub.add_parser("support",
+                   help="Collect a redacted file to send to support")
     run_p = sub.add_parser("run", help="Run the bridge in the foreground")
     run_p.add_argument("--port", default=None,
                        help="Serial port (default: find the board)")
@@ -7359,6 +7686,7 @@ def main(argv=None) -> int:
         "config": cmd_config,
         "theme": cmd_theme,
         "settings": cmd_settings,
+        "support": cmd_support,
         "run": cmd_run,
     }[args.cmd](args)
 
