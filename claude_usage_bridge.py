@@ -1302,9 +1302,21 @@ def main(argv=None):
     # and restated each heartbeat; sburn exactly as the token burn line.
     plan_frames = logbook.RepeatsBy("p", PLAN_LOGGED_FIELDS, "plan lines")
     sburn_frames = logbook.RepeatsBy("p", ("q",), "spend burn lines")
+    # The sessions card's rows (found in review of PR #34, 2026-11-25).
+    # pc/bridge.py's heartbeat forgets the page it last sent every 60 s, so
+    # the whole page goes out again each minute, a line per row: about 1440
+    # `-> srow` lines a day on an idle desk with one session, 10-20 thousand
+    # with four -- the bridge.log growth svc_frames was written to undo.
+    # Kept per row (`i`), like svc per page: the rows of one page alternate
+    # and a single Repeats would log every one. Compared on the rows on the
+    # page, the live total and the page (`n`, `tot`, `pg`) and on nothing
+    # else, so the name and the context reading never enter the comparison
+    # either -- a logged line means the list grew, shrank or turned a page.
+    srow_frames = logbook.RepeatsBy("i", ("n", "tot", "pg"), "session rows")
     _REPEATED = {"usage": usage_frames, "time": time_frames,
                  "svc": svc_frames, "burn": burn_frames,
-                 "plan": plan_frames, "sburn": sburn_frames}
+                 "plan": plan_frames, "sburn": sburn_frames,
+                 "srow": srow_frames}
     # For this computer's own Claude Code, in the folder `blink install`
     # recorded (pc/claude_home): a login service does not see the shell's
     # CLAUDE_CONFIG_DIR, so the watchdog guards the file install wrote --
@@ -1367,7 +1379,7 @@ def main(argv=None):
             print(f"[watchdog] {drifted}", file=sys.stderr)
         for line in (heartbeat.due(), usage_frames.due(), time_frames.due(),
                      svc_frames.due(), burn_frames.due(), plan_frames.due(),
-                     sburn_frames.due()):
+                     sburn_frames.due(), srow_frames.due()):
             if line:
                 print(line, file=sys.stderr)
         if logbook.rotate_if_full(_log_file, sys.stderr):

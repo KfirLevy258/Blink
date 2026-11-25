@@ -539,6 +539,8 @@ class ClaudeStateProvider(base.ProviderParser):
         self._dir = path
         self._now = now
         self._sweep = sweep
+        # The last _scan_details reading, for last_session_details().
+        self._details = {}
         # Anything with poll(now) -> bool: pc/desktop_chat_activity's watcher
         # in the daemon (ingest.default_providers), None everywhere else.
         # `blink status` counts hook sessions with a provider of its own and
@@ -629,7 +631,16 @@ class ClaudeStateProvider(base.ProviderParser):
         return live
 
     def _waiting_marked(self, path, now_epoch):
-        """Is the waiting marker present, and recent enough to mean it?
+        """Is the waiting marker present, and recent enough to mean it?"""
+        return self._marker_age(path, now_epoch) is not None
+
+    def _marker_age(self, path, now_epoch):
+        """The waiting marker's age when it is present and means it, else None.
+
+        The sessions card says how long a person has been asked, and the
+        marker's mtime is when they were: the slot beside it may have been
+        rewritten since by the same-second PreToolUse the marker exists to
+        survive (ON DISK), so the slot's clock is the wrong one for this row.
 
         Existence is nearly the whole answer -- the shim creates the file when
         a person is asked something and removes it when they answer -- but a
@@ -642,11 +653,13 @@ class ClaudeStateProvider(base.ProviderParser):
         try:
             age = now_epoch - os.path.getmtime(path)
         except OSError:
-            return False
+            return None
         # A clock that stepped backwards, exactly as derive_state treats it:
         # a negative age is a broken measurement, not a fresh file, and the
         # marker is present either way.
-        return age <= ABANDONED_AFTER_S
+        if age > ABANDONED_AFTER_S:
+            return None
+        return max(0.0, age)
 
     def ended_sessions(self, now_epoch):
         """The session ids the hook has buried, and swept once they age out.
@@ -697,12 +710,45 @@ class ClaudeStateProvider(base.ProviderParser):
 
         Sessions in STATE_UNKNOWN are absent from the mapping and are swept
         exactly as scan() always swept them.
+
+        Cut down from _scan_details, the one reading of the directory, so the
+        sessions card (session_details) and the panel's light cannot disagree
+        about which sessions exist or what state each is in.
         """
+        details, agents = self._scan_details(now_epoch)
+        return ({sid: (d[0], d[1]) for sid, d in details.items()}, agents)
+
+    def session_details(self, now_epoch):
+        """{session_id: (state, name, age_s, tool, event)}: one row each of
+        the sessions card (docs/sessions-card-design.md, pc/session_rows).
+
+        A fresh reading of the directory, sweeping as session_states does.
+        The daemon's bus asks last_session_details() instead, which is the
+        reading its own poll already made, so a card row is about the same
+        poll as the usage line beside it.
+
+        `age_s` is seconds since the session's last hook event, or since its
+        waiting marker for a session that needs you, never negative. `tool`
+        is the slot's tool name, "" when it has none -- a slot from a shim
+        older than the card, or any event but PreToolUse. `event` is the
+        slot's last event name.
+        """
+        return self._scan_details(now_epoch)[0]
+
+    def last_session_details(self):
+        """session_details() as the last poll, scan or session_states call
+        read it; {} before any."""
+        return self._details
+
+    def _scan_details(self, now_epoch):
+        """({session_id: (state, name, age_s, tool, event)}, live agents)."""
+        details = {}
+        self._details = details
         try:
             entries = os.listdir(self._dir)
         except OSError:
             # No hooks installed, or nothing has happened yet. Both normal.
-            return {}, 0
+            return details, 0
 
         # Called for what it COLLECTS rather than for what it returns. The
         # shim leaves a tombstone in this directory as well as in the Codex
@@ -730,7 +776,6 @@ class ClaudeStateProvider(base.ProviderParser):
         settle_pid_trust([(p, pl) for _, p, pl in slots if pl is not None],
                          now_epoch)
 
-        states = {}
         agents = 0
         for name, state_path, payload in slots:
             sid = name[: -len(".state")]
@@ -766,13 +811,28 @@ class ClaudeStateProvider(base.ProviderParser):
             # overwritten by a same-second PreToolUse. Nothing goes the other
             # way: no slot event clears a marker, because deciding a person
             # has answered is the shim's job, where the event order is known.
+            row_age = max(0.0, age)
             if self._waiting_marked(marker_path, now_epoch):
                 state = base.STATE_WAITING
+                # How long the person has been asked, which is the marker's
+                # age: see _marker_age.
+                marked = self._marker_age(marker_path, now_epoch)
+                if marked is not None:
+                    row_age = marked
 
-            states[sid] = (state, sess_name)
+            # The tool, and only as the shim wrote it: a string or nothing.
+            # The shim's pattern already refused anything that is not a
+            # plain short name; pc/session_rows only compares it with a
+            # fixed list and never puts it on the wire.
+            tool = payload.get("tool") if isinstance(payload, dict) else None
+            if not isinstance(tool, str):
+                tool = ""
+            event = payload.get("event") if isinstance(payload, dict) else ""
+            details[sid] = (state, sess_name, row_age, tool,
+                            event if isinstance(event, str) else "")
             agents += self._count_agents(os.path.join(self._dir, sid),
                                          now_epoch)
-        return states, agents
+        return details, agents
 
     def scan(self, now_epoch):
         """{state: n_sessions}, {state: [names]}, total live agents.

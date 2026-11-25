@@ -12,7 +12,9 @@ context windows and name the model in use. Both came off the panel -- with
 several agents running there are several contexts at different levels and no
 single number is any of them -- and what is left is account-wide: every open
 terminal reports the same two percentages, so the most recent render is as
-good as any.
+good as any. The sessions card brought context back per ROW, where one
+session's number is that session's (self._ctx, context_by_session): never
+onto the usage frame.
 
 Two payloads are remembered, each for a question the file in front of us
 cannot answer.
@@ -269,6 +271,32 @@ class ClaudeCliProvider(base.ProviderParser):
         # recognised against. See _reply_without_window and
         # REPLY_MEMORY_LIMIT.
         self._costs = {}
+        # {session_id: (context %, mtime)}, for the sessions card's context
+        # bar (docs/sessions-card-design.md, "Context per session"). Claude
+        # Code puts context_window.used_percentage on each render of its
+        # status line, and the file is ONE file shared by every terminal on
+        # the desk (tools/blink-statusline.sh says why it is not one per
+        # session): a render from one terminal can be overwritten by
+        # another's before a poll reads it. So what a row shows is the
+        # session's newest render that a poll SAW, keyed by the id in the
+        # payload that carried it -- a missed render is corrected by the
+        # same session's next one, and one session's figure can never land
+        # on another's row. (not yet measured on a desk.) Bounded like
+        # _costs, by REPLY_MEMORY_LIMIT, oldest dropped first; in memory
+        # only, never logged and never saved.
+        #
+        # Fed by the poll AND by sample_context, which the daemon's serial
+        # loop calls on every pass (about every 0.2 s) so that a render
+        # overwritten before the next poll is still seen; see there.
+        self._ctx = {}
+        # The status-line file's signature (_file_sig) when sample_context
+        # last read it, so an unchanged file is stat'ed and not re-read; and
+        # the path the last poll resolved, which the sampler reads rather
+        # than resolving its own five times a second (path() asks
+        # claude_home.current(), which reads ~/.blink/config.json). None
+        # before the first sample / poll.
+        self._ctx_sig = None
+        self._ctx_path = None
         # The replies without a window so far, for the whole desk: [first
         # reply's mtime, latest one's], or None. See _reply_without_window.
         # In memory only, so a restarted daemon starts the chain again.
@@ -925,6 +953,113 @@ class ClaudeCliProvider(base.ProviderParser):
             self._stale_owed = False
         self._login_fp, self._login_mtime = fp, (view.mtime or None)
 
+    def _note_context(self, payload, mtime):
+        """Remember this render's context fullness under its session id.
+
+        Accepted only as a finite int or float (a bool is not a number here)
+        in 0..100, rounded to a whole percent; anything else is not stored
+        and the value already held for that session stays. An unknown value
+        is absent, never 0: a bar at 0% would say the context is empty, which
+        is a reading, and we did not take one. See self._ctx.
+
+        True when the session's held figure changed (sample_context's
+        answer); falsy otherwise.
+        """
+        if not isinstance(payload, dict):
+            return
+        sid = payload.get("session_id")
+        if not isinstance(sid, str) or not sid:
+            return
+        cw = payload.get("context_window")
+        pct = cw.get("used_percentage") if isinstance(cw, dict) else None
+        if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+            return
+        # Floats only for isfinite: an int is always finite, and converting
+        # one of 310 digits to a float raises OverflowError (the same trap
+        # codex_cli._no_short_window documents).
+        if isinstance(pct, float) and not math.isfinite(pct):
+            return
+        if not (0 <= pct <= 100):
+            return False
+        before = self._ctx.pop(sid, None)
+        self._ctx[sid] = (int(round(pct)), mtime)     # newest last, for the cap
+        while len(self._ctx) > REPLY_MEMORY_LIMIT:
+            del self._ctx[next(iter(self._ctx))]
+        return before is None or before[0] != self._ctx[sid][0]
+
+    def context_by_session(self):
+        """{session_id: context %} as the polls and samples so far have seen
+        it rendered: the sessions card's bar (pc/session_rows). A session
+        with no entry has no known figure."""
+        return {sid: v[0] for sid, v in self._ctx.items()}
+
+    def sample_context(self):
+        """Take the context figure off the status-line file if it has been
+        rewritten since the last sample; True when a session's figure moved.
+
+        Why this exists. The file is ONE file for every terminal on the desk
+        (tools/blink-statusline.sh renames each render over the last), and
+        the poll that otherwise reads it runs on the fast tick, every
+        FAST_POLL_INTERVAL_S = 2 s (claude_usage_bridge; POLL_INTERVAL_S = 60
+        s is the heartbeat), and only while the board answers. Session A
+        rendering at 31 % and session B at 64 % inside one such interval
+        left only B's render for the poll to read, so A's row kept a figure
+        from an earlier render, or had none (review of the sessions card,
+        2026-11-25). The daemon's serial loop turns once per read, and a read
+        waits at most its 0.2 s timeout, on USB (serial.Serial timeout=0.2)
+        and on WiFi alike (wifi_link.SecureLink.read, _pump(0.2)); this is
+        called on every turn (Bridge.pump), so the window in which a second
+        render can hide the first shrinks from 2 s to about 0.2 s -- longer
+        only for the pass that also runs a poll, by whatever that poll costs.
+        Two renders inside one pass still lose the first, until that
+        session's next render: how often Claude Code renders is not yet
+        measured on a desk. The whole fix is a file per session written by
+        the status-line script, which this change does not make
+        (docs/sessions-card-design.md, "Context per session").
+
+        Cheap on purpose: one stat a pass, and a read only when the file's
+        signature (inode, mtime_ns, size; claude_plan.signature) moved.
+        The shim writes by rename, so every render is a new inode and a
+        half-written file is never in place; a file that does not parse
+        anyway (Windows, a share) reads as nothing and its signature is
+        kept, so the render that replaces it is read when it lands.
+
+        Context only. Nothing here touches what a poll decides from the file
+        -- the frames, the memories, the reply chain, the spend count, the
+        newest-render time -- so a sample between polls can change no usage
+        figure; the poll reads the file itself as it always did, and the
+        same render noted twice is the same figure.
+
+        The old login's render is refused here as the poll refuses it
+        (_note_login, _status_frames): while self._old_render marks the
+        file, it is the render that was in place when a /login switch was
+        seen, and the poll does not take its context either, so the sampler
+        must not be a second way past that refusal. The mark is only read
+        here, never set or cleared: which render is the new login's is the
+        poll's to decide. A sid's context is that session's whatever the
+        login, so the refusal costs at most that one render, the next being
+        the new login's.
+
+        Never raises (a failure is "nothing new"), never logs, and stores
+        nothing but the figure _note_context accepts; the path is resolved
+        here, at call time, never at import (CLAUDE.md, the sandbox hole).
+        """
+        try:
+            path = self._ctx_path
+            if path is None:
+                path = self.path()
+            sig = _file_sig(path)
+            if sig is None or sig is _ABSENT or sig == self._ctx_sig:
+                return False
+            mark = self._old_render
+            if mark is not None and (mark is _UNSTATED or sig == mark):
+                return False
+            self._ctx_sig = sig
+            payload, mtime = ss.read_payload(path)
+            return bool(self._note_context(payload, mtime))
+        except Exception:
+            return False
+
     def _status_frames(self, now_epoch):
         """The frames the status line gives this poll; see the module
         docstring."""
@@ -941,8 +1076,18 @@ class ClaudeCliProvider(base.ProviderParser):
         back = self._polled_at is not None and now_epoch < self._polled_at
         self._polled_at = now_epoch
         self._live = None
+        # Resolved once a poll, as it always was, and kept for
+        # sample_context, which reads the same file between polls.
+        path = self.path()
+        if path != self._ctx_path:
+            # A signature is only meaningful for the file it was taken off:
+            # the config's `out` folder moved (or this is the first poll
+            # after a sample resolved its own path), so what the sampler
+            # last saw says nothing about the file it will stat next.
+            self._ctx_sig = None
+        self._ctx_path = path
         if self._old_render is not None:
-            sig = _file_sig(self.path())
+            sig = _file_sig(path)
             if self._old_render is _UNSTATED and sig is not None:
                 self._old_render = sig
             if sig is None or sig == self._old_render:
@@ -952,9 +1097,10 @@ class ClaudeCliProvider(base.ProviderParser):
             else:
                 self._old_render = None
         if self._old_render is None:
-            payload, mtime = ss.read_payload(self.path())
+            payload, mtime = ss.read_payload(path)
             mtime = self._dated(mtime, now_epoch)
         self._read = (payload, mtime)
+        self._note_context(payload, mtime)
         if (self._render_at is not None
                 and self._render_at > now_epoch + spend_count.SKEW_S):
             # Kept from a clock that has since gone back: the newest render

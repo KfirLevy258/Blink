@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import pathlib
 import sys
@@ -1356,3 +1357,466 @@ def test_ask_and_answer_are_logged_by_type_alone(capsys):
     b.on_message({"t": "answer", "v": 2, "id": "refresh", "a": "later"})
     err = capsys.readouterr().err
     assert "refresh" not in err and "later" not in err
+
+
+# --- the sessions card: srow and spage (docs/sessions-card-design.md) ---------
+
+def _row(name, kind="work", age=10, ctx=None, pv="c"):
+    from pc import session_rows
+    return session_rows.Row(pv, name, kind, age, ctx)
+
+
+class _RowsFetch:
+    """A fetch with the bus's session_rows accessor; the rows are the test's."""
+
+    def __init__(self, rows=()):
+        self.rows = list(rows)
+        self._usage = protocol.usage(61.0, "R1", 26.0, "R2", [])
+
+    def __call__(self):
+        return dict(self._usage)
+
+    def session_rows(self):
+        return list(self.rows)
+
+
+def _rows_bridge(rows=(), caps=("sessions",), fetch=None):
+    sent = []
+    clock = FakeClock()
+    fetch = _RowsFetch(rows) if fetch is None else fetch
+    b = Bridge(write_msg=sent.append, fetch_usage=fetch, now=clock.now,
+               wall=lambda: (1752444000, 180),
+               board_caps_hint=list(caps) if caps is not None else None,
+               **_NO_FEED)
+    return b, sent, fetch, clock
+
+
+def _srows(sent):
+    return [m for m in sent if m.get("t") == "srow"]
+
+
+def test_no_srow_to_a_board_without_the_sessions_cap():
+    b, sent, _, _ = _rows_bridge([_row("A")], caps=("svc",))
+    b.poll_once()
+    b.poll_if_changed()
+    b.on_message({"t": "spage", "v": 2, "p": 0})
+    assert _srows(sent) == []
+
+
+def test_a_fetch_without_session_rows_sends_nothing():
+    b, sent, _, _ = _rows_bridge(
+        fetch=lambda: protocol.usage(61.0, "R1", 26.0, "R2", []))
+    b.poll_once()
+    b.poll_if_changed()
+    assert _srows(sent) == []
+
+
+def test_the_page_goes_once_and_then_only_on_change():
+    fetch = _RowsFetch([_row("A", age=10), _row("B", kind="idle", age=20)])
+    b, sent, _, _ = _rows_bridge(fetch=fetch)
+    b.poll_once()
+    rows = _srows(sent)
+    assert [(m["i"], m["n"], m["tot"], m["pg"], m["nm"]) for m in rows] == [
+        (0, 2, 2, 0, "A"), (1, 2, 2, 0, "B")]
+    del sent[:]
+    b.poll_if_changed()
+    assert _srows(sent) == []
+    # Seconds inside the same minute are the board's to count.
+    fetch.rows = [_row("A", age=50), _row("B", kind="idle", age=59)]
+    b.poll_if_changed()
+    assert _srows(sent) == []
+    # A minute boundary, or a new kind, is a change.
+    fetch.rows = [_row("A", kind="edit", age=50), _row("B", kind="idle",
+                                                       age=59)]
+    b.poll_if_changed()
+    assert [m["k"] for m in _srows(sent)] == ["edit", "idle"]
+    del sent[:]
+    fetch.rows = [_row("A", kind="edit", age=61), _row("B", kind="idle",
+                                                       age=59)]
+    b.poll_if_changed()
+    assert len(_srows(sent)) == 2
+
+
+def test_the_heartbeat_restates_an_unchanged_page_once():
+    b, sent, _, _ = _rows_bridge([_row("A")])
+    b.poll_once()
+    del sent[:]
+    b.poll_once()
+    assert len(_srows(sent)) == 1
+
+
+def test_after_a_hello_the_page_follows_the_quiet_window():
+    b, sent, _, clock = _rows_bridge([_row("A")])
+    b.poll_once()
+    del sent[:]
+    b.on_message({"t": "hello", "v": 2, "caps": ["sessions"]})
+    # Not inside the hello burst (tests/pc/test_hello_burst.py).
+    assert _srows(sent) == []
+    clock.t += 3
+    b.poll_if_changed()
+    assert [m["nm"] for m in _srows(sent)] == ["A"]
+
+
+def test_spage_is_answered_with_that_page_at_once():
+    rows = [_row(f"p{i}", age=i) for i in range(9)]
+    b, sent, _, _ = _rows_bridge(rows)
+    b.on_message({"t": "hello", "v": 2, "caps": ["sessions"]})
+    del sent[:]
+    # Inside the quiet window, and answered all the same: the board asked.
+    b.on_message({"t": "spage", "v": 2, "p": 2})
+    got = _srows(sent)
+    assert [(m["i"], m["n"], m["tot"], m["pg"], m["nm"]) for m in got] == [
+        (0, 1, 9, 2, "p8")]
+    del sent[:]
+    b.on_message({"t": "spage", "v": 2, "p": 1})
+    assert [m["nm"] for m in _srows(sent)] == ["p4", "p5", "p6", "p7"]
+    # Past the end is the last page; a page that is not an integer is no ask.
+    del sent[:]
+    b.on_message({"t": "spage", "v": 2, "p": 40})
+    assert {m["pg"] for m in _srows(sent)} == {2}
+    del sent[:]
+    for bad in (True, "1", 1.0, None):
+        b.on_message({"t": "spage", "v": 2, "p": bad})
+    assert _srows(sent) == []
+
+
+def test_the_asked_page_is_kept_until_the_next_hello():
+    rows = [_row(f"p{i}", age=i) for i in range(6)]
+    b, sent, _, clock = _rows_bridge(rows)
+    b.on_message({"t": "spage", "v": 2, "p": 1})
+    del sent[:]
+    b.poll_once()
+    assert {m["pg"] for m in _srows(sent)} == {1}
+    b.on_message({"t": "hello", "v": 2, "caps": ["sessions"]})
+    del sent[:]
+    clock.t += 3
+    b.poll_if_changed()
+    assert {m["pg"] for m in _srows(sent)} == {0}
+
+
+def test_an_empty_list_is_one_line_with_no_row():
+    b, sent, _, _ = _rows_bridge([])
+    b.poll_once()
+    assert _srows(sent) == [{"t": "srow", "v": protocol.VERSION, "i": 0,
+                             "n": 0, "tot": 0, "pg": 0}]
+
+
+def test_two_sessions_each_carry_their_own_context():
+    b, sent, _, _ = _rows_bridge([_row("A", ctx=30), _row("B", ctx=70),
+                                  _row("C", ctx=None, pv="x")])
+    b.poll_once()
+    got = {m["nm"]: m.get("cx") for m in _srows(sent)}
+    assert got == {"A": 30, "B": 70, "C": None}
+    assert all(protocol.encode_checked(m)[1] is None for m in _srows(sent))
+
+
+def test_an_unknown_context_omits_cx_and_is_never_zero():
+    b, sent, _, _ = _rows_bridge([_row("A", ctx=None), _row("B", ctx=0)])
+    b.poll_once()
+    got = {m["nm"]: m for m in _srows(sent)}
+    assert "cx" not in got["A"]
+    assert got["B"]["cx"] == 0           # a reading of zero is still a reading
+
+
+def test_a_failing_sampler_with_a_message_never_stops_or_prints(capsys):
+    fetch = _SamplingFetch([_row("A")])
+
+    def boom():
+        raise OSError("secret-figure-73")
+
+    fetch.sample_context = boom
+    b, sent, _, _ = _rows_bridge(fetch=fetch)
+    b.poll_once()
+    del sent[:]
+    for _ in range(3):
+        b.pump()
+    b.poll_if_changed()
+    err = capsys.readouterr().err
+    assert "secret-figure-73" not in err and "sample" not in err
+
+
+def _daemon_srow_logger():
+    """The RepeatsBy the daemon really builds for srow, rebuilt from its own
+    source, plus the proof that main() wires it: `srow_frames` is assigned a
+    RepeatsBy, registered in _REPEATED under "srow" and flushed with .due().
+    The key is read from the daemon, not copied here, so changing it changes
+    what these tests exercise."""
+    from pc import logbook
+    tree = _daemon_tree()
+    built = None
+    registered = False
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            continue
+        name = node.targets[0].id
+        if (name == "srow_frames" and isinstance(node.value, ast.Call)
+                and node.value.func.attr == "RepeatsBy"):
+            built = [ast.literal_eval(a) for a in node.value.args]
+        if name == "_REPEATED" and isinstance(node.value, ast.Dict):
+            for k, v in zip(node.value.keys, node.value.values):
+                if (isinstance(k, ast.Constant) and k.value == "srow"
+                        and isinstance(v, ast.Name)
+                        and v.id == "srow_frames"):
+                    registered = True
+    assert built is not None, "the daemon builds no srow_frames"
+    assert registered, "srow is not in _REPEATED"
+    assert "srow_frames.due()" in ast.unparse(tree)
+    by, fields, label = built
+    # Only what the transcript allowlist keeps for srow: never nm or cx.
+    assert by in protocol.TAP_FIELDS["srow"]
+    assert set(fields) <= protocol.TAP_FIELDS["srow"]
+    return logbook.RepeatsBy(by, fields, label)
+
+
+def test_the_daemon_counts_unchanged_session_rows_instead_of_logging_them():
+    """The heartbeat re-sends the page every minute; logged in full that was
+    about 1440 `-> srow` lines a day with one session, 10-20 thousand with
+    four (review of PR #34, 2026-11-25). Through the same RepeatsBy the
+    daemon builds: a day of heartbeats over an unchanged four-row page logs
+    each row once, and a real change -- a session that ends -- still logs."""
+    r = _daemon_srow_logger()
+    logged = []
+    wire = []
+    fetch = _RowsFetch([_row(f"S{k}", age=10 + k) for k in range(4)])
+    b, sent, _, _ = _rows_bridge(fetch=fetch)
+
+    def heartbeats(count):
+        for _ in range(count):
+            b.poll_once()
+            b.poll_if_changed()
+            wire.extend(_srows(sent))
+            for m in _srows(sent):
+                if r.worth_logging(m):
+                    logged.append(protocol.log_name(m))
+            del sent[:]
+
+    heartbeats(1)
+    assert logged == ["srow"] * 4
+    heartbeats(1439)
+    # The board was told every minute; the log was not.
+    assert len(wire) >= 1440 * 4
+    assert logged == ["srow"] * 4, len(logged)
+
+    fetch.rows = fetch.rows[:3]
+    heartbeats(5)
+    assert logged == ["srow"] * 7
+
+
+def test_an_empty_session_list_and_a_page_turn_are_each_logged():
+    r = _daemon_srow_logger()
+    rows = [_row(f"p{i}", age=i) for i in range(9)]
+    fetch = _RowsFetch([])
+    b, sent, _, _ = _rows_bridge(fetch=fetch)
+    logged = []
+
+    def drain():
+        logged.extend(protocol.log_name(m) for m in _srows(sent)
+                      if r.worth_logging(m))
+        del sent[:]
+
+    for _ in range(3):
+        b.poll_once()
+        b.poll_if_changed()
+        drain()
+    assert logged == ["srow"]  # the n=0 line, once
+
+    fetch.rows = rows
+    b.on_message({"t": "spage", "v": 2, "p": 2})  # the last page, one row
+    drain()
+    after_first_page = len(logged)
+    assert after_first_page == 2  # the n=0 line, then n=1 differs
+    b.on_message({"t": "spage", "v": 2, "p": 0})
+    drain()
+    after_first_page = len(logged)
+    assert after_first_page == 6  # page 0: n=4, pg=0 -- four new rows
+    b.on_message({"t": "spage", "v": 2, "p": 0})
+    drain()
+    assert len(logged) == after_first_page  # same page again: counted only
+    b.on_message({"t": "spage", "v": 2, "p": 1})
+    drain()
+    assert len(logged) > after_first_page  # pg differs: logged
+
+
+def test_the_daemons_writer_logs_srow_only_through_the_repeats_gate():
+    """The tests above run a RepeatsBy rebuilt from the daemon's config, so
+    they would still pass if the writer (`send`, inside main) stopped asking
+    it. Read the writer itself: an `if kind in _REPEATED` whose test is
+    `_REPEATED[kind].worth_logging(m)` guards a print of log_name(m) -- the
+    type and nothing else -- and no other print of a message precedes it."""
+    send = next(n for n in ast.walk(_main_node())
+                if isinstance(n, ast.FunctionDef) and n.name == "send")
+    gates = [n for n in ast.walk(send) if isinstance(n, ast.If)
+             and "kind in _REPEATED" == ast.unparse(n.test)]
+    assert len(gates) == 1, "the writer has no _REPEATED dispatch"
+    gate = gates[0]
+    inner = [n for n in gate.body if isinstance(n, ast.If)]
+    assert len(inner) == 1
+    assert ast.unparse(inner[0].test) == "_REPEATED[kind].worth_logging(m)"
+    prints = [ast.unparse(n) for n in ast.walk(inner[0])
+              if isinstance(n, ast.Call)
+              and getattr(n.func, "id", None) == "print"]
+    assert len(prints) == 1 and "protocol.log_name(m)" in prints[0]
+    # The fall-through branch must not log srow: it is an elif on the gate.
+    assert gate.orelse and isinstance(gate.orelse[0], ast.If)
+    assert "srow" not in ast.unparse(gate.orelse[0].test)
+
+
+def test_the_session_row_log_key_never_holds_a_name_or_context():
+    fields = _daemon_srow_logger()._make()._fields
+    assert "nm" not in fields and "cx" not in fields
+
+
+def test_srow_lines_log_and_redact_without_the_name(capsys):
+    b, sent, _, _ = _rows_bridge([_row("Secret-Project", ctx=55)])
+    b.poll_once()
+    assert "Secret-Project" not in capsys.readouterr().err
+    for m in _srows(sent):
+        assert protocol.log_name(m) == "srow"
+        assert "nm" not in protocol.redact(m)
+
+
+# --- the context sampler, once per serial-loop pass ----------------------------
+
+class _SamplingFetch(_RowsFetch):
+    """A fetch with the bus's sample_context accessor, recording each call
+    and whether a poll had run at that point."""
+
+    def __init__(self, rows=()):
+        super().__init__(rows)
+        self.events = []
+
+    def __call__(self):
+        self.events.append("poll")
+        return super().__call__()
+
+    def sample_context(self):
+        self.events.append("sample")
+        return False
+
+
+def test_every_pass_samples_context_between_polls():
+    """The daemon calls pump() on every pass of its serial loop (about every
+    0.2 s) and the polls far less often: the samples land between them, and
+    sampling writes nothing."""
+    fetch = _SamplingFetch([_row("A", ctx=30)])
+    b, sent, _, _ = _rows_bridge(fetch=fetch)
+    b.poll_once()
+    before = len(sent)
+    for _ in range(9):
+        b.pump()
+    assert len(sent) == before
+    b.poll_if_changed()
+    assert fetch.events == ["poll"] + ["sample"] * 9 + ["poll"]
+
+
+def test_a_fetch_without_the_sampler_is_skipped():
+    b, sent, _, _ = _rows_bridge([_row("A")])
+    b.pump()
+    b = _rows_bridge(fetch=lambda: protocol.usage(61.0, "R1", 26.0, "R2",
+                                                  []))[0]
+    b.pump()
+
+
+def test_a_sampler_that_raises_costs_nothing(capsys):
+    fetch = _SamplingFetch()
+
+    def boom():
+        raise RuntimeError("x")
+
+    fetch.sample_context = boom
+    b, _, _, _ = _rows_bridge(fetch=fetch)
+    for _ in range(3):
+        b.pump()
+    assert capsys.readouterr().err == ""
+
+
+def _sampling_bus(tmp_path, clock, details):
+    """The real bus over the real status-line provider, with the hooks'
+    sessions given: only the state reader is a stand-in, so the rows are
+    built by IngestionBus._collect_rows and session_rows.build_rows."""
+    from pc import ingest
+    from pc.providers.claude_cli import ClaudeCliProvider
+    from pc.providers.claude_state import ClaudeStateProvider
+
+    class _State(ClaudeStateProvider):
+        def poll(self, now_epoch):
+            return []
+
+        def last_session_details(self):
+            return dict(details)
+
+    p = tmp_path / "statusline.json"
+    bus = ingest.IngestionBus(
+        providers=[_State(path=str(tmp_path / "state"), sweep=False),
+                   ClaudeCliProvider(path=str(p))],
+        now=clock.now)
+    return bus, p
+
+
+def _render(p, sid, pct, mtime):
+    body = {"session_id": sid, "context_window": {"used_percentage": pct},
+            "rate_limits": {"five_hour": {"used_percentage": 27.0,
+                                          "resets_at": mtime + 3600},
+                            "seven_day": {"used_percentage": 12.0}}}
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(body), encoding="utf-8")
+    os.utime(tmp, (mtime, mtime))
+    tmp.replace(p)          # by rename, as tools/blink-statusline.sh writes
+
+
+def test_two_sessions_reporting_between_polls_each_get_their_own_cx(tmp_path):
+    """The review's case end to end: session A renders 31 %, then B's render
+    at 64 % replaces it in the one shared file, both between two polls; with
+    a serial-loop pass (pump) after each, the next fast tick sends one srow
+    per session, each with its own cx."""
+    clock = FakeClock()
+    clock.t = 1_787_700_000.0
+    details = {sid: (base.STATE_RUNNING, name, 5, "", "UserPromptSubmit")
+               for sid, name in (("sess-a", "A"), ("sess-b", "B"))}
+    bus, p = _sampling_bus(tmp_path, clock, details)
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=bus.fetch(), now=clock.now,
+               wall=lambda: (1752444000, 180),
+               board_caps_hint=["sessions"], **_NO_FEED)
+    _render(p, "sess-a", 10, clock.t - 120)
+    b.poll_once()
+    assert {m["nm"]: m.get("cx") for m in _srows(sent)} == {"A": 10,
+                                                            "B": None}
+    del sent[:]
+    clock.t += 1
+    _render(p, "sess-a", 31, clock.t - 1)
+    b.pump()
+    _render(p, "sess-b", 64, clock.t - 0.5)
+    b.pump()
+    clock.t += 1
+    b.poll_if_changed()
+    got = _srows(sent)
+    assert {m["nm"]: m.get("cx") for m in got} == {"A": 31, "B": 64}
+    assert all(protocol.encode_checked(m)[1] is None for m in got)
+
+
+def test_without_a_pass_between_the_renders_the_first_is_lost(tmp_path):
+    """The residue, pinned at the Bridge: two renders inside one pass are
+    the old failure shape. A keeps its earlier figure; B's never lands on
+    A's row."""
+    clock = FakeClock()
+    clock.t = 1_787_700_000.0
+    details = {sid: (base.STATE_RUNNING, name, 5, "", "UserPromptSubmit")
+               for sid, name in (("sess-a", "A"), ("sess-b", "B"))}
+    bus, p = _sampling_bus(tmp_path, clock, details)
+    sent = []
+    b = Bridge(write_msg=sent.append, fetch_usage=bus.fetch(), now=clock.now,
+               wall=lambda: (1752444000, 180),
+               board_caps_hint=["sessions"], **_NO_FEED)
+    _render(p, "sess-a", 10, clock.t - 120)
+    b.poll_once()
+    del sent[:]
+    clock.t += 1
+    _render(p, "sess-a", 31, clock.t - 1)
+    _render(p, "sess-b", 64, clock.t - 0.5)
+    b.pump()
+    clock.t += 1
+    b.poll_if_changed()
+    assert {m["nm"]: m.get("cx") for m in _srows(sent)} == {"A": 10,
+                                                            "B": 64}

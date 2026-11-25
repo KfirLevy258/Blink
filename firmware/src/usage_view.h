@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "msg_parse.h"	/* struct msg_srow, and fmt.h's tones with it */
 
 /*
  * A provider id as the board keeps it, NUL included: what proto.c reads
@@ -384,5 +385,57 @@ const char *usage_view_bench_focus(void);
 void usage_view_set_plan(const char *prov, const char *plan,
 			 const char *period, const char *acct,
 			 double usd, double lim, bool est, bool hint);
+
+/*
+ * THE SESSIONS CARD's rows (docs/sessions-card-design.md).
+ *
+ * The table lives here, beside the counts the pip row draws, rather than in
+ * proto.c: proto.c is not compiled in the host harness, this file is, so a
+ * harness can seed rows through the same call the wire uses. The card itself
+ * is ui_settings.c's; this file only keeps what the daemon said.
+ */
+
+/*
+ * One parsed `srow` line (msg_parse_srow), and the uptime it arrived at
+ * (k_uptime_get(), from the caller). A line whose page, row count or total
+ * differs from the table's starts the table again: the daemon sends a page
+ * whole, row by row, and a row of the old page must never sit beside the
+ * new one's. n 0 empties the list. Data, not a widget: kept with or without
+ * the screen built. Nothing of it is ever logged.
+ */
+void usage_view_set_srow(const struct msg_srow *r, int64_t at_ms);
+
+/* Forget every row: HOST LOST, where the daemon that described the sessions
+ * is gone, and the card must not go on naming them. */
+void usage_view_clear_srows(void);
+
+/*
+ * What the table holds. `n`, `tot` and `pg` as the last line said them (all
+ * 0 before any, which the card reads as "No sessions open"); a row index
+ * 0..n-1 that has not arrived yet returns false from usage_view_srow().
+ * `gen` moves on every change, so the card redraws only when it must.
+ */
+struct usage_srows {
+	int n, tot, pg;
+	uint32_t gen;
+	bool seen;		/* any srow line since boot or the last clear */
+};
+void usage_view_srows(struct usage_srows *out);
+
+/* Row `i` of the page held, and its age in seconds as of `now_ms` -- the
+ * wire's `age` counted up from the moment the row arrived. */
+bool usage_view_srow(int i, int64_t now_ms, struct msg_srow *out);
+
+/*
+ * A tap on the pip row asked for the card, once: true at most once per tap,
+ * and the request cleared by reading it. The tap area's own callback only
+ * raises this; ui_settings_service() decides whether anything may open.
+ */
+bool usage_view_take_sessions_tap(void);
+
+/* A pip tone as the 0xRRGGBB the theme gives it: as a mark (the bar), and as
+ * text (the state words, where green needs its text variant, low_text). */
+uint32_t usage_view_tone_hex(enum fmt_pip_tone t);
+uint32_t usage_view_tone_text_hex(enum fmt_pip_tone t);
 
 #endif /* USAGE_VIEW_H */

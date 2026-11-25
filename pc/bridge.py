@@ -13,6 +13,7 @@ from pc import ota as ota_mod
 from pc import wifi_ota
 from pc import private_file
 from pc import protocol
+from pc import session_rows
 from pc import settings_ops
 from pc import wifi_pair
 from pc import status_page
@@ -202,6 +203,12 @@ class Bridge:
         self._fetch_signed = fetch_signed_manifest
         self._app_update = None          # (version, artifact) from last query
         self._last_session = None        # (label, n) last sent; see poll_once
+        # The sessions card (docs/sessions-card-design.md): the page the
+        # board last asked for with spage, and the key of the page last put
+        # on the wire, or None when it is owed -- see
+        # _send_session_rows_if_changed.
+        self._spage = 0
+        self._last_rows = None
         self._last_plan = None           # plan message last sent; see _send_plan_if_changed
         # True from the start of a heartbeat until its plan has gone out:
         # see _heartbeat.
@@ -386,6 +393,10 @@ class Bridge:
         # the same shape as offer_if_newer on every connect rather than once
         # per daemon lifetime.
         self._last_session = None
+        # The sessions card, likewise: a board that just booted holds no row,
+        # and its card opens on page 0 (it asks with spage when it opens).
+        self._spage = 0
+        self._last_rows = None
         # The plan, for the same reason: a board that just booted assumes
         # windows, and on-change alone would leave a spend page unsaid.
         self._last_plan = None
@@ -562,6 +573,15 @@ class Bridge:
             self._on_wifi_state(msg)
         elif t == "answer":
             self._on_answer(msg)
+        elif t == "spage":
+            # The card opened (page 0) or the owner paged: that page goes at
+            # once, changed or not -- the board asked because it does not
+            # hold it. An spage with no readable page asks for nothing.
+            p = protocol.spage_page(msg)
+            if p is not None:
+                self._spage = p
+                self._last_rows = None
+                self._send_session_rows_if_changed(asked=True)
         # unknown types ignored
 
     # --- OTA, for a board with no network of its own -------------------
@@ -1305,7 +1325,8 @@ class Bridge:
         """Write any theme_edit answers that are ready, and an ask a look
         on run_async's thread found due. Called by the daemon
         on every pass of its serial loop, so an answer goes out within one
-        read timeout of the browser opening -- well inside the board's 5 s."""
+        read timeout of the browser opening -- well inside the board's 5 s.
+        And, last, the sessions card's context sample (_sample_context)."""
         while True:
             try:
                 ok = self._edit_answers.get_nowait()
@@ -1335,6 +1356,32 @@ class Bridge:
         self._restate_edit()
         # "Keep figures fresh?", once _consider_ask's look has said yes.
         self._send_ask_if_ready()
+        self._sample_context()
+
+    def _sample_context(self):
+        """The sessions card's context sampler, once a pass.
+
+        Claude Code's status line is one file for every terminal, and each
+        render replaces the last; the poll that reads it runs every 2 s
+        (the fast tick), so two sessions rendering inside one tick left only
+        the second one's context for its row. This pass runs once per serial
+        read, which waits at most 0.2 s on USB and WiFi alike, so sampling
+        here narrows that window tenfold
+        (ClaudeCliProvider.sample_context says what is left of it). The
+        rows still go out from the fast tick, built by the bus's poll from
+        what was sampled: this writes nothing.
+
+        Read off the fetch like session_rows: a fetch without the accessor
+        -- every test fake, the single-source fetch -- is skipped. Silent
+        on failure, every pass: the bus already contains its providers, and
+        a line here would print five times a second."""
+        sample = getattr(self._fetch, "sample_context", None)
+        if sample is None:
+            return
+        try:
+            sample()
+        except Exception:
+            pass
 
     def _edit_after_silence(self):
         """On every ping, before it is counted: if the board was silent long
@@ -1503,6 +1550,12 @@ class Bridge:
             self._sleep(wait)
         self._store_until = None
         self._heartbeat()
+        # The sessions card's page, restated with every heartbeat: the
+        # heartbeat forgot what was sent (_heartbeat), so this sends it
+        # unless _send_usage already did inside the heartbeat. Here as well
+        # as there because a heartbeat with no usage line still has rows:
+        # the hooks see sessions on a desk with no reading yet.
+        self._send_session_rows_if_changed()
         self._send_theme()
         self._consider_ask()
 
@@ -1530,6 +1583,11 @@ class Bridge:
         # A flag and not a cleared _last_plan: _outgoing needs to
         # know which plan the board held before this one.
         self._restate_plan = True
+        # And the sessions card's page, for the same reason as svc: one srow
+        # lost on the wire is otherwise repaired only when the page next
+        # changes. Forgotten here and sent once, after the poll below has
+        # read the rows (_send_usage, or poll_once when there is no line).
+        self._last_rows = None
 
         try:
             usage = self._read_usage()
@@ -1619,6 +1677,9 @@ class Bridge:
             # spend page that has just gone takes its share with it.
             self._outgoing(None)
             self._send_svc_if_changed()
+            # The card's rows do not depend on a usage reading: the bus read
+            # them in the poll that found none.
+            self._send_session_rows_if_changed()
             return
         # The plan first, and the take-down of a spend page it ends, once
         # for the tick: _outgoing.
@@ -1837,12 +1898,74 @@ class Bridge:
         nothing, which is what an older daemon did anyway.
         """
         session_pair = getattr(self._fetch, "session_pair", None)
-        if session_pair is None:
+        if session_pair is not None:
+            pair = tuple(session_pair())
+            if pair != self._last_session:
+                self._write(protocol.session(*pair))
+                self._last_session = pair
+        # The card rides wherever the hint line does, so it moves on the
+        # same two-second tick. Its own accessor, asked whether or not the
+        # fetch has session_pair.
+        self._send_session_rows_if_changed()
+
+    def _send_session_rows_if_changed(self, asked=False):
+        """Put the sessions card's current page on the wire, on change only.
+
+        One srow line per row of the asked page (self._spage, clamped into
+        the pages there are), or the one n=0 line for an empty list. Only to
+        a board whose caps list BOARD_CAP_SESSIONS: an older board would
+        drop every line unread. Read off the fetch like session_pair, so a
+        fetch without session_rows -- every test fake, the single-source
+        fetch -- sends nothing.
+
+        "Changed" is the page as the board draws it: each row's provider,
+        name, kind, context and age in WHOLE MINUTES, plus tot and pg. The
+        board counts a row's age up on its own from when the row arrived,
+        so a row is not resent every two seconds for its seconds; a minute
+        boundary does resend it, which keeps the board's count from
+        drifting. Cleared (None) after every hello, with every heartbeat
+        and on every spage, each of which then sends the page whatever it
+        holds.
+        """
+        if not self._board_can(protocol.BOARD_CAP_SESSIONS):
             return
-        pair = tuple(session_pair())
-        if pair != self._last_session:
-            self._write(protocol.session(*pair))
-            self._last_session = pair
+        # Not inside the hello burst. The reply to a hello is measured against
+        # the board's 2048-byte receive ring (tests/pc/test_hello_burst.py,
+        # 1405 bytes at its widest on 2026-10-27), and a full page is four
+        # more lines of up to ~130 bytes each with a plain name. So the page
+        # waits out THEME_QUIET_S, as theme lines and the burn line do, and
+        # goes on the first fast tick after it: _last_rows is still None, so
+        # it is owed. An spage (`asked`) is answered at once -- the board is
+        # past its greeting and waiting on exactly these lines.
+        if not asked and self._in_quiet_window():
+            return
+        rows_of = getattr(self._fetch, "session_rows", None)
+        if rows_of is None:
+            return
+        try:
+            rows = list(rows_of() or ())
+        except Exception as e:
+            # The card is a bonus; a failure costs it, said by type only and
+            # once per process -- this is asked every two seconds.
+            if not getattr(self, "_rows_failed", False):
+                self._rows_failed = True
+                print(f"[bridge] sessions card unavailable"
+                      f" ({type(e).__name__})", file=sys.stderr)
+            return
+        pg, on_page, _pages = session_rows.page(rows, self._spage)
+        tot = len(rows)
+        key = (tot, pg, tuple((r.provider, r.name, r.kind, r.ctx,
+                               r.age_s // 60) for r in on_page))
+        if key == self._last_rows:
+            return
+        self._last_rows = key
+        if not on_page:
+            self._write(protocol.srow(0, 0, tot, pg))
+            return
+        n = len(on_page)
+        for i, r in enumerate(on_page):
+            self._write(protocol.srow(i, n, tot, pg, pv=r.provider, k=r.kind,
+                                      age=r.age_s, nm=r.name, cx=r.ctx))
 
     def begin_pass(self):
         """A new pass of the serial loop starts here.

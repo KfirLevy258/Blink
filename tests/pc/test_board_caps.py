@@ -289,9 +289,11 @@ def _fw_line(name, buf_name="buf"):
 # to keep the figures fresh with /usage (docs/plans/usage-refresh.md, 1b):
 # the daemon sends `ask` only to a board that lists it.
 # "wifi", "logo" and "pref" are the WiFi branch's: the network link, the
-# start-up logo and pref_set (spec S15.2, S15.3).
+# start-up logo and pref_set (spec S15.2, S15.3). "sessions" is the sessions
+# card (docs/sessions-card-design.md): the daemon sends `srow` lines only to a
+# board that lists it, and only such a board ever sends `spage`.
 FW_CAPS = {"svc", "theme", "edit_done", "burn", "plan", "spendburn", "ask",
-           "wifi", "logo", "pref"}
+           "wifi", "logo", "pref", "sessions"}
 
 
 def test_the_boards_hello_carries_its_caps_and_fits_its_buffer():
@@ -316,8 +318,9 @@ def test_the_boards_pref_carries_its_caps_and_fits_its_buffer():
     # focus, bright and view are what pref_set sets (spec S15.3); ok says
     # whether the pref_set it answers was refused.
     assert {"focus", "bright", "view", "ok"} <= set(msg)
-    # Measured 217 B in the 256 B buffer (hello: 203 in 256) once
-    # develop merged into the WiFi branch, with all ten caps. On develop
+    # Measured 228 B in the 256 B buffer (hello: 214 in 256) with the
+    # eleventh cap, "sessions" (issue #18, 2026-11-24). It was 217 (hello
+    # 203) once develop merged into the WiFi branch, with ten. On develop
     # alone it was 151 in 160 (hello 180 in 192) with "ask", 145 (174) with
     # "spendburn", 133 (162) with "plan", 126 in 128 (155 in 160) before;
     # on the WiFi branch alone 185 in 224 (hello 171 in 192), after the
@@ -326,14 +329,14 @@ def test_the_boards_pref_carries_its_caps_and_fits_its_buffer():
     # drops a longer inbound line whole; a pref anywhere near that is a
     # mistake.
     assert len(line) <= 256, len(line)
-    assert len(line) == 217, len(line)
+    assert len(line) == 228, len(line)
 
 
 def test_the_boards_hello_is_measured_at_its_widest():
     """The figure the comment in send_hello quotes, held to it: a cap that
     grows the hello moves this number and the comment with it."""
     line, size = _fw_line("send_hello")
-    assert (len(line), size) == (203, 256)
+    assert (len(line), size) == (214, 256)
 
 
 def test_the_caps_are_appended_never_reordered():
@@ -344,7 +347,8 @@ def test_the_caps_are_appended_never_reordered():
     assert caps, "BOARD_CAPS is gone from proto.c"
     names = re.findall(r'\\"([a-z_]+)\\"', caps.group(1))
     assert names == ["svc", "theme", "edit_done", "burn", "plan",
-                     "spendburn", "ask", "wifi", "logo", "pref"], names
+                     "spendburn", "ask", "wifi", "logo", "pref",
+                     "sessions"], names
 
 
 def test_the_boards_pref_names_the_board_as_hello_does():

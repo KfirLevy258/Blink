@@ -262,3 +262,50 @@ def test_a_missing_directory_has_buried_nothing(tmp_path):
     and neither may raise on the poll path."""
     assert codex_state.ended(NOW, path=str(tmp_path / "nope"),
                              sweep=False) == set()
+
+
+# --- details: the sessions card's rows ---------------------------------------
+
+
+def test_details_carry_name_age_tool_and_event_for_each_slot(d):
+    (d / "cx-1.state").write_text(
+        '{"event":"PreToolUse","t":%d,"name":"Api","tool":"apply_patch"}'
+        % int(NOW - 7))
+    _slot(d, "cx-2", "Stop", NOW - 90)
+
+    got = codex_state.details(NOW, path=str(d), sweep=False)
+
+    assert got == {
+        "cx-1": (base.STATE_RUNNING, "Api", 7.0, "apply_patch", "PreToolUse"),
+        "cx-2": (base.STATE_IDLE, "", 90.0, "", "Stop"),
+    }
+
+
+def test_details_honour_the_callers_path_and_sweep(monkeypatch, d):
+    seen = []
+
+    class Spy:
+        def __init__(self, path=None, sweep=True):
+            seen.append((path, sweep))
+
+        def session_details(self, now_epoch):
+            return {}
+
+    monkeypatch.setattr(claude_state, "ClaudeStateProvider", Spy)
+    codex_state.details(NOW, path=str(d), sweep=False)
+    codex_state.details(NOW)
+
+    assert seen[0] == (str(d), False)
+    assert seen[1] == (os.path.expanduser(codex_state.STATE_DIR), True)
+
+
+def test_a_waiting_codex_row_is_aged_by_its_marker(d):
+    _slot(d, "cx-1", "PreToolUse", NOW - 2)
+    marker = d / ("cx-1" + claude_state.WAITING_MARKER_SUFFIX)
+    marker.write_text("")
+    _stamp(marker, NOW - 40)
+
+    got = codex_state.details(NOW, path=str(d), sweep=False)
+
+    assert got["cx-1"][0] == base.STATE_WAITING
+    assert got["cx-1"][2] == 40.0

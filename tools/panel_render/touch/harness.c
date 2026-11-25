@@ -569,6 +569,9 @@ static void touch_line(const char *json)
 	snprintf(note, sizeof(note), "stroke");
 }
 
+/* stubs.c: the daemon's answer to an spage, page p of six made-up rows. */
+void harness_srow_page(int p);
+
 static void ui_state_line(void)
 {
 	struct ui_settings_bench b;
@@ -782,6 +785,9 @@ int main(int argc, char **argv)
 	usage_view_set_sessions(2, 0);
 	usage_view_set_counts(2, 1, 0, 0);
 	usage_view_set_clock(14, 5);
+	/* And the sessions card's: six made-up sessions, page 0 of 2, as a
+	 * daemon sends them after hello (stubs.c, harness_srow_page). */
+	harness_srow_page(0);
 	ui_settings_attach(lv_screen_active());
 	run_for(200);
 

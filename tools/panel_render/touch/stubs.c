@@ -8,8 +8,10 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <zephyr/kernel.h>
 
 #include "cfg_store.h"
+#include "usage_view.h"
 #include "backlight.h"
 #include "ota.h"
 #include "proto.h"
@@ -379,6 +381,67 @@ void proto_send_theme_now(const char *why)
 void proto_send_theme_edit(void)
 {
 	harness_emit("{\"t\":\"theme_edit\",\"v\":2}");
+}
+
+/* --- the sessions card's rows ------------------------------------------- */
+
+/*
+ * Six made-up sessions, two pages of the card (docs/sessions-card-design.md),
+ * in the daemon's order: needs you, failed, the running kinds, idle. Written
+ * here, never captured -- a captured row would carry somebody's project
+ * names into a public repo. One cx is absent (a Codex row, which carries none
+ * in this version) so the harness draws a row with no bar.
+ */
+static const struct {
+	char pv;
+	enum fmt_srow_kind k;
+	int32_t age;
+	const char *nm;
+	int cx;
+} harness_sess[] = {
+	{ 'c', FMT_SROW_WAIT, 95, "Blink", 42 },
+	{ 'x', FMT_SROW_FAIL, 610, "Docs", -1 },
+	{ 'c', FMT_SROW_EDIT, 12, "Website", 67 },
+	{ 'c', FMT_SROW_TOOL, 40, "Api", 91 },
+	{ 'c', FMT_SROW_IDLE, 3 * 3600 + 5 * 60, "Notes", 12 },
+	{ 'c', FMT_SROW_IDLE, 26 * 60, "Scratch", 5 },
+};
+
+/* What the daemon does on an spage: send the asked page, row by row, at
+ * once. Fed straight into usage_view, as proto.c's srow arm would. */
+void harness_srow_page(int p)
+{
+	int tot = (int)(sizeof(harness_sess) / sizeof(harness_sess[0]));
+	int first = p * FMT_SROWS_PER_PAGE;
+	int n = tot - first;
+	struct msg_srow r;
+
+	if (p < 0 || first >= tot) {
+		return;
+	}
+	if (n > FMT_SROWS_PER_PAGE) {
+		n = FMT_SROWS_PER_PAGE;
+	}
+	for (int i = 0; i < n; i++) {
+		memset(&r, 0, sizeof(r));
+		r.i = i;
+		r.n = n;
+		r.tot = tot;
+		r.pg = p;
+		r.pv = harness_sess[first + i].pv;
+		r.k = harness_sess[first + i].k;
+		r.age = harness_sess[first + i].age;
+		snprintf(r.nm, sizeof(r.nm), "%s", harness_sess[first + i].nm);
+		r.cx = harness_sess[first + i].cx;
+		usage_view_set_srow(&r, k_uptime_get());
+	}
+}
+
+/* Not on stdout: the bench reads no spage, and the board's real one goes to
+ * the daemon. The answer is what matters here. */
+void proto_send_spage(int p)
+{
+	harness_srow_page(p);
 }
 
 /* --- the boot screen ------------------------------------------------------- */
