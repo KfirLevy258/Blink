@@ -58,6 +58,154 @@ def settings_pickup(home, launcher, log=None):
     return t
 
 
+# The board's answers to a `panel` message (firmware/src/proto.c, issue #23),
+# as fixed text, each mapped to the one word the answer file may hold. The
+# set-to line is matched with the panel it names, so a board that named the
+# other one is told apart from a success; everything else on a line --
+# above all the errno of "(%d)" -- is never read.
+_PANEL_SET_TO = {f"[cfg] panel set to {p}": p
+                 for p in settings_request.DISPLAY_PANELS}
+_PANEL_LINES = (
+    ("[cfg] could not store the panel", "not_stored"),
+    ("[cfg] panel saved; restart the board to show it", "not_shown"),
+    ("[cfg] unknown panel; ignored", "unknown"),
+    ("[cfg] panel is set over the cable only; ignored", "cable"),
+)
+# How long the daemon listens for that answer. The board prints it in the
+# same pass that parses the message (proto.c), so well under a second on a
+# running board; three seconds is what `blink provision` and the CLI's own
+# exchange always allowed (cli._tell_board's wait_s), kept so a slow
+# MADCTL write is not mistaken for old firmware.
+PANEL_LISTEN_S = 3.0
+
+
+def panel_answer(line, asked):
+    """The result word for one raw console line, or None when the line is
+    not an answer to a panel message. Only constants come back: the line is
+    text off the serial buffer and none of it is returned or kept.
+
+    `in`, not startswith, as cli._tell_board matched: the board's console
+    and its protocol output share one UART, and a line that arrives glued
+    behind part of another is still the answer."""
+    if "[cfg] panel set to " in line:
+        for stem, p in _PANEL_SET_TO.items():
+            if stem in line:
+                return "set" if p == asked else "mismatch"
+        # A set-to line naming neither panel is not one this firmware
+        # prints; it is not a success either.
+        return "mismatch"
+    for stem, result in _PANEL_LINES:
+        if stem in line:
+            return result
+    return None
+
+
+class PanelPickup:
+    """`blink config panel` (issue #23), serviced from _upkeep on every
+    serial-loop pass and from the waiting loop when no board is linked.
+
+    Never blocks: a taken request becomes `pending`, with a monotonic
+    deadline, and each later pass either finds the board's answer in what
+    heard() was fed or, past the deadline, answers "silent". Names only in
+    the log: never the panel, the id, or any of the board's text.
+
+    One request at a time. A request that arrives while one is pending is
+    left where it is, untaken, and picked up on the first pass after the
+    answer: the board answers one message with one line and carries nothing
+    to say which message it was answering, so two in flight could not be
+    told apart, and dropping either would leave a command waiting out its
+    ten seconds for an answer that was never coming. The listen is three
+    seconds and the CLI waits ten, so the second command is still served.
+    """
+
+    def __init__(self, home, log=None, clock=time.monotonic):
+        self.home = home
+        self.log = log or sys.stderr
+        self.clock = clock
+        self.pending = None     # (request id, panel asked, deadline)
+        self._buf = bytearray()
+        # Said once per process, as _said_request_refused: this runs about
+        # five times a second.
+        self._said_refused = False
+
+    def _say(self, text):
+        print(f"[panel] {text}", file=self.log)
+
+    def _answer(self, result):
+        rid = self.pending[0]
+        self.pending = None
+        self._buf.clear()
+        try:
+            settings_request.write_panel_answer(self.home, rid, result)
+        except (OSError, ValueError, private_file.NotPrivate):
+            self._say("answer not written")
+            return
+        self._say(f"answered ({result})")
+
+    def heard(self, data):
+        """Raw bytes off the USB console. Kept only while a request is
+        pending, and only until the next newline: lines are matched here and
+        dropped, never logged (ConsoleEcho logs the cut version)."""
+        if self.pending is None:
+            return
+        self._buf.extend(data)
+        while self.pending is not None:
+            nl = self._buf.find(b"\n")
+            if nl < 0:
+                break
+            line = bytes(self._buf[:nl]).decode("utf-8", "replace")
+            del self._buf[:nl + 1]
+            result = panel_answer(line, self.pending[1])
+            if result is not None:
+                self._answer(result)
+        # As ConsoleEcho's cap: a buffer fed from a wire is bounded.
+        if len(self._buf) > 4096:
+            del self._buf[:-4096]
+
+    def link_down(self):
+        """The link went while a request waited: not old firmware, no board."""
+        if self.pending is not None:
+            self._answer("no_board")
+
+    def tick(self, via=None, send=None):
+        """One pass. `via` is "usb", "wifi" or None (no board linked);
+        `send` is the connection's writer, which returns whether the line
+        went out (encode_checked refused it otherwise)."""
+        if self.pending is not None:
+            if self.clock() >= self.pending[2]:
+                self._answer("silent")
+            return
+        # A request older than PANEL_REQUEST_MAX_AGE_S comes back None and
+        # is deleted all the same: its command stopped waiting long ago (a
+        # Ctrl-C, or a daemon started days after the command died), and
+        # sending it would switch the display under nobody. Nothing is said
+        # about it, as for any other refused shape.
+        try:
+            req = settings_request.take_panel_request(self.home)
+        except (OSError, private_file.NotPrivate):
+            if not self._said_refused:
+                self._said_refused = True
+                self._say("request file refused")
+            return
+        if req is None:
+            return
+        self._say("request taken")
+        # Pending before the send: a write that raises (the cable came out)
+        # lands in the serial-lost handler, whose choose() calls link_down,
+        # and the command is told "no board" rather than nothing.
+        self.pending = (req["id"], req["display"],
+                        self.clock() + PANEL_LISTEN_S)
+        self._buf.clear()
+        if via is None or send is None:
+            self._answer("no_board")
+        elif via != "usb":
+            # The board refuses this message off the cable (proto.c prints
+            # "set over the cable only"), so it is not sent over WiFi at all.
+            self._answer("cable")
+        elif not send(protocol.panel(req["display"])):
+            self._answer("not_sent")
+
+
 POLL_INTERVAL_S = 60
 # How often to LOOK at the local state files. Whether anything is SENT is a
 # separate decision, made in Bridge.poll_if_changed.
@@ -1354,9 +1502,18 @@ def main(argv=None):
     # the file grew fastest, because the "waiting for the board" path used to
     # print on a timer.
     _log_file = os.path.join(blink_home, "bridge.log")
+    # `blink config panel`, for the life of the process: a request is taken
+    # here whether or not a board is linked, so the command hears "no board"
+    # from a daemon on an unplugged machine instead of "the app did not
+    # answer". panel_link is the open connection's link and writer, set once
+    # its Bridge exists and cleared in choose(), the road every lost link
+    # takes.
+    panel_pickup = PanelPickup(blink_home)
+    panel_link = {}
 
     def _upkeep():
         settings_pickup(blink_home, theme_builder)
+        panel_pickup.tick(panel_link.get("via"), panel_link.get("send"))
         # The burn readers forget what has left their five hours whether or
         # not anything polls them: an unplugged board polls nothing, and an
         # unmarked page is never read (IngestionBus.prune_burn, README
@@ -1484,6 +1641,10 @@ def main(argv=None):
         # page's waiting ops now and drop the link state it would report
         # (BoardOps.link_down); the next Bridge brings the link back.
         board_ops.link_down()
+        # And a panel request waiting on the board's answer is answered
+        # "no board" now, rather than "silent" (old firmware) at its deadline.
+        panel_link.clear()
+        panel_pickup.link_down()
         # Lambdas, not the functions, so a test that replaces
         # candidate_ports or usb_topology on this module is heard.
         return wait_for_link(
@@ -1823,6 +1984,8 @@ def main(argv=None):
             return bridge.on_message(m)
 
         tap, write_msg, dispatch = install_tap(send, dispatch, tap)
+        # write_msg rather than send, so the tap records the panel line too.
+        panel_link.update(via=via, send=write_msg)
 
         bridge = Bridge(write_msg=write_msg, fetch_usage=fetch,
                         flash_image=flash_image,
@@ -1894,6 +2057,12 @@ def main(argv=None):
                     if via == "usb":    # only the serial wire carries console
                         for line in console.feed(data):
                             print(line, file=sys.stderr)
+                        # The raw bytes, which the echo above has already
+                        # cut: "[cfg] panel set to" without its panel cannot
+                        # tell a success from a mismatch. Matched to a
+                        # constant there and dropped; idle unless a
+                        # `blink config panel` is waiting.
+                        panel_pickup.heard(data)
                         if tap:
                             tap.console(data)
                     for msg in reader.feed(data):

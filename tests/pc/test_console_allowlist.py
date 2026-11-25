@@ -79,6 +79,10 @@ LINES = [
     ("[cfg] could not store the panel (-28)",
      "[cfg] could not store the panel", ["-28"]),
     ("[cfg] unknown panel; ignored", "[cfg] unknown panel; ignored", []),
+    # proto.c: a panel message that arrived over WiFi, refused. Fixed text,
+    # kept whole; it reached the log as a bare "[cfg]" until 2026-11-25.
+    ("[cfg] panel is set over the cable only; ignored",
+     "[cfg] panel is set over the cable only; ignored", []),
     # proto.c, PANEL_MSG_NOT_SHOWN: stored, the MADCTL write failed
     ("[cfg] panel saved; restart the board to show it (-116)",
      "[cfg] panel saved; restart the board to show it", ["-116"]),

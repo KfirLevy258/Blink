@@ -117,12 +117,14 @@ echo "release stage passed"
 # Stage two: the bench (touch-inject) image. It is what the board check's
 # touch run flashes and plays tools/bench/full_touch.txt on, and its code
 # lives inside #ifdef CONFIG_BLINK_TOUCH_INJECT, which the release build above
-# never compiles. On 2026-11-25 bench-only code in proto.c went to that check
-# having been compiled by nobody, because nothing a round may run built the
-# option. So this builds it too, pristine, into a scratch directory of its own
-# (never build-inject, for the same reason as never build-sb), and the second
-# build costs its few minutes for that. The line is BLINK_TOUCH_INJECT's help
-# in firmware/Kconfig, with -d the scratch dir and the key the one above.
+# never compiles. So a change to proto.c (where the touch-inject dispatch
+# sits, right beside the panel line's) can break the bench image while the
+# release image builds clean, and nothing else that can run without a board
+# would notice before the board check did. So this builds it too, pristine,
+# into a scratch directory of its own (never build-inject, for the same
+# reason as never build-sb), and the second build costs its few minutes for
+# that. The line is BLINK_TOUCH_INJECT's help in firmware/Kconfig, with -d
+# the scratch dir and the key the one above.
 BENCH=$(mktemp -d "${TMPDIR:-/tmp}/blink-panel-bench.XXXXXX") ||
 	fail "could not make a scratch directory for the bench build"
 LOG="$BENCH/build.log"
@@ -150,7 +152,8 @@ else
 	fail "the bench .config lacks CONFIG_BLINK_TOUCH_INJECT=y; the -D did not reach the app"
 fi
 
-# Only our two files with bench code in them: the build has an unrelated
+# Only proto.c, which holds the touch-inject dispatch, and main.c, where
+# issue #23's panel code lives: the build has an unrelated
 # '"LOGO_H" redefined' warning in logo.c that is not this check's business.
 # "src/" keeps MCUboot's boot/zephyr/main.c out of the match.
 WARN=$(grep -E 'src/(proto|main)\.c:[0-9]+(:[0-9]+)?: warning:' "$LOG" || true)

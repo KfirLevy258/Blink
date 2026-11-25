@@ -37,13 +37,6 @@
 #include "wl_heap.h"
 #include "wl_server.h"
 
-#ifdef CONFIG_BLINK_TOUCH_INJECT
-/* Bench images only, defined in proto.c (see bench_boot_dispatch there):
- * proto.h is not changed for the bench, so the declaration is repeated
- * here. */
-void proto_bench_ui_up(void);
-#endif
-
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
 /*
@@ -405,17 +398,6 @@ static void run_usb(void)
 	/* A tap that landed during boot, before this loop could act on it, is
 	 * stale by now; ui_settings.h explains. Throw it away. */
 	ui_settings_drop_pending();
-
-#ifdef CONFIG_BLINK_TOUCH_INJECT
-	/* The first real screen is up and its Settings zones are attached, so
-	 * the bench may be told what the panel shows and may press it. Until
-	 * now proto.c held its ui_state questions and refused its touches: on
-	 * 2026-11-25 a bench tap fell on the boot splash because ui_state said
-	 * gauges while the clip played (proto.c, bench_boot_dispatch). Here,
-	 * because both of main()'s paths reach the main loop only through
-	 * run_usb(). */
-	proto_bench_ui_up();
-#endif
 
 	/* The first panel is up. Spin with interrupts off and the watchdog fed
 	 * by nobody: the unconfirmed image must be reverted by the watchdog, the

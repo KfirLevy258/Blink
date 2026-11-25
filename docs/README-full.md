@@ -381,10 +381,15 @@ blink config panel standard    # the default
 A board that needs `alternate` looks mirrored, colour-swapped and too dark on
 `standard`.
 
-The command talks to the board over the USB cable, pausing the background
-service for a moment while it does. The board saves the setting and applies
-it straight away, with no reboot, and keeps it across restarts, updates and a
-factory reset. There is no menu for it on the board itself: on a mirrored
+The command hands the setting to the running BLINK app (the background
+service, or `blink run` in another terminal), which sends it to the board over
+the USB cable. Neither the board nor the app is restarted. So the app has to
+be running, and the board has to be on the cable: a board reached only over
+WiFi refuses the setting, and the command says to plug it in. The board saves
+the setting and applies it straight away, with no reboot, and keeps it across
+restarts, updates and a factory reset. If the board saved it but could not
+switch the screen over, the command says so: unplug the board and plug it back
+in to show it. There is no menu for it on the board itself: on a mirrored
 screen a tap lands on the wrong side, so it could not be reached on exactly
 the boards that need it.
 

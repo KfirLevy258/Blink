@@ -98,6 +98,34 @@ static lv_obj_t *notice;	/* outcome popup on the top layer */
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 static const char *bench_nt;
 #define bench_nt_clear() (bench_nt = NULL)
+/*
+ * Bench builds: has ui_settings_attach() run? Until it has, ui_state says
+ * busy=1, because nothing a press can reach exists yet.
+ *
+ * The board check (tools/board_touch.py playing tools/bench/full_touch.txt)
+ * failed on six runs through 2026-11-25 at script line 21, `tap
+ * settings.open`: expected scr=settings ov=none, the board said scr=gauges
+ * ov=none. The bench's summary of that run counted exactly one `[boot]`
+ * printk line, no `[bl]` line, no bootloader lines, and no out-of-memory or
+ * input-queue-full lines. `[bl]` comes from backlight_init and `[boot]
+ * edition:` once per boot as the splash starts (bootclip.c), so the bench
+ * had attached while the boot splash was still playing: not a crash, and
+ * not a reboot it caused.
+ *
+ * During the splash ui_boot.c pumps proto_service(), so touch_inject.c
+ * already answers ui_state, and with no panel up it says scr=gauges (its
+ * else-branch), modal=none, slp=0, busy=0. The bench's opening `expect
+ * ui_state scr=gauges modal=none slp=0` passed at once, and the tap after
+ * it was played onto the splash, where there is no edge zone yet, or was
+ * thrown away by ui_settings_drop_pending() at the top of run_usb()
+ * (main.c). The clip is 52 frames at 12 fps, about 4.3 s, and the first tap
+ * comes about 1 s after the bench attaches, so an attach in the first ~3 s
+ * of the splash lost it. busy=1 is the honest answer until attach:
+ * board_touch.py's wait_state() waits for busy==0 (3 s for an `expect`,
+ * settle + 3 s for a target), and tw_click_parse refuses a click as busy,
+ * which is what both should do during boot.
+ */
+static bool bench_attached;
 #else
 #define bench_nt_clear() ((void)0)
 #endif
@@ -4519,6 +4547,13 @@ void ui_settings_attach(lv_obj_t *scr)
 	mk_edge_zone(scr, LV_ALIGN_RIGHT_MID, zone_settings_cb);
 	mk_edge_zone(scr, LV_ALIGN_LEFT_MID, zone_anim_cb);
 	mk_page_zone(scr);
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	/* The zones exist now, so ui_state may stop saying busy (see
+	 * bench_attached). main.c calls this immediately before run_usb(),
+	 * with no proto_service() or lv_timer_handler() in between, so no
+	 * stroke can start between here and ui_settings_drop_pending(). */
+	bench_attached = true;
+#endif
 
 	/* The OTA watcher runs from here on, not from the panel build: the boot
 	 * prompt, the download bar and the outcome popup are all screen-level
@@ -4547,8 +4582,10 @@ void ui_settings_bench_state(struct ui_settings_bench *out)
 	out->modal = wn ? "whatsnew" : dl_overlay ? "download" :
 		     upd_prompt ? "prompt" : ask_box ? "ask" :
 		     notice ? "notice" : "none";
-	out->busy = want_open || want_close || want_page != 0 || closing ||
-		    sub_closing || theme_closing;
+	/* !bench_attached: the boot splash is still up and nothing a tap can
+	 * reach exists; see the flag's declaration (2026-11-25). */
+	out->busy = !bench_attached || want_open || want_close ||
+		    want_page != 0 || closing || sub_closing || theme_closing;
 	out->theme_page = theme_page;
 	out->edit = edit_note == edit_holding ? "held" :
 		    edit_note == edit_waiting ? "waiting" :
