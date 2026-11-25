@@ -251,6 +251,10 @@ Things worth knowing when hacking on the CYD:
 - Touch (XPT2046) needs averaging (`reads = <8>`), and devicetree properties are
   last-one-wins - a stray duplicate silently degrades it.
 - The backlight (GPIO 21) runs on LEDC PWM and is adjustable in Settings.
+- Two display modules exist, and one image drives both: the panel is chosen at
+  run time with `blink config panel standard|alternate`, stored on the board and
+  applied at once ([`src/panel.h`](src/panel.h) has what differs). There is no
+  build option for it any more; firmware older than this ignores the command.
 
 ## Source map
 

@@ -57,7 +57,10 @@ int cfg_clear_token(void);
  * another sign-in. */
 int cfg_clear_wifi(void);
 
-#define CFG_AP_PSK_MAX 17	/* 16 + NUL; generated ones are 10 chars */
+/* 16 + NUL on every record before 2026-11-25; the field now keeps 16 bytes and
+ * its old NUL is the panel byte (cfg_store.c, struct rec). The setter stores
+ * at most 15 characters; generated ones are 10. */
+#define CFG_AP_PSK_MAX 17
 
 /* The setup AP's WPA2 password: random, generated once at first boot and
  * stable thereafter, so a printed/remembered QR keeps working. Rides in the
@@ -231,5 +234,28 @@ bool cfg_edition_locked(void);
  * -EINVAL for an edition this firmware does not know.
  */
 int cfg_set_edition(uint8_t edition);
+
+/*
+ * Which display module this board drives (issue #23; firmware/src/panel.h has
+ * what differs between them, and the measurements).
+ *
+ * It used to be a build option, and a board built the wrong way came out
+ * mirrored with red and blue swapped. Now one image serves both and this byte
+ * chooses, set over USB with `blink config panel standard|alternate`.
+ *
+ * 0 is standard, so every record any earlier firmware wrote -- this byte was
+ * the NUL of the setup-AP password -- reads as the panel that ships. Any byte
+ * other than 1 reads as standard. cfg_set_panel() refuses anything but 0 and
+ * 1 (-EINVAL) and leaves RAM as it was when the write fails. A factory reset
+ * keeps it: it is a hardware fact, and a reset that mirrored the screen would
+ * leave a menu nobody can operate.
+ */
+enum cfg_panel {
+	CFG_PANEL_STANDARD = 0,
+	CFG_PANEL_ALTERNATE = 1,
+};
+
+uint8_t cfg_get_panel(void);
+int cfg_set_panel(uint8_t panel);
 
 #endif /* CFG_STORE_H */

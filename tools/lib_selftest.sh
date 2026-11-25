@@ -2,11 +2,10 @@
 # Sourced by tools/release.sh, tools/burn.sh and tools/flash_encrypted.sh.
 # POSIX sh: burn.sh is /bin/sh.
 #
-# Four builds that must not ship are refused here: the fatal selftest
-# (blink_refuse_selftest, next), the touch injector (blink_refuse_inject),
-# the touch trace (blink_refuse_trace) and the pilot-panel build
-# (blink_refuse_pilot). The last two are release.sh's alone, since both are
-# flashed to boards on purpose.
+# Three builds that must not ship are refused here: the fatal selftest
+# (blink_refuse_selftest, next), the touch injector (blink_refuse_inject) and
+# the touch trace (blink_refuse_trace). The last is release.sh's alone, since
+# it is flashed to boards on purpose.
 #
 # blink_refuse_selftest <.config> <image>
 #
@@ -135,49 +134,18 @@ blink_refuse_trace() {
 	return 0
 }
 
-# blink_refuse_pilot <.config> <image>
-#
-# The same two looks for CONFIG_BLINK_PANEL_PILOT (pilot.conf), the build
-# for the two pilot boards, whose display modules differ from production.
-# It compiles out main.c's MADCTL correction, so on a production panel it
-# renders mirrored, red and blue swapped, and dim (firmware/Kconfig, measured
-# 2026-08-21). Shipped as an OTA, that is every desk.
-#
-# The image look runs the other way round from the others: a pilot build
-# prints nothing of its own, but a production build carries the
-# "panel: MADCTL=0x" line of the correction it compiles in (present in every
-# build directory on this desk, 2026-10-28), and a pilot build has none of
-# it. An image without that line is not a production image, whatever its
-# .config says.
-#
-# Called by release.sh only: the pilot boards are flashed with this build on
-# purpose (flash_encrypted.sh; dev.sh's fused-chip message says how).
-blink_refuse_pilot() {
-	if [ ! -f "$1" ]; then
-		echo "FATAL: no $1 -- cannot tell whether this is a pilot-panel build." >&2
-		echo "       Refusing an image nothing has inspected." >&2
-		return 1
-	fi
-	if [ ! -f "$2" ]; then
-		echo "FATAL: no image at $2 to inspect." >&2
-		return 1
-	fi
-	if grep -q '^CONFIG_BLINK_PANEL_PILOT=y' "$1"; then
-		echo "FATAL: CONFIG_BLINK_PANEL_PILOT=y in $1." >&2
-		echo "       This image is for the two pilot boards; on a production" >&2
-		echo "       panel it is mirrored, colour-swapped and dim. A -D value or" >&2
-		echo "       EXTRA_CONF_FILE=pilot.conf stays in the build directory's" >&2
-		echo "       CMake cache: rebuild it pristine (west build -p always)" >&2
-		echo "       without it." >&2
-		return 1
-	fi
-	if ! grep -aqF 'panel: MADCTL=0x' "$2"; then
-		echo "FATAL: $2 lacks the production panel correction, though the" >&2
-		echo "       .config says otherwise. It would render mirrored." >&2
-		return 1
-	fi
-	return 0
-}
+# There used to be a fourth refusal here, for the separate build the two
+# boards with the other display module needed: a Kconfig option compiled out
+# main.c's MADCTL correction and the backlight scale, and an image built with
+# it was mirrored, red and blue swapped, and dim on every other desk
+# (measured 2026-08-21). Issue #23 retired that build. The panel is now a
+# setting saved on the board and chosen at run time over USB (`blink config
+# panel standard|alternate`), so every image is the same image whatever the
+# panel, there is no option left to find in a .config, and the image look --
+# which refused an image without the "panel: MADCTL=0x" boot line -- could
+# never fire, because main.c now carries that line in every build. A check
+# that cannot fail reads as a check that passed, so it went rather than
+# stayed.
 
 # blink_refuse_standalone_net <.config> <image>
 #

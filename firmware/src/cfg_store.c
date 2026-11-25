@@ -54,7 +54,41 @@ struct rec {
 	char ssid[CFG_SSID_MAX];
 	char psk[CFG_PSK_MAX];
 	char token[CFG_TOKEN_MAX];
-	char ap_psk[CFG_AP_PSK_MAX];
+	/*
+	 * The setup AP's password, one byte shorter than it was, and the panel.
+	 *
+	 * Which display module the board drives (issue #23) needed a byte, and
+	 * the record had no spare one that every older firmware would carry
+	 * through untouched -- except this. Up to 2026-11-25 the field was 17
+	 * bytes, `CFG_AP_PSK_MAX` = 16 characters + NUL, and every writer that
+	 * ever touched it kept the 17th byte a NUL: cfg_set_ap_psk() copies at
+	 * most 16 characters and then stores '\0' at [16], the generated
+	 * passwords are 10 characters, cfg_reset() and a blank record zero it,
+	 * and each migration below copies it from a layout whose own setter did
+	 * the same. So on every record any shipped firmware wrote, this byte
+	 * reads 0, which is CFG_PANEL_STANDARD -- what every desk already runs.
+	 *
+	 * It sits inside the crc_134 prefix, so all three seals cover it and
+	 * nothing needs a new reader. A downgrade to 1.3.4 or 1.4.x keeps it,
+	 * because those firmwares rewrite their whole RAM copy of the prefix,
+	 * this byte included, and so a re-update finds it where it was. The one
+	 * way an older image clears it is its own cfg_set_ap_psk(), which
+	 * stores '\0' at [16]. Nothing in this tree calls that setter any more
+	 * (the setup AP left with the WiFi mode on 2026-10-27), and an old
+	 * image calls it only to generate a password when none is stored, so
+	 * an alternate board downgraded to one and back could at worst come
+	 * back standard -- mirrored, fixed by one `blink config panel
+	 * alternate` (not yet measured on a desk). An old image reads the byte
+	 * as part of a password it no longer uses; a 16-character password next
+	 * to an alternate byte would read there as 17 characters and no NUL,
+	 * which its strncpy into a bounded buffer still stops at (generated
+	 * passwords are 10 characters, so no such record is known to exist).
+	 *
+	 * Every other offset, and sizeof(struct rec), are unchanged; the
+	 * BUILD_ASSERTs after the struct and tests/cfg_store hold them.
+	 */
+	char ap_psk[CFG_AP_PSK_MAX - 1];
+	uint8_t panel;			/* enum cfg_panel; see cfg_get_panel */
 	uint8_t ota_state;		/* 0 idle, 1 install started (cleared on next boot) */
 	char ota_target[CFG_OTA_VER_MAX]; /* version the install aimed at */
 	uint8_t main_src;		/* 0 unset -> claude; else enum cfg_main_src */
@@ -100,6 +134,24 @@ struct rec {
 	uint8_t pair_key[CFG_PAIR_KEY_LEN];	/* secret, never logged */
 	uint32_t crc;		/* over everything above, always last */
 } __packed;
+
+/*
+ * The layout every shipped firmware and every downgrade reads, pinned. The
+ * panel byte is carved out of ap_psk's last byte, so it must not move
+ * anything else: 1.3.4 finds its seal at 471, 1.4.x at 503, and a record of
+ * any other length is a record nobody can read. Counted from the base layout
+ * (5f6b635) by hand and again by tests/cfg_store. Plain _Static_assert
+ * rather than Zephyr's BUILD_ASSERT, so the host stubs need nothing new.
+ */
+_Static_assert(offsetof(struct rec, ap_psk) == 434, "ap_psk moved");
+_Static_assert(offsetof(struct rec, panel) == 450, "panel is ap_psk's 17th byte");
+_Static_assert(offsetof(struct rec, ota_state) == 451, "ota_state moved");
+_Static_assert(offsetof(struct rec, crc_134) == 471, "1.3.4's seal moved");
+_Static_assert(offsetof(struct rec, theme_id) == 475, "theme_id moved");
+_Static_assert(offsetof(struct rec, crc_143) == 503, "1.4.x's seal moved");
+_Static_assert(offsetof(struct rec, pair_set) == 507, "pair_set moved");
+_Static_assert(offsetof(struct rec, crc) == 540, "crc moved");
+_Static_assert(sizeof(struct rec) == 544, "the record changed size");
 
 /* Which seal slot_load() read a record through: decides what cfg_init may
  * take from the other slot. The layouts older than 1.3.4 count as 1.3.4 --
@@ -281,6 +333,8 @@ static bool slot_load(int off, struct rec *out, enum rec_layout *layout)
 		memcpy(out->ssid, pl.ssid, sizeof(out->ssid));
 		memcpy(out->psk, pl.psk, sizeof(out->psk));
 		memcpy(out->token, pl.token, sizeof(out->token));
+		/* sizeof(out->ap_psk), 16 bytes, off a 17-byte field: the 17th
+		 * was its NUL, and out->panel stays the memset's 0 = standard. */
 		memcpy(out->ap_psk, pl.ap_psk, sizeof(out->ap_psk));
 		out->ota_state = pl.ota_state;
 		memcpy(out->ota_target, pl.ota_target, sizeof(out->ota_target));
@@ -331,7 +385,7 @@ static bool slot_load(int off, struct rec *out, enum rec_layout *layout)
 		memcpy(out->ssid, pe.ssid, sizeof(out->ssid));
 		memcpy(out->psk, pe.psk, sizeof(out->psk));
 		memcpy(out->token, pe.token, sizeof(out->token));
-		memcpy(out->ap_psk, pe.ap_psk, sizeof(out->ap_psk));
+		memcpy(out->ap_psk, pe.ap_psk, sizeof(out->ap_psk));	/* 16 of 17 */
 		out->ota_state = pe.ota_state;
 		memcpy(out->ota_target, pe.ota_target, sizeof(out->ota_target));
 		out->main_src = pe.main_src;
@@ -364,7 +418,7 @@ static bool slot_load(int off, struct rec *out, enum rec_layout *layout)
 		memcpy(out->ssid, prev.ssid, sizeof(out->ssid));
 		memcpy(out->psk, prev.psk, sizeof(out->psk));
 		memcpy(out->token, prev.token, sizeof(out->token));
-		memcpy(out->ap_psk, prev.ap_psk, sizeof(out->ap_psk));
+		memcpy(out->ap_psk, prev.ap_psk, sizeof(out->ap_psk));	/* 16 of 17 */
 		out->ota_state = prev.ota_state;
 		memcpy(out->ota_target, prev.ota_target, sizeof(out->ota_target));
 		out->main_src = 0;	/* unset -> the default, not garbage */
@@ -393,7 +447,7 @@ static bool slot_load(int off, struct rec *out, enum rec_layout *layout)
 	memcpy(out->ssid, old.ssid, sizeof(out->ssid));
 	memcpy(out->psk, old.psk, sizeof(out->psk));
 	memcpy(out->token, old.token, sizeof(out->token));
-	memcpy(out->ap_psk, old.ap_psk, sizeof(out->ap_psk));
+	memcpy(out->ap_psk, old.ap_psk, sizeof(out->ap_psk));	/* 16 of 17 */
 	out->crc = rec_crc(out);	/* valid in RAM; resealed on next persist */
 	printk("[cfg] migrated pre-OTA record (seq %u)\n", old.seq);
 	return true;
@@ -813,6 +867,42 @@ int cfg_set_edition(uint8_t edition)
 	return rc;
 }
 
+/*
+ * Only 1 is alternate. Anything else -- the 0 every shipped record carries in
+ * this byte (see struct rec), or a stray value -- is the standard panel, the
+ * one every desk in the field has.
+ */
+uint8_t cfg_get_panel(void)
+{
+	return cfg.panel == CFG_PANEL_ALTERNATE ? CFG_PANEL_ALTERNATE
+						: CFG_PANEL_STANDARD;
+}
+
+/*
+ * Rolled back on a failed write, as cfg_set_edition does and for the same
+ * reason: persist() serialises the whole RAM record, so a value left behind in
+ * RAM would be sealed by the next unrelated write -- a brightness step -- and
+ * the board would change panel at its next boot with nobody having asked.
+ */
+int cfg_set_panel(uint8_t panel)
+{
+	uint8_t was;
+	int rc;
+
+	if (panel != CFG_PANEL_STANDARD && panel != CFG_PANEL_ALTERNATE) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	was = cfg.panel;
+	cfg.panel = panel;
+	rc = persist();
+	if (rc != 0) {
+		cfg.panel = was;
+	}
+	k_mutex_unlock(&cfg_lock);
+	return rc;
+}
+
 int cfg_set_weekly_sel(uint8_t sel)
 {
 	k_mutex_lock(&cfg_lock, K_FOREVER);
@@ -840,24 +930,41 @@ int cfg_set_bright_pct(uint8_t pct)
 	return rc;
 }
 
+/*
+ * The field is 16 bytes now and its old NUL is the panel byte, so a record an
+ * older firmware wrote can hold 16 characters with no terminator inside the
+ * array. Read with strnlen over the array, never strncpy off its end, and
+ * always terminate the caller's copy.
+ */
 bool cfg_get_ap_psk(char *psk, size_t len)
 {
+	size_t n;
+
+	if (psk == NULL || len == 0) {
+		return false;
+	}
 	k_mutex_lock(&cfg_lock, K_FOREVER);
-	if (!cfg.ap_psk[0]) {
+	n = strnlen(cfg.ap_psk, sizeof(cfg.ap_psk));
+	if (n == 0) {
 		k_mutex_unlock(&cfg_lock);
 		return false;
 	}
-	strncpy(psk, cfg.ap_psk, len - 1);
-	psk[len - 1] = '\0';
+	if (n > len - 1) {
+		n = len - 1;
+	}
+	memcpy(psk, cfg.ap_psk, n);
+	psk[n] = '\0';
 	k_mutex_unlock(&cfg_lock);
 	return true;
 }
 
+/* At most 15 characters, so this firmware's own records keep a NUL inside the
+ * field; generated passwords are 10. */
 int cfg_set_ap_psk(const char *psk)
 {
 	k_mutex_lock(&cfg_lock, K_FOREVER);
-	strncpy(cfg.ap_psk, psk, sizeof(cfg.ap_psk) - 1);
-	cfg.ap_psk[sizeof(cfg.ap_psk) - 1] = '\0';
+	memset(cfg.ap_psk, 0, sizeof(cfg.ap_psk));
+	strncpy(cfg.ap_psk, psk ? psk : "", sizeof(cfg.ap_psk) - 1);
 
 	int rc = persist();
 
@@ -935,13 +1042,24 @@ int cfg_reset(void)
 	 *
 	 * The memset takes the WiFi pairing with it, and the two erases below
 	 * take it off both sectors, as cfg_clear_pairing does.
+	 *
+	 * The panel survives too, for the same kind of reason (issue #23). It
+	 * says which display module is soldered to this board, a hardware fact
+	 * like the edition, not a preference. And clearing it would be a trap:
+	 * an alternate board reset from Settings would come back mirrored, with
+	 * red and blue swapped, and the menu that could fix it cannot be
+	 * operated on a mirrored screen -- every tap lands on the wrong side.
 	 */
 	uint8_t ed = cfg.edition;
 	uint8_t locked = cfg.edition_locked;
+	/* As cfg_get_panel reads it: a stray byte is not worth keeping. */
+	uint8_t panel = cfg.panel == CFG_PANEL_ALTERNATE ? CFG_PANEL_ALTERNATE
+							  : CFG_PANEL_STANDARD;
 
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.edition = ed;
 	cfg.edition_locked = locked;
+	cfg.panel = panel;
 
 	flash_area_erase(fa, SLOT_A, SECTOR);
 	flash_area_erase(fa, SLOT_B, SECTOR);
@@ -950,9 +1068,9 @@ int cfg_reset(void)
 	 * Both slots are blank now, so the stamp exists only in RAM until
 	 * something persists it. Write it back immediately: a reset is
 	 * followed by a reboot, and a power cut in that gap would take the
-	 * edition with it.
+	 * edition with it -- or, on an alternate board, the panel.
 	 */
-	if (locked) {
+	if (locked || panel != CFG_PANEL_STANDARD) {
 		persist();
 	}
 	k_mutex_unlock(&cfg_lock);

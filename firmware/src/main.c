@@ -16,6 +16,7 @@
 #include "cfg_store.h"
 #include "ui_theme.h"
 #include "backlight.h"
+#include "panel.h"
 #include "net_time.h"
 #include "ui_boot.h"
 #include "fatal.h"
@@ -36,82 +37,107 @@
 #include "wl_heap.h"
 #include "wl_server.h"
 
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+/* Bench images only, defined in proto.c (see bench_boot_dispatch there):
+ * proto.h is not changed for the bench, so the declaration is repeated
+ * here. */
+void proto_bench_ui_up(void);
+#endif
+
 static const struct device *const display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
 /*
- * MADCTL correction for the production batch.
+ * MADCTL for the panel this board carries (panel.h has the two modules, the
+ * three ways they differ and the 2026-08-21 measurements).
  *
- * These panels differ from the pilot units in two independent ways, and both
- * land in MADCTL (36h), so one write fixes both. Pilot boards must build with
- * CONFIG_BLINK_PANEL_PILOT, which compiles this away entirely.
- *
- * The pilot units and the production panels are driven with byte-identical
- * registers, yet production renders mirrored -- so the difference is in the
- * module, not in anything we send. The usual cure for that, the SS bit in
- * DISCTRL (B6h), was tried on hardware 2026-08-21: the built devicetree
- * carried it (disctrl = [0a a2 27 04]) and the image did not budge, which
- * rules the B6h route out on this controller. MADCTL is honoured, so the
- * compensation lives there instead.
- *
- * It cannot be a devicetree `rotation`. The ili9xxx driver's CMD_SET_1 table
- * reaches only MV (90 deg) and MV|MX|MY (270 deg) in landscape, and those two
- * differ by a pure 180 deg turn -- neither un-mirrors. What this panel needs is
- * MV|MY, which no rotation value can produce. So we re-issue MADCTL ourselves
- * once, straight onto the DBI bus, after the driver has finished its init.
- *
- * Second, the colour order. The driver hardcodes the BGR bit for every
- * orientation, but these panels are wired RGB, so red and blue arrived
- * swapped. Measured 2026-08-21 with a six-bar test pattern of known values:
- * the RED bar read blue and the BLUE bar read red, while GREEN stayed green
- * and white/black were exact -- a clean channel exchange, with no inversion
- * or gamma error. Clearing bit 3 restores it. (Green surviving a red/blue
- * swap untouched is why eyeballing a green UI element misdiagnosed this.)
+ * Until issue #23 this was a build option, and an image built for the other
+ * module came out mirrored and colour-swapped. Now the stored byte chooses,
+ * read from the record at boot (cfg_init runs first for exactly this) and
+ * changed live by panel_apply() below.
  *
  * Safe to overwrite: the driver writes MADCTL only from set_orientation(),
  * which runs during init and is never called again (nothing in the LVGL glue
- * touches orientation), so this value is the one that sticks. Partial updates
- * stay correct because MY flips the row-address mapping wholesale -- LVGL's
- * window coordinates and its pixels mirror together, and the panel's own
- * reversed wiring cancels them back out.
+ * touches orientation), so the value written here is the one that sticks.
+ * Partial updates stay correct on the standard panel because MY flips the
+ * row-address mapping wholesale -- LVGL's window coordinates and its pixels
+ * mirror together, and the panel's own reversed wiring cancels them back out.
+ * Both values carry MV, so the 320x240 landscape geometry LVGL draws into is
+ * the same either way and nothing above the bus has to know which it is.
  */
-#ifdef CONFIG_BLINK_PANEL_PILOT
-
-/* Pilot panels need none of it: the stock rotation=90 MADCTL (BGR|MV) that the
- * driver writes is already correct for them, mirror and colour order alike. */
-static void panel_fix_madctl(void)
-{
-}
-
-#else
-
-#define PANEL_MADCTL_MV   BIT(5)
-#define PANEL_MADCTL_MY   BIT(7)
-
 static const struct device *const panel_dbi =
 	DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(ili9341)));
 static const struct mipi_dbi_config panel_dbi_cfg =
 	MIPI_DBI_CONFIG_DT(DT_NODELABEL(ili9341),
 			   SPI_OP_MODE_MASTER | SPI_WORD_SET(8), 0);
 
-static void panel_fix_madctl(void)
+/* Send one MADCTL. Returns 0, or a negative errno with the reason printed. */
+static int panel_write_madctl(uint8_t madctl)
 {
-	uint8_t madctl = PANEL_MADCTL_MV | PANEL_MADCTL_MY;	/* BGR bit clear = RGB */
 	int r;
 
 	if (!device_is_ready(panel_dbi)) {
 		printk("[usage] panel: DBI bus not ready, MADCTL uncorrected\n");
-		return;
+		return -ENODEV;
 	}
-
 	r = mipi_dbi_command_write(panel_dbi, &panel_dbi_cfg, 0x36, &madctl, 1);
 	if (r < 0) {
 		printk("[usage] panel: MADCTL write failed (%d)\n", r);
-	} else {
+	}
+	return r < 0 ? r : 0;
+}
+
+/* Everything on the glass was drawn for the other module. The active screen
+ * spans the whole display, so this redraws every layer. */
+static void panel_redraw(void)
+{
+	lv_obj_invalidate(lv_scr_act());
+}
+
+/* panel.h's decisions over this board's hardware. The decisions themselves
+ * -- which MADCTL, whether to write one at boot, what follows a write and
+ * what a failed one stops -- live in panel.h, where the host tests drive the
+ * same code with recorders; this file only says which functions do it. */
+static const struct panel_ops panel_hw = {
+	.write_madctl = panel_write_madctl,
+	.backlight_reapply = backlight_reapply,
+	.redraw = panel_redraw,
+};
+
+BUILD_ASSERT(CFG_PANEL_STANDARD == PANEL_ID_STANDARD &&
+	     CFG_PANEL_ALTERNATE == PANEL_ID_ALTERNATE,
+	     "panel.h repeats cfg_store.h's panel numbers; they must agree");
+
+/*
+ * At boot (panel_boot in panel.h has the why of each case). The standard
+ * panel's line is the one tools/check_panel_build.sh and the tests look for;
+ * a failed write has already printed its own line in panel_write_madctl.
+ */
+static void panel_fix_madctl(void)
+{
+	uint8_t madctl = 0;
+
+	switch (panel_boot(cfg_get_panel(), &panel_hw, &madctl)) {
+	case PANEL_BOOT_WROTE:
 		printk("[usage] panel: MADCTL=0x%02x\n", madctl);
+		break;
+	case PANEL_BOOT_KEPT:
+		printk("[usage] panel: alternate, driver MADCTL kept\n");
+		break;
+	case PANEL_BOOT_FAILED:
+		break;
 	}
 }
 
-#endif /* CONFIG_BLINK_PANEL_PILOT */
+/*
+ * A live change, from proto.c's `panel` handler on this (the LVGL) thread --
+ * panel.h says why that thread and no other, and why a failed MADCTL write
+ * now stops the backlight and the redraw too. Returns 0, or the write's
+ * negative errno for proto.c to report.
+ */
+int panel_apply(uint8_t panel)
+{
+	return panel_live_apply(panel, &panel_hw);
+}
 
 /* ---- OTA boot-side: test-boot self-confirm, else MCUboot reverts ---- */
 
@@ -379,6 +405,17 @@ static void run_usb(void)
 	/* A tap that landed during boot, before this loop could act on it, is
 	 * stale by now; ui_settings.h explains. Throw it away. */
 	ui_settings_drop_pending();
+
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+	/* The first real screen is up and its Settings zones are attached, so
+	 * the bench may be told what the panel shows and may press it. Until
+	 * now proto.c held its ui_state questions and refused its touches: on
+	 * 2026-11-25 a bench tap fell on the boot splash because ui_state said
+	 * gauges while the clip played (proto.c, bench_boot_dispatch). Here,
+	 * because both of main()'s paths reach the main loop only through
+	 * run_usb(). */
+	proto_bench_ui_up();
+#endif
 
 	/* The first panel is up. Spin with interrupts off and the watchdog fed
 	 * by nobody: the unconfirmed image must be reverted by the watchdog, the
@@ -683,11 +720,17 @@ int main(void)
 		printk("[usage] display not ready\n");
 		return -1;
 	}
+	/* The record first: which panel this board carries is in it, and the
+	 * MADCTL fix below has to know before the screen is unblanked, or the
+	 * first frame goes up mirrored. Nothing between here and its old place
+	 * (after ui_touchfx_init) read the record, and everything that does --
+	 * the network thread, the theme, Focus, the backlight -- still comes
+	 * after it. */
+	cfg_init();
 	panel_fix_madctl();
 	display_blanking_off(display_dev);
 	ui_touchfx_init();	/* light touch-echo feedback on every press */
 
-	cfg_init();
 	/* The network thread, after cfg_init (it reads the pairing) and only
 	 * when the self-test passed (D24). It owns the boot join and every
 	 * rejoin, paired or not (D47: an unpaired board's thread still serves a

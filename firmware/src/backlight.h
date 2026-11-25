@@ -15,6 +15,11 @@ void backlight_step(int dir);
  * now rather than stepping toward one. */
 void backlight_set(uint8_t pct);
 
+/* Drive the PWM again at the current level, with `panel`'s scale (panel.h),
+ * and keep that panel for every later step. For a live panel change, once
+ * its MADCTL is on the glass (panel_live_apply); persists nothing. */
+void backlight_reapply(uint8_t panel);
+
 /* Current backlight percent -- one of 20/40/60/80/100. */
 uint8_t backlight_get(void);
 

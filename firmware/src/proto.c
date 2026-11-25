@@ -31,6 +31,18 @@
 #include "ui_theme.h"
 #include "ui_settings.h"
 #include "touch_inject.h"
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+/* The bench's not-ready ui_state line (bench_boot_service) carries the real
+ * brightness, and its log kick is touch_inject.c's, for the same reason. */
+#include "backlight.h"
+#if defined(CONFIG_LOG_MODE_DEFERRED) && defined(CONFIG_LOG_PROCESS_THREAD)
+#include <zephyr/logging/log_ctrl.h>
+#define BENCH_LOG_KICK() log_thread_trigger()
+#else
+#define BENCH_LOG_KICK() ((void)0)
+#endif
+#endif
+#include "panel.h"
 #if defined(CONFIG_BLINK_WIFI_LINK)
 #include <errno.h>
 #include "wl_frame.h"
@@ -1377,6 +1389,130 @@ static void wifi_poll(void)
 	}
 }
 
+#ifdef CONFIG_BLINK_TOUCH_INJECT
+/*
+ * Bench images only: the bench's answers stay honest until the first real
+ * screen is up.
+ *
+ * During the boot clip (about 4.3 s, ui_boot.c) ui_boot keeps calling
+ * proto_service(), so the bench's lines are dispatched while the splash is
+ * the only thing on the panel. touch_inject.c knows nothing of the splash:
+ * its ui_state said gauges, not busy, and a tap got touch_done. On
+ * 2026-11-25, in the board check of issue #23's branch, full_touch.txt's
+ * `expect ui_state scr=gauges` passed against the splash and its first
+ * Settings tap fell on a screen with no edge zones (ui_settings_attach()
+ * makes them after the splash), so the run failed at settings.open with the
+ * board still on the gauges. One [boot] line in that run's tally of
+ * unparsed console lines showed the board was still booting when the script
+ * started.
+ *
+ * So, until main.c's run_usb() says the first screen is up
+ * (proto_bench_ui_up):
+ *   - a touch line of any op, wake and dismiss included, is refused busy:
+ *     nothing it would press or close exists yet;
+ *   - a ui_state question is held, not answered, and answered by
+ *     bench_boot_service() -- with the real line the moment the screen is
+ *     up, or after BENCH_STATE_HOLD_MS with a not-ready line that says busy;
+ *   - a widgets question is answered as before: it lists what is really on
+ *     the panel, splash included, and its gen keeps a later click honest.
+ *
+ * Why hold the question rather than answer not-ready at once: board_touch.py
+ * gives up on a ui_state answer after 2.0 s (query_state), so an answer held
+ * 1.5 s still arrives, and holding stretches the tool's start-up query and
+ * every wait_state poll across the clip. Before this, the first tap came
+ * about 2.5 s after the port opened (a 1 s start-up sleep, then 1.5 s of
+ * `expect notice none`) and needed the boot finished by then; now the board
+ * has roughly 1 + 1.5 + 3 s, since each held answer says busy and wait_state
+ * keeps polling until busy is 0.
+ *
+ * Every source alike, as touch_inject_dispatch() treats them. USB and the
+ * WiFi session both reach dispatch() from proto_service(), on the main
+ * thread (drain_rx and drain_wifi), and so does this service, so plain
+ * statics are enough.
+ */
+#define BENCH_STATE_HOLD_MS 1500
+
+static bool bench_ui_up;
+/* When the held ui_state question came in; 0 is none held. */
+static int64_t bench_state_owed_at;
+
+/* Declared here rather than in proto.h, which bench code does not change;
+ * main.c repeats this declaration inside its own CONFIG_BLINK_TOUCH_INJECT. */
+void proto_bench_ui_up(void);
+
+void proto_bench_ui_up(void)
+{
+	bench_ui_up = true;
+}
+
+/* True when the line was taken here, before touch_inject_dispatch(). */
+static bool bench_boot_dispatch(const char *type)
+{
+	if (bench_ui_up) {
+		return false;
+	}
+	if (strcmp(type, "ui_state") == 0) {
+		if (bench_state_owed_at == 0) {
+			int64_t now = k_uptime_get();
+
+			bench_state_owed_at = now != 0 ? now : 1;
+		}
+		return true;
+	}
+	if (strcmp(type, "touch") == 0) {
+		/* touch_inject.c's refuse(), format and all. */
+		printk("{\"t\":\"touch_refused\",\"v\":%d,\"why\":\"busy\"}\n",
+		       BLINK_PROTO_VERSION);
+		BENCH_LOG_KICK();
+		return true;
+	}
+	return false;
+}
+
+/* Once a proto_service() pass: the held ui_state question's answer. */
+static void bench_boot_service(void)
+{
+	if (bench_state_owed_at == 0) {
+		return;
+	}
+	if (bench_ui_up) {
+		bench_state_owed_at = 0;
+		/* The real line, now the screen it describes exists. ui_state
+		 * reads nothing of its line, so an empty object stands in. */
+		(void)touch_inject_dispatch("ui_state", "{}");
+		return;
+	}
+	if (k_uptime_get() - bench_state_owed_at < BENCH_STATE_HOLD_MS) {
+		return;
+	}
+	bench_state_owed_at = 0;
+	/*
+	 * Not ready, in words board_touch.py accepts (_STATE_WORDS and
+	 * _STATE_INTS): it refuses any scr outside its list, so "connecting"
+	 * (the waiting-for-host screen run_usb() opens on) rather than a new
+	 * word, and busy 1 keeps every wait_state waiting. The fields a run
+	 * restores at its end (stored, bl, focus) are the real ones, read from
+	 * the record and the PWM, both set before proto_init(): the run's
+	 * starting state can be this line, and a made-up brightness of 0
+	 * would be "restored" onto the board. The rest are what an idle
+	 * board says: no overlay, modal, notice or edit, awake, and gf off
+	 * because no gauges have been drawn yet.
+	 */
+	printk("{\"t\":\"ui_state\",\"v\":%d,\"scr\":\"connecting\","
+	       "\"ov\":\"none\",\"modal\":\"none\",\"busy\":1,\"theme\":%d,"
+	       "\"stored\":%d,\"tp\":0,\"focus\":\"%s\",\"bl\":%d,"
+	       "\"edit\":\"name\",\"slp\":0,\"nt\":\"none\",\"gf\":\"off\","
+	       "\"ln\":\"%s\"}\n",
+	       BLINK_PROTO_VERSION, theme_active_id(), ui_theme_stored_id(),
+	       !cfg_get_focus_on() ? "off" :
+	       cfg_get_focus_win() ? "weekly" : "session",
+	       (int)backlight_get(),
+	       proto_link_kind() == 2 ? "wifi" :
+	       proto_link_kind() == 1 ? "usb" : "none");
+	BENCH_LOG_KICK();
+}
+#endif
+
 static void dispatch(const char *json, enum proto_src src)
 {
 	char type[16];
@@ -1389,7 +1525,11 @@ static void dispatch(const char *json, enum proto_src src)
 	 * the panel shows (touch_inject.h). Dispatched BEFORE the host stamp
 	 * and link_usb_heard(): these lines do not count as a USB host, so a
 	 * live WiFi session and an OTA in flight survive board_touch.py
-	 * --touch-only (D55). */
+	 * --touch-only (D55). Until the first screen is up, the boot clip's
+	 * answers come first (bench_boot_dispatch, above). */
+	if (bench_boot_dispatch(type)) {
+		return;
+	}
 	if (touch_inject_dispatch(type, json)) {
 		return;
 	}
@@ -1691,6 +1831,70 @@ static void dispatch(const char *json, enum proto_src src)
 				printk("[cfg] could not store the edition"
 				       " (%d)\n", rc);
 			}
+		}
+	} else if (strcmp(type, "panel") == 0) {
+		/*
+		 * Which display module this board carries (issue #23; panel.h
+		 * and cfg_get_panel in cfg_store.h). Sent by `blink config
+		 * panel standard|alternate`; a firmware older than this one
+		 * falls through to the unknown-type end of dispatch and
+		 * ignores it.
+		 *
+		 * From the cable only. A wrong value mirrors the screen and
+		 * swaps red and blue, and on a mirrored screen the Settings
+		 * menu cannot be operated, so this is not something a peer on
+		 * the network gets to do to a desk. Over WiFi it is dropped,
+		 * with a constant line.
+		 *
+		 * Unlike the edition, no latch: the owner may need to set it
+		 * back, and it takes effect at once rather than at the next
+		 * boot. panel_apply() runs here, on the main thread that owns
+		 * LVGL and the display bus (panel.h explains why that matters),
+		 * the way ui_theme_wire() repaints from the `theme` branch.
+		 *
+		 * What happens is panel_handle_msg in panel.h -- the names, the
+		 * store-then-apply order and what a failure of each stops --
+		 * so the host tests drive the same code with cfg_store.c's real
+		 * setter. This branch only says which functions do it and
+		 * prints one constant line per outcome. A MADCTL write that
+		 * fails after the store worked is said as such rather than as
+		 * "panel set": the choice is on flash and the next boot shows
+		 * it, but until then the glass is the old module's, and
+		 * `blink config panel` tells the owner to restart.
+		 *
+		 * Nothing from the message is echoed, not even the value that
+		 * was refused: the console is what customers send us.
+		 */
+		static const struct panel_msg_ops panel_msg_hw = {
+			.store = cfg_set_panel,
+			.apply = panel_apply,
+		};
+		char pv[12];
+		int rc;
+
+		if (src != PROTO_SRC_USB) {
+			printk("[cfg] panel is set over the cable only; ignored\n");
+			return;
+		}
+		switch (panel_handle_msg(msg_get_str(json, "panel", pv, sizeof(pv))
+					 ? pv : NULL, &panel_msg_hw, &rc)) {
+		case PANEL_MSG_SET_STANDARD:
+			printk("[cfg] panel set to standard\n");
+			break;
+		case PANEL_MSG_SET_ALTERNATE:
+			printk("[cfg] panel set to alternate\n");
+			break;
+		case PANEL_MSG_STORE_FAILED:
+			printk("[cfg] could not store the panel (%d)\n", rc);
+			break;
+		case PANEL_MSG_NOT_SHOWN:
+			printk("[cfg] panel saved; restart the board to show it"
+			       " (%d)\n", rc);
+			break;
+		case PANEL_MSG_UNKNOWN:
+		default:
+			printk("[cfg] unknown panel; ignored\n");
+			break;
 		}
 	} else if (strcmp(type, "welcome") == 0) {
 		double hv = 0;
@@ -2251,6 +2455,7 @@ void proto_service(void)
 #endif
 #ifdef CONFIG_BLINK_TOUCH_INJECT
 	touch_inject_service();
+	bench_boot_service();
 #endif
 	int64_t now = k_uptime_get();
 

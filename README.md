@@ -192,6 +192,8 @@ BLINK keeps no credential and never sends your usage or your sessions anywhere. 
 
 `tools/burn.sh` programs a unit end to end: it builds signed firmware, flashes it, stamps the edition (Claude or Codex, write-once) and confirms the stamp survives a power cycle; add `--logo` for a company logo. Details in [docs/README-full.md](docs/README-full.md#programming-a-unit).
 
+Mirrored screen, red and blue swapped? Some CYD batches carry a different display module: run `blink config panel alternate` with the board on the cable (`blink config panel standard` puts it back). See [docs/README-full.md](docs/README-full.md#a-screen-that-comes-up-mirrored).
+
 ## Read more
 
 - **[The full README](docs/README-full.md)** - how the numbers are found, what the installer changes line by line, ports and multiple boards, updates and signing, the decisions behind the first release

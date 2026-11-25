@@ -192,7 +192,7 @@ WIRE_TYPES = frozenset({
     "theme_edit", "touch_done", "touch_refused", "ui_state", "widgets",
     "answer",
     # host -> board
-    "welcome", "bye", "pong", "time", "usage", "edition", "session",
+    "welcome", "bye", "pong", "time", "usage", "edition", "panel", "session",
     "status", "svc", "theme", "ota_avail", "ota_begin", "ota_resume",
     "ota_none", "ota_error", "edit_state", "burn", "plan", "sburn", "ask",
     # The WiFi transport (docs/superpowers/specs/2026-11-05-wifi-transport-
@@ -254,6 +254,10 @@ TAP_FIELDS = {
     "time": frozenset({"t", "epoch", "utc_offset_min"}),
     "usage": _USAGE_FIELDS,
     "edition": frozenset({"t", "edition"}),
+    # The panel's name is one of two words of ours (PANELS, held to the
+    # TAP_TYPE_ENUMS entry below by test_protocol), so it may be recorded
+    # the way the edition is; anything else under that name is dropped.
+    "panel": frozenset({"t", "panel"}),
     "session": frozenset({"t", "n"}),
     "status": frozenset({"t", "state"}),
     "svc": frozenset({"t", "provider", "level"}),
@@ -300,6 +304,10 @@ TAP_ENUMS = {
 # "refresh" is the only one (ask()).
 TAP_TYPE_ENUMS = {
     ("answer", "id"): frozenset({"refresh"}),
+    # PANELS, below. A literal here because this table is read before that
+    # tuple is defined; test_protocol holds the two equal, as it does for
+    # ASK_ANSWERS.
+    ("panel", "panel"): frozenset({"standard", "alternate"}),
 }
 # Fields that are numbers on the wire (spec S6.1, S7.5). Review of Task 0.1:
 # redact() kept any string of 64 characters or fewer in them, so a board
@@ -1148,6 +1156,36 @@ def edition(name: str) -> dict:
         raise ValueError(f"unknown edition {name!r}; expected one of "
                          + ", ".join(EDITIONS))
     return {"t": "edition", "v": VERSION, "edition": name}
+
+
+# The two display panels a CYD ships with (issue #23). "standard" is the
+# panel every board was built and tested against until then, and the one a
+# board assumes when nothing is stored; "alternate" is the second panel
+# boards have since arrived with, on which the driver's own MADCTL is kept
+# rather than overwritten (the board's boot line says so: "[usage] panel:
+# alternate, driver MADCTL kept").
+PANELS = ("standard", "alternate")
+
+
+def panel(name: str) -> dict:
+    """Tell the board which display panel it has.
+
+    A setting the owner chooses, through `blink config panel`, because the
+    board cannot tell the two panels apart on its own: both answer the same
+    controller, and what differs is how the picture comes out. The board
+    persists it and applies it at once, with no reboot -- unlike `edition`,
+    which picks a boot clip and so can only take effect on the next boot.
+
+    Additive like `edition`: firmware that predates it ignores an unknown
+    message type, so sending one to an older board is a no-op rather than an
+    error. The board's "[cfg] panel set to ..." console line is the only way
+    to tell a stored setting from an ignored one, which is why the CLI waits
+    for it rather than reporting success on write.
+    """
+    if name not in PANELS:
+        raise ValueError(f"unknown panel {name!r}; expected one of "
+                         + ", ".join(PANELS))
+    return {"t": "panel", "v": VERSION, "panel": name}
 
 
 # 24 bytes. STATUS_MAX_W is 300 px and usage_layout.h records

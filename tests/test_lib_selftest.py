@@ -153,8 +153,9 @@ def test_burn_sh_refuses_test_knobs_and_standalone_net_unless_told():
     assert "SKIPPED" in text
 
 
-# --- the touch trace and the pilot panel: release.sh's alone (review, S6) ---
+# --- the touch trace: release.sh's alone (review, S6) -------------------------
 
+# What every image carries now, whatever its panel: main.c's boot line.
 PRODUCTION_LINE = b"[usage] panel: MADCTL=0x%02x\n"
 TRACE_LINE = b"\n#TT-BEGIN seq=%u n=%u sat=%u frame=channel240x320\n"
 
@@ -169,19 +170,16 @@ def _check_fn(tmp_path, fn, config, image):
         capture_output=True, text=True, timeout=30)
 
 
-def test_a_production_image_passes_both(tmp_path):
-    for fn in ("blink_refuse_trace", "blink_refuse_pilot"):
-        r = _check_fn(tmp_path, fn, PLAIN_CONFIG, _image(PRODUCTION_LINE))
-        assert r.returncode == 0, (fn, r.stderr)
-        assert r.stderr == ""
+def test_a_production_image_passes_the_trace_check(tmp_path):
+    r = _check_fn(tmp_path, "blink_refuse_trace", PLAIN_CONFIG,
+                  _image(PRODUCTION_LINE))
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == ""
 
 
-@pytest.mark.parametrize("fn,symbol", [
-    ("blink_refuse_trace", "CONFIG_BLINK_TOUCH_TRACE=y"),
-    ("blink_refuse_pilot", "CONFIG_BLINK_PANEL_PILOT=y"),
-])
-def test_the_trace_and_pilot_symbols_refuse(tmp_path, fn, symbol):
-    r = _check_fn(tmp_path, fn, PLAIN_CONFIG + symbol + "\n",
+def test_the_trace_symbol_refuses(tmp_path):
+    symbol = "CONFIG_BLINK_TOUCH_TRACE=y"
+    r = _check_fn(tmp_path, "blink_refuse_trace", PLAIN_CONFIG + symbol + "\n",
                   _image(PRODUCTION_LINE))
     assert r.returncode == 1
     assert symbol in r.stderr
@@ -195,20 +193,11 @@ def test_the_trace_dump_in_the_image_refuses(tmp_path):
     assert "touch trace dump" in r.stderr
 
 
-def test_an_image_without_the_panel_correction_refuses(tmp_path):
-    """A pilot build prints nothing of its own; what it lacks is the line
-    of the correction it compiles out."""
-    r = _check_fn(tmp_path, "blink_refuse_pilot", PLAIN_CONFIG, _image())
-    assert r.returncode == 1
-    assert "lacks the production panel correction" in r.stderr
-
-
-@pytest.mark.parametrize("fn", ["blink_refuse_trace", "blink_refuse_pilot"])
-def test_a_missing_config_refuses_trace_and_pilot(tmp_path, fn):
+def test_a_missing_config_refuses_the_trace_check(tmp_path):
     img = tmp_path / "zephyr.signed.bin"
     img.write_bytes(_image(PRODUCTION_LINE))
     r = subprocess.run(
-        ["sh", "-c", f'. "$0"; {fn} "$1" "$2"', str(LIB),
+        ["sh", "-c", '. "$0"; blink_refuse_trace "$1" "$2"', str(LIB),
          str(tmp_path / ".config"), str(img)],
         capture_output=True, text=True, timeout=30)
     assert r.returncode == 1
@@ -235,25 +224,7 @@ def test_the_trace_phrase_is_the_one_touch_trace_c_prints():
     assert any(phrase in lit for lit in lits), (phrase, lits)
 
 
-def test_the_pilot_phrase_is_printed_only_by_a_production_build():
-    """Reworded in main.c, every image would read as a pilot one and the
-    release would stop -- loud, but this says why. Compiled in only on the
-    production side of the CONFIG_BLINK_PANEL_PILOT #ifdef, or a pilot image
-    would carry it too and pass."""
-    (phrase,) = re.findall(r"grep -aqF '([^']+)'",
-                           _fn_body(LIB.read_text(encoding="utf-8"),
-                                    "blink_refuse_pilot"))
-    code, _ = _printk_literals(ROOT / "firmware" / "src" / "main.c")
-    start = code.index("#ifdef CONFIG_BLINK_PANEL_PILOT")
-    els = code.index("#else", start)
-    end = code.index("#endif", els)
-    assert phrase not in code[start:els]
-    prod = re.findall(r'printk\(\s*"((?:[^"\\]|\\.)*)"', code[els:end])
-    assert any(phrase in lit for lit in prod), (phrase, prod)
-    assert code.count(phrase) == 1
-
-
-def test_release_sh_refuses_trace_and_pilot_before_publishing():
+def test_release_sh_refuses_trace_before_publishing():
     lines = (ROOT / "tools" / "release.sh").read_text(
         encoding="utf-8").splitlines()
 
@@ -262,10 +233,91 @@ def test_release_sh_refuses_trace_and_pilot_before_publishing():
 
     build = first(r"\s*(\(\s*cd [^&]*&&\s*)?west build\b")
     publish = first(r"\s*gh release (create|edit|upload)\b")
-    for fn in ("blink_refuse_trace", "blink_refuse_pilot"):
-        guard = first(rf"\s*{fn}\b")
-        assert build < guard < publish, fn
-        assert re.search(rf'{fn} "\$CFG" "\$BIN" \|\| exit 1', lines[guard])
+    guard = first(r"\s*blink_refuse_trace\b")
+    assert build < guard < publish
+    assert re.search(r'blink_refuse_trace "\$CFG" "\$BIN" \|\| exit 1',
+                     lines[guard])
+
+
+# --- the panel is a run-time setting now (issue #23) --------------------------
+#
+# The two boards whose display module renders mirrored on the standard
+# setting used to need a build of their own, and release.sh refused that
+# build by its Kconfig symbol and by the absence of main.c's MADCTL boot
+# line. Issue #23 made the panel a setting saved on the board (`blink config
+# panel standard|alternate`), so every image is the same image and the
+# refusal could never fire. These pin that it is gone and stays gone. The
+# retired names are built by concatenation so this file does not itself
+# carry them for the repo-wide search below to find.
+
+RETIRED = ("BLINK_PANEL_" + "PILOT", "BLINK_BL_" + "SCALE_PCT",
+           "pilot" + ".conf")
+REFUSE_PANEL = "blink_refuse_" + "pilot"
+
+
+def test_the_panel_build_refusal_is_gone():
+    lib = LIB.read_text(encoding="utf-8")
+    assert not re.search(rf"^\s*{REFUSE_PANEL}\s*\(\)", lib, re.M)
+    assert REFUSE_PANEL not in lib
+    release = (ROOT / "tools" / "release.sh").read_text(encoding="utf-8")
+    assert REFUSE_PANEL not in release
+
+
+def test_release_sh_still_calls_every_other_refusal_in_order():
+    """Dropping one refusal must not take a neighbour with it. Each call is
+    a real command (not a comment) that ends the script when it fails."""
+    lines = (ROOT / "tools" / "release.sh").read_text(
+        encoding="utf-8").splitlines()
+    order = ["blink_refuse_wifi_mode", "blink_refuse_selftest",
+             "blink_refuse_inject", "blink_refuse_trace",
+             "blink_refuse_standalone_net", "blink_refuse_test_knobs",
+             "blink_refuse_oversize"]
+    at = []
+    for fn in order:
+        (i,) = [i for i, l in enumerate(lines)
+                if re.match(rf"\s*{fn}\b", l)]
+        assert "|| exit 1" in lines[i], lines[i]
+        at.append(i)
+    assert at == sorted(at)
+
+
+def _is_build_dir(part):
+    return part.startswith("build") or part.startswith(".venv")
+
+
+def test_nothing_in_firmware_or_tools_names_the_retired_panel_build():
+    """A stale mention is an instruction someone will follow: a maker told
+    to build with the old overlay gets a build error at best. tools/dev.sh is
+    left out on purpose: it still carries a hint in its fused-chip message
+    that its owner is rewording separately."""
+    skip = {ROOT / "tools" / "dev.sh"}
+    hits = []
+    for top in ("firmware", "tools"):
+        for path in sorted((ROOT / top).rglob("*")):
+            rel = path.relative_to(ROOT)
+            # Directories only: tools/ has files whose names start "build".
+            if any(_is_build_dir(p) for p in rel.parts[1:-1]):
+                continue
+            if not path.is_file() or path in skip:
+                continue
+            data = path.read_bytes()
+            if b"\0" in data:
+                continue  # binary
+            text = data.decode("utf-8", errors="replace")
+            for needle in RETIRED:
+                if needle in text:
+                    hits.append((str(rel), needle))
+    assert hits == []
+
+
+def test_main_c_prints_the_madctl_boot_line_exactly_once():
+    """The platform's board check reads "[usage] panel: MADCTL=0x.." from
+    the boot console to tell the panel correction ran. One printk of it, in
+    code rather than a comment, and no second copy to drift from it."""
+    code, lits = _printk_literals(ROOT / "firmware" / "src" / "main.c")
+    phrase = "panel: MADCTL=0x"
+    assert sum(lit.count(phrase) for lit in lits) == 1, lits
+    assert code.count(phrase) == 1
 
 
 # --- the three WiFi-update test knobs (spec S9, Task 5.1) ---------------------
