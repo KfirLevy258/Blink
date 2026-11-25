@@ -12,12 +12,13 @@ for an app we do not control is exactly the kind of code that should never be
 able to stop it.
 """
 import dataclasses
+import os
 import sys
 import time
 
 from pc import (burn_reader, claude_account, claude_plan, cowork_audit,
-                desktop_idb, desktop_paths, normalizer, protocol,
-                session_verdict, spend_count, weekly_anchor)
+                desktop_chat_activity, desktop_idb, desktop_paths, normalizer,
+                protocol, session_verdict, spend_count, weekly_anchor)
 from pc.providers import base
 from pc.providers import claude_cli
 from pc.providers.claude_cli import ClaudeCliProvider
@@ -50,6 +51,14 @@ FIRST_RETRY_AFTER_S = 60.0
 MAX_RETRY_AFTER_S = 900.0
 
 
+def _blink_home():
+    # cli.blink_home(), repeated rather than imported (cli is the heavy end
+    # of the program, and claude_home repeats it for the same reason).
+    # Resolved per call: a lookup at import would point at the real home
+    # before tests/conftest.py could move it (tests/test_sandbox.py).
+    return os.path.join(os.path.expanduser("~"), ".blink")
+
+
 def default_providers(counter=None, plan=None, home=None, sweep=True):
     """Every provider shipped today, in preference order.
 
@@ -65,11 +74,21 @@ def default_providers(counter=None, plan=None, home=None, sweep=True):
 
     `home` is IngestionBus's: whose drop folder the Claude Code providers
     read.
+
+    The activity provider also carries the Claude Desktop chat watcher, so a
+    chat that is answering lights the dot as one running session. Only this
+    one: `blink status` and the Codex union build their own
+    ClaudeStateProvider with no watcher, so their counts stay the hooks'.
+    The watcher reads its on/off setting from the native ~/.blink, the
+    folder config.json is in whatever claude_home says about Claude Code.
     """
+    chat = desktop_chat_activity.DesktopChatActivity(
+        blink_home=_blink_home())
     return [ClaudeCliProvider(counter=counter, plan=plan, home=home),
             ClaudeDesktopProvider(),
             ClaudeDesktopLocalStorageProvider(),
-            ClaudeStateProvider(home=home, sweep=sweep), CodexCliProvider(),
+            ClaudeStateProvider(home=home, sweep=sweep, chat=chat),
+            CodexCliProvider(),
             # LAST: it only ever offers a remembered projection, and every
             # source above it is polled first so any of them carrying a real
             # weekly reset is what observe() below learns from this cycle.
