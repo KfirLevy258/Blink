@@ -54,7 +54,7 @@ from pc.protocol import UNKNOWN_TYPE, WIRE_TYPES
 # for, and a changed log line fails nothing; an earlier shape pasted all 415
 # line templates here and every change to a log line failed a test.
 PHRASES = dict.fromkeys(
-    "ask bl boot burn cfg claude desktop fatal focus logo mem plan proto "
+    "ask bl boot burn cfg claude desktop fatal focus logo mem panel plan proto "
     "settings sleep slide swipe tap test time touch usage watchdog".split(),
     ())
 PHRASES.update({

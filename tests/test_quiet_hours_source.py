@@ -440,6 +440,13 @@ uint8_t cfg_get_bright_pct(void)
 	return sim_bright;
 }
 
+/* The alternate panel's backlight scale is 100%, so the pwm lines below stay
+ * the shown percent itself; the panel scaling has its own tests. */
+uint8_t cfg_get_panel(void)
+{
+	return CFG_PANEL_ALTERNATE;
+}
+
 /* Every write is recorded: the dim must never be one of them. The stored
  * value is also what the next backlight_init reads, so a "reboot" in a
  * scenario sees what flash would hold. */
@@ -1001,7 +1008,7 @@ def _build(tmp_path, name, driver, firmware):
     drv = work / "driver.c"
     drv.write_text(driver, encoding="utf-8")
     exe = work / name
-    cmd = [cc, "-Wall", "-Werror", "-DCONFIG_BLINK_BL_SCALE_PCT=100",
+    cmd = [cc, "-Wall", "-Werror",
            "-I", str(inc), "-I", str(SRC), str(common), str(drv),
            *[str(SRC / f) for f in firmware], "-o", str(exe)]
     r = subprocess.run(cmd, capture_output=True, text=True)

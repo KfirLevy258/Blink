@@ -120,7 +120,9 @@ _PANEL_DECISION = re.compile(r"\b0[xX](?:[aA]0|28)\b")
 def test_the_backlight_drives_panel_h_pulse():
     code = _code("backlight.c")
     apply = _body(code, "static void apply(void)")
-    assert "pwm_set_pulse_dt(&bl, panel_bl_pulse(" in apply
+    # The shown percent (quiet hours may dim it) on the stored panel's scale.
+    assert "pwm_set_pulse_dt(&bl, panel_bl_pulse(bl.period, shown, panel))" \
+        in apply
     # The panel at boot is the record's...
     assert "cfg_get_panel()" in _body(code, "void backlight_init(void)")
     # ...and a live change sets it, so a failed MADCTL write (which never
@@ -130,15 +132,16 @@ def test_the_backlight_drives_panel_h_pulse():
     # No copy of the sum or the scale of its own.
     for own in ("panel_bl_scale_pct", "10000", "uint64_t"):
         assert own not in code, own
-    assert not re.search(r"\b60\b", code)
+    # (the 60 of minutes-per-hour in quiet hours' clock sum is not the scale)
+    assert not re.search(r"\b60\b", code.replace("hh * 60", ""))
 
 
 def test_the_backlight_panel_is_the_records_before_the_first_apply():
     code = _code("backlight.c")
     init = _body(code, "void backlight_init(void)")
-    # `shown` is assigned from the record, and before apply() runs: the
+    # `panel` is assigned from the record, and before apply() runs: the
     # other order drives the first duty for a stale panel.
-    m = re.search(r"\bshown\s*=\s*cfg_get_panel\(\);", init)
+    m = re.search(r"\bpanel\s*=\s*cfg_get_panel\(\);", init)
     assert m, init
     assert m.end() < init.index("apply();"), init
     # backlight_init must run after cfg_init, or cfg_get_panel() is still
