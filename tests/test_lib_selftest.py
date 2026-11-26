@@ -285,12 +285,18 @@ def _is_build_dir(part):
     return part.startswith("build") or part.startswith(".venv")
 
 
+# tools/dev.sh is a protected owner file: a task may not change it, and the
+# platform's protected-path check failed the round that did (2026-11-26).
+# Its fused-chip message still tells a pilot board's maker to build with the
+# old overlay; the owner makes that edit himself, and the PR names the stale
+# hint so it is not forgotten. Every other file under firmware/ and tools/
+# is still searched.
+PROTECTED = {Path("tools") / "dev.sh"}
+
+
 def test_nothing_in_firmware_or_tools_names_the_retired_panel_build():
     """A stale mention is an instruction someone will follow: a maker told
-    to build with the old overlay gets a build error at best. tools/dev.sh is
-    left out on purpose: it still carries a hint in its fused-chip message
-    that its owner is rewording separately."""
-    skip = {ROOT / "tools" / "dev.sh"}
+    to build with the old overlay gets a build error at best."""
     hits = []
     for top in ("firmware", "tools"):
         for path in sorted((ROOT / top).rglob("*")):
@@ -298,7 +304,9 @@ def test_nothing_in_firmware_or_tools_names_the_retired_panel_build():
             # Directories only: tools/ has files whose names start "build".
             if any(_is_build_dir(p) for p in rel.parts[1:-1]):
                 continue
-            if not path.is_file() or path in skip:
+            if rel in PROTECTED:
+                continue
+            if not path.is_file():
                 continue
             data = path.read_bytes()
             if b"\0" in data:
