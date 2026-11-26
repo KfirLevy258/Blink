@@ -191,7 +191,7 @@ sign-in token it finds, but nothing erases the network name and password or the 
 hotspot's password: they stay in the settings record, and on an unfused board anyone
 with the cable and esptool can read them in plain text. To remove them, erase the
 settings region -- `esptool.py --port <port> erase_region 0x3b0000 0x30000`. That
-clears the whole record: brightness and the other settings go back to their defaults,
+clears the whole record: brightness, quiet hours and the other settings go back to their defaults,
 and the unit's edition reads as Claude until it is stamped again with
 `blink provision --edition codex`, so re-provision a Codex unit afterwards. The record
 keeps those old fields, unread, so that its layout, and every setting in it, survives

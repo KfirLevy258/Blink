@@ -37,6 +37,134 @@ int main(void)
 	CHECK(msg_get_double(tm, "utc_offset_min", &d) && fabs(d + 300.0) < 0.01,
 	      "negative utc_offset_min");
 
+	/* The sessions card's srow line (docs/sessions-card-design.md): whole
+	 * or not at all, and an unknown context is -1, never 0. Every line
+	 * here is made up. */
+	{
+		struct msg_srow r;
+		const char *full = "{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":4,"
+			"\"tot\":6,\"pg\":0,\"pv\":\"c\",\"k\":\"wait\",\"age\":123,"
+			"\"nm\":\"Blink\",\"cx\":42}";
+
+		CHECK(msg_parse_srow(full, &r) && r.i == 0 && r.n == 4 &&
+		      r.tot == 6 && r.pg == 0 && r.pv == 'c' &&
+		      r.k == FMT_SROW_WAIT && r.age == 123 &&
+		      strcmp(r.nm, "Blink") == 0 && r.cx == 42,
+		      "srow: the design's example line, every field");
+		CHECK(msg_parse_srow("{\"t\":\"srow\",\"v\":1,\"i\":3,\"n\":4,"
+				     "\"tot\":9,\"pg\":2,\"pv\":\"x\",\"k\":\"idle\","
+				     "\"age\":5}", &r) &&
+		      r.pv == 'x' && r.k == FMT_SROW_IDLE && r.nm[0] == '\0' &&
+		      r.cx == -1,
+		      "srow: nm and cx absent read as no name and unknown (-1)");
+		CHECK(msg_parse_srow("{\"t\":\"srow\",\"v\":1,\"n\":0,\"tot\":0,"
+				     "\"pg\":0}", &r) && r.n == 0 && r.tot == 0,
+		      "srow: n 0 is the empty list, no row fields needed");
+
+		static const char *const kinds[] = {
+			"wait", "fail", "edit", "tool", "work", "idle"
+		};
+		static const enum fmt_srow_kind want[] = {
+			FMT_SROW_WAIT, FMT_SROW_FAIL, FMT_SROW_EDIT,
+			FMT_SROW_TOOL, FMT_SROW_WORK, FMT_SROW_IDLE
+		};
+		bool all = true;
+
+		for (int i = 0; i < 6; i++) {
+			char line[160];
+
+			snprintf(line, sizeof(line),
+				 "{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":1,\"tot\":1,"
+				 "\"pg\":0,\"pv\":\"c\",\"k\":\"%s\",\"age\":1}",
+				 kinds[i]);
+			all = all && msg_parse_srow(line, &r) && r.k == want[i];
+		}
+		CHECK(all, "srow: each of the six kinds parses to its own");
+
+		/* Refused whole. */
+		static const char *const bad[] = {
+			/* unknown kind, and one a cut buffer would misread */
+			"{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":1,\"tot\":1,\"pg\":0,"
+			"\"pv\":\"c\",\"k\":\"busy\",\"age\":1}",
+			"{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":1,\"tot\":1,\"pg\":0,"
+			"\"pv\":\"c\",\"k\":\"waiting\",\"age\":1}",
+			/* unknown provider */
+			"{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":1,\"tot\":1,\"pg\":0,"
+			"\"pv\":\"z\",\"k\":\"idle\",\"age\":1}",
+			/* i not under n */
+			"{\"t\":\"srow\",\"v\":1,\"i\":2,\"n\":2,\"tot\":2,\"pg\":0,"
+			"\"pv\":\"c\",\"k\":\"idle\",\"age\":1}",
+			/* n past four */
+			"{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":5,\"tot\":5,\"pg\":0,"
+			"\"pv\":\"c\",\"k\":\"idle\",\"age\":1}",
+			/* n more than tot */
+			"{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":3,\"tot\":2,\"pg\":0,"
+			"\"pv\":\"c\",\"k\":\"idle\",\"age\":1}",
+			/* tot and pg past their caps, a fractional index */
+			"{\"t\":\"srow\",\"v\":1,\"n\":0,\"tot\":1000,\"pg\":0}",
+			"{\"t\":\"srow\",\"v\":1,\"n\":0,\"tot\":0,\"pg\":250}",
+			"{\"t\":\"srow\",\"v\":1,\"i\":0.5,\"n\":1,\"tot\":1,\"pg\":0,"
+			"\"pv\":\"c\",\"k\":\"idle\",\"age\":1}",
+			/* age missing, negative, or a string */
+			"{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":1,\"tot\":1,\"pg\":0,"
+			"\"pv\":\"c\",\"k\":\"idle\"}",
+			"{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":1,\"tot\":1,\"pg\":0,"
+			"\"pv\":\"c\",\"k\":\"idle\",\"age\":-1}",
+			"{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":1,\"tot\":1,\"pg\":0,"
+			"\"pv\":\"c\",\"k\":\"idle\",\"age\":\"1\"}",
+			/* a count missing */
+			"{\"t\":\"srow\",\"v\":2,\"tot\":0,\"pg\":0}",
+		};
+		bool none = true;
+
+		for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+			r.n = 77;
+			if (msg_parse_srow(bad[i], &r) || r.n != 77) {
+				none = false;
+				printf("  refused line %zu was taken\n", i);
+			}
+		}
+		CHECK(none, "srow: every malformed line refused, out untouched");
+
+		/* The daemon's own line: pc/protocol.srow stamps v with
+		 * PROTO_VERSION, 2, and the parser must take it (and a line with
+		 * no v, and any extra key) or the card never fills. */
+		CHECK(msg_parse_srow("{\"t\":\"srow\",\"v\":2,\"i\":1,\"n\":2,"
+				     "\"tot\":2,\"pg\":0,\"pv\":\"c\",\"k\":\"edit\","
+				     "\"age\":7,\"nm\":\"Blink\",\"cx\":12,\"z\":9}",
+				     &r) && r.i == 1 && r.k == FMT_SROW_EDIT &&
+		      r.cx == 12,
+		      "srow: v 2, the daemon's stamp, and an extra key are taken");
+		CHECK(msg_parse_srow("{\"t\":\"srow\",\"n\":0,\"tot\":0,\"pg\":0}",
+				     &r) && r.n == 0,
+		      "srow: no v at all is taken");
+
+		/* Held, not refused. */
+		CHECK(msg_parse_srow("{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":1,"
+				     "\"tot\":1,\"pg\":0,\"pv\":\"c\",\"k\":\"work\","
+				     "\"age\":9999999,\"cx\":140}", &r) &&
+		      r.age == FMT_SAGE_MAX && r.cx == 100,
+		      "srow: age past its cap and cx past 100 are held");
+		CHECK(msg_parse_srow("{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":1,"
+				     "\"tot\":1,\"pg\":0,\"pv\":\"c\",\"k\":\"work\","
+				     "\"age\":1,\"cx\":-3}", &r) && r.cx == -1,
+		      "srow: a negative cx is unknown, not 0");
+		CHECK(msg_parse_srow("{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":1,"
+				     "\"tot\":1,\"pg\":0,\"pv\":\"c\",\"k\":\"work\","
+				     "\"age\":1,\"cx\":0}", &r) && r.cx == 0,
+		      "srow: a real 0% stays 0");
+		CHECK(msg_parse_srow("{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":1,"
+				     "\"tot\":1,\"pg\":0,\"pv\":\"c\",\"k\":\"work\","
+				     "\"age\":1,\"nm\":\"abcdefghijklmnopqrstuvwxyz\"}",
+				     &r) && strlen(r.nm) == 24,
+		      "srow: a name past 24 bytes is cut at 24");
+		CHECK(msg_parse_srow("{\"t\":\"srow\",\"v\":1,\"i\":0,\"n\":1,"
+				     "\"tot\":1,\"pg\":0,\"pv\":\"c\",\"k\":\"idle\","
+				     "\"age\":1,\"nm\":\"n\"}", &r) &&
+		      r.n == 1 && strcmp(r.nm, "n") == 0,
+		      "srow: a name that spells a key is not read as one");
+	}
+
 	/* msg_get_bool: the daemon marks a reading it cannot vouch for, and the
 	 * panel must be able to tell that from a real rate limit. */
 	{

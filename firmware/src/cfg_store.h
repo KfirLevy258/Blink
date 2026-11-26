@@ -25,10 +25,19 @@ enum cfg_mode {
  * stored; an unused accessor costs nothing, because the linker drops it.
  * Nothing clears the network or setup-AP passwords such a board still
  * holds -- see the comment at that erase.
+ *
+ * One exception to "reserved": the token's last four bytes now hold quiet
+ * hours (cfg_get_quiet below), so the token itself is 316 bytes, 315
+ * characters. That is safe because no firmware reads a token any more except
+ * to erase it, and release.sh never shipped the WiFi build that wrote one:
+ * field boards hold zeros there, which read as quiet hours off. A downgrade
+ * to an older image finds an empty token (token[0] is still 0) or, from a
+ * long legacy one, a shorter one -- and that image also only ever erases it.
+ * CFG_TOKEN_MAX stays 320: the frozen legacy layouts are sized by it.
  */
 #define CFG_SSID_MAX 33		/* 32 + NUL */
 #define CFG_PSK_MAX 65		/* 64 + NUL */
-#define CFG_TOKEN_MAX 320	/* OAuth refresh tokens are long */
+#define CFG_TOKEN_MAX 320	/* the old field; the token now gets 316 of it */
 
 int cfg_init(void);
 
@@ -178,6 +187,19 @@ int cfg_set_theme(const struct cfg_theme *t);
 uint8_t cfg_get_focus_on(void);
 uint8_t cfg_get_focus_win(void);
 int cfg_set_focus(uint8_t on, uint8_t win);
+
+/* Quiet hours (issue #17): the screen dims to 20% between two times of day.
+ * Stored in the four bytes the token gave up (see the top of this file), so
+ * the record did not change shape. on: 0 off, 1 on. from/until: minutes
+ * since midnight, on the half hour; until may be earlier than from, for a
+ * window that crosses midnight. A record from before them, or any stored
+ * byte this build never writes, reads as off, 22:00 (1320) to 07:00 (420).
+ * The setter refuses on > 1, a time of 1440 or more, or one not a multiple
+ * of 30 (-EINVAL), and writes nothing when nothing changed. Off keeps the
+ * times, so turning quiet hours back on lands where they were. cfg_reset()
+ * clears them; cfg_clear_token() does not touch them. */
+void cfg_get_quiet(uint8_t *on, uint16_t *from_min, uint16_t *until_min);
+int cfg_set_quiet(uint8_t on, uint16_t from_min, uint16_t until_min);
 
 
 /*

@@ -1450,9 +1450,21 @@ def main(argv=None):
     # and restated each heartbeat; sburn exactly as the token burn line.
     plan_frames = logbook.RepeatsBy("p", PLAN_LOGGED_FIELDS, "plan lines")
     sburn_frames = logbook.RepeatsBy("p", ("q",), "spend burn lines")
+    # The sessions card's rows (found in review of PR #34, 2026-11-25).
+    # pc/bridge.py's heartbeat forgets the page it last sent every 60 s, so
+    # the whole page goes out again each minute, a line per row: about 1440
+    # `-> srow` lines a day on an idle desk with one session, 10-20 thousand
+    # with four -- the bridge.log growth svc_frames was written to undo.
+    # Kept per row (`i`), like svc per page: the rows of one page alternate
+    # and a single Repeats would log every one. Compared on the rows on the
+    # page, the live total and the page (`n`, `tot`, `pg`) and on nothing
+    # else, so the name and the context reading never enter the comparison
+    # either -- a logged line means the list grew, shrank or turned a page.
+    srow_frames = logbook.RepeatsBy("i", ("n", "tot", "pg"), "session rows")
     _REPEATED = {"usage": usage_frames, "time": time_frames,
                  "svc": svc_frames, "burn": burn_frames,
-                 "plan": plan_frames, "sburn": sburn_frames}
+                 "plan": plan_frames, "sburn": sburn_frames,
+                 "srow": srow_frames}
     # For this computer's own Claude Code, in the folder `blink install`
     # recorded (pc/claude_home): a login service does not see the shell's
     # CLAUDE_CONFIG_DIR, so the watchdog guards the file install wrote --
@@ -1524,7 +1536,7 @@ def main(argv=None):
             print(f"[watchdog] {drifted}", file=sys.stderr)
         for line in (heartbeat.due(), usage_frames.due(), time_frames.due(),
                      svc_frames.due(), burn_frames.due(), plan_frames.due(),
-                     sburn_frames.due()):
+                     sburn_frames.due(), srow_frames.due()):
             if line:
                 print(line, file=sys.stderr)
         if logbook.rotate_if_full(_log_file, sys.stderr):
@@ -1622,6 +1634,22 @@ def main(argv=None):
     # (the ports move to link_state.silent) and after a USB serial loss.
     asked = set()
     none_due = [0.0]
+    # The silent ports as last written to link.json, None before the first
+    # write. `blink status` reads them to say a board has no BLINK firmware
+    # (issue #16), so the record must move as soon as the set does, not on
+    # the next 60 s beat: a port joins it only after both hello passes heard
+    # nothing, and leaves it the moment the USB layout changes -- a board
+    # re-plugged into the same socket must not be called blank while it is
+    # being probed again.
+    silent_written = [None]
+
+    def write_none():
+        cur = sorted(link_state.silent)
+        try:
+            link_status.write(blink_home, "none", None, silent=cur)
+        except OSError:
+            return
+        silent_written[0] = cur
 
     def waiting_tick():
         # Upkeep, and the link record while no link exists: "none" every 60 s
@@ -1629,12 +1657,10 @@ def main(argv=None):
         # "app not reporting". status_line turns it into a sentence by whether
         # a pairing exists.
         _upkeep()
-        if time.monotonic() >= none_due[0]:
+        if (time.monotonic() >= none_due[0]
+                or sorted(link_state.silent) != silent_written[0]):
             none_due[0] = time.monotonic() + 60.0
-            try:
-                link_status.write(blink_home, "none", None)
-            except OSError:
-                pass
+            write_none()
 
     def choose(after_ota=False):
         # Every road to here is a link lost or none yet. Fail the settings
@@ -1647,12 +1673,24 @@ def main(argv=None):
         panel_pickup.link_down()
         # Lambdas, not the functions, so a test that replaces
         # candidate_ports or usb_topology on this module is heard.
-        return wait_for_link(
-            args.port, on_wait=waiting_tick, home=blink_home,
-            force_wifi=force_wifi, autodetect=lambda: candidate_ports(),
-            topology=lambda: usb_topology(), chooser=link_state,
-            exists=lambda p: os.path.exists(p),
-            prefer=lambda: known.get("port"), after_ota=after_ota)
+        try:
+            return wait_for_link(
+                args.port, on_wait=waiting_tick, home=blink_home,
+                force_wifi=force_wifi, autodetect=lambda: candidate_ports(),
+                topology=lambda: usb_topology(), chooser=link_state,
+                exists=lambda p: os.path.exists(p),
+                prefer=lambda: known.get("port"), after_ota=after_ota)
+        finally:
+            # wait_for_link clears the silent set on a layout change and can
+            # return a port on that same poll, before any waiting_tick:
+            # without this the record would go on naming a re-plugged board
+            # blank for the whole of its new probe. On the first call
+            # silent_written is None, so this always writes: a link.json
+            # from the daemon before this one (a restart, an update) is
+            # still fresh for 180 s and may name this very port silent,
+            # while this process is about to probe it from the beginning.
+            if sorted(link_state.silent) != silent_written[0]:
+                write_none()
 
     via, target = choose()
     # False on the fast pass (answer my welcome), True on the patient one

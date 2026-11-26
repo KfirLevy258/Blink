@@ -51,17 +51,33 @@ def scan(now_epoch, path=None, sweep=True):
     without collecting: the sweep deletes slots, and a diagnostic that deletes
     what it is diagnosing destroys the evidence somebody ran it to see.
 
-    The names the slots carry are dropped rather than returned. Naming the
-    session on the panel is a separate feature with its own rule about when a
-    name may be shown at all (claude_state.poll: only when exactly one session
-    holds the winning state), and the Codex frame has no label story yet.
-    Returning a value with no consumer would invite one to be wired up without
-    that rule.
+    The names the slots carry are dropped here: this is the census, and the
+    panel's single hint line names a session only when exactly one holds the
+    winning state (claude_state.poll). The sessions card is the other rule --
+    every row is one session, so every row may carry its own name -- and it
+    reads them through details() below.
     """
     root = path if path is not None else os.path.expanduser(STATE_DIR)
     states, agents = claude_state.ClaudeStateProvider(
         path=root, sweep=sweep).session_states(now_epoch)
     return {sid: state for sid, (state, _name) in states.items()}, agents
+
+
+def details(now_epoch, path=None, sweep=True):
+    """{session_id: (state, name, age_s, tool, event)} for the Codex hook
+    slots: claude_state.ClaudeStateProvider.session_details, pointed at this
+    directory, for the sessions card (pc/session_rows).
+
+    Hook slots only, in this version. A Codex session the rollout reader sees
+    and no hook has (one opened before the hooks were installed) is counted
+    on the panel by codex_cli's union but has no row on the card: the rollout
+    cannot tell waiting from running (see this module's docstring), and the
+    card's first job is to say which session needs you. It gets one from its
+    next turn, when the hooks start firing for it.
+    """
+    root = path if path is not None else os.path.expanduser(STATE_DIR)
+    return claude_state.ClaudeStateProvider(
+        path=root, sweep=sweep).session_details(now_epoch)
 
 
 def ended(now_epoch, path=None, sweep=True):

@@ -586,4 +586,95 @@
  */
 #define BURN_TEXT_W		(SCR_MID_X - 2 * 5)
 
+/*
+ * THE SESSIONS CARD (docs/sessions-card-design.md), and the tap that opens it.
+ *
+ * The tap area sits over the pip row, top left: the dots are what the card
+ * explains, so the dots are what is pressed. Until this, every pip was built
+ * non-clickable and nothing on the screen took a tap there, so the corner
+ * gives up nothing to carry it.
+ *
+ * Its right edge is the measurement that matters. The wordmark begins at
+ * SCR_MID_X - BRAND_W / 2 = 134, and the clock sits under it, centred, and
+ * narrower than it ("23:59" is about 40 px in Montserrat 14 against the
+ * brand's 52), so 134 bounds both. The area runs 0..130, PIP_WALL_X, the
+ * row's own bound (the last of PIP_MAX pips ends at 128), and LVGL's
+ * extended click area (SESS_TAP_EXT on every side) carries the finger to
+ * 133, a pixel short of the brand. Neither the brand nor the
+ * clock takes a tap; the clearance is so a press aimed at the time or the
+ * name is not read as a press on the dots.
+ *
+ * Downwards it takes the status line's left half as well, 0..39 with the
+ * extension: a row of 8 px dots is no target for a finger, and the status
+ * line carries no control. It stops short of the rings (GAUGE_ARC_Y, 44),
+ * and the left edge zone (ui_settings.c mk_edge_zone, 44x150 centred on the
+ * left edge: y 45..195) begins below that. tests/usage_layout asserts every
+ * one of these.
+ */
+#define SESS_TAP_X		0
+#define SESS_TAP_Y		0
+#define SESS_TAP_W		PIP_WALL_X
+#define SESS_TAP_H		36
+#define SESS_TAP_EXT		3
+#define BRAND_X0		(SCR_MID_X - BRAND_W / 2)
+
+/*
+ * The card itself, full screen: a 40 px bar (the back button, 36 px at y 2,
+ * and the title), four 44 px rows, and a 24 px page strip -- 40 + 176 + 24 =
+ * 240, the panel exactly. Four rows and no more is what the issue measured
+ * as fitting; the rest are pages (FMT_SROWS_PER_PAGE).
+ */
+#define SESS_BAR_H		40
+#define SESS_ROWS		4
+#define SESS_ROW_H		44
+#define SESS_STRIP_H		24
+#define SESS_ROW_Y0		SESS_BAR_H
+#define SESS_STRIP_Y		(SESS_ROW_Y0 + SESS_ROWS * SESS_ROW_H)
+#define SESS_TITLE_Y		10
+
+/*
+ * Inside a row, two lines of FONT_LINE_H: the name and how long on the
+ * first, the state words and the context bar with its figure on the second,
+ * 4 px from the row's edges and 4 apart (4 + 16 + 4 + 16 + 4 = 44).
+ *
+ * Across: the name takes the width less the duration's box (70 px holds
+ * "99h 59m", 55 px in Montserrat 14). The words get 160 px ("Session failed",
+ * the widest, is 104). The bar is 6 px tall, centred on the second line, and
+ * the figure ("100%", 33 px) sits in a 40 px box at the right margin.
+ */
+#define SESS_PAD_X		10
+#define SESS_LINE1_Y		4
+#define SESS_LINE2_Y		(SESS_LINE1_Y + FONT_LINE_H + 4)
+#define SESS_AGE_W		70
+#define SESS_NAME_W		(SCR_W - 2 * SESS_PAD_X - SESS_AGE_W - 6)
+#define SESS_WORDS_W		160
+#define SESS_PCT_W		40
+#define SESS_BAR_W		70
+#define SESS_BAR_H_PX		6
+#define SESS_BAR_X		(SCR_W - SESS_PAD_X - SESS_PCT_W - 6 - SESS_BAR_W)
+#define SESS_BAR_Y		(SESS_LINE2_Y + (FONT_LINE_H - SESS_BAR_H_PX) / 2)
+
+/*
+ * The page strip: "Previous" left, "Next" right, "1 of 2" between. The
+ * buttons are the strip's height less 2 px each side, with an extended click
+ * area to make a finger target of a 20 px button: the strip has the panel's
+ * bottom edge under it, where an overshoot costs nothing, and the last row
+ * above, which takes no tap of its own.
+ */
+#define SESS_BTN_W		96
+#define SESS_BTN_H		(SESS_STRIP_H - 4)
+#define SESS_BTN_EXT		8
+
+/* What the board checks at build time, as well as the host test: a layout
+ * that does not fit must not compile. */
+_Static_assert(SESS_BAR_H + SESS_ROWS * SESS_ROW_H + SESS_STRIP_H <= SCR_H,
+	       "the sessions card is taller than the panel");
+_Static_assert(SESS_ROWS == 4, "the card holds the daemon's four-row page");
+_Static_assert(SESS_TAP_X + SESS_TAP_W + SESS_TAP_EXT < BRAND_X0,
+	       "the sessions tap reaches the brand and the clock under it");
+_Static_assert(SESS_TAP_Y + SESS_TAP_H + SESS_TAP_EXT <= GAUGE_ARC_Y,
+	       "the sessions tap reaches the rings");
+_Static_assert(SESS_LINE2_Y + FONT_LINE_H + 4 <= SESS_ROW_H,
+	       "a sessions row's second line runs out of the row");
+
 #endif /* USAGE_LAYOUT_H */

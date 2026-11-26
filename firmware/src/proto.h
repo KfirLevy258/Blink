@@ -87,6 +87,11 @@ const char *proto_board_id_hex(void);
  * the daemon's "Keep figures fresh?" (ask_prompt.h). */
 void proto_send_answer(enum ask_answer a);
 
+/* {"t":"spage","v":2,"p":K}: the sessions card asks the daemon for page K,
+ * from 0 (docs/sessions-card-design.md), when it opens (0) and when the
+ * owner pages. The rows come back as srow lines. */
+void proto_send_spage(int p);
+
 /* Did the last welcome advertise the theme builder ("caps":["theme"])? */
 bool proto_host_can_theme(void);
 

@@ -188,6 +188,11 @@ RELOCATED_DIRNAME = "Claude-Data"
 USAGE_CACHE_NAME = "plan-usage-history.json"
 LOCAL_STORAGE_LEAF = ("Local Storage", "leveldb")
 INDEXEDDB_LEAF = ("IndexedDB", "https_claude.ai_0.indexeddb.leveldb")
+# The claude.ai IndexedDB's blob store, beside its leveldb folder. Only
+# pc/desktop_chat_activity looks at it, and only by listing names and stat'ing
+# them: a blob is a value too large for the leveldb, and a value of that store
+# can be conversation content, so nothing here ever opens one.
+INDEXEDDB_BLOB_LEAF = ("IndexedDB", "https_claude.ai_0.indexeddb.blob")
 COWORK_SESSIONS_NAME = "local-agent-mode-sessions"
 
 SOURCE_ROAMING = "roaming"
@@ -643,6 +648,10 @@ def local_storage_dir():
 
 def indexeddb_dir():
     return os.path.join(data_dir(), *INDEXEDDB_LEAF)
+
+
+def indexeddb_blob_dir():
+    return os.path.join(data_dir(), *INDEXEDDB_BLOB_LEAF)
 
 
 def cowork_sessions_dir():

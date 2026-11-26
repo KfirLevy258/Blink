@@ -12,14 +12,17 @@ for an app we do not control is exactly the kind of code that should never be
 able to stop it.
 """
 import dataclasses
+import os
 import sys
 import time
 
 from pc import (burn_reader, claude_account, claude_plan, cowork_audit,
-                desktop_idb, desktop_paths, normalizer, protocol,
-                session_verdict, spend_count, weekly_anchor)
+                desktop_chat_activity, desktop_idb, desktop_paths, normalizer,
+                protocol, session_rows, session_verdict, spend_count,
+                weekly_anchor)
 from pc.providers import base
 from pc.providers import claude_cli
+from pc.providers import codex_state
 from pc.providers.claude_cli import ClaudeCliProvider
 from pc.providers.claude_desktop import ClaudeDesktopProvider
 from pc.providers.claude_desktop_ls import ClaudeDesktopLocalStorageProvider
@@ -50,7 +53,16 @@ FIRST_RETRY_AFTER_S = 60.0
 MAX_RETRY_AFTER_S = 900.0
 
 
-def default_providers(counter=None, plan=None, home=None, sweep=True):
+def _blink_home():
+    # cli.blink_home(), repeated rather than imported (cli is the heavy end
+    # of the program, and claude_home repeats it for the same reason).
+    # Resolved per call: a lookup at import would point at the real home
+    # before tests/conftest.py could move it (tests/test_sandbox.py).
+    return os.path.join(os.path.expanduser("~"), ".blink")
+
+
+def default_providers(counter=None, plan=None, home=None, sweep=True,
+                      publish_chat=True):
     """Every provider shipped today, in preference order.
 
     Order is not the merge rule -- pc/normalizer merges by recency per field,
@@ -65,11 +77,35 @@ def default_providers(counter=None, plan=None, home=None, sweep=True):
 
     `home` is IngestionBus's: whose drop folder the Claude Code providers
     read.
+
+    The activity provider also carries the Claude Desktop chat watcher, so a
+    chat that is answering lights the dot as one running session. Only this
+    one: `blink status` and the Codex union build their own
+    ClaudeStateProvider with no watcher, so their counts stay the hooks'.
+    The watcher reads its on/off setting from the native ~/.blink, the
+    folder config.json is in whatever claude_home says about Claude Code.
+
+    `publish_chat` has the watcher write its verdict to the Blink home
+    (desktop_chat_activity.READING_FILE), which is how `blink status`, a
+    process of its own, learns whether a chat is busy. True is the daemon's
+    case: the bridge builds its bus with the default. `blink status --wire`
+    also builds these providers, for one poll, and passes False, so a
+    one-shot look can never touch the daemon's reading. Any other one-shot
+    caller must pass False too: a publishing watcher's first poll writes no
+    verdict, but it does remove the reading already there (an earlier
+    daemon's, as far as it can know), which from a one-shot caller would
+    blank the running daemon's busy/idle line in `blink status` until that
+    daemon's next heartbeat (desktop_chat_activity, DesktopChatActivity.
+    _publish). As of 2026-11-25 the bridge's build_bus is the only caller
+    that leaves it True.
     """
+    chat = desktop_chat_activity.DesktopChatActivity(
+        blink_home=_blink_home(), publish=publish_chat)
     return [ClaudeCliProvider(counter=counter, plan=plan, home=home),
             ClaudeDesktopProvider(),
             ClaudeDesktopLocalStorageProvider(),
-            ClaudeStateProvider(home=home, sweep=sweep), CodexCliProvider(),
+            ClaudeStateProvider(home=home, sweep=sweep, chat=chat),
+            CodexCliProvider(),
             # LAST: it only ever offers a remembered projection, and every
             # source above it is polled first so any of them carrying a real
             # weekly reset is what observe() below learns from this cycle.
@@ -93,7 +129,7 @@ class IngestionBus:
     def __init__(self, providers=None, preferred_provider="claude",
                  now=time.time, burn=None, verdict=DEFAULT_VERDICT,
                  account=None, counter=None, plan_source=None, home=None,
-                 read_only=False):
+                 read_only=False, publish_chat=True):
         """`plan_source`, when given, is where the bus's one reader of
         Claude Code's config takes its view from instead of the file: a
         WSL home's pc/wsl_watch.WslWatch.view, which answers from memory,
@@ -117,7 +153,11 @@ class IngestionBus:
         nothing -- those providers were built by the caller, who gives a
         ClaudeCliProvider its counter directly -- and is asked only for
         spend_burn()'s buckets: a scenario's bus passes the scenario's
-        stand-in (scripted.ScriptedSpendCount) for exactly that."""
+        stand-in (scripted.ScriptedSpendCount) for exactly that.
+
+        `publish_chat` goes to default_providers when the bus builds its
+        own: True for the daemon, False for `blink status --wire`'s one
+        poll. Unused with `providers` given."""
         # The login watch (pc/claude_account), made here only for the
         # shipped providers. A bus built from a scenario exists to replay the
         # same timeline on any desk, and whoever happens to be signed in to
@@ -156,7 +196,8 @@ class IngestionBus:
                 counter = spend_count.SpendCounter()
             self._counter = counter
             self._providers = default_providers(counter, self._plan_reader,
-                                                home, sweep=not read_only)
+                                                home, sweep=not read_only,
+                                                publish_chat=publish_chat)
         else:
             self._providers = list(providers)
         self._preferred = preferred_provider
@@ -251,6 +292,11 @@ class IngestionBus:
         # second time could pick a different winner and name a project that
         # does not belong to the state on the panel.
         self._session_pair = ("", 0)
+        # The sessions card's rows (pc/session_rows.Row), every live session
+        # in the card's order, as the last poll() read them -- for the same
+        # reason as _session_pair: a row answers for the poll the usage line
+        # came from. See session_rows().
+        self._session_rows = []
         # The plan message for the pair the last poll() chose, or None while
         # this bus has never seen a plan -- see plan_msg().
         self._plan = None
@@ -617,6 +663,9 @@ class IngestionBus:
             # but the board is still captioning its Claude page SPEND. The
             # "windows" this produces is what takes that caption down.
             self._plan = protocol.plan_for(primary, secondary)
+        # Before the return below: the card lists the sessions the hooks
+        # see, and a desk with hooks and no usage reading yet still has them.
+        self._session_rows = self._collect_rows(now)
         if primary is None:
             return None
         msg = protocol.frame_to_usage(primary, now, secondary)
@@ -625,6 +674,69 @@ class IngestionBus:
         self._session_pair = _pair_from(
             primary, secondary, msg.get("state", base.STATE_UNKNOWN))
         return msg
+
+    def _collect_rows(self, now):
+        """The sessions card's rows for this poll; [] when nothing reads.
+
+        Claude's are the reading this poll's ClaudeStateProvider already
+        made (last_session_details), so they cannot disagree with the light
+        on the panel. Codex's are read here, without sweeping: codex_cli's
+        own scan, earlier in this poll, is the one that collects, and a
+        second sweeper would only be a second place for it to go wrong. The
+        context figures are the status-line provider's memory. A provider
+        this bus does not have -- a scenario's, a test's -- gives {}.
+
+        Contained like a provider: the card is a bonus on the poll, never
+        its cost. A failure is said by type, once, as poll_frames says one.
+        """
+        claude, codex, ctx = {}, {}, {}
+        try:
+            for p in self._providers:
+                if isinstance(p, ClaudeStateProvider) and not claude:
+                    claude = p.last_session_details()
+                elif isinstance(p, CodexCliProvider) and not codex:
+                    codex = codex_state.details(
+                        now, path=getattr(p, "_state_dir", None), sweep=False)
+                elif isinstance(p, ClaudeCliProvider) and not ctx:
+                    ctx = p.context_by_session()
+            return session_rows.build_rows(claude, codex, ctx)
+        except Exception as e:
+            if not getattr(self, "_rows_failed", False):
+                self._rows_failed = True
+                print(f"[ingest] sessions card rows failed"
+                      f" ({type(e).__name__})", file=sys.stderr)
+            return []
+
+    def session_rows(self):
+        """Every live session as a pc/session_rows.Row, in the card's order,
+        as the last poll() read them. Not on the usage line, for the reason
+        session_pair() gives: the Bridge pages these into srow lines."""
+        return self._session_rows
+
+    def sample_context(self):
+        """Let each provider that has one take its between-polls sample
+        (claude_cli.ClaudeCliProvider.sample_context, the sessions card's
+        per-session context); True when any figure moved.
+
+        Asked by the Bridge on every pass of the daemon's serial loop, about
+        every 0.2 s, so it must cost a stat and say nothing: no log line,
+        not even once, and nothing a provider raises gets past here. The
+        rows themselves are still built by poll(), on the next fast tick
+        (at most FAST_POLL_INTERVAL_S, 2 s, later), from the memory this
+        fills: building them here as well would read the Codex state folder
+        five times a second for a row the board is sent on that tick
+        anyway. A provider without the method -- every one but the status
+        line's, a scenario's -- is skipped."""
+        moved = False
+        for p in self._providers:
+            sample = getattr(p, "sample_context", None)
+            if sample is None:
+                continue
+            try:
+                moved = bool(sample()) or moved
+            except Exception:
+                pass
+        return moved
 
     def credit_refresh(self, activity_for):
         """Wire `activity_for(fetched_at)` (RefreshWatch's): the time to
@@ -968,6 +1080,12 @@ class _BusFetch:
 
     def session_pair(self):
         return self._bus.session_pair()
+
+    def session_rows(self):
+        return self._bus.session_rows()
+
+    def sample_context(self):
+        return self._bus.sample_context()
 
     def burn_pages(self):
         return self._bus.burn_pages()

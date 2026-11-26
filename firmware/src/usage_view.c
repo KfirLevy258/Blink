@@ -1086,6 +1086,51 @@ static void render_weekly(void)
 }
 
 static lv_obj_t *gauge_scr;
+
+/* The sessions card's tap area over the pip row, and the request its click
+ * raises for ui_settings_service() to take (usage_view_take_sessions_tap). */
+static lv_obj_t *sess_tap;
+static bool sess_tap_req;
+static lv_point_t sess_tap_at;	/* where the press began */
+
+/*
+ * A swipe's release is a CLICKED too (lv_indev.c sends it whenever nothing
+ * scrolled), so a stroke that starts on the dots and heads for another page
+ * would open the card as well as turn the page. Only a press that ends
+ * within SESS_TAP_SLOP of where it began asks for the card -- measured here
+ * from LVGL's own points rather than asked of ui_swipe, because this file
+ * is built into the panel renderers that have no ui_swipe at all.
+ * ui_settings_service() refuses it again if a swipe latched anything.
+ */
+#define SESS_TAP_SLOP	12
+
+static void sess_tap_cb(lv_event_t *e)
+{
+	lv_indev_t *in = lv_indev_active();
+	lv_point_t p;
+
+	if (in == NULL) {
+		return;
+	}
+	lv_indev_get_point(in, &p);
+	if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
+		sess_tap_at = p;
+		return;
+	}
+	if (LV_ABS(p.x - sess_tap_at.x) <= SESS_TAP_SLOP &&
+	    LV_ABS(p.y - sess_tap_at.y) <= SESS_TAP_SLOP) {
+		sess_tap_req = true;	/* the flag is all this does */
+	}
+}
+
+bool usage_view_take_sessions_tap(void)
+{
+	bool r = sess_tap_req;
+
+	sess_tap_req = false;
+	return r;
+}
+
 /* Kept only so a theme change can reach them; nothing else touches these. */
 static lv_obj_t *title_lbl, *chev_r, *chev_l;
 
@@ -1129,6 +1174,11 @@ void usage_view_deinit(void)
 		pip[i] = NULL;
 		pip_num[i] = NULL;
 	}
+	/* Dies with the screen; a tap it raised and nobody took goes too, or
+	 * the card would open by itself on the next screen. The rows stay:
+	 * they are data. */
+	sess_tap = NULL;
+	sess_tap_req = false;
 	cur_page = 0;
 	activity = USAGE_ACTIVITY_NONE;
 	toast = NULL;
@@ -1244,6 +1294,32 @@ void usage_view_init(void)
 			     PIP_NUM_Y);
 		lv_obj_add_flag(pip_num[i], LV_OBJ_FLAG_HIDDEN);
 	}
+
+	/*
+	 * The sessions card's door: a transparent hit area over the pip row
+	 * (usage_layout.h, SESS_TAP_*, for its bounds and why they stop where
+	 * they do). The one clickable thing in the header, on purpose and with
+	 * the two precautions the edge zones taught (ui_settings.c,
+	 * zone_was_a_tap): it keeps GESTURE_BUBBLE, so a swipe that starts on
+	 * the dots still reaches the screen, and its click is taken only when
+	 * the press did not travel (sess_tap_cb), because LVGL sends CLICKED on
+	 * the release of a swipe too. Live with no dots as well -- the card then says there
+	 * are no sessions, rather than the corner going dead and leaving the
+	 * owner to wonder whether the tap missed. Built after the pips, so it
+	 * wins the hit test over them; the takeover, built last, covers it.
+	 */
+	sess_tap = lv_obj_create(scr);
+	lv_obj_set_size(sess_tap, SESS_TAP_W, SESS_TAP_H);
+	lv_obj_align(sess_tap, LV_ALIGN_TOP_LEFT, SESS_TAP_X, SESS_TAP_Y);
+	lv_obj_set_style_bg_opa(sess_tap, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_border_width(sess_tap, 0, 0);
+	lv_obj_set_style_shadow_width(sess_tap, 0, 0);
+	lv_obj_set_style_pad_all(sess_tap, 0, 0);
+	lv_obj_clear_flag(sess_tap, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_add_flag(sess_tap, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_set_ext_click_area(sess_tap, SESS_TAP_EXT);
+	lv_obj_add_event_cb(sess_tap, sess_tap_cb, LV_EVENT_PRESSED, NULL);
+	lv_obj_add_event_cb(sess_tap, sess_tap_cb, LV_EVENT_CLICKED, NULL);
 
 	/* Carries the amber/red explanation. Empty when all is well: the gauges
 	 * still hold real (if stale) numbers in those states, so they stay visible
@@ -2924,6 +3000,107 @@ static lv_color_t pip_text_colour(enum fmt_pip_kind k)
 	return fmt_pip_tone(k) == FMT_TONE_RED || fmt_pip_tone(k) == FMT_TONE_AMBER
 		       ? pip_colour(k)
 		       : lv_color_hex(theme_pal()->low_text);
+}
+
+/*
+ * The same two mappings as 0xRRGGBB for the sessions card in ui_settings.c,
+ * so its state words wear exactly the ink of the dots that opened it. Hex
+ * rather than lv_color_t to keep usage_view.h free of LVGL (proto.c and the
+ * host tests include it).
+ */
+uint32_t usage_view_tone_hex(enum fmt_pip_tone t)
+{
+	switch (t) {
+	case FMT_TONE_RED:
+		return theme_pal()->high;
+	case FMT_TONE_AMBER:
+		return theme_pal()->mid;
+	default:
+		return theme_pal()->low;
+	}
+}
+
+uint32_t usage_view_tone_text_hex(enum fmt_pip_tone t)
+{
+	return t == FMT_TONE_GREEN ? theme_pal()->low_text :
+	       usage_view_tone_hex(t);
+}
+
+/*
+ * The sessions card's table: the page the daemon last sent, four rows at
+ * most whatever the number of sessions (docs/sessions-card-design.md, the
+ * board asks for a page with `spage`). Each row keeps the uptime it arrived
+ * at, so its age counts up between the daemon's updates.
+ */
+static struct {
+	int n, tot, pg;
+	bool seen;
+	uint32_t gen;
+	bool have[FMT_SROWS_PER_PAGE];
+	struct msg_srow row[FMT_SROWS_PER_PAGE];
+	int64_t at_ms[FMT_SROWS_PER_PAGE];
+} srows;
+
+void usage_view_set_srow(const struct msg_srow *r, int64_t at_ms)
+{
+	if (r == NULL) {
+		return;
+	}
+	/* A new page, a new count or a new total is a new list: the rows of
+	 * the old one would otherwise sit beside the new one's until every
+	 * slot happened to be overwritten. */
+	if (!srows.seen || r->n != srows.n || r->tot != srows.tot ||
+	    r->pg != srows.pg) {
+		memset(srows.have, 0, sizeof(srows.have));
+		srows.n = r->n;
+		srows.tot = r->tot;
+		srows.pg = r->pg;
+		srows.seen = true;
+	}
+	if (r->n > 0 && r->i >= 0 && r->i < r->n &&
+	    r->i < FMT_SROWS_PER_PAGE) {
+		srows.row[r->i] = *r;
+		srows.at_ms[r->i] = at_ms;
+		srows.have[r->i] = true;
+	}
+	srows.gen++;
+}
+
+void usage_view_clear_srows(void)
+{
+	uint32_t gen = srows.gen;
+
+	memset(&srows, 0, sizeof(srows));
+	srows.gen = gen + 1;
+}
+
+void usage_view_srows(struct usage_srows *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	out->n = srows.n;
+	out->tot = srows.tot;
+	out->pg = srows.pg;
+	out->gen = srows.gen;
+	out->seen = srows.seen;
+}
+
+bool usage_view_srow(int i, int64_t now_ms, struct msg_srow *out)
+{
+	int64_t secs;
+
+	if (out == NULL || i < 0 || i >= srows.n || i >= FMT_SROWS_PER_PAGE ||
+	    !srows.have[i]) {
+		return false;
+	}
+	*out = srows.row[i];
+	secs = (int64_t)out->age;
+	if (now_ms > srows.at_ms[i]) {
+		secs += (now_ms - srows.at_ms[i]) / 1000;
+	}
+	out->age = secs > FMT_SAGE_MAX ? FMT_SAGE_MAX : (int32_t)secs;
+	return true;
 }
 
 static void toast_hide(void)

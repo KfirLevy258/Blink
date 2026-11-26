@@ -8,12 +8,15 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <zephyr/kernel.h>
 
 #include "cfg_store.h"
+#include "usage_view.h"
 #include "backlight.h"
 #include "ota.h"
 #include "proto.h"
 #include "net_link.h"
+#include "net_time.h"
 #include "ui_boot.h"
 #include "ui_theme.h"
 #include "theme.h"
@@ -91,6 +94,47 @@ uint8_t backlight_get(void)
 void backlight_step(int dir)
 {
 	bright = backlight_next_level(bright, dir);
+}
+
+/* The host has no PWM and no daemon clock, so quiet hours never dim
+ * anything here: the schedule only has to store and read back, for the
+ * settings screen that edits it. */
+void backlight_tick(void)
+{
+}
+
+void backlight_quiet_changed(void)
+{
+}
+
+/* Quiet hours in RAM: off, 22:00 to 07:00 (minutes since midnight) until the
+ * settings screen sets them. */
+static uint8_t quiet_on;
+static uint16_t quiet_from = 1320, quiet_until = 420;
+
+void cfg_get_quiet(uint8_t *on, uint16_t *from_min, uint16_t *until_min)
+{
+	*on = quiet_on;
+	*from_min = quiet_from;
+	*until_min = quiet_until;
+}
+
+int cfg_set_quiet(uint8_t on, uint16_t from_min, uint16_t until_min)
+{
+	quiet_on = on;
+	quiet_from = from_min;
+	quiet_until = until_min;
+	return 0;
+}
+
+/* The Quiet hours page asks whether the board has the time yet, to say so in
+ * its hint. touch.sh does not compile net_time.c, so the harness answers as a
+ * board that has not been told the time: the page draws its "waits" line. */
+bool net_time_local(int *hh, int *mm)
+{
+	(void)hh;
+	(void)mm;
+	return false;
 }
 
 /* --- OTA: the state ota.c keeps, moved the way proto.c and main.c move it --
@@ -337,6 +381,67 @@ void proto_send_theme_now(const char *why)
 void proto_send_theme_edit(void)
 {
 	harness_emit("{\"t\":\"theme_edit\",\"v\":2}");
+}
+
+/* --- the sessions card's rows ------------------------------------------- */
+
+/*
+ * Six made-up sessions, two pages of the card (docs/sessions-card-design.md),
+ * in the daemon's order: needs you, failed, the running kinds, idle. Written
+ * here, never captured -- a captured row would carry somebody's project
+ * names into a public repo. One cx is absent (a Codex row, which carries none
+ * in this version) so the harness draws a row with no bar.
+ */
+static const struct {
+	char pv;
+	enum fmt_srow_kind k;
+	int32_t age;
+	const char *nm;
+	int cx;
+} harness_sess[] = {
+	{ 'c', FMT_SROW_WAIT, 95, "Blink", 42 },
+	{ 'x', FMT_SROW_FAIL, 610, "Docs", -1 },
+	{ 'c', FMT_SROW_EDIT, 12, "Website", 67 },
+	{ 'c', FMT_SROW_TOOL, 40, "Api", 91 },
+	{ 'c', FMT_SROW_IDLE, 3 * 3600 + 5 * 60, "Notes", 12 },
+	{ 'c', FMT_SROW_IDLE, 26 * 60, "Scratch", 5 },
+};
+
+/* What the daemon does on an spage: send the asked page, row by row, at
+ * once. Fed straight into usage_view, as proto.c's srow arm would. */
+void harness_srow_page(int p)
+{
+	int tot = (int)(sizeof(harness_sess) / sizeof(harness_sess[0]));
+	int first = p * FMT_SROWS_PER_PAGE;
+	int n = tot - first;
+	struct msg_srow r;
+
+	if (p < 0 || first >= tot) {
+		return;
+	}
+	if (n > FMT_SROWS_PER_PAGE) {
+		n = FMT_SROWS_PER_PAGE;
+	}
+	for (int i = 0; i < n; i++) {
+		memset(&r, 0, sizeof(r));
+		r.i = i;
+		r.n = n;
+		r.tot = tot;
+		r.pg = p;
+		r.pv = harness_sess[first + i].pv;
+		r.k = harness_sess[first + i].k;
+		r.age = harness_sess[first + i].age;
+		snprintf(r.nm, sizeof(r.nm), "%s", harness_sess[first + i].nm);
+		r.cx = harness_sess[first + i].cx;
+		usage_view_set_srow(&r, k_uptime_get());
+	}
+}
+
+/* Not on stdout: the bench reads no spage, and the board's real one goes to
+ * the daemon. The answer is what matters here. */
+void proto_send_spage(int p)
+{
+	harness_srow_page(p);
 }
 
 /* --- the boot screen ------------------------------------------------------- */

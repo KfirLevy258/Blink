@@ -190,11 +190,12 @@ WIRE_TYPES = frozenset({
     # board -> host
     "hello", "ping", "pref", "ota_query", "ota_flash", "theme_now",
     "theme_edit", "touch_done", "touch_refused", "ui_state", "widgets",
-    "answer",
+    "answer", "spage",
     # host -> board
     "welcome", "bye", "pong", "time", "usage", "edition", "panel", "session",
     "status", "svc", "theme", "ota_avail", "ota_begin", "ota_resume",
     "ota_none", "ota_error", "edit_state", "burn", "plan", "sburn", "ask",
+    "srow",
     # The WiFi transport (docs/superpowers/specs/2026-11-05-wifi-transport-
     # design.md S6.1, S7.5). Builders arrive in Tasks 1.3 and 6.2; the names
     # are here now so the transcript allowlist below can be complete.
@@ -279,6 +280,12 @@ TAP_FIELDS = {
     "burn": frozenset({"t", "p"}), "sburn": frozenset({"t", "p"}),
     "plan": frozenset({"t", "p", "plan", "period"}),
     "ask": frozenset({"t", "id"}), "answer": frozenset({"t", "id", "a"}),
+    # The sessions card (srow, spage): where a row sits and how many there
+    # are, and the page the board asked for. Never `nm`, which is a project
+    # directory somebody named, nor `age`, `k` or `cx`, which together say
+    # what one person's session was doing and when.
+    "srow": frozenset({"t", "i", "n", "tot", "pg"}),
+    "spage": frozenset({"t", "p"}),
 }
 
 # The fixed words of the WiFi lines (spec S5.7, S6.1). A string in one of
@@ -317,7 +324,7 @@ TAP_TYPE_ENUMS = {
 # either) and reject only a string.
 _INT_FIELDS = frozenset({"off", "i", "n", "busy", "theme", "stored", "tp",
                          "bl", "slp", "size", "epoch", "utc_offset_min", "bytes",
-                         "frames", "bright"})
+                         "frames", "bright", "tot", "pg"})
 _NUM_FIELDS = frozenset({
     "ok", "done", "editing", "present", "focus", "session_pct", "session_resets_in_s",
     "weekly_pct", "weekly_resets_in_s", "stale", "fable_pct", "sonnet_pct",
@@ -1292,6 +1299,107 @@ BOARD_CAP_SPENDBURN = "spendburn"
 BOARD_CAP_ASK = "ask"
 # The words an `answer` line may carry. Anything else is not an answer.
 ASK_ANSWERS = ("on", "no", "later")
+# Draws the sessions card from srow lines and asks for its pages with spage
+# (docs/sessions-card-design.md). A board without it is sent no srow: it
+# would drop every one unread, a line per session per change.
+BOARD_CAP_SESSIONS = "sessions"
+
+
+# --- srow / spage: the sessions card ----------------------------------------
+#
+# One flat line per row, never a field on the usage frame (454 of 512 bytes
+# loaded, dropped whole when over) and never one line carrying a list: four
+# rows with names in one line is over 400 bytes of a budget that is the
+# board's whole receive line, and a row is what changes.
+#
+# THE BUDGET. The widest srow this builder can make is
+#   {"t":"srow","v":V,"i":3,"n":4,"tot":999,"pg":249,"pv":"c","k":"wait",
+#    "age":359999,"nm":<24 bytes>,"cx":100}
+# about 125 bytes with a plain name. A name is clipped to 24 BYTES of UTF-8
+# (SESSION_LABEL_MAX_BYTES), and JSON escaping can at most sextuple a byte
+# (a control character as \u00XX), so the ceiling is under 250 bytes:
+# comfortably inside MAX_LINE_BYTES whatever the name. tests/pc/
+# test_protocol.py measures the widest through encode_checked.
+#
+# The numbers are clamped here, not trusted from the caller: each clamp is a
+# digit count the budget above was worked out from.
+SROW_KINDS = ("wait", "fail", "edit", "tool", "work", "idle")
+SROW_PROVIDERS = ("c", "x")
+SROW_PAGE_SIZE = 4
+SROW_TOT_MAX = 999
+SROW_PAGE_MAX = 249
+# 99 h 59 min 59 s: the card says "99h+" past it, and six digits is the cost.
+SROW_AGE_MAX = 359999
+
+
+def _clamp_int(v, lo, hi):
+    try:
+        v = int(v)
+    except (TypeError, ValueError, OverflowError):
+        return lo
+    return min(max(v, lo), hi)
+
+
+def srow(i, n, tot, pg, pv=None, k=None, age=0, nm="", cx=None) -> dict:
+    """One row of the sessions card, or with n=0 the empty list.
+
+    `i` is the row on this page (0..3), `n` the rows on the page (0..4), `tot`
+    every live session (0..999), `pg` the page (0..249). `pv` "c" (Claude) or
+    "x" (Codex), `k` one of SROW_KINDS, `age` seconds since the session's
+    last event (or since it asked for you), clamped 0..SROW_AGE_MAX. `nm`
+    goes out clipped to SESSION_LABEL_MAX_BYTES and is left off when empty;
+    `cx` the context fullness 0..100, left off when None. Absent is how the
+    board knows a value is unknown, so neither is ever sent as "" or 0.
+
+    n=0 is the whole message for an empty list: i, n, tot, pg and nothing
+    else, so there is no row to misread.
+
+    Sent only to a board whose caps list BOARD_CAP_SESSIONS, through
+    encode_checked like every production line.
+    """
+    n = _clamp_int(n, 0, SROW_PAGE_SIZE)
+    msg = {"t": "srow", "v": VERSION,
+           "i": _clamp_int(i, 0, SROW_PAGE_SIZE - 1), "n": n,
+           "tot": _clamp_int(tot, 0, SROW_TOT_MAX),
+           "pg": _clamp_int(pg, 0, SROW_PAGE_MAX)}
+    if n == 0:
+        msg["i"] = 0
+        return msg
+    if pv not in SROW_PROVIDERS:
+        raise ValueError("srow provider must be one of SROW_PROVIDERS")
+    if k not in SROW_KINDS:
+        raise ValueError("srow kind must be one of SROW_KINDS")
+    msg["pv"] = pv
+    msg["k"] = k
+    msg["age"] = _clamp_int(age, 0, SROW_AGE_MAX)
+    if isinstance(nm, str) and nm:
+        clipped = _clip_utf8(nm, SESSION_LABEL_MAX_BYTES)
+        if clipped:
+            msg["nm"] = clipped
+    # A number or nothing: a string that happens to parse, or a bool, is not
+    # a context reading, and NaN/inf have no whole percent.
+    if isinstance(cx, (int, float)) and not isinstance(cx, bool):
+        if isinstance(cx, int) or math.isfinite(cx):
+            cxv = int(round(cx))
+            if 0 <= cxv <= 100:
+                msg["cx"] = cxv
+    return msg
+
+
+def spage_page(msg):
+    """The page a board's spage asks for, or None when it asks for none.
+
+    `p` must be a JSON integer: a bool (which Python calls an int), a float,
+    a string or a missing key is no ask at all. A negative page is page 0
+    and anything past SROW_PAGE_MAX is SROW_PAGE_MAX; the Bridge then clamps
+    it into the pages that exist (session_rows.page). The value is never
+    logged: it came off the serial buffer."""
+    if not isinstance(msg, dict) or msg.get("t") != "spage":
+        return None
+    p = msg.get("p")
+    if isinstance(p, bool) or not isinstance(p, int):
+        return None
+    return min(max(p, 0), SROW_PAGE_MAX)
 
 
 def board_caps(msg) -> frozenset:

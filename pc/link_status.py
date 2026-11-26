@@ -16,12 +16,27 @@ import time
 LINK_FILE = "link.json"
 
 
-def write(home: str, link: str, ip: str | None, now=time.time) -> None:
+def write(home: str, link: str, ip: str | None, now=time.time,
+          silent=()) -> None:
+    """`silent` is the daemon's LinkChooser.silent: the serial ports that
+    opened and stayed quiet through BOTH hello passes, the 1.5 s one and the
+    11 s one (PROBE_PATIENT_S, long enough to hear a board that is still
+    booting). They are carried here because `blink status` cannot find out
+    for itself: the daemon holds the port, and status never opens one --
+    an open with the wrong line settings reboots the board (CLAUDE.md).
+    Without this, a blank board read "none identified yet" for ever, which
+    an owner took for "still working on it" (issue #16).
+
+    Port names only, the same names board.json already stores; never a
+    byte of what was (not) heard on them."""
     path = os.path.join(home, LINK_FILE)
     tmp = "%s.%d.tmp" % (path, os.getpid())
+    rec = {"link": link, "ip": ip, "t": now()}
+    if silent:
+        rec["silent"] = sorted(silent)
     try:
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"link": link, "ip": ip, "t": now()}, f)
+            json.dump(rec, f)
         os.replace(tmp, path)
     except OSError:
         try:
@@ -41,6 +56,24 @@ def read(home: str, now=time.time, max_age_s: float = 180.0) -> dict | None:
     if not isinstance(rec, dict) or age > max_age_s or age < -max_age_s:
         return None
     return rec
+
+
+def silent_ports(rec: dict | None) -> list[str]:
+    """The ports the daemon gave up on as silent, from a record read().
+
+    A missing or stale record (no daemon running), one written before the
+    key existed, or a damaged one all give []: status then keeps its old
+    "none identified yet" wording rather than calling a board blank on a
+    guess. Only short plain strings survive, so a hand-edited file cannot
+    print arbitrary text, as with the address in status_line."""
+    if not isinstance(rec, dict):
+        return []
+    got = rec.get("silent")
+    if not isinstance(got, list):
+        return []
+    return [p for p in got
+            if isinstance(p, str) and 0 < len(p) <= 128
+            and p.isprintable()]
 
 
 def status_line(rec: dict | None, paired: bool) -> str:

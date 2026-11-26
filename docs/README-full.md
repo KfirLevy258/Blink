@@ -41,11 +41,15 @@ Blink is a small desk display that shows how much of your Claude Code usage you'
 
 Beside the dials is a small pip telling you whether anything is waiting on you - across every Claude Code and Codex session you have open, one light: amber the moment a session has finished or is asking permission, a green pulse while everything is still working, red when something is stuck or rate-limited. Under them, a countdown to each window's reset.
 
+### Sessions card
+
+Tap the marks in the top-left corner and the board lists every open session, one row each, four to a page: its project folder's name, what it is doing (Needs you, Session failed, Editing, Running a tool, Working, Idle), how long it has been doing it, and for Claude Code how full its context is. Sessions that need you come first. The back button closes it. The context figure is the last one Claude Code's status line showed for that session while the bridge was looking; a session it has not seen yet shows no bar rather than an empty one. Codex rows have no context bar yet. Needs firmware that lists `sessions` in its capabilities; older boards are sent nothing new.
+
 It runs on a cheap (~$12) ESP32 touchscreen. Plug it into your computer, run the setup once, and it sits on your desk and keeps itself up to date.
 
 ### Where the numbers come from
 
-Blink keeps no credential and never sends your usage or your sessions anywhere. (If you turn on status-page alerts, it reads the public status pages every 5 minutes; see "Security & privacy".) It reads figures other programs have already worked out, from files they already write: from Codex's session log it takes the rate-limit line, the folder each session runs in and when each turn starts and ends, and on an account with no five-hour limit the token counts, and nothing of the conversation; from Claude Code's status line it keeps the last payload (which also names your working directory and session), readable by you alone, and reads the usage figures, the session id and the session's cost out of it; Claude Code's config (`~/.claude.json`) it parses whole in memory, though it can hold your MCP servers' tokens and, on Linux and Windows, an API key, and looks only at the plan name and rate-limit tier (of which only whether they say Ultra is kept), the seat type, the account and organisation ids and, on a usage-billed seat, the spend Claude Code saved at the last `/usage`; on such a seat a one-way fingerprint of the ids, each session's highest cost estimate and when it was first seen or last rose, each rise counted in the last five hours with its time, the month's total of older ones and the time of the last `/usage` are kept in `~/.blink/spend-count.json`. While the account is marked as having no five-hour window it also reads the output-token counts in Claude Code's transcripts, or, for a Codex account with none, every token count of each turn in Codex's session log, held in memory until five hours after Codex last wrote that turn (board plugged in or not) with only the output tokens added up, and sends the board only a total per quarter-hour; see "What the installer changes" for exactly what is read.
+Blink keeps no credential and never sends your usage or your sessions anywhere. (If you turn on status-page alerts, it reads the public status pages every 5 minutes; see "Security & privacy".) It reads figures other programs have already worked out, from files they already write: from Codex's session log it takes the rate-limit line, the folder each session runs in and when each turn starts and ends, and on an account with no five-hour limit the token counts, and nothing of the conversation; from Claude Code's status line it keeps the last payload (which also names your working directory and session), readable by you alone, and reads the usage figures, the session id and the session's cost out of it; Claude Code's config (`~/.claude.json`) it parses whole in memory, though it can hold your MCP servers' tokens and, on Linux and Windows, an API key, and looks only at the plan name and rate-limit tier (of which only whether they say Ultra is kept), the seat type, the account and organisation ids and, on a usage-billed seat, the spend Claude Code saved at the last `/usage`; on such a seat a one-way fingerprint of the ids, each session's highest cost estimate and when it was first seen or last rose, each rise counted in the last five hours with its time, the month's total of older ones and the time of the last `/usage` are kept in `~/.blink/spend-count.json`. While the account is marked as having no five-hour window it also reads the output-token counts in Claude Code's transcripts, or, for a Codex account with none, every token count of each turn in Codex's session log, held in memory until five hours after Codex last wrote that turn (board plugged in or not) with only the output tokens added up, and sends the board only a total per quarter-hour. From Claude Desktop it reads its usage cache and the five-hour usage record in its Local Storage; for the Desktop chat light it also reads the names, sizes and times of the files in Desktop's IndexedDB folder, never opening them, and uses only the name and time of each event in Desktop's analytics queue (the Local Storage files it parses to get there stay in the daemon's memory while it runs, ids and drafts included, and nothing from them is written, logged or sent); the light's only file, `~/.blink/desktop_chat.json`, holds a yes or no, whether the light is available, the time and the app's own process id, for `blink status`. See "What the installer changes" for exactly what is read.
 
 ### Keeping figures fresh
 
@@ -81,8 +85,8 @@ It finds `claude` on `PATH`, then in `~/.local/bin` (`%USERPROFILE%\.local\bin` 
 |---|---|---|
 | **Claude Code in a terminal** | Everything: both limits, both countdowns, the activity light. An account with no five-hour window (verified Ultra, from 2026-10-30) has no session dial to show, so the left half becomes the burn view: Claude Code's output tokens over the last five hours, a bar per quarter-hour labelled with the hour, and an arrow for whether the last hour ran faster or slower than the one before. `blink status` says when the account has no window. BLINK decides that only on proof. On a desk whose Claude Code config names the Ultra plan (its rate-limit tier as well as its plan name), the first Claude Code reply with no five-hour figure is that proof, and the burn view comes up within a poll of it, unless Claude Code has shown a five-hour figure in the five hours before that reply. Any other account, or one whose config cannot be read, keeps `--%` for its first five and a quarter hours or so of Claude Code use (a break of over an hour, or a restart of the daemon, starts that count again. So does closing the lid or unplugging the board for most of an hour, because replies made while it is closed or unplugged are not seen: about 58 minutes if Claude Code replies every two minutes, 50 if every ten. A shorter gap does not), and any five-hour figure Claude Code shows after that brings the session dial back. The weekly limit is unchanged. Until the first burn line arrives, the dial reads `--%`. The view counts Claude Code only: Desktop and claude.ai chats leave no token counts on disk. | **Full** |
 | **Claude Code in the VS Code / JetBrains extension** | The same. The extension runs the same CLI and reads the same `~/.claude/settings.json`, so the status line and hooks work identically | **Full** |
-| **Claude Code in Claude Desktop's Code tab** | What Desktop chat gets (below), plus the activity light: the Code tab runs its own copy of Claude Code, which reads `~/.claude/settings.json`, so the hooks fire. It runs headless, so the status line never does, and the figures come from Desktop's files rather than from Claude Code. Measured on macOS (2026-09-26) and Windows 11 ARM64 (2026-09-30) | **Partial** |
-| **Claude Desktop chat, without Claude Code** | Both percentages and the five-hour countdown whenever Desktop holds a reset time (the fill rate covers the gaps). The five-hour figure and its countdown come from Desktop's Local Storage, refreshed within seconds of a turn; the weekly percentage follows Desktop's own refresh: about every 5 minutes while it is in use, every 15 (occasionally 30) when it sits idle, and at once when its usage panel is opened. The weekly countdown once learned, `--` until then. **No activity light** | **Partial** |
+| **Claude Code in Claude Desktop's Code tab** | What Desktop chat gets (below), plus the full activity light: the Code tab runs its own copy of Claude Code, which reads `~/.claude/settings.json`, so the hooks fire. It runs headless, so the status line never does, and the figures come from Desktop's files rather than from Claude Code. Measured on macOS (2026-09-26) and Windows 11 ARM64 (2026-09-30) | **Partial** |
+| **Claude Desktop chat, without Claude Code** | Both percentages and the five-hour countdown whenever Desktop holds a reset time (the fill rate covers the gaps). The five-hour figure and its countdown come from Desktop's Local Storage, refreshed within seconds of a turn; the weekly percentage follows Desktop's own refresh: about every 5 minutes while it is in use, every 15 (occasionally 30) when it sits idle, and at once when its usage panel is opened. The weekly countdown once learned, `--` until then. On macOS and Windows, a **best-effort activity light** while a chat is answering: green, then gone, never amber (see [The Desktop chat light](#the-desktop-chat-light)) | **Partial** |
 | **Codex CLI** | Both limits and both countdowns, on its own page | **Full** |
 | **claude.ai in a browser** | Nothing | **Not supported** |
 
@@ -90,7 +94,7 @@ It finds `claude` on `PATH`, then in `~/.local/bin` (`%USERPROFILE%\.local\bin` 
 
 **Sleep.** The board pings the app every 10 s. Thirty seconds without an answer, on a board that has shown figures this boot and is not mid-update, means the computer is asleep: the screen plays a closing clip, loops a sleeping one, and plays an opening clip when the app answers again. Uninstall sends a `bye` first so a removed app shows "connecting" instead. Clips: `tools/make_sleepanim.py`; design: `docs/sleep-mode-design.md`.
 
-**Why Claude Desktop is only half.** The five-hour window has a real countdown: Claude Desktop's own Local Storage carries a reset time next to its percentage, refreshed within seconds of a turn. The seven-day window does not: Claude Desktop does not save a seven-day reset time on a chat-only machine (as of August 2026). So BLINK remembers one, the first time any source reports it, and counts it forward a week at a time; that countdown is published only while nothing has contradicted it, and withdrawn the moment something does. Wherever a window has no countdown to show, the panel shows a **rate** instead (`+14%/h`) - measured from readings actually taken, not a guessed reset time. The activity light needs Claude Code's hooks. Chat never runs them; Desktop's Code tab does - measured 2026-09-26 on Desktop 2.9939.2, whose bundled Claude Code 2.1.281 starts with `--setting-sources=user,project,local` and fired the installed hooks on a real session, though it is not on `PATH` and so the machine still reads as "no Claude Code". The same measurement found the status line never runs there: Desktop drives Claude Code headless over stream-json, with nothing to draw it on. `blink install` says which of these this machine gets -- it reads the hooks and any learned weekly reset rather than promising them -- instead of only reporting each step as done.
+**Why Claude Desktop is only half.** The five-hour window has a real countdown: Claude Desktop's own Local Storage carries a reset time next to its percentage, refreshed within seconds of a turn. The seven-day window does not: Claude Desktop does not save a seven-day reset time on a chat-only machine (as of August 2026). So BLINK remembers one, the first time any source reports it, and counts it forward a week at a time; that countdown is published only while nothing has contradicted it, and withdrawn the moment something does. Wherever a window has no countdown to show, the panel shows a **rate** instead (`+14%/h`) - measured from readings actually taken, not a guessed reset time. The full activity light needs Claude Code's hooks. Chat never runs them, so a chat gets only the best-effort light described under [The Desktop chat light](#the-desktop-chat-light), read from Desktop's own files; Desktop's Code tab runs the hooks - measured 2026-09-26 on Desktop 2.9939.2, whose bundled Claude Code 2.1.281 starts with `--setting-sources=user,project,local` and fired the installed hooks on a real session, though it is not on `PATH` and so the machine still reads as "no Claude Code". The same measurement found the status line never runs there: Desktop drives Claude Code headless over stream-json, with nothing to draw it on. `blink install` says which of these this machine gets -- it reads the hooks and any learned weekly reset rather than promising them -- instead of only reporting each step as done.
 
 **Why claude.ai is not supported.** A browser extension was built to read usage from response headers and measured against the real site: 178 responses, none carrying a rate-limit header of any kind. There is nothing to read. It was removed rather than shipped as a feature that does nothing. [`docs/next-steps.md`](next-steps.md) §A has the measurement.
 
@@ -101,7 +105,8 @@ It finds `claude` on `PATH`, then in `~/.local/bin` (`%USERPROFILE%\.local\bin` 
 | Claude Code's status line | both limits, reset times | nothing - set up by `blink install` |
 | Claude Code's hooks | per-session busy / waiting / finished / rate-limited | nothing - set up by `blink install` |
 | Claude Desktop's usage cache | both limits, and the burn rate derived from its history | nothing - read if the app is installed |
-| Claude Desktop's Local Storage | a five-hour reset time, refreshed within seconds of a turn | nothing - read if the app is installed |
+| Claude Desktop's Local Storage | a five-hour reset time, refreshed within seconds of a turn; for the Desktop chat light, the name and time of each event in its analytics queue (the only parts used) | nothing - read if the app is installed |
+| Claude Desktop's IndexedDB folder | for the Desktop chat light, when Desktop writes there: file names, sizes and times only, never opened | nothing - read if the app is installed, on unless `blink config desktop-chat-light off` |
 | A remembered weekly boundary | a weekly reset time, once one has been learned from any of the sources above; published only while nothing contradicts it | nothing - learned automatically, never configured |
 | Codex CLI's own session log | both limits and reset times, for Codex; on an account with no five-hour limit, every token count of each turn, held in memory until five hours after Codex last wrote that turn, with only the output tokens added up for the burn view | nothing - read if Codex is installed |
 
@@ -256,19 +261,21 @@ Blink has to change.
 | | |
 |---|---|
 | Changes | two keys in `~/.claude/settings.json`: `statusLine.command`, and one entry under `hooks` for each of ten Claude Code lifecycle events (`SessionStart`, `PreToolUse`, `Stop`, ... - the activity light is derived from them). Your own hooks are left in place |
-| Creates | `~/.blink/` (readable by you alone) - a copy of the program, the status line script, the hook script, and a `state/` directory holding one small file per open session (event name, time, and the session and agent ids Claude Code generates - nothing else) |
+| Creates | `~/.blink/` (readable by you alone) - a copy of the program, the status line script, the hook script, and a `state/` directory holding one small file per open session (event name, time, the session and agent ids Claude Code generates, the project folder's name without the path above it, and on `PreToolUse` whether the tool edits files, written as `edit` or `other` and never as the tool's name - nothing else; never the tool's arguments) |
 | Creates | a login item, so the bridge starts with your session (a LaunchAgent on macOS, a user systemd unit on Linux, a Scheduled Task on Windows) |
 | Creates | `usage-refresh.json` in `~/.blink/` (when the last refresh ran, how many runs in a row failed and since when, the reason if BLINK turned it off, when you last turned it back on, whether the service could not find Claude Code, the path of the `claude` your terminal found, and for the board's question how many times it was answered, when it was last sent and whether you said no) and an empty `refresh/` folder there for the run to start in. Both are created only once the refresh is turned on or asked about; `blink uninstall` removes them. The on/off answer itself is the `usage-refresh` key in `config.json`. See "Keeping figures fresh" |
 | Leaves alone | every other key in `settings.json`, and the file's own formatting and permissions. Nothing is installed system-wide |
 | Keeps | the last status line payload Claude Code sent, in `~/.blink/statusline.json`. Alongside the two usage figures it carries the session id, working directory, transcript path and the session's cost. Three things are read from it: the usage figures (`rate_limits`), the session id and the session's running cost (`cost.total_cost_usd`). The last two only tell whether Claude Code's replies keep coming back without a five-hour window; the app holds them in memory for up to 64 sessions and never logs them, and saves them only on a usage-billed seat (see the `spend-count.json` row). Nothing in the file leaves the machine |
 | Keeps | whether the account has a five-hour window, in `~/.blink/session-window.json`: that verdict, the kind of evidence it rests on and when that evidence was taken - nothing else. Written when the verdict changes, so a restarted app and `blink status` agree with the running one. Removed by `blink uninstall`, so a reinstall decides afresh from its own evidence |
-| Changes | `~/.blink/config.json`: every install records in it which Claude Code folder it set up (`claude_home`: the folder, and whether `CLAUDE_CONFIG_DIR` named it; for WSL, see "Claude Code inside WSL" below), so the background service, which does not see your shell, reads the same one. The rest of it is written only if you ask, by `blink config` (it holds `status-page` and `usage-refresh`; `usage-refresh` is also written by your answer on the board, and set to off by BLINK itself when the refresh turns itself off; `usage-refresh` is absent until you answer the question, and a reinstall that finds an answer keeps it and does not ask again). Removed by `blink uninstall`, so a reinstall starts with status-page alerts off and asks the usage-refresh question afresh; one that does not parse is left, since it may be the only record of where Blink was set up, and uninstall says so |
+| Changes | `~/.blink/config.json`: every install records in it which Claude Code folder it set up (`claude_home`: the folder, and whether `CLAUDE_CONFIG_DIR` named it; for WSL, see "Claude Code inside WSL" below), so the background service, which does not see your shell, reads the same one. The rest of it is written only if you ask, by `blink config` (it holds `status-page`, `usage-refresh` and `desktop-chat-light`; `desktop-chat-light` is written only by `blink config desktop-chat-light on` or `off`, and is absent, meaning on, until then; `usage-refresh` is also written by your answer on the board, and set to off by BLINK itself when the refresh turns itself off; `usage-refresh` is absent until you answer the question, and a reinstall that finds an answer keeps it and does not ask again). Removed by `blink uninstall`, so a reinstall starts with status-page alerts off and asks the usage-refresh question afresh; one that does not parse is left, since it may be the only record of where Blink was set up, and uninstall says so |
 | Keeps | the board's theme, for a board that can show one (firmware 1.4.0 and later). `~/.blink/theme.json` holds the theme you set here or picked on the board. `theme_seen.json`, written by the app alone, holds the last theme it knew the board had, so a theme picked on the board while the app was off is kept rather than overwritten. `theme_sent.json` records the last theme the board confirmed storing, and `theme_preview.json` holds a builder preview or a cancel briefly, until the app next sends it to the board. All four are removed by `blink uninstall`, so a reinstall does not send an old theme back to the board |
 | Keeps | a remembered weekly boundary, in `~/.blink/weekly-anchor.json`: one weekly reset time and when it was seen - two timestamps, nothing else. It is learned from the first source that reports one: the Claude Code status line or, on a machine with none remembered yet, once per start from a Cowork session record Claude Desktop wrote, of which only that reset time is taken. `blink uninstall` leaves it |
 | Keeps | the board last connected, in `~/.blink/board.json`: the serial port it answered on, the id it reports (made from its chip's own hardware id), its firmware version and what it can show. It lets the next start open that port without scanning, and lets `blink status` and `blink theme` say what the board can do. `blink uninstall` leaves it |
 | Keeps | the app's own log, `~/.blink/bridge.log`, with the four before it as `bridge.log.1` to `bridge.log.4` (4 MB each). A line per event, stamped with the local date and time: which port it connected on, the kind of each message to and from the board but never what it carried, the board's console cut to a fixed list of lines, a source failing or working again, updates, and errors. No credential, no message text, nothing read from a transcript. `blink uninstall` leaves it |
-| Reads | Claude Desktop's usage cache, the five-hour usage record in its Local Storage, and the tail of Codex's session log, when present; from each only the usage figures are kept, and from Codex's log also the folder each session runs in (its `session_meta` `cwd`, for the project name) and the `task_started`, `task_complete` and `turn_aborted` events (for the activity light). No credential, no token |
+| Reads | Claude Desktop's usage cache, the five-hour usage record in its Local Storage, and the tail of Codex's session log, when present; from each only the usage figures are used, and from Codex's log also the folder each session runs in (its `session_meta` `cwd`, for the project name) and the `task_started`, `task_complete` and `turn_aborted` events (for the activity light). No credential, no token. (Reading the Local Storage record means parsing whole Local Storage files, which stay in the daemon's memory while it runs; see the Desktop chat light row below) |
 | Reads | only when no weekly reset time is remembered yet, at most once per start: Claude Desktop's Cowork session records, first from its audit files and, if they have none, from its IndexedDB store. That store also holds your conversations; the app walks it by record key and field name to the one weekly reset time a Cowork record carries, takes that single timestamp and nothing else, and never logs, prints or saves anything else from it |
+| Reads | for the Desktop chat light, unless `blink config desktop-chat-light off`: the names, sizes and modification times of the files in Claude Desktop's claude.ai IndexedDB folder and its blob folder, which are never opened; and the analytics queue in its Local Storage (`antalytics_queue_v1`), of which only each event's name and time are used. Reading the queue means parsing Desktop's Local Storage files, and the parser keeps whole parsed files in the daemon's memory while it runs (at most 16 files and 4 MB), the queue's account and conversation ids and composer drafts included, as it already did for the five-hour usage record. Nothing from either folder or the queue is logged, printed, saved or sent, and nothing leaves the machine. See "The Desktop chat light" |
+| Keeps | the Desktop chat light's last verdict, in `~/.blink/desktop_chat.json`, for `blink status`: whether the light is available, unavailable or off, whether a chat is answering (yes or no), when the app wrote that and the app's own process id - nothing else, nothing from Desktop's folders. Written by the running app when the verdict changes and every 30 s, and removed by it when it starts; `blink status` ignores one older than two minutes, and one whose writer is no longer running (on Windows that check is (not yet measured on a desk)). Removed by `blink uninstall` |
 | Reads | only when the file has changed (its size, time and identity are checked every two seconds; a change is read at most once every five seconds): Claude Code's config, `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`; a non-empty legacy `.config.json` in `~/.claude` or `$CLAUDE_CONFIG_DIR` comes first, as it does for Claude Code). The whole file is read and parsed in memory to reach fields of `oauthAccount`: the rate-limit tier, `organizationRateLimitTier`, the plan name, `planDisplayName`, the seat type, `seatTier` and `billingType`, and the account and organisation ids; of the first two the app keeps only whether they say Ultra, in memory. On a usage-billed seat it also reads the spend Claude Code saved at the last `/usage` (`cachedUsageUtilization`): the month's spend and limit, and when it was saved. The file also holds your email address, your name, your project folders and your MCP servers' settings, which can include their tokens, and on Linux and Windows it can hold an API key; none of it, nor anything else from the file, is kept, logged or printed. A file over 8 MB, or anything but a regular file, is not opened, and neither it nor a file that parses but is not a JSON object is read again until it changes. A file that does not parse (most often one Claude Code is still writing) changes nothing: the last reading is kept and the file is tried again five seconds later |
 | Keeps | only on a usage-billed Claude seat, in `~/.blink/spend-count.json`, readable by you alone: a one-way fingerprint of the account and organisation ids, the highest cost Claude Code's status line estimated for each session and when it was first seen or last rose (a session id, an amount and a time, no conversation), each rise in cost counted in the last five hours with its time (for the board's quarter-hour view), the month's total of the older ones, and the time of the last `/usage` it counts from. Older rises are added into that one total rather than kept one by one; what grows is the list of sessions, one short entry each until the month turns, so the file gains about 2 KB a day at thirty Claude Code sessions a day (about 66 KB by the end of such a month). It is written at most once a minute while costs rise, and at once when a new session appears. It is an estimate between `/usage` runs, and the file is replaced when the month turns or the login changes. Removed by `blink uninstall`, with any temp file a write left beside it, so a reinstall starts its count afresh from the spend Claude Code saved at the last `/usage` |
 | Reads | only while the account is marked as having no five-hour window (see the row above and "Claude Code in a terminal"), and only for a board that can show the burn view: Claude Code's transcripts, under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`). Only lines containing `"output_tokens"` are decoded, and of each only `type`, `timestamp`, `message.id`, `requestId`, `message.model` and `message.usage.output_tokens` are looked at. It holds in memory, and nowhere else, each transcript's path, size, read position and a hash of the last 256 bytes it read (to notice a file rewritten in place), and for each reply still inside the last five hours its message and request ids and output-token count. What goes to the board is twenty quarter-hour totals. Nothing from a transcript - no line, no value, no path - is logged, printed or saved. The transcripts are read only while the account is marked as having no five-hour window; on the Ultra plan a mark can come from a single reply, and the next five-hour figure Claude Code shows lifts it and stops the reading |
@@ -524,7 +531,7 @@ The things that were open before the first release, and how each was settled.
 | **Company units** | The same image plays a company logo (a still or a short clip) after the boot animation when the factory wrote one to the `logo` partition (`tools/burn.sh --logo`). No logo partition, no logo: individuals are the default, and a re-burn without `--logo` erases it. |
 | **Windows on Arm** | Supported, with WCH's Arm64 driver (`vendor/ch341ser-arm64`). The package bundled for x64 lacks the Arm64 file its own `.INF` names, so on a Windows 11 ARM64 VM (2026-09-30) `pnputil` failed with exit 2 and a release told Arm customers no driver exists. WCH's current package carries one, and `blink install` stages it on Arm. Measured 2026-10-19 on a Windows 11 ARM64 VM with the board passed through: the driver installed Microsoft-signed, the board came up as `USB-SERIAL CH340 (COM3)`, and the daemon and board completed the handshake and exchanged usage. Not yet measured: the undriven case (`docs/windows-check.md`, A2) on Arm. |
 | **One board per computer** | The app drives one BLINK. A second one attached is ignored; `--port` picks one deterministically. |
-| **What is supported** | Claude Code in a terminal or IDE extension: everything (on an account with no five-hour window, such as Ultra, the session dial gives way to a five-hour burn view of Claude Code's output). Codex CLI: everything, on its own page (on an account with no five-hour limit, such as Codex Pro, the session dial gives way to the same burn view, of Codex's output). Claude Desktop alone: a five-hour countdown whenever Desktop is holding a reset time - it keeps one only while a window is running and clears it in between, so the countdown comes and goes and the fill rate covers the gaps - a weekly countdown once one has been learned, and the activity light only in Desktop's Code tab. claude.ai in a browser: nothing. |
+| **What is supported** | Claude Code in a terminal or IDE extension: everything (on an account with no five-hour window, such as Ultra, the session dial gives way to a five-hour burn view of Claude Code's output). Codex CLI: everything, on its own page (on an account with no five-hour limit, such as Codex Pro, the session dial gives way to the same burn view, of Codex's output). Claude Desktop alone: a five-hour countdown whenever Desktop is holding a reset time - it keeps one only while a window is running and clears it in between, so the countdown comes and goes and the fill rate covers the gaps - a weekly countdown once one has been learned, the full activity light only in Desktop's Code tab, and for chat a best-effort light that shows a reply being written and nothing else (see "The Desktop chat light"). claude.ai in a browser: nothing. |
 | **The spend page's limits** | On a usage-billed seat the figure is exact just after `/usage` in a terminal and an estimate in between, built from Claude Code's own list-price cost estimate, which may differ from the bill. Spend in Claude Desktop (chat and its Code tab), Cowork, claude.ai, `claude -p`, the Agent SDK and other computers never reaches the status line, and appears only at the next `/usage`. The status line is one file shared by every session and read every 2 seconds, so a session's last rise can be missed. Just after a `/login` to another account the page can be blank until Claude Code next draws its status line (a render made in the few seconds before Blink notices the switch is taken for the old account's), or show the old account's figures once: the status line does not say which account drew it. |
 | **Automatic app updates** | **Off** for the first release. The signed manifest carries the switch (`daemon.auto`), so it can be turned on for a later release - and off again within minutes - without touching any installed machine. |
 | **What the app keeps on disk** | Exactly what the table under "What the installer changes" says, readable by the user alone, sent nowhere. |
@@ -536,6 +543,7 @@ The things that were open before the first release, and how each was settled.
 - **The device holds no credential.** It never signs in and never talks to Anthropic. The figures come from the Claude Code on your own machine, which has already worked them out, and reach the board over the cable. There is no token on the device to leak, and nothing to revoke if you sell or lend it.
 - **The usage refresh is opt-in and runs your own Claude Code.** Off until you answer yes. It runs `claude -p /usage` with your login, which BLINK never sees: no token is read, held or sent, and BLINK does not call Anthropic itself. It was measured at zero model turns and zero cost, and turns itself off if that changes. Anthropic's terms restrict automated use of consumer accounts, so the decision is yours; see "Keeping figures fresh".
 - **Status-page alerts are off unless you turn them on.** `blink config status-page on` lets the app on your computer read the public status pages (status.claude.com, and status.openai.com when the board shows a Codex page) every 5 minutes, so the panel can say when the service, not your machine, is having trouble. Board firmware 1.3.4 and earlier does not show it; update the board to see it. These are plain public requests: no account, token or usage goes with them. Off, the app makes no such request at all.
+- **The Desktop chat light reads two things of Claude Desktop's, and uses almost nothing.** It reads Desktop's analytics queue in its Local Storage (`antalytics_queue_v1`), and the chat light's own code uses and holds only each event's name and time, for one poll. That is not all that sits in memory, though. To reach the queue it parses Desktop's Local Storage files, and the parser (`pc/leveldb.py`) caches whole parsed files in the daemon's memory while the daemon runs, up to 16 files and 4 MB at a time, the least recently used dropped first; those files include the queue's account and conversation ids and your composer drafts (messages typed and not yet sent). Nothing from them is written to disk, logged, printed or sent, and nothing leaves the computer. That cache is older than the chat light: the five-hour usage record is read through the same parser. Desktop's claude.ai IndexedDB folder, which holds your conversations, is read only by the names, sizes and modification times of its files; no file in it is ever opened. What the light learns and observes stays in memory; the one thing it writes is `~/.blink/desktop_chat.json`, with a yes or no for "a chat is answering", whether the light is available, unavailable or off, the time it was written and the app's own process id, which `blink status` reads. Nothing is sent. The rule for the light is that the queue may only hold it on and never turns it on by itself. The light turns on only from activity in the IndexedDB folders. While there has been such activity recently, a "message sent" in the queue with no finish after it keeps the light on through a reply that writes nothing for a while, for up to 10 minutes. A finish in the queue never switches off the hold the IndexedDB started. The queue is kept to that because on macOS it reaches disk 20-60 s late and can miss turns that come quickly one after another, so a stale "sent" whose finish was lost would otherwise light a desk where nobody is chatting. It is on by default because it reads local files only and nothing leaves the computer, unlike the usage refresh and status-page alerts, which are off until you turn them on; `blink config desktop-chat-light off` stops both reads.
 - **The setup touches few files, and says which first.** Claude Code's `settings.json` (in `~/.claude`, or the folder `CLAUDE_CONFIG_DIR` names): its `statusLine.command`, and a hook entry per lifecycle event; Codex's `hooks.json` when Codex is installed; and `~/.blink/config.json`, which records the Claude Code folder it set up. See "What the installer changes" above for exactly what is written and what is kept. All of it is reversible with one command.
 - Earlier versions of this repository also held an on-device Wi-Fi and sign-in path, which no release ever included. It used Claude Code's OAuth client id to sign the board in to Anthropic, and it was deleted on 2026-10-27. If its strings ever reappear in an image, the release script refuses to publish it.
 
@@ -565,6 +573,130 @@ not typed into claims nothing, and neither does one that has ended. Codex has
 no hook interface, so its state comes from its own session log: a turn that
 started, finished or was interrupted. Codex permission prompts are not in that
 log, so a prompt shows as "working" until you answer it.
+
+### The Desktop chat light
+
+Claude Desktop's chat runs no hooks, so it cannot tell the board what it is
+doing the way Claude Code does. On macOS and Windows, BLINK lights the dot
+anyway while a Desktop chat is answering, as a **best effort**, from two
+things Desktop already writes:
+
+- **Its claude.ai IndexedDB folder and blob folder.** Desktop writes there
+  while a reply streams in. BLINK reads only the names, sizes and modification
+  times of the files and never opens one. The rule that decides "busy" uses
+  the timing and the file names, never how much was written.
+- **Its analytics queue**, a key in its Local Storage
+  (`antalytics_queue_v1`). Of each event the chat light uses and holds only
+  the name and the time, for one poll. To get at the queue it parses
+  Desktop's Local Storage files, and the parser caches whole parsed files in
+  the daemon's memory while the daemon runs (up to 16 files and 4 MB at a
+  time, the least recently used dropped first). Those files hold the queue's
+  account and conversation ids and your composer drafts (messages typed and
+  not yet sent). Nothing from them is written to disk, logged, printed or
+  sent, and nothing leaves the computer. That cache is older than the chat
+  light: the five-hour usage record is read through the same parser.
+
+What the light learns and observes in those folders (names, sizes, times,
+queue events, which sub-folders churn) is kept in memory and never written,
+logged or sent. The one thing it writes is a small file in the Blink folder,
+`~/.blink/desktop_chat.json`, holding four values: whether the light can
+work here ("available", "unavailable" or "off"), whether a chat is answering
+(yes or no), the time the app wrote them and the running app's own process
+id (its own, not anything from Desktop's folders). `blink status` reads it;
+nothing is sent anywhere.
+
+The light turns on only from activity in the IndexedDB folders. The queue
+may only hold it on and never turns it on by itself. While there has been
+recent IndexedDB activity and the light is on, a "message sent" in the queue
+with no finish after it keeps the light on, for up to 10 minutes, through a
+reply that leaves the IndexedDB quiet for a while. A finish in the queue
+never switches off the hold the IndexedDB started. The
+reason is that on macOS the queue reaches disk 20-60 s late and can miss
+turns that come quickly one after another, so a stale "sent" whose finish was
+lost would otherwise light a desk where nobody is chatting. It also means
+that if the IndexedDB's hold (20 s on Windows, 50 s on macOS) runs out before
+the queue's "sent" reaches disk, the light goes off and the late "sent" does
+not bring it back.
+
+Desktop also keeps an idle cache in one of the blob sub-folders, churning
+when nobody is chatting. On macOS, until BLINK has learned which sub-folder
+that is, no IndexedDB write is taken as a reply, so **the chat light does not
+come on at all**: the queue cannot light it alone, so on macOS the light
+depends on the IndexedDB itself, its log growing with no new blob in the
+learned sub-folder beside that growth, or a new blob in a sub-folder that is
+not the idle cache. A new blob in a sub-folder while the light is off and no
+send is pending is only a candidate. It counts as an idle occasion once about
+90 s have passed with no "sent" or finish for that time showing up in the
+queue and no IndexedDB activity counted after the candidate was seen (a
+light lit by the candidate's own write does not drop it); the queue can be up to 60 s late, so this is
+what keeps a reply's own write from being counted as churn. Three such
+occasions at least 60 s apart mark the sub-folder as the idle cache. So on
+macOS learning takes at least several minutes of Desktop sitting idle after
+the daemon starts, and it is held in memory only, so it starts again when the
+daemon restarts. A reply whose "sent" the queue never records can still be
+miscounted as an idle occasion. The learning rule has not been replayed
+against recorded data (not yet measured on a desk). When the set of
+sub-folders changes (after a Desktop update, say) it forgets and learns
+again, including when the change happened while the folders could not be
+read or the light was turned off.
+
+On the board a busy chat counts as one running session, so a Claude Code
+session and a chat answering show as two. It is only ever **running, then
+gone**: never amber and never "your turn", because the signal that a reply
+has ended trails the real end by too much to be worth a prompt.
+
+What it costs:
+
+- It can light while a message is being typed, before it is sent.
+- It trails the end of a reply by about 20 s on Windows and about 50 s on
+  macOS.
+- Two chats replying at once count as one.
+- On macOS every poll (about every 2 s) lists the blob folder by name, three
+  folder levels deep, opening nothing. On 2026-11-25, on a Mac running macOS
+  27.2, a single listing of a Desktop blob folder holding 89 entries took
+  about 1.4 ms (mean of 500 runs). What that listing costs a running daemon
+  over a day, and on a large, long-used store, is unknown (not yet measured
+  on a desk). Windows does not list it.
+- On macOS, learning is slow on purpose: a background write is counted as
+  idle only after about 90 s, and it is dropped if a "sent" shows up in the
+  queue within that window, so the light stays dark for at least several
+  minutes after the daemon starts.
+
+It is **on by default**: it reads local files only and nothing leaves the
+computer, which is why it differs from status-page alerts and the usage
+refresh, which are off until you turn them on. `blink config desktop-chat-light
+off` turns it off (and `on` back on). `blink status` says which state it is in,
+"Desktop chat light: available (best effort)", "not available on this Desktop
+version" or "turned off". When it is available, it also says "Desktop chat:
+busy" or "Desktop chat: idle", as the running app last reported it. One look
+cannot tell a quiet chat from a busy one, and `blink status` is a separate
+program, so the running app writes its verdict to `~/.blink/desktop_chat.json`
+when it changes and every 30 s otherwise, and status reads that. A reading more
+than two minutes old does not count, so when the app is not running (or has
+stopped reporting) status shows no busy or idle line at all rather than guess.
+A reading counts only while the app that wrote it is the one running. When the
+app starts, it removes the reading the previous run left, so for its first
+couple of seconds status shows no busy or idle line, never the old run's.
+Status also checks that the process that wrote the reading is still alive
+and ignores the reading if not. On Windows it checks a different way from
+macOS and Linux, because the check used there would end the process it asked
+about on Windows; the Windows check only looks, and when it cannot tell,
+status ignores the reading rather than quote an app that may have stopped.
+On Windows itself that check is (not yet measured on a desk).
+If the folder is missing or
+cannot be read (on macOS that includes any folder inside the blob folder that
+is refused), or Desktop changes its layout, the light stays off, `blink
+status` says it is not available, and the daemon keeps running. It does not
+exist on Linux, where there is no Claude Desktop.
+
+Measured in throwaway probes on 2026-10-01 and 2026-10-02, on macOS with
+Desktop 2.19675.0 and on Windows 11 ARM64 with Desktop 2.16120.0.0, with one
+account. Still open:
+
+- Two chats at once on macOS (not yet measured on a desk).
+- Desktop with analytics turned off in its privacy settings (not yet measured on a desk). The queue may then never fill, in which case nothing bridges a quiet stretch in a reply.
+- Going offline, reconnecting, and a Desktop restart in the middle of a reply (not yet measured on a desk).
+- A second Desktop version on each OS (not yet measured on a desk).
 
 ## WiFi
 
@@ -621,7 +753,7 @@ and back to return. It is six tiles, three by two, each with an icon:
 
 | Tile | What it does |
 |---|---|
-| **Brightness** | Tap a level. It is kept across a power cycle |
+| **Brightness** | Tap a level. It is kept across a power cycle. **Quiet hours**, the row under the levels, is a switch, **Off** or **On**, with a **From** and an **Until** time set in half-hour steps (22:00 to 07:00 to begin with). Between them the screen dims to 20%, and your chosen brightness returns at Until. The board has no clock of its own: it needs the time from your computer, and until the app has sent it quiet hours do nothing and the page says so |
 | **Open on PC** | Opens the settings page on your computer, where the theme, the logo and WiFi are set (below) |
 | **Focus** | One window big instead of two side by side: **Off**, **Session** or **Weekly**. The other window stays on screen as a single dim line under the big dial. Off remembers which window was big |
 | **Update** | The software update: **Up to date**, **Available** when there is something to install, or **App is old** when the half on your computer is behind (see "Updates") |
@@ -828,9 +960,50 @@ repository.
 
 `~/.blink/bin/blink status` first: it names the service state, every source it
 reads and the age of each reading. Then a replug of the board. If neither
-helps, email **support@blink-buddy.com** with that output
-and the tail of `~/.blink/bridge.log` (neither contains a credential or any
-message text).
+helps, run `~/.blink/bin/blink support` and email the zip it writes to
+**support@blink-buddy.com**. It holds the main rows of `blink status`, the
+app's and board's versions (the board's as the app last recorded it), the
+system and service state, and the newest 256 KB of `bridge.log` and
+`bridge.log.1`. It goes on the Desktop (the OneDrive Desktop on Windows when
+Explorer uses it, the folder `user-dirs.dirs` names on Linux), named for the
+day. When there is no Desktop folder, or it refuses the file (macOS does
+when Terminal was not given access to the Desktop), the zip goes in
+`~/.blink`, and the command says so and prints the full location. A second
+run that day writes `-2` beside the first rather than over it. It reads
+only: it does not stop or restart the service and does not open the board's
+port.
+
+What goes in is cut by an allowlist (`pc/support.py`). A log line is kept
+only if it starts with one of the app's own tags, and it keeps its time, its
+tag and the one fixed phrase it opens with, from that tag's short list, so
+`[bridge] -> usage` reads as it was written and `[bridge] connected on` is
+followed by `<x>`. Everything after the phrase (a folder, a network name, an
+id, a number) is that one `<x>`, whatever it says. The board's own console
+lines are kept whole when they are exactly one of the fixed messages the app
+already logs (`[ota] update REVERTED`, `rst:0xf (BROWNOUT_RESET)`). A status
+row keeps its label and an opening phrase from one more fixed list the same
+way; other rows, the Wire row and every indented continuation line are left
+out. What is left over: a line whose first words were filled in and spell a
+whole listed phrase would show that phrase. No number is kept from the log
+or the status rows. The versions (app, firmware, Claude Code, Python) are in
+`system.txt`, each asked for by the command itself. Lines that are not the
+app's own (a whole message logged before 2026-10-30, a traceback) are left
+out and counted. This is a filter, not a proof that nothing private is left,
+so open the zip and read it before sending. If `blink support` itself fails,
+email what it printed. Don't send `blink status` or `bridge.log` by hand,
+because neither is filtered.
+
+If the Board lines say "A USB serial device here isn't answering as a BLINK",
+the app found a USB-serial chip and nothing on it answered, neither within 1.5
+seconds nor within 11, which is long enough to hear a board that is still
+booting. Silence is all it measured. A BLINK with no firmware reads this way,
+and so does one whose firmware is not starting, and so does any other device
+built on the same chip, an Arduino clone for instance, which is none of our
+business and can be left alone. If it is your BLINK, unplug it and plug it back
+in. If it stays this way, email **support@blink-buddy.com** with the output of
+`blink status`; there is nothing to flash yourself. Until the running app has
+listened that long, or when it is not running, the line keeps saying "none
+identified yet".
 
 Every line in that log carries the local date and time it was written. The
 file is capped at 4 MB and the four previous ones are kept beside it as

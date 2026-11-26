@@ -43,6 +43,7 @@
 #include "settings_icons.h"
 #include "edit_hold.h"
 #include "usage_layout.h"	/* FONT_LINE_H */
+#include "net_time.h"		/* net_time_local, for the Quiet hours hint */
 
 /*
  * Roles in the active theme (theme.c), read when drawn. The comments give
@@ -83,6 +84,15 @@ static lv_obj_t *confirm;	/* NULL when no dialog is up */
 static lv_obj_t *conn_ov, *conn_confirm, *conn_err;
 /* The About screen: a read-only page, built like Connection's. */
 static lv_obj_t *about_ov;
+/*
+ * The sessions card (docs/sessions-card-design.md): full screen over the
+ * gauges, opened by a tap on the pip row and closed by its back button.
+ * Declared up here because every "is something up?" test below must count
+ * it -- the ask box and the update offer may not stack on it, and it may
+ * not open over them. Defined with mk_back, further down.
+ */
+static lv_obj_t *sess_ov;
+static void sess_close(void);
 
 /* Software-update widgets (all NULL when their owner is closed/absent). */
 static lv_obj_t *notice;	/* outcome popup on the top layer */
@@ -304,6 +314,23 @@ static lv_obj_t *focus_note;	/* the Focus screen's line under its choices */
 static lv_obj_t *focus_btn[FOCUS_CHOICES];
 static void focus_forget(void);
 static lv_obj_t *seg[BRIGHT_STOPS];
+/*
+ * The Quiet hours page is up inside bright_ov in place of the levels page
+ * (see "Quiet hours" below). While it is, bright_big and seg[] are NULL, and
+ * every path that forgets bright_ov calls quiet_forget() as well, which
+ * clears this and the page's own pointers.
+ */
+static bool quiet_page;
+static void quiet_forget(void);
+static void quiet_row(lv_obj_t *parent);
+static void quiet_build(void);
+static void quiet_back(void);
+static void quiet_hint_paint(void);
+/* The Focus buttons' look, which the Quiet hours page wears too. */
+static lv_style_t focus_st_btn;	/* every choice */
+static lv_style_t focus_st_on;	/* ...and the chosen one, as LV_STATE_CHECKED */
+static bool focus_styles_made;	/* both styles above hold properties */
+static void focus_styles(void);
 
 static void bright_refresh(void)
 {
@@ -1423,7 +1450,7 @@ static void ask_tick(void)
 	struct ask_prompt_turn at = ask_prompt_step(
 		ask_pending, ask_box != NULL,
 		panel || confirm || notice || wn || upd_prompt || dl_overlay ||
-			ui_anim_showing(),
+			sess_ov || ui_anim_showing(),
 		!proto_host_seen(), board_dozing, k_uptime_get(), ask_shown_ms,
 		ask_pending_ms);
 
@@ -1485,6 +1512,14 @@ void ui_settings_dozing(bool dozing)
 		upd_prompt_done = false;
 		printk("[ota] offer withdrawn: the board is dozing\n");
 	}
+	/* The sessions card goes as well: a board that wakes into a list of
+	 * sessions from before it slept would show rows nobody is reading,
+	 * and a doze is the owner gone. Not only when one is up: sess_close
+	 * also deletes a closed card still waiting for the mode loop
+	 * (sess_doomed), so the board never dozes with one kept. */
+	if (dozing) {
+		sess_close();
+	}
 }
 
 static void upd_timer_cb(lv_timer_t *t)
@@ -1493,6 +1528,12 @@ static void upd_timer_cb(lv_timer_t *t)
 	struct ota_ui snap;
 
 	ota_ui_get(&snap);
+
+	/* The Quiet hours page's hint turns from "Waits for the time" into the
+	 * usual line when the daemon's time message lands with the page
+	 * already open. A no-op unless the page is up, and it redraws only
+	 * when the answer changes. */
+	quiet_hint_paint();
 
 	/*
 	 * Screen-level state first, and unconditionally.
@@ -1561,7 +1602,7 @@ static void upd_timer_cb(lv_timer_t *t)
 		struct upd_prompt_turn pt = upd_prompt_step(
 			snap.st, upd_prompt != NULL, upd_prompt_done,
 			panel || confirm || notice || dl_overlay || ask_box ||
-				ui_anim_showing(),
+				sess_ov || ui_anim_showing(),
 			board_dozing);
 
 		if (pt.act == UPD_PROMPT_WITHDRAW) {
@@ -1863,6 +1904,568 @@ static lv_obj_t *mk_back(lv_obj_t *parent, lv_event_cb_t cb)
 }
 
 /*
+ * ---- The sessions card (docs/sessions-card-design.md) --------------------
+ *
+ * One row per open session, four to a page: name, what it is doing, how
+ * long, and how full its context is. Opened by a tap on the pip row
+ * (usage_view.c, sess_tap) and closed by the same back button every
+ * Settings screen has, or a right swipe, or the doze.
+ *
+ * Built like the brightness screen -- a full-screen object in COL_BG with
+ * mk_back in its corner -- but on the gauge screen rather than in the
+ * panel, because it is not part of Settings: it opens with the panel shut,
+ * and it dies with the gauge screen if that is ever deleted under it (the
+ * DELETE callback below forgets every pointer). It does not show in the
+ * bench's ui_state: ov and modal name Settings' screens and the popups, a
+ * fixed list tools/board_touch.py checks, and the card is neither -- it
+ * reads ov=none modal=none, and is found by its widgets instead.
+ *
+ * Paging is the swipe the gauges use (swipe_cb, up for the next page, as a
+ * list follows the finger) and two buttons, because a resistive panel
+ * misses slides it never misses presses (zone_page_cb has the measurements).
+ * There is no LV_EVENT_GESTURE handler: swipe_cb already sees every stroke
+ * made here, and LVGL's detector seeing some of the same ones would turn a
+ * page twice. The rows hold only the page the daemon sent; turning one asks
+ * for the next with spage and dims the rows until it arrives.
+ */
+static struct {
+	lv_obj_t *box, *name, *age, *words, *bar, *pct;
+} sess_row[SESS_ROWS];
+static lv_obj_t *sess_empty, *sess_ind;
+static lv_obj_t *sess_prev_lbl, *sess_next_lbl;
+static int sess_want_pg;	/* the page asked for */
+static bool sess_pending;	/* ...and not yet arrived */
+static int64_t sess_asked_ms;
+static uint32_t sess_gen_drawn;
+static int64_t sess_drawn_ms;
+static bool sess_rebuild_owed;	/* a theme change, taken in the mode loop */
+
+/*
+ * A card the back button or a swipe closed, hidden and waiting for the mode
+ * loop to delete it (sess_close_later, sess_reap). NULL when none is.
+ *
+ * Not lv_obj_delete_async(): that queues through lv_async_call, which
+ * allocates a timer from the 32 KB LVGL pool and ignores a failure (the
+ * rebuild_owed / repaint_top_owed notes in ui_settings_service say the same
+ * of the theme work). A failed queue would leave the card drawn and taking
+ * every press for good, while everything here believed it gone. Hiding it
+ * allocates nothing, and the delete is the mode loop's, which is outside any
+ * LVGL event and needs no queue.
+ *
+ * The close stays this way for that reason alone. It is not the cause of
+ * any board failure seen so far: the platform's board check of 2026-11-25
+ * failed at the first `tap settings.open` of tools/bench/full_touch.txt (its
+ * line 21) because the run began while the board's boot clip was still
+ * playing, and a tap made then opens nothing (ui_settings_bench_state has
+ * the evidence and the fix).
+ */
+static lv_obj_t *sess_doomed;
+
+/*
+ * When the card last closed, and how long after that it may not open again.
+ * The back button sits over the dots (SESS_TAP_*, usage_layout.h), so a
+ * bounce of the press that closed the card -- or a second press of a finger
+ * that thought the first one missed -- lands on the gauges' tap area the
+ * moment the card is hidden, and must not open it again (not yet measured on
+ * a desk: ui_state cannot see the card). 400 ms is longer than a contact
+ * bounce and shorter than anyone meaning to reopen it.
+ */
+#define SESS_REOPEN_GUARD_MS	400
+static int64_t sess_closed_ms;
+static bool sess_closed_once;	/* no guard before the first close */
+
+/*
+ * There is no guard on the swipes after a close, on purpose, and there was
+ * one until review rejected it (2026-11-25).
+ *
+ * It was SESS_STROKE_GUARD_MS: for 800 ms after the card closed, swipe_cb
+ * dropped every swipe and the edge strips believed LVGL's tap over
+ * ui_swipe's drag. Meant to drop only a stroke left over from the press on
+ * "<", it dropped anything in the window, so a deliberate swipe to the next
+ * provider straight after Back did nothing. The window was sized on paper
+ * and had never been measured on a desk.
+ *
+ * Narrowing it to "the contact that pressed Back" was the next idea, and it
+ * cannot be done from here.
+ *
+ *  - That contact is no longer down when the card closes. sess_back_cb runs
+ *    on CLICKED, which LVGL sends on release, so the press on "<" is over
+ *    in LVGL's eyes by the time the card goes. A swipe made on the card
+ *    goes to sess_swipe while sess_ov is still set.
+ *
+ *  - The one way a press on "<" can still be part of a swipe after the
+ *    close is ui_swipe's stitch: a contact that starts within
+ *    UI_SWIPE_STITCH_MS (250 ms, ui_swipe_geom.h) of the press's last
+ *    report joins its stroke, which then starts at the back button. With
+ *    the driver's ~100 ms release lag (TI_RELEASE_LAG_MS) before CLICKED,
+ *    that is any contact starting up to ~150 ms after the close. A bounce
+ *    of the Back finger and a fresh finger are the same thing at that point:
+ *    LVGL reports each as a new press, and ui_swipe's public face
+ *    (ui_swipe_dragging) says nothing about which stroke it is tracking. So
+ *    a flag cleared at the next press-down never catches the stitched
+ *    stroke, and one cleared at the next release drops the first swipe
+ *    after Back however late it comes, because ui_swipe fires with the
+ *    finger still down. Either way it is no better than no guard, or worse.
+ *
+ *  - The stitch is not the card's. The same "<" press followed within the
+ *    window by a press elsewhere happens on every Settings screen too, and
+ *    nothing guards it there. Settling it belongs in ui_swipe, for every
+ *    screen at once.
+ *
+ * Without the guard, a swipe after Back pages the providers from the moment
+ * the card closes. The exception is one that starts inside the stitch
+ * window, which ui_swipe measures from "<" exactly as it would after any
+ * other button (not yet measured on a desk). The stitched case was only
+ * ever seen on the host harness, while its clock had been altered to age
+ * strokes by serial-wire time. That change also made
+ * tools/bench/full_touch.txt fail there (click "Focus" then click "Session"
+ * stitched, 2026-11-25) and was withdrawn. The bench scripts wait
+ * out the stitch after every click (tests/test_sessions_card_source.py
+ * holds them to it), so a bench never makes that stroke. The reopen guard
+ * above stays: it is about the gauges' tap area under "<", not about
+ * swipes, and LVGL can see it.
+ */
+
+/*
+ * How long dimmed rows wait for the page they asked for. A daemon that is
+ * there answers an spage at once; one that is not never will (a board on
+ * the bench has none), and rows dimmed for ever read as a hung panel. After
+ * this the card goes back to saying what it holds.
+ */
+#define SESS_PAGE_WAIT_MS	5000
+
+static void sess_forget(void)
+{
+	sess_ov = NULL;
+	for (int i = 0; i < SESS_ROWS; i++) {
+		sess_row[i].box = sess_row[i].name = sess_row[i].age = NULL;
+		sess_row[i].words = sess_row[i].bar = sess_row[i].pct = NULL;
+	}
+	sess_empty = sess_ind = NULL;
+	sess_prev_lbl = sess_next_lbl = NULL;
+	sess_pending = false;
+	sess_rebuild_owed = false;
+}
+
+/* The card went with its screen (or was closed): nothing may draw through a
+ * pointer into it again. Compared, because a closed card waits for the mode
+ * loop and a new card can be open by the time the old one goes. A doomed
+ * card is cleared too: if its screen is deleted first (a rebuild of the
+ * gauges), sess_reap must not delete it a second time. */
+static void sess_deleted_cb(lv_event_t *e)
+{
+	lv_obj_t *o = lv_event_get_target(e);
+
+	if (o == sess_ov) {
+		sess_forget();
+	}
+	if (o == sess_doomed) {
+		sess_doomed = NULL;
+	}
+}
+
+/* Delete a card sess_close_later hid, if one waits. Only outside an LVGL
+ * event: sess_service (the mode loop) and sess_close's callers. */
+static void sess_reap(void)
+{
+	lv_obj_t *o = sess_doomed;
+
+	if (o == NULL) {
+		return;
+	}
+	sess_doomed = NULL;
+	lv_obj_delete(o);
+}
+
+/* Either close: a tap already raised on the dots is dropped, and the reopen
+ * guard starts (SESS_REOPEN_GUARD_MS). */
+static void sess_note_closed(void)
+{
+	(void)usage_view_take_sessions_tap();
+	sess_closed_ms = k_uptime_get();
+	sess_closed_once = true;
+}
+
+/* The page on screen: the asked one while it is on its way, else what the
+ * table holds. */
+static int sess_page_now(const struct usage_srows *t)
+{
+	return sess_pending ? sess_want_pg : t->pg;
+}
+
+static void sess_paint(void)
+{
+	struct usage_srows t;
+	int64_t now = k_uptime_get();
+	char buf[FMT_SNAME_MAX * 3];
+	char ind[FMT_SPAGE_BUF];
+	int shown = 0;
+
+	if (sess_ov == NULL) {
+		return;
+	}
+	usage_view_srows(&t);
+	if (sess_pending && (t.pg == sess_want_pg ||
+			     now - sess_asked_ms > SESS_PAGE_WAIT_MS)) {
+		sess_pending = false;
+	}
+	for (int i = 0; i < SESS_ROWS; i++) {
+		struct msg_srow r;
+
+		if (!usage_view_srow(i, now, &r)) {
+			lv_obj_add_flag(sess_row[i].box, LV_OBJ_FLAG_HIDDEN);
+			continue;
+		}
+		shown++;
+		lv_obj_clear_flag(sess_row[i].box, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_set_style_opa(sess_row[i].box,
+				     sess_pending ? LV_OPA_40 : LV_OPA_COVER, 0);
+		fmt_srow_name(r.nm, r.pv, buf, sizeof(buf));
+		lv_label_set_text(sess_row[i].name, buf);
+		fmt_srow_age(r.age, buf, sizeof(buf));
+		lv_label_set_text(sess_row[i].age, buf);
+		lv_label_set_text(sess_row[i].words, fmt_srow_words(r.k));
+		lv_obj_set_style_text_color(sess_row[i].words,
+			lv_color_hex(usage_view_tone_text_hex(fmt_srow_tone(r.k))),
+			0);
+		/* Unknown is no bar and no figure, never an empty bar and
+		 * "0%": a session whose render the daemon has not seen yet
+		 * is not a session with nothing in its context. */
+		if (r.cx < 0) {
+			lv_obj_add_flag(sess_row[i].bar, LV_OBJ_FLAG_HIDDEN);
+			lv_obj_add_flag(sess_row[i].pct, LV_OBJ_FLAG_HIDDEN);
+		} else {
+			lv_bar_set_value(sess_row[i].bar, r.cx, LV_ANIM_OFF);
+			lv_obj_set_style_bg_color(sess_row[i].bar,
+				lv_color_hex(usage_view_tone_hex(fmt_ctx_tone(r.cx))),
+				LV_PART_INDICATOR);
+			snprintf(buf, sizeof(buf), "%d%%", r.cx);
+			lv_label_set_text(sess_row[i].pct, buf);
+			lv_obj_clear_flag(sess_row[i].bar, LV_OBJ_FLAG_HIDDEN);
+			lv_obj_clear_flag(sess_row[i].pct, LV_OBJ_FLAG_HIDDEN);
+		}
+	}
+	/* Said only when the list really is empty: rows of a page still on
+	 * their way are not "no sessions". */
+	if (shown == 0 && t.n == 0) {
+		lv_obj_clear_flag(sess_empty, LV_OBJ_FLAG_HIDDEN);
+	} else {
+		lv_obj_add_flag(sess_empty, LV_OBJ_FLAG_HIDDEN);
+	}
+	fmt_spage_indicator(sess_page_now(&t), t.tot, ind, sizeof(ind));
+	lv_label_set_text(sess_ind, ind);
+	/* Dimmed at the ends, never disabled: a disabled button drops the
+	 * press, and the bench clicks both with no sessions at all. */
+	lv_obj_set_style_text_color(sess_prev_lbl,
+		fmt_spage_can(sess_page_now(&t), t.tot, -1) ? COL_TEXT : COL_DIM,
+		0);
+	lv_obj_set_style_text_color(sess_next_lbl,
+		fmt_spage_can(sess_page_now(&t), t.tot, 1) ? COL_TEXT : COL_DIM,
+		0);
+	sess_gen_drawn = t.gen;
+	sess_drawn_ms = now;
+}
+
+/* Ask for page `pg` and dim the rows until it comes. */
+static void sess_ask(int pg)
+{
+	sess_want_pg = pg;
+	sess_pending = true;
+	sess_asked_ms = k_uptime_get();
+	proto_send_spage(pg);
+	sess_paint();
+}
+
+static void sess_step(int delta)
+{
+	struct usage_srows t;
+	int at;
+
+	if (sess_ov == NULL) {
+		return;
+	}
+	usage_view_srows(&t);
+	at = sess_page_now(&t);
+	if (fmt_spage_can(at, t.tot, delta)) {
+		sess_ask(at + delta);
+	}
+}
+
+static void sess_prev_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	sess_step(-1);
+}
+
+static void sess_next_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	sess_step(1);
+}
+
+/* A row takes a press and does nothing with it. CLICKABLE so the bench's
+ * widget walk lists each row by its name; the handler so the press is
+ * spent here rather than falling through to the card. */
+static void sess_row_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+}
+
+/* Outside any LVGL event (the doze, a theme rebuild): delete now, and a
+ * card still waiting from a close-later with it, so a doze leaves none. */
+static void sess_close(void)
+{
+	lv_obj_t *o = sess_ov;
+
+	sess_reap();
+	if (o == NULL) {
+		return;
+	}
+	sess_forget();
+	sess_note_closed();
+	lv_obj_delete(o);
+}
+
+/*
+ * From inside an event or a timer (the back button, a swipe): the object
+ * under the finger is the card's own, so it is not deleted here. Hidden and
+ * made unclickable at once instead -- neither allocates -- so it stops
+ * drawing and taking presses this frame, and sess_service deletes it on the
+ * next mode-loop pass (sess_doomed above says why not lv_obj_delete_async).
+ * A card already waiting is never leaked by overwriting the pointer: it is
+ * deleted first. Today none can be waiting here -- a new card opens only
+ * from sess_service, which reaps before it builds -- but a doomed card is
+ * hidden and no longer the one on screen, so the event in progress is not
+ * on it and deleting it from here is safe.
+ */
+static void sess_close_later(void)
+{
+	lv_obj_t *o = sess_ov;
+
+	if (o == NULL) {
+		return;
+	}
+	sess_reap();
+	sess_forget();
+	sess_note_closed();
+	lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+	lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);
+	sess_doomed = o;
+}
+
+static void sess_back_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	sess_close_later();
+}
+
+static lv_obj_t *sess_label(lv_obj_t *parent, int x, int y, int w,
+			    lv_text_align_t align, lv_color_t col)
+{
+	lv_obj_t *l = lv_label_create(parent);
+
+	lv_label_set_text(l, "");
+	lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+	lv_obj_set_size(l, w, FONT_LINE_H);
+	lv_obj_set_style_text_align(l, align, 0);
+	lv_obj_set_style_text_color(l, col, 0);
+	lv_obj_set_pos(l, x, y);
+	return l;
+}
+
+static lv_obj_t *sess_btn(lv_obj_t *parent, const char *txt, lv_align_t align,
+			  int x, lv_event_cb_t cb, lv_obj_t **lbl)
+{
+	lv_obj_t *b = lv_btn_create(parent);
+
+	lv_obj_set_size(b, SESS_BTN_W, SESS_BTN_H);
+	lv_obj_align(b, align, x, -2);
+	lv_obj_set_style_bg_color(b, COL_PANEL, 0);
+	lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(b, 0, 0);
+	lv_obj_set_style_radius(b, 6, 0);
+	lv_obj_set_style_shadow_width(b, 0, 0);
+	lv_obj_set_style_pad_all(b, 0, 0);
+	lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_set_ext_click_area(b, SESS_BTN_EXT);
+	lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+	*lbl = lv_label_create(b);
+	lv_label_set_text(*lbl, txt);
+	lv_obj_center(*lbl);
+	return b;
+}
+
+/* Build the card over the active screen -- the gauges, since it only opens
+ * with the panel shut -- and paint what the table holds. */
+static void sess_build(void)
+{
+	lv_obj_t *ov = lv_obj_create(lv_screen_active());
+
+	sess_ov = ov;
+	lv_obj_set_size(ov, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_style_bg_color(ov, COL_BG, 0);
+	lv_obj_set_style_bg_opa(ov, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(ov, 0, 0);
+	lv_obj_set_style_radius(ov, 0, 0);
+	lv_obj_set_style_pad_all(ov, 0, 0);
+	lv_obj_clear_flag(ov, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(ov, sess_deleted_cb, LV_EVENT_DELETE, NULL);
+	lv_obj_center(ov);
+	lv_obj_move_foreground(ov);
+
+	mk_back(ov, sess_back_cb);
+
+	lv_obj_t *title = lv_label_create(ov);
+
+	lv_label_set_text(title, "Sessions");
+	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+	lv_obj_set_style_text_color(title, COL_TEXT, 0);
+	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, SESS_TITLE_Y);
+	mk_line(ov, SESS_BAR_H);
+
+	for (int i = 0; i < SESS_ROWS; i++) {
+		lv_obj_t *b = lv_obj_create(ov);
+
+		sess_row[i].box = b;
+		lv_obj_set_size(b, SCR_W, SESS_ROW_H);
+		lv_obj_set_pos(b, 0, SESS_ROW_Y0 + i * SESS_ROW_H);
+		lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
+		lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
+		lv_obj_set_style_border_width(b, 1, 0);
+		lv_obj_set_style_border_color(b, COL_LINE, 0);
+		lv_obj_set_style_radius(b, 0, 0);
+		lv_obj_set_style_pad_all(b, 0, 0);
+		lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+		lv_obj_add_event_cb(b, sess_row_cb, LV_EVENT_CLICKED, NULL);
+		/* The name first: the widget walk names a row by its first
+		 * label. */
+		sess_row[i].name = sess_label(b, SESS_PAD_X, SESS_LINE1_Y,
+					      SESS_NAME_W, LV_TEXT_ALIGN_LEFT,
+					      COL_TEXT);
+		sess_row[i].age = sess_label(b, SCR_W - SESS_PAD_X - SESS_AGE_W,
+					     SESS_LINE1_Y, SESS_AGE_W,
+					     LV_TEXT_ALIGN_RIGHT, COL_DIM);
+		sess_row[i].words = sess_label(b, SESS_PAD_X, SESS_LINE2_Y,
+					       SESS_WORDS_W, LV_TEXT_ALIGN_LEFT,
+					       COL_TEXT);
+		sess_row[i].bar = lv_bar_create(b);
+		lv_obj_set_size(sess_row[i].bar, SESS_BAR_W, SESS_BAR_H_PX);
+		lv_obj_set_pos(sess_row[i].bar, SESS_BAR_X, SESS_BAR_Y);
+		lv_bar_set_range(sess_row[i].bar, 0, 100);
+		lv_obj_set_style_bg_color(sess_row[i].bar, COL_TRACK, 0);
+		lv_obj_set_style_bg_opa(sess_row[i].bar, LV_OPA_COVER, 0);
+		lv_obj_clear_flag(sess_row[i].bar, LV_OBJ_FLAG_CLICKABLE);
+		sess_row[i].pct = sess_label(b, SCR_W - SESS_PAD_X - SESS_PCT_W,
+					     SESS_LINE2_Y, SESS_PCT_W,
+					     LV_TEXT_ALIGN_RIGHT, COL_TEXT);
+		lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
+	}
+
+	sess_empty = lv_label_create(ov);
+	lv_label_set_text(sess_empty, FMT_SESSIONS_EMPTY);
+	lv_obj_set_style_text_color(sess_empty, COL_DIM, 0);
+	lv_obj_align(sess_empty, LV_ALIGN_TOP_MID, 0,
+		     SESS_ROW_Y0 + (SESS_ROWS * SESS_ROW_H - FONT_LINE_H) / 2);
+
+	sess_btn(ov, "Previous", LV_ALIGN_BOTTOM_LEFT, SESS_PAD_X,
+		 sess_prev_cb, &sess_prev_lbl);
+	sess_btn(ov, "Next", LV_ALIGN_BOTTOM_RIGHT, -SESS_PAD_X,
+		 sess_next_cb, &sess_next_lbl);
+	sess_ind = lv_label_create(ov);
+	lv_label_set_text(sess_ind, "");
+	lv_obj_set_style_text_color(sess_ind, COL_DIM, 0);
+	lv_obj_align(sess_ind, LV_ALIGN_BOTTOM_MID, 0,
+		     -(SESS_STRIP_H - FONT_LINE_H) / 2);
+	sess_paint();
+}
+
+/*
+ * May the card open now? Never over anything: not the panel or its
+ * confirm, a notice, What's new, the download screen, the ask box or the
+ * update offer -- each of those is answered first -- nor the eye clip, the
+ * CONNECTING takeover (it covers the dots), a doze, or a swipe that has
+ * just latched a page change or Settings, whose release the tap may be.
+ * Nor within SESS_REOPEN_GUARD_MS of a close: the back button sits over the
+ * dots, and a bounce of the press that closed the card must not reopen it.
+ */
+static bool sess_can_open(void)
+{
+	if (sess_closed_once &&
+	    k_uptime_get() - sess_closed_ms < SESS_REOPEN_GUARD_MS) {
+		return false;
+	}
+	return sess_ov == NULL && panel == NULL && confirm == NULL &&
+	       notice == NULL && wn == NULL && dl_overlay == NULL &&
+	       ask_box == NULL && upd_prompt == NULL && !closing &&
+	       !want_open && want_page == 0 && !board_dozing &&
+	       !ui_anim_showing() && !ui_anim_gesture_muted() &&
+	       !usage_view_takeover_active();
+}
+
+/* Once per ui_settings_service(): take a tap, keep the card current. */
+static void sess_service(void)
+{
+	/* First, and every pass: a card the back button or a swipe closed is
+	 * deleted here, outside any LVGL event (sess_close_later). */
+	sess_reap();
+	if (usage_view_take_sessions_tap() && sess_can_open()) {
+		struct usage_srows t;
+
+		sess_build();
+		/* Opening asks for the first page. Rows already held from
+		 * another page are shown dimmed until it comes. */
+		usage_view_srows(&t);
+		if (t.pg != 0) {
+			sess_ask(0);
+		} else {
+			proto_send_spage(0);
+			sess_paint();
+		}
+		return;
+	}
+	if (sess_ov == NULL) {
+		return;
+	}
+	if (sess_rebuild_owed) {
+		/* A theme change: built again in the new colours, on the page
+		 * it was on. Nothing is asked again; the table is unchanged. */
+		bool pending = sess_pending;
+		int want = sess_want_pg;
+		int64_t asked = sess_asked_ms;
+
+		sess_close();
+		sess_build();
+		sess_pending = pending;
+		sess_want_pg = want;
+		sess_asked_ms = asked;
+		sess_paint();
+		return;
+	}
+
+	struct usage_srows t;
+
+	usage_view_srows(&t);
+	/* On a new row, and once a second for the durations, which count up
+	 * from when each row arrived. */
+	if (t.gen != sess_gen_drawn || k_uptime_get() - sess_drawn_ms >= 1000) {
+		sess_paint();
+	}
+}
+
+/* A completed stroke while the card is up (swipe_cb). */
+static void sess_swipe(enum ui_swipe_dir dir)
+{
+	if (dir == UI_SWIPE_UP) {
+		sess_step(1);
+	} else if (dir == UI_SWIPE_DOWN) {
+		sess_step(-1);
+	} else if (dir == UI_SWIPE_RIGHT) {
+		sess_close_later();
+	}
+}
+
+/*
  * The Settings tiles: six equal 94 x 91 buttons, three by two, each an icon
  * over its name over its state. 91 px is 16 mm and 94 is 16.7 mm against a
  * ~9 mm fingertip (5.62 px/mm on this 2.8" panel).
@@ -2102,6 +2705,7 @@ static void sub_closed_cb(void *unused)
 		for (int i = 0; i < BRIGHT_STOPS; i++) {
 			seg[i] = NULL;
 		}
+		quiet_forget();
 		bright_ov = NULL;
 	} else if (focus_ov != NULL) {
 		mem_stats_report("focus-close");
@@ -2161,9 +2765,19 @@ static void bright_gesture_cb(lv_event_t *e)
 	/* The same swipe that closes the panel closes this first. Without it
 	 * the gesture would bubble past an overlay that is covering the panel
 	 * and shut the whole thing, which is not what the motion looks like it
-	 * should do from here. */
+	 * should do from here.
+	 *
+	 * On the Quiet hours page the swipe goes back to the levels, not out
+	 * of Brightness: everywhere in this file the right swipe does what
+	 * the back arrow in the corner does, and on that page the arrow goes
+	 * to the levels. One gesture with two meanings on one screen would be
+	 * the thing to learn twice. */
 	if (lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_RIGHT) {
-		bright_close();
+		if (quiet_page) {
+			quiet_back();
+		} else {
+			bright_close();
+		}
 	}
 }
 
@@ -2186,26 +2800,14 @@ void ui_settings_apply_bright(uint8_t pct)
 	bright_refresh();
 }
 
-static void show_bright(lv_event_t *e)
+/*
+ * The levels page: everything inside bright_ov while the Quiet hours page is
+ * not up. Its own function because it is built twice -- when the screen
+ * opens, and when the Quiet hours page goes back to it (quiet_back_cb), in
+ * the same overlay, which is emptied in between.
+ */
+static void bright_levels(void)
 {
-	ARG_UNUSED(e);
-	if (bright_ov || focus_ov || theme_ov || confirm || conn_ov || about_ov ||
-	    panel == NULL) {
-		return;
-	}
-	panel_empty();		/* see sub_closed_cb() */
-	bright_ov = lv_obj_create(panel);
-	lv_obj_set_size(bright_ov, LV_PCT(100), LV_PCT(100));
-	lv_obj_set_style_bg_color(bright_ov, COL_BG, 0);
-	lv_obj_set_style_bg_opa(bright_ov, LV_OPA_COVER, 0);
-	lv_obj_set_style_border_width(bright_ov, 0, 0);
-	lv_obj_set_style_radius(bright_ov, 0, 0);
-	lv_obj_set_style_pad_all(bright_ov, 0, 0);
-	lv_obj_clear_flag(bright_ov, LV_OBJ_FLAG_SCROLLABLE);
-	lv_obj_clear_flag(bright_ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
-	lv_obj_add_event_cb(bright_ov, bright_gesture_cb, LV_EVENT_GESTURE, NULL);
-	lv_obj_center(bright_ov);
-
 	mk_back(bright_ov, bright_close_cb);
 
 	lv_obj_t *title = lv_label_create(bright_ov);
@@ -2246,13 +2848,427 @@ static void show_bright(lv_event_t *e)
 				    (void *)(intptr_t)lvl);
 	}
 
-	lv_obj_t *hint = lv_label_create(bright_ov);
-
-	lv_label_set_text(hint, "Tap a level");
-	lv_obj_set_style_text_color(hint, COL_DIM, 0);
-	lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 210);
+	/* Where "Tap a level" was: the row that opens Quiet hours. The stops
+	 * say what they are by their shape, and the line under them is the
+	 * one place left on this screen for a second control. */
+	quiet_row(bright_ov);
 
 	bright_refresh();	/* paints the stops and the readout */
+}
+
+static void show_bright(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	if (bright_ov || focus_ov || theme_ov || confirm || conn_ov || about_ov ||
+	    panel == NULL) {
+		return;
+	}
+	panel_empty();		/* see sub_closed_cb() */
+	quiet_forget();		/* it always opens on the levels */
+	bright_ov = lv_obj_create(panel);
+	lv_obj_set_size(bright_ov, LV_PCT(100), LV_PCT(100));
+	lv_obj_set_style_bg_color(bright_ov, COL_BG, 0);
+	lv_obj_set_style_bg_opa(bright_ov, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(bright_ov, 0, 0);
+	lv_obj_set_style_radius(bright_ov, 0, 0);
+	lv_obj_set_style_pad_all(bright_ov, 0, 0);
+	lv_obj_clear_flag(bright_ov, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_clear_flag(bright_ov, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(bright_ov, bright_gesture_cb, LV_EVENT_GESTURE, NULL);
+	lv_obj_center(bright_ov);
+
+	bright_levels();
+}
+
+/* --- Quiet hours: a second page inside the brightness screen ---------- */
+
+/*
+ * Quiet hours dim the panel to BACKLIGHT_QUIET_PCT between two times of day,
+ * and the level the owner picked comes back at Until (backlight.c keeps both;
+ * cfg_store holds the schedule in minutes since local midnight, in 30-minute
+ * steps). Issue #17.
+ *
+ * A page of the Brightness screen rather than a seventh tile: the six-tile
+ * grid fills the panel exactly (see TILE_W), and the schedule is about the
+ * same light the stops set. It REPLACES the stops inside bright_ov instead of
+ * stacking another overlay on them: Brightness over the whole settings panel
+ * was measured at the LVGL pool's limit (30,632 B of 30,632, see the comment
+ * over sub_closing), so the levels page is emptied first and built again on
+ * the way back. That is also why this page is spare -- about twenty objects,
+ * eight more than the levels page it stands in for (not yet measured on a
+ * desk; the "quiet-open" [mem] line is there to measure it).
+ *
+ * The board has no clock of its own: the time of day comes from the daemon
+ * (net_time.c), so until it has arrived the schedule does nothing, and the
+ * page says so instead of the usual hint.
+ */
+#define QUIET_ROW_Y	206	/* 4 px under the stops, which end at 202 */
+#define QUIET_ROW_H	32
+#define QUIET_STEP_MIN	30
+#define QUIET_DAY_MIN	1440
+#define QUIET_SW_Y	48	/* the Off/On pair */
+#define QUIET_SW_W	143	/* two 143s and a 10 make the 296 */
+#define QUIET_SW_GAP	10
+#define QUIET_CTL_H	44	/* every control on the page: 7.8 mm */
+#define QUIET_FROM_Y	102
+#define QUIET_UNTIL_Y	152
+#define QUIET_STEP_W	56	/* '-' and '+': 56 x 44, 10.0 x 7.8 mm */
+#define QUIET_MINUS_X	112
+#define QUIET_PLUS_X	252	/* ends at 308, the right margin */
+#define QUIET_HINT_Y	206
+
+BUILD_ASSERT(QUIET_ROW_Y + QUIET_ROW_H <= 240,
+	     "the Quiet hours row runs off the panel");
+BUILD_ASSERT(2 * QUIET_SW_W + QUIET_SW_GAP == 296,
+	     "the Off/On pair no longer fills the 296 px between margins");
+BUILD_ASSERT(QUIET_SW_Y + QUIET_CTL_H < QUIET_FROM_Y &&
+	     QUIET_FROM_Y + QUIET_CTL_H < QUIET_UNTIL_Y &&
+	     QUIET_UNTIL_Y + QUIET_CTL_H < QUIET_HINT_Y,
+	     "the Quiet hours controls overlap");
+BUILD_ASSERT(QUIET_PLUS_X + QUIET_STEP_W == 308,
+	     "the '+' buttons no longer end at the right margin");
+/* The hint below spells the figure out, so the two cannot drift apart. */
+BUILD_ASSERT(BACKLIGHT_QUIET_PCT == 20,
+	     "the Quiet hours hint says 20%; say the new figure");
+
+/*
+ * Every pointer into the Quiet hours page. All NULL unless quiet_page is
+ * set, and forgotten (quiet_forget) wherever bright_ov is, so a tap's
+ * repaint never writes through a deleted label.
+ */
+static lv_obj_t *quiet_sw[2];		/* Off, On */
+static lv_obj_t *quiet_from_lbl;
+static lv_obj_t *quiet_until_lbl;
+static lv_obj_t *quiet_hint;
+static int quiet_hint_shown = -1;	/* which hint quiet_hint holds */
+
+static void quiet_forget(void)
+{
+	quiet_page = false;
+	quiet_sw[0] = NULL;
+	quiet_sw[1] = NULL;
+	quiet_from_lbl = NULL;
+	quiet_until_lbl = NULL;
+	quiet_hint = NULL;
+	quiet_hint_shown = -1;
+}
+
+static void quiet_hhmm(char *buf, size_t n, uint16_t min)
+{
+	snprintf(buf, n, "%02u:%02u", (unsigned)(min / 60), (unsigned)(min % 60));
+}
+
+/* 0: the usual line, 1: no time of day yet, 2: From equals Until. The
+ * last because backlight_quiet_now() reads two equal times as an empty
+ * window, never as a whole day, and the page should not look like it is
+ * about to dim when it never will. */
+static int quiet_hint_kind(void)
+{
+	uint8_t on;
+	uint16_t from, until;
+	int hh, mm;
+
+	cfg_get_quiet(&on, &from, &until);
+	if (!net_time_local(&hh, &mm)) {
+		return 1;
+	}
+	return from == until ? 2 : 0;
+}
+
+static void quiet_hint_paint(void)
+{
+	static const char *const words[] = {
+		"Dims the screen to 20% between these times",
+		"Waits for the time from your computer",
+		"Same time twice: it never dims",
+	};
+	int k;
+
+	if (quiet_hint == NULL) {
+		return;
+	}
+	k = quiet_hint_kind();
+	if (k == quiet_hint_shown) {
+		return;		/* nothing changed: no redraw */
+	}
+	lv_label_set_text(quiet_hint, words[k]);
+	quiet_hint_shown = k;
+}
+
+static void quiet_refresh(void)
+{
+	uint8_t on;
+	uint16_t from, until;
+	char b[8];
+
+	cfg_get_quiet(&on, &from, &until);
+	for (int i = 0; i < 2; i++) {
+		if (quiet_sw[i] == NULL) {
+			continue;
+		}
+		if ((i == 1) == (on != 0)) {
+			lv_obj_add_state(quiet_sw[i], LV_STATE_CHECKED);
+		} else {
+			lv_obj_clear_state(quiet_sw[i], LV_STATE_CHECKED);
+		}
+	}
+	if (quiet_from_lbl) {
+		quiet_hhmm(b, sizeof(b), from);
+		lv_label_set_text(quiet_from_lbl, b);
+	}
+	if (quiet_until_lbl) {
+		quiet_hhmm(b, sizeof(b), until);
+		lv_label_set_text(quiet_until_lbl, b);
+	}
+	quiet_hint_paint();
+}
+
+/* Store a schedule, let the backlight answer the tap now rather than at its
+ * next 1 s tick, and repaint. A failed write is not logged: a new console tag
+ * would have to join logbook.CONSOLE_TAGS (tests/pc/test_console_allowlist.py
+ * holds the two lists equal), and the repaint shows what the store still
+ * holds, which is the truth. */
+static void quiet_store(uint8_t on, uint16_t from, uint16_t until)
+{
+	(void)cfg_set_quiet(on, from, until);
+	backlight_quiet_changed();
+	quiet_refresh();
+}
+
+/* A press on this page counts only as a tap, and not once the screen is
+ * closing or going back: the same guard as focus_pick_cb, for the same
+ * reason -- LVGL 9 sends CLICKED on the release of a swipe. */
+static bool quiet_tap_ok(void)
+{
+	return tile_was_a_tap() && !sub_closing && quiet_page;
+}
+
+static void quiet_sw_cb(lv_event_t *e)
+{
+	uint8_t want = (uint8_t)(intptr_t)lv_event_get_user_data(e);
+	uint8_t on;
+	uint16_t from, until;
+
+	if (!quiet_tap_ok()) {
+		return;
+	}
+	cfg_get_quiet(&on, &from, &until);
+	if ((on != 0) == (want != 0)) {
+		return;		/* a flash write that buys nothing */
+	}
+	quiet_store(want, from, until);
+}
+
+/* user_data: bit 0 says Until (else From), bit 1 says '+' (else '-'). */
+static void quiet_step_cb(lv_event_t *e)
+{
+	int k = (int)(intptr_t)lv_event_get_user_data(e);
+	int d = (k & 2) ? QUIET_STEP_MIN : QUIET_DAY_MIN - QUIET_STEP_MIN;
+	uint8_t on;
+	uint16_t from, until;
+
+	if (!quiet_tap_ok()) {
+		return;
+	}
+	cfg_get_quiet(&on, &from, &until);
+	/* Wraps at midnight both ways: 23:30 + 30 is 00:00, and 00:00 - 30
+	 * is 23:30, so either button reaches every time. */
+	if (k & 1) {
+		until = (uint16_t)((until + d) % QUIET_DAY_MIN);
+	} else {
+		from = (uint16_t)((from + d) % QUIET_DAY_MIN);
+	}
+	quiet_store(on, from, until);
+}
+
+/*
+ * The page switches, both ways. Deferred through lv_async_call because the
+ * caller is a click on an object the switch deletes -- the row on the levels
+ * page, or the back button here -- exactly as show_bright() is deferred from
+ * its tile. Each re-checks what it finds when it runs: the screen can have
+ * closed, been rebuilt in a new theme (rebuild_cb reopens the levels page),
+ * or already switched on a second tap.
+ */
+static void quiet_open_cb(void *unused)
+{
+	ARG_UNUSED(unused);
+	if (bright_ov == NULL || quiet_page || sub_closing) {
+		return;
+	}
+	/* The levels page's pointers go before its objects do:
+	 * ui_settings_apply_bright() can run bright_refresh() at any time. */
+	bright_big = NULL;
+	for (int i = 0; i < BRIGHT_STOPS; i++) {
+		seg[i] = NULL;
+	}
+	lv_obj_clean(bright_ov);
+	quiet_page = true;
+	quiet_build();
+	mem_stats_report("quiet-open");
+}
+
+static void quiet_back_async(void *unused)
+{
+	ARG_UNUSED(unused);
+	if (bright_ov == NULL || !quiet_page || sub_closing) {
+		return;
+	}
+	quiet_forget();		/* clears quiet_page too */
+	lv_obj_clean(bright_ov);
+	bright_levels();
+}
+
+static void quiet_row_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	/* The row sits under the stops, where a back swipe can start. */
+	if (!tile_was_a_tap() || sub_closing) {
+		return;
+	}
+	(void)lv_async_call(quiet_open_cb, NULL);	/* a failure: tap again */
+}
+
+static void quiet_back(void)
+{
+	(void)lv_async_call(quiet_back_async, NULL);	/* as above */
+}
+
+static void quiet_back_cb(lv_event_t *e)
+{
+	ARG_UNUSED(e);
+	quiet_back();
+}
+
+/*
+ * The row on the levels page: one full-width button, "Quiet hours" on the
+ * left and the schedule ("Off", or "22:00 - 07:00") on the right. 296 x 32
+ * is 52.7 x 5.7 mm -- shorter than every other target here, because the
+ * stops above it are pinned (tools/board_touch.py) and 240 px is all there
+ * is; its width is what makes it easy to hit.
+ */
+static void quiet_row(lv_obj_t *parent)
+{
+	uint8_t on;
+	uint16_t from, until;
+	char a[8], b[8], v[20];
+	lv_obj_t *row = lv_btn_create(parent);
+
+	lv_obj_set_size(row, 296, QUIET_ROW_H);
+	lv_obj_align(row, LV_ALIGN_TOP_LEFT, 12, QUIET_ROW_Y);
+	lv_obj_add_style(row, &st_row, 0);	/* a tile's look; set in build_panel */
+	lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+	/* Bubbles, as the stops do: a back swipe begun here must still reach
+	 * bright_gesture_cb. quiet_row_cb's tap test stops it opening too. */
+	lv_obj_add_flag(row, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(row, quiet_row_cb, LV_EVENT_CLICKED, NULL);
+
+	lv_obj_t *name = lv_label_create(row);
+
+	lv_label_set_text(name, "Quiet hours");
+	lv_obj_align(name, LV_ALIGN_LEFT_MID, 10, 0);
+
+	cfg_get_quiet(&on, &from, &until);
+	quiet_hhmm(a, sizeof(a), from);
+	quiet_hhmm(b, sizeof(b), until);
+	snprintf(v, sizeof(v), "%s - %s", a, b);
+
+	lv_obj_t *val = lv_label_create(row);
+
+	lv_label_set_text(val, on ? v : "Off");
+	lv_obj_add_style(val, &st_row_dim, 0);
+	lv_obj_align(val, LV_ALIGN_RIGHT_MID, -10, 0);
+}
+
+/* One of the page's controls: the Focus buttons' look (focus_st_btn, and
+ * focus_st_on when CHECKED), at least 44 px tall. */
+static lv_obj_t *quiet_btn(int x, int y, int w, const char *txt,
+			   lv_event_cb_t cb, int user)
+{
+	lv_obj_t *b = lv_btn_create(bright_ov);
+
+	lv_obj_remove_style_all(b);
+	lv_obj_add_style(b, &focus_st_btn, 0);
+	lv_obj_add_style(b, &focus_st_on, LV_STATE_CHECKED);
+	lv_obj_set_size(b, w, QUIET_CTL_H);
+	lv_obj_align(b, LV_ALIGN_TOP_LEFT, x, y);
+	/* As on the Focus screen: not scrollable, or a drag eats the tap;
+	 * gestures bubble to bright_gesture_cb, and quiet_tap_ok() keeps the
+	 * swipe from also pressing the button it began on. */
+	lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_add_flag(b, LV_OBJ_FLAG_GESTURE_BUBBLE);
+	lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, (void *)(intptr_t)user);
+
+	lv_obj_t *l = lv_label_create(b);
+
+	lv_label_set_text(l, txt);
+	lv_obj_center(l);
+	return b;
+}
+
+/* "From" or "Until", a '-', the time, a '+'. Returns the time label. */
+static lv_obj_t *quiet_time_row(int y, const char *name, int until)
+{
+	lv_obj_t *n = lv_label_create(bright_ov);
+
+	lv_label_set_text(n, name);
+	lv_obj_set_style_text_color(n, COL_DIM, 0);
+	lv_obj_align(n, LV_ALIGN_TOP_LEFT, 12, y + (QUIET_CTL_H - FONT_LINE_H) / 2);
+
+	quiet_btn(QUIET_MINUS_X, y, QUIET_STEP_W, LV_SYMBOL_MINUS,
+		  quiet_step_cb, until);
+	quiet_btn(QUIET_PLUS_X, y, QUIET_STEP_W, LV_SYMBOL_PLUS,
+		  quiet_step_cb, until | 2);
+
+	/* Centred in the 84 px between the two buttons. */
+	lv_obj_t *t = lv_label_create(bright_ov);
+
+	lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);
+	lv_obj_set_style_text_color(t, COL_TEXT, 0);
+	lv_obj_set_width(t, QUIET_PLUS_X - QUIET_MINUS_X - QUIET_STEP_W);
+	lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_align(t, LV_ALIGN_TOP_LEFT, QUIET_MINUS_X + QUIET_STEP_W,
+		     y + (QUIET_CTL_H - 20) / 2);
+	return t;
+}
+
+static void quiet_build(void)
+{
+	/* The Focus screen's two styles, refilled in the active theme. Safe
+	 * here: Focus and Brightness are never up together, and no object
+	 * refers to the styles once the last Focus screen or Quiet hours page
+	 * has been deleted -- which the clean before this call did. */
+	focus_styles();
+
+	/* Back goes to the levels page, not out of Brightness: this page is
+	 * one level down, and the arrow says "where I came from". */
+	mk_back(bright_ov, quiet_back_cb);
+
+	lv_obj_t *title = lv_label_create(bright_ov);
+
+	lv_label_set_text(title, "Quiet hours");
+	lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+	lv_obj_set_style_text_color(title, COL_TEXT, 0);
+	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+	mk_line(bright_ov, 40);
+
+	quiet_sw[0] = quiet_btn(12, QUIET_SW_Y, QUIET_SW_W, "Off",
+				quiet_sw_cb, 0);
+	quiet_sw[1] = quiet_btn(12 + QUIET_SW_W + QUIET_SW_GAP, QUIET_SW_Y,
+				QUIET_SW_W, "On", quiet_sw_cb, 1);
+
+	quiet_from_lbl = quiet_time_row(QUIET_FROM_Y, "From", 0);
+	quiet_until_lbl = quiet_time_row(QUIET_UNTIL_Y, "Until", 1);
+
+	/* The longest line is 42 characters, about 290 px at the ~6.9 px a
+	 * character the Focus notes measured -- inside the 320 unbounded,
+	 * so it is left content-sized rather than dotted. */
+	quiet_hint = lv_label_create(bright_ov);
+	lv_obj_set_style_text_color(quiet_hint, COL_DIM, 0);
+	lv_obj_align(quiet_hint, LV_ALIGN_TOP_MID, 0, QUIET_HINT_Y);
+	quiet_hint_shown = -1;
+
+	quiet_refresh();
 }
 
 /* --- The theme screen ------------------------------------------------- */
@@ -3089,9 +4105,8 @@ static const char *const focus_notes[FOCUS_CHOICES] = {
 	"Weekly big, session as a line",
 };
 
-static lv_style_t focus_st_btn;	/* every choice */
-static lv_style_t focus_st_on;	/* ...and the chosen one, as LV_STATE_CHECKED */
-static bool focus_styles_made;	/* both styles above hold properties */
+/* focus_st_btn and focus_st_on are declared at the top of the file, beside
+ * focus_btn: the Quiet hours page, earlier in the file, uses them too. */
 
 /* 0 off, 1 session, 2 weekly: what the store says now. */
 static int focus_choice(void)
@@ -3825,6 +4840,7 @@ static void do_close(void (*pump)(void))
 	for (int i = 0; i < BRIGHT_STOPS; i++) {
 		seg[i] = NULL;
 	}
+	quiet_forget();
 	theme_ov = NULL;	/* these die with the panel too */
 	theme_grid = NULL;
 	theme_edit_lbl = NULL;
@@ -3905,13 +4921,17 @@ void ui_settings_service(void (*pump)(void))
 		repaint_top_owed = false;
 		repaint_top_cb(NULL);
 	}
-	if (want_open && panel == NULL) {
+	/* The sessions card: a tap on the dots, and its once-a-second
+	 * redraw. Before the transitions, which it refuses to open over and
+	 * which may not run under it (the two conditions below). */
+	sess_service();
+	if (want_open && panel == NULL && sess_ov == NULL) {
 		want_open = false;
 		do_open(pump);
 	} else if (want_close && panel != NULL) {
 		want_close = false;
 		do_close(pump);
-	} else if (want_page != 0 && panel == NULL) {
+	} else if (want_page != 0 && panel == NULL && sess_ov == NULL) {
 		/*
 		 * Last, and only with the panel closed. A page change is the
 		 * least important of the three, and re-checking can_page here
@@ -4003,6 +5023,9 @@ static void rebuild_cb(void *unused)
 	for (int i = 0; i < BRIGHT_STOPS; i++) {
 		seg[i] = NULL;
 	}
+	/* The Quiet hours page goes with it, and Brightness comes back on its
+	 * levels page: show_bright() always opens there. */
+	quiet_forget();
 	theme_ov = NULL;
 	theme_grid = NULL;
 	theme_edit_lbl = NULL;
@@ -4071,6 +5094,12 @@ void ui_settings_apply_theme(void)
 	if ((wn || upd_prompt || ask_box || dl_overlay) &&
 	    lv_async_call(repaint_top_cb, NULL) != LV_RESULT_OK) {
 		repaint_top_owed = true;
+	}
+	/* The sessions card is rebuilt in the new colours by the mode loop
+	 * (sess_service), which runs outside any LVGL event and needs no
+	 * queued call that could fail. */
+	if (sess_ov != NULL) {
+		sess_rebuild_owed = true;
 	}
 }
 
@@ -4188,7 +5217,8 @@ static void swipe_progress_cb(enum ui_swipe_dir dir, int pct)
 
 	/* No page preview under a modal either: the rail would grow a mark
 	 * promising a page change that modal_up() is about to refuse. */
-	if (panel == NULL && !modal_up() && !ui_anim_gesture_muted()) {
+	if (panel == NULL && sess_ov == NULL && !modal_up() &&
+	    !ui_anim_gesture_muted()) {
 		if (dir == UI_SWIPE_UP) {
 			delta = 1;
 		} else if (dir == UI_SWIPE_DOWN) {
@@ -4231,6 +5261,17 @@ static void swipe_cb(enum ui_swipe_dir dir)
 	if (panel != NULL) {
 		return;
 	}
+	/* The sessions card owns every stroke made on it: up and down turn
+	 * its pages, right closes it, and none of them may reach the
+	 * provider pages, Settings or the clip under it. */
+	if (sess_ov != NULL) {
+		sess_swipe(dir);
+		return;
+	}
+	/* Once it has closed, a swipe is the gauges' again at once: nothing
+	 * here times out a window after the close (the comment after
+	 * SESS_REOPEN_GUARD_MS says why). An 800 ms window here once
+	 * swallowed a deliberate provider swipe made straight after Back. */
 	if (ui_anim_gesture_muted()) {
 		return;	/* the swipe that just closed the clip, replayed */
 	}
@@ -4391,8 +5432,16 @@ static bool zone_was_a_tap(void)
 	 * route a tap takes. This is the third and it is the one under the
 	 * finger.
 	 */
-	return panel == NULL && !modal_up() && !ui_anim_gesture_muted() &&
-	       !ui_swipe_dragging();
+	/* sess_ov: the card covers these zones and takes the press itself;
+	 * counted here as well, so no ordering of objects can make a tap on
+	 * the card reach the gauges' zones under it. */
+	/* No exception after the card closes: ui_swipe's drag is believed
+	 * here as everywhere, so a swipe that starts or ends on a strip just
+	 * after Back is the swipe and not also a tap. The 800 ms window that
+	 * used to believe LVGL's tap instead went with swipe_cb's (the comment
+	 * after SESS_REOPEN_GUARD_MS says why). */
+	return panel == NULL && sess_ov == NULL && !modal_up() &&
+	       !ui_anim_gesture_muted() && !ui_swipe_dragging();
 }
 
 static void zone_settings_cb(lv_event_t *e)

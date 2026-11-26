@@ -131,7 +131,8 @@ struct ui_settings_bench {
 	bool open;		/* the panel is up (or is the ground under one) */
 	const char *sub;	/* none|brightness|theme|focus|connection|confirm */
 	const char *modal;	/* none|notice|whatsnew|prompt|ask|download */
-	bool busy;		/* a transition is latched or a close queued */
+	bool busy;		/* a transition is latched or a close queued,
+				 * or the boot splash is still up */
 	int theme_page;		/* the theme screen's page, from 0 */
 	const char *edit;	/* "Edit on computer": name|waiting|opened|run|held */
 	const char *nt;		/* the notice up: none|sleep|ota|other */

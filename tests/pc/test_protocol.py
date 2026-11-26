@@ -1555,6 +1555,10 @@ def _builders():
                                limit=500.0),
          {"t", "p", "plan", "period"}, {"v", "usd", "lim"}),
         ("ask", protocol.ask("refresh"), {"t", "id"}, {"v"}),
+        # The sessions card: where a row sits, never its name or activity.
+        ("srow", protocol.srow(1, 2, 6, 0, pv="c", k="edit", age=9,
+                               nm="SECRET name", cx=42),
+         {"t", "i", "n", "tot", "pg"}, {"v", "pv", "k", "age", "nm", "cx"}),
     ]
 
 
@@ -1680,3 +1684,114 @@ def test_wifi_set_refuses_a_non_ascii_password_without_quoting_it():
 def test_the_tap_keeps_every_ota_ack_error_word():
     for word in ("", "unconfirmed", "refused", "failed"):
         assert protocol.redact({"t": "ota_ack", "err": word})["err"] == word
+
+
+# --- srow / spage: the sessions card (docs/sessions-card-design.md) ---------
+
+def _widest_srow(kind, name):
+    return protocol.srow(3, 4, 10 ** 9, 10 ** 9, pv="c", k=kind,
+                         age=10 ** 12, nm=name, cx=100)
+
+
+def test_the_widest_srow_fits_the_line_for_every_kind():
+    # 24 bytes of three-byte characters, and a name of control characters,
+    # which JSON escapes six bytes each: the widest a clipped name can be.
+    names = ["€" * 30, "\x01" * 40, "n" * 40, 'q"\\' * 20]
+    widest = 0
+    for kind in protocol.SROW_KINDS:
+        for name in names:
+            raw, why = protocol.encode_checked(_widest_srow(kind, name))
+            assert why is None
+            widest = max(widest, len(raw))
+    assert widest <= protocol.MAX_LINE_BYTES
+    # Generous room is the design, not luck: four of these follow a hello.
+    assert widest < 260
+
+
+def test_srow_clamps_its_numbers_to_the_budget_they_were_sized_for():
+    msg = _widest_srow("wait", "Blink")
+    assert (msg["i"], msg["n"], msg["tot"], msg["pg"], msg["age"]) == (
+        3, 4, protocol.SROW_TOT_MAX, protocol.SROW_PAGE_MAX,
+        protocol.SROW_AGE_MAX)
+    neg = protocol.srow(-1, 2, -5, -2, pv="x", k="idle", age=-30)
+    assert (neg["i"], neg["tot"], neg["pg"], neg["age"]) == (0, 0, 0, 0)
+
+
+def test_srow_name_is_clipped_on_a_character_boundary():
+    msg = protocol.srow(0, 1, 1, 0, pv="c", k="work", nm="€" * 30)
+    assert len(msg["nm"].encode("utf-8")) <= protocol.SESSION_LABEL_MAX_BYTES
+    assert msg["nm"] == "€" * 8
+
+
+def test_srow_leaves_unknown_name_and_context_off_never_zero():
+    msg = protocol.srow(0, 1, 1, 0, pv="x", k="idle", age=5)
+    assert "nm" not in msg and "cx" not in msg
+    for bad in (True, 101, -1, "40", float("nan")):
+        assert "cx" not in protocol.srow(0, 1, 1, 0, pv="c", k="idle", cx=bad)
+    assert protocol.srow(0, 1, 1, 0, pv="c", k="idle", cx=0)["cx"] == 0
+
+
+def test_srow_with_no_rows_is_the_bare_empty_list():
+    assert protocol.srow(0, 0, 0, 0) == {"t": "srow", "v": protocol.VERSION,
+                                         "i": 0, "n": 0, "tot": 0, "pg": 0}
+
+
+def test_srow_refuses_a_kind_or_provider_that_is_not_ours():
+    import pytest
+    with pytest.raises(ValueError):
+        protocol.srow(0, 1, 1, 0, pv="c", k="sleeping")
+    with pytest.raises(ValueError):
+        protocol.srow(0, 1, 1, 0, pv="claude", k="idle")
+
+
+def test_the_transcript_keeps_no_name_or_activity_from_an_srow():
+    msg = protocol.srow(1, 2, 6, 1, pv="c", k="edit", age=99, nm="Secret",
+                        cx=42)
+    assert protocol.redact(msg) == {"t": "srow", "i": 1, "n": 2, "tot": 6,
+                                    "pg": 1}
+    assert "Secret" not in json.dumps(protocol.redact(msg))
+    assert protocol.log_name(msg) == "srow"
+    assert protocol.TAP_FIELDS["srow"].isdisjoint({"nm", "k", "age", "cx",
+                                                   "pv"})
+
+
+def test_spage_is_a_known_type_logged_by_name():
+    assert "spage" in protocol.WIRE_TYPES and "srow" in protocol.WIRE_TYPES
+    assert protocol.log_name({"t": "spage", "p": 3}) == "spage"
+    assert protocol.redact({"t": "spage", "p": 3, "x": "y"}) == {
+        "t": "spage", "p": 3}
+
+
+def test_spage_page_takes_only_an_integer_and_clamps_it():
+    page = protocol.spage_page
+    assert page({"t": "spage", "p": 2}) == 2
+    assert page({"t": "spage", "p": 0, "v": 2, "up_ms": 5}) == 0
+    assert page({"t": "spage", "p": -4}) == 0
+    assert page({"t": "spage", "p": 10 ** 400}) == protocol.SROW_PAGE_MAX
+    for bad in (True, False, 1.0, "1", None, [1]):
+        assert page({"t": "spage", "p": bad}) is None
+    assert page({"t": "spage"}) is None
+    assert page({"t": "pref", "p": 1}) is None
+    assert page("spage") is None
+
+
+def test_srow_and_the_boards_spage_carry_the_protocol_version_the_parser_takes():
+    """The design's example showed "v":1 and the daemon stamps every line
+    with PROTO_VERSION (2). firmware/src/msg_parse.c's msg_parse_srow first
+    insisted on v 1 and so refused every row the daemon sent; the host test
+    now feeds it v 2 (tests/msg_parse/host_test.c), and this holds the other
+    end: the version on the wire is the one the board's own lines carry."""
+    assert protocol.VERSION == 2
+    assert protocol.srow(0, 1, 1, 0, pv="c", k="idle")["v"] == 2
+    assert protocol.srow(0, 0, 0, 0)["v"] == 2
+    # The line proto_send_spage writes, key for key: the daemon reads p and
+    # ignores v, as it ignores any key it does not know.
+    assert protocol.spage_page({"t": "spage", "v": 2, "p": 1}) == 1
+    parser = (pathlib.Path(__file__).resolve().parents[2] / "firmware"
+              / "src" / "msg_parse.c").read_text(encoding="utf-8")
+    body = parser[parser.index("bool msg_parse_srow("):]
+    assert 'get_whole(json, "v"' not in body
+
+
+def test_the_sessions_cap_is_its_own_word():
+    assert protocol.BOARD_CAP_SESSIONS == "sessions"

@@ -1,0 +1,90 @@
+# The sessions card (docs/sessions-card-design.md, issue #18): a tap on the
+# pip row opens it, its buttons page, its back button closes it, and the
+# gauges' own controls still work afterwards.
+#
+# Runs on the harness, which seeds six made-up sessions (two pages), and on
+# a real board with no daemon, which has none -- so every expectation here is
+# true of both: the card's controls exist and answer whatever it holds, and
+# "Previous" and "Next" are always there to press, dimmed at the ends.
+#
+#   BLINK_PYTHON=$PWD/.venv-test/bin/python sh tools/panel_render/touch.sh \
+#       "${TMPDIR:-/tmp}/blink-sessions-card" tests/board/sessions_card_touch.txt
+#
+# A board flashed just before this runs may still be in its boot clip, where
+# ui_state reads busy=1 until the gauges are attached (ui_settings.c,
+# ui_settings_bench_state) and a tap would land on the splash. Each expect
+# waits up to 3 s for busy=0; two give the clip six.
+#
+# Every expectation here names only what the script itself decides: the
+# screen (scr), the Settings sub-screen (ov), the popup (modal), busy and
+# slp. Never theme, stored, bl, focus, gf, tp or ln: those are the owner's
+# settings, and board_touch.py's wait_state compares only the fields a line
+# names (board_touch.py:1889-1904; the host harness runs through the same
+# function, tools/panel_render/touch.sh:73), so leaving them out is how a
+# line stays true on every desk. The platform's board check of 2026-11-25
+# stopped at "line 129: expect ui_state ... theme=0 stored=0: board says
+# ... theme=2 stored=2" -- tools/bench/full_touch.txt's line, not one of
+# these, on a board whose owner keeps theme 2; the harness is always 0.
+# tests/test_sessions_card_source.py refuses those keys here.
+#
+# These two only wait out the boot; a notice the board was showing is not
+# their business (modal is checked once the target below has cleared it).
+expect ui_state scr=gauges
+expect ui_state scr=gauges
+# A raw tap goes straight to the panel: unlike `tap <target>`, it does not
+# wake a dozing board or dismiss a notice first (board_touch.py
+# clear_the_way, run_target), so on a desk that had dozed, or was showing a
+# notice, it would land on that instead and the card would never open
+# (sess_can_open, ui_settings.c, refuses both). The harness never dozes and
+# raises nothing, so it passed there either way. A Settings round trip is a
+# named target that does both and changes no setting; its settle (1.6 s)
+# outlasts the gesture mute Settings leaves behind it.
+tap settings.open
+tap settings.back
+expect ui_state scr=gauges ov=none modal=none slp=0
+# The dots, top left: inside SESS_TAP_* (usage_layout.h), clear of the brand.
+raw tap 40 14
+# A raw tap has no settle of its own either, so this keeps it and the press
+# on "Next" below separate strokes (the stitch is explained further down).
+wait 0.5
+expect-widget "<"
+expect-widget "Previous"
+expect-widget "Next"
+# Not a Settings screen and not a popup: ui_state's words are unchanged.
+expect ui_state scr=gauges ov=none modal=none
+# A wait after each press, so each is a stroke of its own, as a finger's
+# would be. ui_swipe takes two contacts less than UI_SWIPE_STITCH_MS (250 ms,
+# ui_swipe_geom.h) apart as ONE stroke, and a click has no settle of its
+# own, so a bench could be that quick. A precaution: not measured on a board.
+click "Next"
+wait 0.5
+click "Previous"
+wait 0.5
+click "<"
+# The card is hidden at once and deleted on the next mode-loop pass; the
+# wait also keeps the tap below from being stitched to this press.
+wait 1
+# Back on the gauges -- though this cannot prove the card closed: ui_state
+# reports gauges with the card up or not. The proof is the tap below, which
+# the full-screen card would have taken.
+expect ui_state scr=gauges ov=none modal=none
+tap settings.open
+expect ui_state scr=settings ov=none
+click "<"
+expect ui_state scr=gauges
+# Leave the board settled for whatever runs next on it. Closing Settings
+# mutes gestures for UI_SLIDE_MS * 6 (ui_settings.c, do_close), and a click
+# does not wait that out the way a named target's settle does.
+# full_touch.txt waits the same 1.6 s after its own last click out of
+# Settings.
+#
+# What the platform's board check of 2026-11-25 actually failed: line 21 of
+# tools/bench/full_touch.txt, its first `tap settings.open` ("expected
+# scr=settings ov=none, board says scr=gauges ov=none"), in a run whose
+# console held the boot clip's closing [boot] line and nothing from before
+# it: the run began during the clip of a board just flashed, when ui_state
+# still read gauges and busy=0 and the tap landed on the splash. ui_state
+# now reads busy=1 until the gauges are up (an inference from the counts,
+# not yet measured on a desk).
+wait 1.6
+expect ui_state scr=gauges modal=none busy=0

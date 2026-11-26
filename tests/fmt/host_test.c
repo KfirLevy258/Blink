@@ -659,6 +659,89 @@ static void test_fmt_about(void)
 	}
 }
 
+/* The sessions card (docs/sessions-card-design.md): the words, the clock,
+ * the name, and the page sums. Made-up names only. */
+static void test_fmt_sessions(void)
+{
+	char b[FMT_SAGE_BUF];
+	char n[FMT_SNAME_MAX * 3];
+	char p[FMT_SPAGE_BUF];
+
+	EXPECT_STR(fmt_srow_words(FMT_SROW_WAIT), "Needs you");
+	EXPECT_STR(fmt_srow_words(FMT_SROW_FAIL), "Session failed");
+	EXPECT_STR(fmt_srow_words(FMT_SROW_EDIT), "Editing");
+	EXPECT_STR(fmt_srow_words(FMT_SROW_TOOL), "Running a tool");
+	EXPECT_STR(fmt_srow_words(FMT_SROW_WORK), "Working");
+	EXPECT_STR(fmt_srow_words(FMT_SROW_IDLE), "Idle");
+	EXPECT_STR(fmt_srow_words((enum fmt_srow_kind)42), "Working");
+
+	/* The dots' vocabulary: act is red, finished amber, running green. */
+	check_true("needs you is red", fmt_srow_tone(FMT_SROW_WAIT) == FMT_TONE_RED);
+	check_true("failed is red", fmt_srow_tone(FMT_SROW_FAIL) == FMT_TONE_RED);
+	check_true("idle is amber", fmt_srow_tone(FMT_SROW_IDLE) == FMT_TONE_AMBER);
+	check_true("editing is green", fmt_srow_tone(FMT_SROW_EDIT) == FMT_TONE_GREEN);
+	check_true("a tool is green", fmt_srow_tone(FMT_SROW_TOOL) == FMT_TONE_GREEN);
+	check_true("working is green", fmt_srow_tone(FMT_SROW_WORK) == FMT_TONE_GREEN);
+	check_true("context 59 is green", fmt_ctx_tone(59) == FMT_TONE_GREEN);
+	check_true("context 60 is amber", fmt_ctx_tone(60) == FMT_TONE_AMBER);
+	check_true("context 90 is red", fmt_ctx_tone(90) == FMT_TONE_RED);
+
+	static const struct { int32_t s; const char *want; } ages[] = {
+		{ -4, "0s" }, { 0, "0s" }, { 45, "45s" }, { 59, "59s" },
+		{ 60, "1m" }, { 12 * 60 + 59, "12m" }, { 3599, "59m" },
+		{ 3600, "1h 00m" }, { 3 * 3600 + 5 * 60, "3h 05m" },
+		{ FMT_SAGE_MAX, "99h 59m" }, { FMT_SAGE_MAX + 1000, "99h 59m" },
+	};
+
+	for (unsigned i = 0; i < sizeof(ages) / sizeof(ages[0]); i++) {
+		fmt_srow_age(ages[i].s, b, sizeof(b));
+		EXPECT_STR(b, ages[i].want);
+	}
+	/* The widest is whole in exactly FMT_SAGE_BUF. */
+	fmt_srow_age(FMT_SAGE_MAX, b, FMT_SAGE_BUF);
+	check_true("the widest duration fits FMT_SAGE_BUF",
+		   strcmp(b, "99h 59m") == 0);
+
+	fmt_srow_name("Blink", 'c', n, sizeof(n));
+	EXPECT_STR(n, "Blink");
+	fmt_srow_name("", 'c', n, sizeof(n));
+	EXPECT_STR(n, "Claude session");
+	fmt_srow_name(NULL, 'x', n, sizeof(n));
+	EXPECT_STR(n, "Codex session");
+	fmt_srow_name("\xC2\xA0 ", 'x', n, sizeof(n));
+	EXPECT_STR(n, "Codex session");
+	fmt_srow_name("caf\xC3\xA9", 'c', n, sizeof(n));
+	EXPECT_STR(n, "caf?");
+	fmt_srow_name("", '?', n, sizeof(n));
+	EXPECT_STR(n, "Session");
+
+	check_true("no sessions is one page", fmt_spage_count(0) == 1);
+	check_true("four is one page", fmt_spage_count(4) == 1);
+	check_true("five is two pages", fmt_spage_count(5) == 2);
+	check_true("six is two pages", fmt_spage_count(6) == 2);
+	check_true("999 is 250 pages", fmt_spage_count(FMT_STOT_MAX) == 250);
+	check_true("the last page index is the wire's cap",
+		   fmt_spage_count(FMT_STOT_MAX) - 1 == FMT_SPAGE_MAX);
+	check_true("negative tot is one page", fmt_spage_count(-3) == 1);
+	check_true("page 5 of 6 sessions clamps to 1", fmt_spage_clamp(5, 6) == 1);
+	check_true("page -1 clamps to 0", fmt_spage_clamp(-1, 6) == 0);
+	check_true("next from page 0 of 6", fmt_spage_can(0, 6, 1));
+	check_true("no next from page 1 of 6", !fmt_spage_can(1, 6, 1));
+	check_true("previous from page 1 of 6", fmt_spage_can(1, 6, -1));
+	check_true("no previous from page 0", !fmt_spage_can(0, 6, -1));
+	check_true("no paging with no sessions",
+		   !fmt_spage_can(0, 0, 1) && !fmt_spage_can(0, 0, -1));
+	check_true("a delta of 2 is no page step", !fmt_spage_can(0, 99, 2));
+	fmt_spage_indicator(0, 6, p, sizeof(p));
+	EXPECT_STR(p, "1 of 2");
+	fmt_spage_indicator(0, 0, p, sizeof(p));
+	EXPECT_STR(p, "1 of 1");
+	fmt_spage_indicator(FMT_SPAGE_MAX, FMT_STOT_MAX, p, FMT_SPAGE_BUF);
+	EXPECT_STR(p, "250 of 250");
+
+	EXPECT_STR(FMT_SESSIONS_EMPTY, "No sessions open");
+}
+
 int main(void)
 {
 	check("unknown", -1, "--");
@@ -736,6 +819,7 @@ int main(void)
 	test_fmt_spend();
 	test_fmt_spend_page();
 	test_fmt_about();
+	test_fmt_sessions();
 
 	printf("\n%s (%d failure%s)\n", failures ? "FAILURES" : "ALL TESTS PASSED",
 	       failures, failures == 1 ? "" : "s");

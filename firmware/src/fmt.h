@@ -330,6 +330,108 @@ const char *fmt_spend_hint(double pct);
  */
 void fmt_uptime(int64_t secs, char *buf, size_t buflen);
 
+/*
+ * THE SESSIONS CARD (docs/sessions-card-design.md): one row per open session,
+ * four to a page, opened by a tap on the pip row. Every word and every page
+ * sum the card shows is decided here, where tests/fmt reaches it;
+ * ui_settings.c needs LVGL and only places them.
+ */
+
+/* What a row's session is doing: the wire's `k`, parsed by msg_parse_srow().
+ * In the order the daemon sorts them, most urgent first. */
+enum fmt_srow_kind {
+	FMT_SROW_WAIT,		/* "wait": a person is asked */
+	FMT_SROW_FAIL,		/* "fail": the turn died */
+	FMT_SROW_EDIT,		/* "edit": running, last tool an edit */
+	FMT_SROW_TOOL,		/* "tool": running, any other tool */
+	FMT_SROW_WORK,		/* "work": running, no tool in flight */
+	FMT_SROW_IDLE,		/* "idle": the turn finished */
+};
+
+/* Rows on one page of the card: what 320x240 holds (usage_layout.h,
+ * SESS_ROWS). The daemon pages by the same four. */
+#define FMT_SROWS_PER_PAGE	4
+/* The wire's bounds (pc/session_rows.py builds to them): `tot` 0..999 and
+ * `pg` 0..249, so a page index never needs more than three digits. */
+#define FMT_STOT_MAX		999
+#define FMT_SPAGE_MAX		249
+/* `age` in seconds, 0..359999: 99h 59m 59s, the widest fmt_srow_age() is
+ * built to write. */
+#define FMT_SAGE_MAX		359999
+/* `nm`, at most 24 bytes on the wire, plus NUL. */
+#define FMT_SNAME_MAX		25
+
+/*
+ * The row's state words, sentence case, one capital:
+ *
+ *   wait "Needs you", fail "Session failed", edit "Editing",
+ *   tool "Running a tool", work "Working", idle "Idle".
+ *
+ * Anything else reads "Working": the parser refuses an unknown `k`, so only
+ * this file could hand one over, and green and "Working" ask nothing of the
+ * reader -- fmt_pip_tone's rule for a kind this build cannot name.
+ */
+const char *fmt_srow_words(enum fmt_srow_kind k);
+
+/*
+ * The ink the words wear, in the pip row's vocabulary so the card and the
+ * dots it opened from never disagree: needs-you and failed are red (act),
+ * idle is amber (finished, unread), the three running kinds green.
+ */
+enum fmt_pip_tone fmt_srow_tone(enum fmt_srow_kind k);
+
+/*
+ * The context bar's ink, the ramp the rings use for fullness: green under
+ * 60%, amber to 90%, red from there. -1 (unknown) is green, and is never
+ * drawn: the card hides the bar and the figure for it.
+ */
+enum fmt_pip_tone fmt_ctx_tone(int cx);
+
+/* "Needs you" and the widest the card writes, "3h 05m" and "Session failed",
+ * fit; rounded up. */
+#define FMT_SAGE_BUF		12
+
+/*
+ * How long a row has been in its state, ticking up on the board:
+ *
+ *   under a minute   -> "45s"
+ *   under an hour    -> "12m"      (whole minutes, rounded down)
+ *   otherwise        -> "3h 05m"   to "99h 59m", where it stops
+ *
+ * A negative count reads "0s". Seconds only under a minute, because a
+ * figure that changes every second on four rows is motion nobody asked for;
+ * under a minute is when the owner is watching it come back.
+ */
+void fmt_srow_age(int32_t secs, char *buf, size_t buflen);
+
+/*
+ * The row's name: the project name through fmt_ascii (it is a directory's
+ * name, user-controlled, and the built-in fonts draw non-ASCII as boxes), or,
+ * when the daemon sent none or it is blank, "Claude session" / "Codex
+ * session" by `pv` ('c' or 'x'; anything else "Session").
+ */
+void fmt_srow_name(const char *nm, char pv, char *buf, size_t buflen);
+
+/* The card's line when no session is open, and the board's line before any
+ * row has arrived (a daemon too old to send them, or none at all). */
+#define FMT_SESSIONS_EMPTY	"No sessions open"
+
+/* The pages `tot` sessions take, four to a page: 0 and 1..4 are one page (an
+ * empty list is still a page, the one that says so), 5..8 two. Negative
+ * reads as 0, past FMT_STOT_MAX as it. */
+int fmt_spage_count(int tot);
+
+/* `pg` held to a page that exists for `tot`: 0 .. fmt_spage_count(tot) - 1. */
+int fmt_spage_clamp(int pg, int tot);
+
+/* Whether paging by `delta` (-1 previous, +1 next) from `pg` lands on a page
+ * that exists. False for any other delta. */
+bool fmt_spage_can(int pg, int tot, int delta);
+
+/* "1 of 3": the page counted from one. "1 of 1" for a single page. */
+#define FMT_SPAGE_BUF		16
+void fmt_spage_indicator(int pg, int tot, char *buf, size_t buflen);
+
 /* "Blink-" and the LAST four hex digits of the board id, upper case:
  * "Blink-3F7A". An id that is shorter than four digits, or holds anything
  * but hex ("unknown" is what proto answers with no id), is no name to give
