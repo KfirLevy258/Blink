@@ -70,6 +70,25 @@ LINES = [
     # proto.c:698
     ("[cfg] edition set to codex (applies on next boot)",
      "[cfg] edition set to", ["codex"]),
+    # The panel choice (issue #23): which panel was set, the store's errno
+    # and the MADCTL figure are cut; the two fixed lines are kept whole.
+    # "[cfg] panel set to alternate" has its own test below: the alternate
+    # boot line carries the word "alternate" as fixed text, so the whole-boot
+    # test here could not hold it as a secret.
+    ("[cfg] panel set to standard", "[cfg] panel set to", ["standard"]),
+    ("[cfg] could not store the panel (-28)",
+     "[cfg] could not store the panel", ["-28"]),
+    ("[cfg] unknown panel; ignored", "[cfg] unknown panel; ignored", []),
+    # proto.c: a panel message that arrived over WiFi, refused. Fixed text,
+    # kept whole; it reached the log as a bare "[cfg]" until 2026-11-25.
+    ("[cfg] panel is set over the cable only; ignored",
+     "[cfg] panel is set over the cable only; ignored", []),
+    # proto.c, PANEL_MSG_NOT_SHOWN: stored, the MADCTL write failed
+    ("[cfg] panel saved; restart the board to show it (-116)",
+     "[cfg] panel saved; restart the board to show it", ["-116"]),
+    ("[usage] panel: MADCTL=0xa0", "[usage] panel: MADCTL=0x", ["a0"]),
+    ("[usage] panel: alternate, driver MADCTL kept",
+     "[usage] panel: alternate, driver MADCTL kept", []),
     # mem_stats.c:131
     ("[mem] lvgl settings: used=31337 free=2320 largest=1999 peak=30001"
      " boot_peak=29000 pool=32768", "[mem]", ["31337", "2320", "settings"]),
@@ -135,6 +154,34 @@ def test_a_refused_line_is_named_in_the_log(line):
     kept whole. The burn view's refusal was left off the list when the burn
     line was added, and reached bridge.log as a bare "[proto]"."""
     assert logbook.ConsoleEcho().feed((line + "\r\n").encode()) == [line]
+
+
+@pytest.mark.parametrize("name", ["standard", "alternate"])
+def test_the_panel_the_board_set_is_cut_from_the_log(name):
+    """Issue #23. The value is one of two words of ours, but the rule is
+    that a formatted value never rides into bridge.log, and the CLI that
+    asked for it prints the board's answer itself."""
+    out = logbook.ConsoleEcho().feed(f"[cfg] panel set to {name}\r\n".encode())
+    assert out == ["[cfg] panel set to"]
+
+
+def test_a_panel_saved_but_not_shown_is_its_own_line_in_the_log():
+    """Issue #23, review round 4. A store that worked and a MADCTL write
+    that did not used to print "panel set"; it has its own line now, and
+    support has to be able to tell it from the other three answers in
+    bridge.log -- without the errno, which is a value."""
+    line = "[cfg] panel saved; restart the board to show it (-5)"
+    out = logbook.ConsoleEcho().feed((line + "\r\n").encode())
+    assert out == ["[cfg] panel saved; restart the board to show it"]
+    assert "-5" not in out[0]
+    for other in ("[cfg] panel set to", "[cfg] could not store the panel",
+                  "[cfg] unknown panel; ignored"):
+        assert out[0] != other
+    # It is the firmware's own line, one printk, in the panel branch.
+    proto = (SRC / "proto.c").read_text(encoding="utf-8")
+    assert any(fmt == "[cfg] panel saved; restart the board to show it"
+                      " (%d)\\n" for _n, fmt in _formats())
+    assert "PANEL_MSG_NOT_SHOWN" in proto
 
 
 def test_no_figure_from_a_boot_reaches_the_log():
@@ -272,7 +319,7 @@ _FIELDS = {
              "provider src state n_sess n_run n_wait n_stuck n_agents p2 "
              "p2_session_pct p2_weekly_pct p2_s_in_s p2_w_in_s p2_stale "
              "burn_pph age_s p2_age_s active_age_s",
-    "edition": "t edition", "session": "t n", "status": "t state",
+    "edition": "t edition", "panel": "t panel", "session": "t n", "status": "t state",
     "svc": "t provider level", "theme": "t op id",
     "ota_avail": "t version size", "ota_begin": "t version",
     "ota_resume": "t version", "ota_none": "t", "ota_error": "t",

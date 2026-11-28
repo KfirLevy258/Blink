@@ -31,6 +31,7 @@
 #include "ui_theme.h"
 #include "ui_settings.h"
 #include "touch_inject.h"
+#include "panel.h"
 #if defined(CONFIG_BLINK_WIFI_LINK)
 #include <errno.h>
 #include "wl_frame.h"
@@ -1716,6 +1717,70 @@ static void dispatch(const char *json, enum proto_src src)
 				printk("[cfg] could not store the edition"
 				       " (%d)\n", rc);
 			}
+		}
+	} else if (strcmp(type, "panel") == 0) {
+		/*
+		 * Which display module this board carries (issue #23; panel.h
+		 * and cfg_get_panel in cfg_store.h). Sent by `blink config
+		 * panel standard|alternate`; a firmware older than this one
+		 * falls through to the unknown-type end of dispatch and
+		 * ignores it.
+		 *
+		 * From the cable only. A wrong value mirrors the screen and
+		 * swaps red and blue, and on a mirrored screen the Settings
+		 * menu cannot be operated, so this is not something a peer on
+		 * the network gets to do to a desk. Over WiFi it is dropped,
+		 * with a constant line.
+		 *
+		 * Unlike the edition, no latch: the owner may need to set it
+		 * back, and it takes effect at once rather than at the next
+		 * boot. panel_apply() runs here, on the main thread that owns
+		 * LVGL and the display bus (panel.h explains why that matters),
+		 * the way ui_theme_wire() repaints from the `theme` branch.
+		 *
+		 * What happens is panel_handle_msg in panel.h -- the names, the
+		 * store-then-apply order and what a failure of each stops --
+		 * so the host tests drive the same code with cfg_store.c's real
+		 * setter. This branch only says which functions do it and
+		 * prints one constant line per outcome. A MADCTL write that
+		 * fails after the store worked is said as such rather than as
+		 * "panel set": the choice is on flash and the next boot shows
+		 * it, but until then the glass is the old module's, and
+		 * `blink config panel` tells the owner to restart.
+		 *
+		 * Nothing from the message is echoed, not even the value that
+		 * was refused: the console is what customers send us.
+		 */
+		static const struct panel_msg_ops panel_msg_hw = {
+			.store = cfg_set_panel,
+			.apply = panel_apply,
+		};
+		char pv[12];
+		int rc;
+
+		if (src != PROTO_SRC_USB) {
+			printk("[cfg] panel is set over the cable only; ignored\n");
+			return;
+		}
+		switch (panel_handle_msg(msg_get_str(json, "panel", pv, sizeof(pv))
+					 ? pv : NULL, &panel_msg_hw, &rc)) {
+		case PANEL_MSG_SET_STANDARD:
+			printk("[cfg] panel set to standard\n");
+			break;
+		case PANEL_MSG_SET_ALTERNATE:
+			printk("[cfg] panel set to alternate\n");
+			break;
+		case PANEL_MSG_STORE_FAILED:
+			printk("[cfg] could not store the panel (%d)\n", rc);
+			break;
+		case PANEL_MSG_NOT_SHOWN:
+			printk("[cfg] panel saved; restart the board to show it"
+			       " (%d)\n", rc);
+			break;
+		case PANEL_MSG_UNKNOWN:
+		default:
+			printk("[cfg] unknown panel; ignored\n");
+			break;
 		}
 	} else if (strcmp(type, "welcome") == 0) {
 		double hv = 0;

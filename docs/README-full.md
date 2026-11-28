@@ -371,6 +371,39 @@ before esptool is called. Measured on hardware 2026-09-07: a confirmed image's
 uptime runs straight through the 90-second deadline, where the unconfirmed one
 rebooted.
 
+### A screen that comes up mirrored
+
+Not every CYD batch carries the same display module. On most, the firmware
+corrects the panel's orientation and colour order and scales the backlight
+down to suit it. A few batches carry a module
+that needs neither: given the standard setting, it renders mirrored, with red
+and blue swapped, and dim. The panel is a setting saved on the board, so the
+same firmware serves both:
+
+```bash
+blink config panel alternate   # for a board that comes up mirrored and dim
+blink config panel standard    # the default
+```
+
+A board that needs `alternate` looks mirrored, colour-swapped and too dark on
+`standard`.
+
+The command hands the setting to the running BLINK app (the background
+service, or `blink run` in another terminal), which sends it to the board over
+the USB cable. Neither the board nor the app is restarted. So the app has to
+be running, and the board has to be on the cable: a board reached only over
+WiFi refuses the setting, and the command says to plug it in. The board saves
+the setting and applies it straight away, with no reboot, and keeps it across
+restarts, updates and a factory reset. If the board saved it but could not
+switch the screen over, the command says so: unplug the board and plug it back
+in to show it. There is no menu for it on the board itself: on a mirrored
+screen a tap lands on the wrong side, so it could not be reached on exactly
+the boards that need it.
+
+Firmware older than this release ignores the setting. Update the board first;
+on older firmware the command reports that the board did not confirm, and the
+screen stays as it was.
+
 ### Company units
 
 A unit sold to a company shows the company's logo after the boot animation:

@@ -210,11 +210,11 @@ blink_refuse_selftest "$CFG" "$BIN" || exit 1
 # Nor a touch-inject image, which boots like a release and takes touches from
 # the cable: every desk that took it could be operated from the computer.
 blink_refuse_inject "$CFG" "$BIN" || exit 1
-# Nor a touch-trace image, which prints every touch on the cable, nor a
-# pilot-panel one, which on a production panel is mirrored and colour-swapped.
-# Both get into build-sb the same way, one EXTRA_CONF_FILE kept in the cache.
+# Nor a touch-trace image, which prints every touch on the cable. It gets
+# into build-sb through one EXTRA_CONF_FILE kept in the cache. (The panel
+# needs no build of its own any more: since issue #23 it is a setting saved
+# on the board, so there is no panel build left to refuse.)
 blink_refuse_trace "$CFG" "$BIN" || exit 1
-blink_refuse_pilot "$CFG" "$BIN" || exit 1
 # An image with a radio carries the daemon link and nothing else, and no
 # bench test knob (each would revert or hang every desk that took it).
 blink_refuse_standalone_net "$CFG" "$BIN" || exit 1

@@ -6920,13 +6920,37 @@ def cmd_provision(args) -> int:
     """
     import serial                      # only this path needs it installed
 
+    port = _board_port(args)
+    if not port:
+        return 1
+    return _with_port_borrowed(lambda: _stamp_edition(serial, port, args))
+
+
+def _board_port(args):
+    """The port named by --port, or the board found on its own; None, after
+    saying so, when there is neither. For provision, the one command that
+    talks to the board in place of the daemon."""
     from claude_usage_bridge import autodetect_port
 
     port = args.port or autodetect_port()
     if not port:
         print("No board found. Plug one in, or pass --port.", file=sys.stderr)
-        return 1
+        return None
+    return port
 
+
+def _with_port_borrowed(talk) -> int:
+    """Stop the daemon, run `talk()`, and start the daemon again exactly once
+    on every way out, returning what `talk()` returned.
+
+    cmd_provision's alone. `blink config panel` (issue #23) used it too until
+    2026-11-25, and both the open and the restart reset the board -- which a
+    factory step can afford and a desk with a fresh, unconfirmed update
+    cannot (MCUboot reverts an image reset before ota_mark_healthy). That
+    command now goes through the running daemon instead
+    (settings_request.PANEL_REQUEST_FILE). Kept a function of its own so
+    the restart lives in one place; it has been lost before (below).
+    """
     from pc import service_ctl
 
     stopped = False
@@ -6962,7 +6986,7 @@ def cmd_provision(args) -> int:
             # stop(), which the fleet suite and halt() share.
             _kill_by_path()
             time.sleep(1.0)
-        return _stamp_edition(serial, port, args)
+        return talk()
     finally:
         if stopped:
             print(f"Background service ... {service_ctl.start_service()}")
@@ -6971,10 +6995,56 @@ def cmd_provision(args) -> int:
 def _stamp_edition(serial, port, args) -> int:
     """cmd_provision's half that holds the port: open it, wait for hello,
     send the edition, read back the board's answer."""
+    rc, said = _tell_board(serial, port, args.baud,
+                           protocol.edition(args.edition), ("[cfg] edition",))
+    if rc is not None:
+        return rc
+
+    if said:
+        line = said.split("[cfg] ", 1)[-1]
+        print(line)
+        # A refusal is not a success. The edition latches on the first stamp
+        # and the board declines every one after it (cfg_set_edition), so a
+        # unit that comes back down the line for a second pass has to fail
+        # here loudly rather than be boxed as whatever the label said.
+        if "refusing" in line:
+            print("This unit was stamped already. Clearing it means erasing"
+                  " the config partition\nover USB with the board in"
+                  " bootloader mode -- a factory operation, on purpose.",
+                  file=sys.stderr)
+            rc = 1
+        else:
+            rc = 0
+    else:
+        print(f"Sent edition={args.edition}, but the board did not confirm it."
+              "\nA board running firmware older than this feature ignores the"
+              " message.", file=sys.stderr)
+        rc = 1
+
+    return rc
+
+
+def _tell_board(serial, port, baud, msg, answers, wait_s=3.0):
+    """Open `port`, wait for the board's hello, send `msg` once, and listen
+    for the board's console line about it.
+
+    Returns (rc, line). rc is 1 when the exchange never happened -- the port
+    would not open, no hello came, or the line would not encode -- and that
+    has already been said on stderr; it is None otherwise. `line` is the last
+    line heard that contains one of `answers`, or None when none came, which
+    is what a board too old to know `msg` sounds like.
+
+    _stamp_edition's body, lifted out of it when `blink config panel` (issue
+    #23) briefly shared the exchange; the waits, the open dance and the
+    wording of every failure are as they were. That command no longer opens
+    the port -- its open resets the board, which it promised not to do -- so
+    provision is the only caller. The line is returned for the caller to
+    read, never logged: it is text off the serial buffer.
+    """
     try:
         ser = serial.Serial()
         ser.port = port
-        ser.baudrate = args.baud
+        ser.baudrate = baud
         ser.timeout = 0.2
         # Same open dance as the daemon: leave DTR/RTS alone, then pulse RTS,
         # so the board comes up in run mode rather than the ROM loader. See
@@ -6990,7 +7060,7 @@ def _stamp_edition(serial, port, args) -> int:
         ser.reset_input_buffer()
     except Exception as e:
         print(f"Could not open {port}: {e}", file=sys.stderr)
-        return 1
+        return 1, None
 
     try:
         # Wait for the board to say hello before sending anything.
@@ -7016,26 +7086,26 @@ def _stamp_edition(serial, port, args) -> int:
                 ready = True
                 break
         if not ready:
-            # The finally below closes the port, and cmd_provision's starts
-            # the service. Both used to be done here as well, so this path
-            # started the service twice.
+            # The finally below closes the port, and _with_port_borrowed's
+            # starts the service. Both used to be done here as well, so this
+            # path started the service twice.
             print(f"No hello from the board on {port} within 10 s.",
                   file=sys.stderr)
-            return 1
+            return 1, None
 
         # encode_checked, as every production writer is (CLAUDE.md): a line
         # over the board's limit is dropped whole and silently.
-        raw, why = protocol.encode_checked(protocol.edition(args.edition))
+        raw, why = protocol.encode_checked(msg)
         if raw is None:
             print(f"Not sent: {why}", file=sys.stderr)
-            return 1
+            return 1, None
         ser.write(raw)
         ser.flush()
         # Read back what the board says about it. The firmware prints one
         # line either way, and that line is the whole confirmation: a board
         # too old to know the message answers nothing, which is a different
         # outcome from a board that stored it.
-        deadline = time.monotonic() + 3.0
+        deadline = time.monotonic() + wait_s
         while time.monotonic() < deadline:
             chunk = ser.readline()
             if not chunk:
@@ -7043,34 +7113,144 @@ def _stamp_edition(serial, port, args) -> int:
             text = chunk.decode("utf-8", "replace").strip()
             if text:
                 heard.append(text)
-            if "[cfg] edition" in text:
+            if any(a in text for a in answers):
                 break
     finally:
         ser.close()
 
-    said = [h for h in heard if "[cfg] edition" in h]
-    if said:
-        line = said[-1].split("[cfg] ", 1)[-1]
-        print(line)
-        # A refusal is not a success. The edition latches on the first stamp
-        # and the board declines every one after it (cfg_set_edition), so a
-        # unit that comes back down the line for a second pass has to fail
-        # here loudly rather than be boxed as whatever the label said.
-        if "refusing" in line:
-            print("This unit was stamped already. Clearing it means erasing"
-                  " the config partition\nover USB with the board in"
-                  " bootloader mode -- a factory operation, on purpose.",
-                  file=sys.stderr)
-            rc = 1
-        else:
-            rc = 0
-    else:
-        print(f"Sent edition={args.edition}, but the board did not confirm it."
-              "\nA board running firmware older than this feature ignores the"
-              " message.", file=sys.stderr)
-        rc = 1
+    said = [h for h in heard if any(a in h for a in answers)]
+    return None, (said[-1] if said else None)
 
-    return rc
+
+# Ten seconds, as SETTINGS_WAIT_S: the daemon listens PANEL_LISTEN_S (3 s)
+# for the board's answer, takes a request on its next serial-loop pass
+# (about 0.2 s), and holds a second request until the first is answered, so
+# ten covers two commands run together with room for a slow pass.
+PANEL_WAIT_S = 10
+
+
+def _set_panel(home, value, clock=time.monotonic, sleep=time.sleep) -> int:
+    """`blink config panel standard|alternate`: hand the choice to the
+    running daemon and report the one word it answers with.
+
+    Through the daemon, never the port (issue #23, review of 2026-11-25).
+    This used to stop the service, open the serial port and start the
+    service again, and the open's RTS pulse and the restarted daemon's own
+    open each reset the board -- under a command that said "no restart is
+    needed". A reset before ota_mark_healthy makes MCUboot revert a fresh
+    update, and the old-firmware advice below sent people to update and
+    then run this, which is exactly that. Now nothing here touches the port
+    or the service, so the board keeps running and so does the app.
+
+    The daemon matches the board's console line to a fixed word
+    (claude_usage_bridge.panel_answer); what is printed here is rebuilt from
+    that word and `value`, never from anything the board printed."""
+    from pc import private_file, settings_request
+    try:
+        rid = settings_request.write_panel_request(home, value)
+    except (OSError, private_file.NotPrivate) as e:
+        print(f"Could not leave the request for the app: {e}")
+        return 1
+    # Whether the request is settled: answered (the daemon took it, so the
+    # file under that name now could only be a second command's), or
+    # removed by the timeout below. Anything else that ends this function
+    # removes it in the finally (review of 2026-11-25): a Ctrl-C during the
+    # wait used to leave it in ~/.blink/private, and a daemon started days
+    # later took it and switched the board's display module long after the
+    # command was abandoned. take_panel_request also drops one older than
+    # PANEL_REQUEST_MAX_AGE_S, for the exits nothing here lives through.
+    settled = False
+    try:
+        start = clock()
+        while True:
+            try:
+                result = settings_request.read_panel_answer(home, rid)
+            except (OSError, private_file.NotPrivate) as e:
+                print(f"Could not read the app's answer: {e}")
+                return 1
+            if result is not None:
+                settled = True
+                break
+            if clock() - start >= PANEL_WAIT_S:
+                settled = True
+                try:
+                    untouched = private_file.remove_private(
+                        home, settings_request.PANEL_REQUEST_FILE)
+                except (OSError, private_file.NotPrivate):
+                    # NotPrivate too: it is not an OSError, and the timeout
+                    # message is the one thing this path owes the person.
+                    untouched = True
+                if untouched:
+                    print("The app is not running. Run blink install, or"
+                          " blink run in another terminal.")
+                else:
+                    print("The app did not answer. Try blink config panel"
+                          " again in a moment.")
+                return 1
+            sleep(0.2)
+    finally:
+        if not settled:
+            # Best effort, and never in place of the way out it is cleaning
+            # up after: a KeyboardInterrupt still reaches main() and leaves
+            # the process as every other Ctrl-C here does (cmd_settings).
+            try:
+                private_file.remove_private(
+                    home, settings_request.PANEL_REQUEST_FILE)
+            except (OSError, private_file.NotPrivate):
+                pass
+    return _said_panel(value, result)
+
+
+def _said_panel(value, result) -> int:
+    """What `blink config panel` prints for the daemon's answer, and its rc."""
+    if result == "set":
+        print(f"panel set to {value}")
+        print("The board saved it and is using it now; no restart is"
+              " needed.")
+        return 0
+    if result == "mismatch":
+        # Not a line this firmware prints for this message. Said plainly
+        # rather than read as a success, without echoing what it held.
+        print(f"Sent panel={value}, but the board answered with a"
+              " different panel.", file=sys.stderr)
+    elif result == "not_stored":
+        print("could not store the panel")
+        print("The board could not save the setting. Try again; if it keeps"
+              " failing, the board's storage needs a look.", file=sys.stderr)
+    elif result == "not_shown":
+        # A board that stored the choice but could not send the display its
+        # new MADCTL (firmware/src/panel.h, panel_handle_msg): before that
+        # answer existed the board printed "panel set" regardless, and the
+        # owner was told no restart was needed while the screen stayed
+        # mirrored. Saved, so the next boot shows it; not on the screen yet,
+        # so not a success. 1 rather than 0 because the owner has something
+        # to do.
+        print(f"panel saved as {value}, but not shown yet")
+        print("The board saved the setting but could not switch the screen"
+              " over. Unplug the board and plug it back in to show it.",
+              file=sys.stderr)
+    elif result == "unknown":
+        print("The board did not know that panel and ignored it.",
+              file=sys.stderr)
+    elif result == "silent":
+        # Safe advice now that this command no longer resets the board: an
+        # update followed by this cannot revert the update any more.
+        print(f"Sent panel={value}, but the board did not confirm it."
+              "\nA board running firmware older than this feature ignores the"
+              " setting. Update the board first, then run this again.",
+              file=sys.stderr)
+    elif result == "cable":
+        # The board takes this message from the USB link only (proto.c), and
+        # a daemon reaching it over WiFi does not send it at all.
+        print("The panel can only be set over the USB cable. Plug the board"
+              " into this computer and run this again.", file=sys.stderr)
+    elif result == "no_board":
+        print("No board is connected. Plug the board into this computer and"
+              " run this again.", file=sys.stderr)
+    else:   # not_sent: encode_checked refused the line
+        print("The app could not send the setting to the board.",
+              file=sys.stderr)
+    return 1
 
 
 # `blink config <setting> [on|off]`. One table, so the listing, the parser's
@@ -7142,7 +7322,22 @@ _CONFIG = {
 }
 
 
-def cmd_config(args) -> int:
+# The one setting kept on the board rather than in config.json (issue #23):
+# which display panel it has. Not in _CONFIG because nothing about it is
+# on/off or on this computer -- the board stores it, applies it at once, and
+# has no message that reports it back, so the computer can set it but never
+# read it. Saying so is better than a listing that shows a guess.
+PANEL_SETTING = "panel"
+_PANEL_WHAT = "which display panel the board has (stored on the board)"
+_PANEL_UNREAD = (
+    "panel: stored on the board; this computer cannot read it back.",
+    "Set it with: blink config panel standard  (or alternate)",
+    "Use alternate only if the picture on your board is mirrored or its"
+    " colours are wrong.",
+)
+
+
+def cmd_config(args, clock=time.monotonic, sleep=time.sleep) -> int:
     name = getattr(args, "setting", None)
     value = getattr(args, "value", None)
     home = blink_home()
@@ -7154,11 +7349,27 @@ def cmd_config(args) -> int:
     if name is None:
         # The name column is as wide as the longest name plus two:
         # "desktop-chat-light" is 18, and ran into the state at 14.
-        wide = max(len(n) for n in _CONFIG) + 2
+        wide = max(len(n) for n in [*_CONFIG, PANEL_SETTING]) + 2
         for n, setting in _CONFIG.items():
             # 12 wide: "unreadable" is ten, and ran into the description.
             print(f"{n:<{wide}}{state(setting):<12}{setting.what}")
+        print(f"{PANEL_SETTING:<{wide}}{'on board':<12}{_PANEL_WHAT}")
         return 0
+    # One parser takes every setting's values, so each setting checks its
+    # own here, before anything is written.
+    if name == PANEL_SETTING:
+        if value is not None and value not in protocol.PANELS:
+            print("The panel setting takes standard or alternate.",
+                  file=sys.stderr)
+            return 1
+        if value is None:
+            for line in _PANEL_UNREAD:
+                print(line)
+            return 0
+        return _set_panel(home, value, clock=clock, sleep=sleep)
+    if value is not None and value not in ("on", "off"):
+        print(f"The {name} setting takes on or off.", file=sys.stderr)
+        return 1
     setting = _CONFIG[name]
     if value is not None:
         try:
@@ -7642,10 +7853,19 @@ def main(argv=None) -> int:
     config_p = sub.add_parser(
         "config",
         help="Show or change a setting (blink config status-page on)")
-    config_p.add_argument("setting", nargs="?", choices=list(_CONFIG),
+    config_p.add_argument("setting", nargs="?",
+                          choices=list(_CONFIG) + [PANEL_SETTING],
                           help="Which setting; omit to list them all")
-    config_p.add_argument("value", nargs="?", choices=["on", "off"],
-                          help="Turn it on or off; omit to show it")
+    # Every setting's values in one list; cmd_config checks which go with
+    # which, so `config panel on` is a plain sentence rather than a usage
+    # dump from argparse.
+    config_p.add_argument("value", nargs="?",
+                          choices=["on", "off"] + list(protocol.PANELS),
+                          help="on or off (panel: standard or alternate);"
+                               " omit to show it")
+    # No --port or --baud: `config panel` goes through the running app,
+    # which already holds the port (_set_panel), so flags naming one would
+    # do nothing and say otherwise.
     theme_p = sub.add_parser(
         "theme",
         help="Change the board's colours (blink theme opens the builder)")

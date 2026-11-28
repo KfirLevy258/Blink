@@ -309,11 +309,11 @@ flash)
 				# key -- the board boots, but every later OTA is rejected and reverts.
 				echo '             -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"$HOME/.blink/ota_signing_key_p256.pem\"" \'
 				echo "           && $ROOT/tools/flash_encrypted.sh $PORT"
-				echo "       If this is one of the two PILOT boards, add to that build:"
-				echo "           -DEXTRA_CONF_FILE=pilot.conf"
-				echo "       (their display module differs; a stock build renders them"
-				echo "        mirrored, red/blue swapped and dim. Judge per board -- being"
-				echo "        fused is NOT the same thing as being a pilot.)"
+				echo "       If this is one of the two PILOT boards, build it the same way as any"
+				echo "       other board, then run: blink config panel alternate"
+				echo "       with the app running and the board on USB (their display module"
+				echo "       differs; until then it renders mirrored, red/blue swapped and dim."
+				echo "       Judge per board -- being fused is NOT the same thing as being a pilot.)"
 				echo "       BLINK_SKIP_EFUSE_CHECK=1 overrides."
 			} >&2
 			exit 1

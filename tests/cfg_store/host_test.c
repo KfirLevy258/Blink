@@ -36,6 +36,7 @@
 #include <zephyr/storage/flash_map.h>
 
 #include "cfg_store.h"
+#include "panel.h"
 
 uint8_t fake_flash[FAKE_FLASH_SIZE];
 long fake_write_budget = -1;
@@ -693,6 +694,370 @@ static void edition_latch_untouched_by_clear_pairing(void)
 	named("edition_latch_untouched_by_clear_pairing", f);
 }
 
+/* --- The panel byte (issue #23) ---
+ *
+ * The panel lives in what was the setup-AP password's 17th byte, its NUL on
+ * every record any firmware wrote. struct rec is private to cfg_store.c, so
+ * its layout is pinned here from the outside: the offsets are the base
+ * layout's (5f6b635), counted by hand, checked against the frozen rec_134 and
+ * against the bytes a write actually leaves on the fake flash.
+ */
+#define AP_PSK_OFF 434
+#define PANEL_OFF 450		/* AP_PSK_OFF + 16 */
+#define OTA_STATE_OFF 451
+#define CRC_134_OFF 471
+#define THEME_ID_OFF 475
+#define REC_SIZE 544
+
+/* The newest whole record of our layout on the fake flash, or -1. */
+static int newest_whole(void)
+{
+	bool a = slot_whole_wifi(SLOT_A), b = slot_whole_wifi(SLOT_B);
+	uint32_t sa, sb;
+
+	memcpy(&sa, fake_flash + SLOT_A + 4, sizeof(sa));
+	memcpy(&sb, fake_flash + SLOT_B + 4, sizeof(sb));
+	if (a && (!b || sa >= sb)) {
+		return SLOT_A;
+	}
+	return b ? SLOT_B : -1;
+}
+
+/* Plant a raw panel byte in every whole record and seal all three CRCs over
+ * it again, as a later firmware or a flipped bit would leave it. */
+static void plant_panel(uint8_t v)
+{
+	const int slots[] = { SLOT_A, SLOT_B };
+
+	for (int i = 0; i < 2; i++) {
+		uint8_t *r = fake_flash + slots[i];
+		uint32_t crc;
+
+		if (!slot_whole_wifi(slots[i])) {
+			continue;
+		}
+		r[PANEL_OFF] = v;
+		crc = crc32_ieee(r, CRC_134_OFF);
+		memcpy(r + CRC_134_OFF, &crc, sizeof(crc));
+		crc = crc32_ieee(r, CRC_143_OFF);
+		memcpy(r + CRC_143_OFF, &crc, sizeof(crc));
+		crc = crc32_ieee(r, WIFI_CRC_OFF);
+		memcpy(r + WIFI_CRC_OFF, &crc, sizeof(crc));
+	}
+}
+
+static void panel_byte(void)
+{
+	int f = failures, before, slot;
+	char ap[CFG_AP_PSK_MAX];
+
+	/* The layout: nothing but ap_psk's last byte moved. */
+	CHECK(offsetof(struct rec_134, ap_psk) == AP_PSK_OFF &&
+	      PANEL_OFF == AP_PSK_OFF + 16 &&
+	      offsetof(struct rec_134, ota_state) == OTA_STATE_OFF &&
+	      offsetof(struct rec_134, crc) == CRC_134_OFF &&
+	      sizeof(struct rec_134) == THEME_ID_OFF &&
+	      CRC_143_OFF == 503 && PAIR_SET_OFF == 507 &&
+	      WIFI_CRC_OFF == 540 && WIFI_CRC_OFF + 4 == REC_SIZE,
+	      "panel: offsets are the base layout's (ap_psk 434, panel 450,"
+	      " ota_state 451, crc_134 471, theme_id 475, crc_143 503,"
+	      " pair_set 507, crc 540, size 544)");
+
+	/* Every record already on desks reads standard. */
+	memset(fake_flash, 0xFF, sizeof(fake_flash));
+	CHECK(cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_STANDARD,
+	      "panel: a blank record reads standard");
+	desk_in(SLOT_A);
+	CHECK(cfg_get_panel() == CFG_PANEL_STANDARD,
+	      "panel: a 1.3.4 record reads standard");
+	{
+		struct rec_143 x = desk_143(7);
+
+		memset(fake_flash, 0xFF, sizeof(fake_flash));
+		write_143(SLOT_A, &x);
+		CHECK(cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_STANDARD,
+		      "panel: a 1.4.x record reads standard");
+	}
+	{
+		/* A 16-character AP password, its NUL in byte 17: the most
+		 * an older setter could store. Still read back whole. */
+		struct rec_134 r = desk_record();
+
+		memset(r.ap_psk, 0, sizeof(r.ap_psk));
+		memcpy(r.ap_psk, "0123456789abcdef", 16);
+		memset(fake_flash, 0xFF, sizeof(fake_flash));
+		write_134(SLOT_A, &r);
+		CHECK(cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_STANDARD &&
+		      cfg_get_ap_psk(ap, sizeof(ap)) &&
+		      strcmp(ap, "0123456789abcdef") == 0,
+		      "panel: a 16-character AP password reads standard and"
+		      " comes back whole");
+	}
+
+	/* Alternate is stored in byte 450 under all three seals. */
+	desk_in(SLOT_A);
+	CHECK(cfg_set_panel(CFG_PANEL_ALTERNATE) == 0 &&
+	      cfg_get_panel() == CFG_PANEL_ALTERNATE, "panel: alternate stored");
+	slot = newest_whole();
+	CHECK(slot >= 0 && fake_flash[slot + PANEL_OFF] == CFG_PANEL_ALTERNATE &&
+	      sealed_at(slot, CRC_134_OFF) && sealed_at(slot, CRC_143_OFF) &&
+	      fake_flash[slot + REC_SIZE] == 0xFF,
+	      "panel: on flash at byte 450, every seal good, 544 bytes written");
+	CHECK(cfg_get_ap_psk(ap, sizeof(ap)) && strcmp(ap, "apkey12345") == 0,
+	      "panel: the AP password beside it is untouched");
+	CHECK(cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_ALTERNATE,
+	      "panel: alternate survives a reboot");
+	check_desk_settings("panel");
+
+	/* Refused values write nothing and leave the edition latch alone. */
+	before = fake_writes;
+	CHECK(cfg_set_panel(2) == -EINVAL && cfg_set_panel(0xFF) == -EINVAL &&
+	      fake_writes == before && cfg_get_panel() == CFG_PANEL_ALTERNATE,
+	      "panel: 2 and 0xFF are refused, nothing written");
+	CHECK(cfg_get_edition() == CFG_EDITION_CODEX && cfg_edition_locked() &&
+	      cfg_set_edition(CFG_EDITION_CLAUDE) == -EPERM,
+	      "panel: the edition latch is untouched");
+
+	/* A failed write leaves RAM on what flash holds. */
+	fake_erase_rc = -5;
+	CHECK(cfg_set_panel(CFG_PANEL_STANDARD) != 0 &&
+	      cfg_get_panel() == CFG_PANEL_ALTERNATE,
+	      "panel: a failed write leaves alternate in RAM");
+	fake_erase_rc = 0;
+
+	/* Downgrade to 1.3.4: it carries the byte, and a write by it keeps it. */
+	{
+		struct rec_134 seen;
+
+		CHECK(boot_134(&seen) &&
+		      (uint8_t)seen.ap_psk[16] == CFG_PANEL_ALTERNATE &&
+		      seen.edition_locked == 1,
+		      "panel: 1.3.4 boots on a record carrying the byte");
+		seen.seq++;
+		seen.bright_pct = 80;
+		write_134(newest_whole() == SLOT_A ? SLOT_B : SLOT_A, &seen);
+		CHECK(cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_ALTERNATE &&
+		      cfg_get_bright_pct() == 80,
+		      "panel: after a 1.3.4 write and re-update, still alternate");
+		CHECK(boot_134(&seen) && seen.bright_pct == 80,
+		      "panel: (1.3.4's record is the newest)");
+	}
+
+	/* Downgrade to 1.4.x, a write there, and back. */
+	{
+		struct rec_143 seen;
+
+		CHECK(cfg_set_panel(CFG_PANEL_ALTERNATE) == 0 && boot_143(&seen),
+		      "panel: 1.4.x boots");
+		seen.r.seq++;
+		seen.r.bright_pct = 40;
+		write_143(newest_whole() == SLOT_A ? SLOT_B : SLOT_A, &seen);
+		CHECK(cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_ALTERNATE &&
+		      cfg_get_bright_pct() == 40,
+		      "panel: after a 1.4.x write and re-update, still alternate");
+	}
+
+	/* A factory reset keeps it -- latched board or not. */
+	CHECK(cfg_set_panel(CFG_PANEL_ALTERNATE) == 0 && cfg_reset() == 0 &&
+	      cfg_get_panel() == CFG_PANEL_ALTERNATE && cfg_edition_locked(),
+	      "panel: a reset keeps alternate and the latch");
+	CHECK(cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_ALTERNATE &&
+	      cfg_get_bright_pct() == 100,
+	      "panel: ...on flash, with the settings back to defaults");
+	memset(fake_flash, 0xFF, sizeof(fake_flash));
+	cfg_init();
+	CHECK(cfg_set_panel(CFG_PANEL_ALTERNATE) == 0 && cfg_reset() == 0 &&
+	      cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_ALTERNATE &&
+	      !cfg_edition_locked(),
+	      "panel: an unstamped board's reset still writes alternate back");
+
+	/* A byte this build never writes is the standard panel. */
+	CHECK(cfg_set_panel(CFG_PANEL_ALTERNATE) == 0 &&
+	      cfg_set_focus(1, 0) == 0, "panel: both sectors hold alternate");
+	plant_panel(7);
+	CHECK(cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_STANDARD,
+	      "panel: a stray byte 7 reads standard");
+
+	/* And back to standard, which also sticks. */
+	CHECK(cfg_set_panel(CFG_PANEL_STANDARD) == 0 && cfg_init() == 0 &&
+	      cfg_get_panel() == CFG_PANEL_STANDARD,
+	      "panel: standard again, after a reboot");
+	named("panel_byte", f);
+}
+
+/* --- A panel message through the firmware (issue #23, review round 4) ---
+ *
+ * panel_byte above proves the record; tests/backlight/host_test.c proves
+ * panel.h's decisions against fakes. Neither proved the two together, and
+ * the CLI tests answer from a canned board, so the live path from a message
+ * to the record, the MADCTL, the backlight and the redraw could have come
+ * apart with every test still green. Here the message goes through
+ * panel_handle_msg -- the code proto.c's `panel` branch runs -- with the
+ * real cfg_set_panel as its store and panel_live_apply as its apply, as
+ * main.c's panel_apply is; only the bus, the PWM and LVGL are recorders.
+ * The fake backlight computes the pulse with panel_bl_pulse, which is what
+ * backlight.c's apply() drives.
+ */
+#define E2E_PERIOD 1000000u	/* ns: the overlay's 1 kHz */
+
+static uint8_t e2e_madctl[8];
+static int e2e_nmadctl;
+static int e2e_write_rc;
+static int e2e_reapplies;
+static uint32_t e2e_pulse;
+static bool e2e_bl_is_record;	/* the backlight's panel is the record's */
+static int e2e_redraws;
+
+static void e2e_reset(void)
+{
+	e2e_nmadctl = 0;
+	e2e_write_rc = 0;
+	e2e_reapplies = 0;
+	e2e_pulse = 0xDEADBEEFu;
+	e2e_bl_is_record = false;
+	e2e_redraws = 0;
+}
+
+static int e2e_write(uint8_t m)
+{
+	if (e2e_nmadctl < (int)sizeof(e2e_madctl)) {
+		e2e_madctl[e2e_nmadctl] = m;
+	}
+	e2e_nmadctl++;
+	return e2e_write_rc;
+}
+
+static void e2e_reapply(uint8_t panel)
+{
+	e2e_reapplies++;
+	e2e_pulse = panel_bl_pulse(E2E_PERIOD, 100, panel);
+	e2e_bl_is_record = panel == cfg_get_panel();
+}
+
+static void e2e_redraw(void)
+{
+	e2e_redraws++;
+}
+
+static const struct panel_ops e2e_hw = {
+	.write_madctl = e2e_write,
+	.backlight_reapply = e2e_reapply,
+	.redraw = e2e_redraw,
+};
+
+static int e2e_apply(uint8_t panel)
+{
+	return panel_live_apply(panel, &e2e_hw);
+}
+
+static const struct panel_msg_ops e2e_msg = {
+	.store = cfg_set_panel,
+	.apply = e2e_apply,
+};
+
+static void panel_message_through_the_firmware(void)
+{
+	int f = failures, err, before, slot;
+	uint8_t m;
+
+	CHECK(CFG_PANEL_STANDARD == PANEL_ID_STANDARD &&
+	      CFG_PANEL_ALTERNATE == PANEL_ID_ALTERNATE,
+	      "message: panel.h's numbers are cfg_store.h's");
+
+	/* A desk on the standard panel is told it has the alternate one. */
+	desk_in(SLOT_A);
+	e2e_reset();
+	CHECK(panel_handle_msg("alternate", &e2e_msg, &err) ==
+	      PANEL_MSG_SET_ALTERNATE && err == 0 &&
+	      cfg_get_panel() == CFG_PANEL_ALTERNATE,
+	      "message alternate: answered set, the record holds alternate");
+	slot = newest_whole();
+	CHECK(slot >= 0 && fake_flash[slot + PANEL_OFF] == CFG_PANEL_ALTERNATE,
+	      "message alternate: on flash");
+	CHECK(e2e_nmadctl == 1 && e2e_madctl[0] == 0x28,
+	      "message alternate: MADCTL 0x28 written once");
+	CHECK(e2e_reapplies == 1 && e2e_pulse == E2E_PERIOD && e2e_bl_is_record,
+	      "message alternate: backlight at the whole period");
+	CHECK(e2e_redraws == 1, "message alternate: redrawn once");
+	CHECK(cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_ALTERNATE,
+	      "message alternate: survives a reboot");
+	check_desk_settings("message alternate");
+	e2e_reset();
+	m = 0x55;
+	CHECK(panel_boot(cfg_get_panel(), &e2e_hw, &m) == PANEL_BOOT_KEPT &&
+	      e2e_nmadctl == 0 && m == 0x55,
+	      "message alternate, rebooted: boot writes no MADCTL");
+
+	/* And back. */
+	e2e_reset();
+	CHECK(panel_handle_msg("standard", &e2e_msg, &err) ==
+	      PANEL_MSG_SET_STANDARD && err == 0 &&
+	      cfg_get_panel() == CFG_PANEL_STANDARD,
+	      "message standard: answered set, the record holds standard");
+	slot = newest_whole();
+	CHECK(slot >= 0 && fake_flash[slot + PANEL_OFF] == CFG_PANEL_STANDARD,
+	      "message standard: on flash");
+	CHECK(e2e_nmadctl == 1 && e2e_madctl[0] == 0xA0,
+	      "message standard: MADCTL 0xA0 written once");
+	CHECK(e2e_reapplies == 1 && e2e_pulse == E2E_PERIOD * 60u / 100u &&
+	      e2e_bl_is_record, "message standard: backlight at 60%");
+	CHECK(e2e_redraws == 1, "message standard: redrawn once");
+	CHECK(cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_STANDARD,
+	      "message standard: survives a reboot");
+	e2e_reset();
+	m = 0;
+	CHECK(panel_boot(cfg_get_panel(), &e2e_hw, &m) == PANEL_BOOT_WROTE &&
+	      m == 0xA0 && e2e_nmadctl == 1 && e2e_madctl[0] == 0xA0,
+	      "message standard, rebooted: boot writes 0xA0");
+
+	/* A name the board does not know, or none: nothing anywhere. */
+	{
+		const char *bad[] = { "Alternate", "alternate ", "", NULL };
+
+		for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+			e2e_reset();
+			before = fake_writes;
+			CHECK(panel_handle_msg(bad[i], &e2e_msg, &err) ==
+			      PANEL_MSG_UNKNOWN && fake_writes == before &&
+			      e2e_nmadctl == 0 && e2e_reapplies == 0 &&
+			      e2e_redraws == 0 &&
+			      cfg_get_panel() == CFG_PANEL_STANDARD,
+			      "message garbage: nothing stored, nothing written");
+		}
+	}
+
+	/* The flash refuses: not stored, so the glass is left alone too. */
+	e2e_reset();
+	fake_erase_rc = -5;
+	CHECK(panel_handle_msg("alternate", &e2e_msg, &err) ==
+	      PANEL_MSG_STORE_FAILED && err != 0 &&
+	      cfg_get_panel() == CFG_PANEL_STANDARD,
+	      "message, flash refuses: could not store, still standard");
+	fake_erase_rc = 0;
+	CHECK(e2e_nmadctl == 0 && e2e_reapplies == 0 && e2e_redraws == 0,
+	      "message, flash refuses: no MADCTL, no backlight, no redraw");
+	CHECK(cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_STANDARD,
+	      "message, flash refuses: standard after a reboot");
+
+	/* The bus refuses after the store: saved, not shown, and a restart
+	 * shows it -- the alternate boot leaves the driver's own MADCTL. */
+	e2e_reset();
+	e2e_write_rc = -5;
+	CHECK(panel_handle_msg("alternate", &e2e_msg, &err) ==
+	      PANEL_MSG_NOT_SHOWN && err == -5 &&
+	      cfg_get_panel() == CFG_PANEL_ALTERNATE,
+	      "message, MADCTL write fails: saved but not shown");
+	CHECK(e2e_nmadctl == 1 && e2e_madctl[0] == 0x28 &&
+	      e2e_reapplies == 0 && e2e_redraws == 0,
+	      "message, MADCTL write fails: no backlight, no redraw");
+	e2e_reset();
+	CHECK(cfg_init() == 0 && cfg_get_panel() == CFG_PANEL_ALTERNATE &&
+	      panel_boot(cfg_get_panel(), &e2e_hw, &m) == PANEL_BOOT_KEPT &&
+	      e2e_nmadctl == 0,
+	      "message, MADCTL write fails: the next boot is alternate's");
+	named("panel_message_through_the_firmware", f);
+}
+
 /* --- Quiet hours (issue #17), in the token's last four bytes --- */
 
 /*
@@ -1224,6 +1589,8 @@ int main(void)
 	power_cut_every_byte_both_slots();
 	factory_reset_clears_pairing();
 	edition_latch_untouched_by_clear_pairing();
+	panel_byte();
+	panel_message_through_the_firmware();
 	quiet_hours();
 
 	printf(failures ? "\n%d FAILED\n" : "\nall cfg_store checks passed\n",

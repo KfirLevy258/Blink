@@ -32,6 +32,11 @@ void backlight_step(int dir);
  * stored but the panel stays at BACKLIGHT_QUIET_PCT until Until. */
 void backlight_set(uint8_t pct);
 
+/* Drive the PWM again at the current level, with `panel`'s scale (panel.h),
+ * and keep that panel for every later step. For a live panel change, once
+ * its MADCTL is on the glass (panel_live_apply); persists nothing. */
+void backlight_reapply(uint8_t panel);
+
 /* The owner's chosen percent -- one of 20/40/60/80/100. This is the stored
  * level, not what the panel shows: during quiet hours the panel is held at
  * BACKLIGHT_QUIET_PCT while this still answers what was picked, so the

@@ -9,6 +9,37 @@ from pc.providers import base
 from tests.pc.test_text_encoding import FILES
 
 
+class TestPanel(unittest.TestCase):
+    """`blink config panel` (issue #23): the board's display panel."""
+
+    def test_both_panels_encode_within_the_line_budget(self):
+        for name in protocol.PANELS:
+            raw, why = protocol.encode_checked(protocol.panel(name))
+            self.assertIsNotNone(raw, why)
+            self.assertLessEqual(len(raw), 512)     # proto.c MAX_LINE_BYTES
+            self.assertEqual(json.loads(raw), {"t": "panel",
+                                               "v": protocol.VERSION,
+                                               "panel": name})
+
+    def test_an_unknown_panel_is_refused_before_the_wire(self):
+        for bad in ("on", "Standard", "", "alternate "):
+            with self.assertRaises(ValueError):
+                protocol.panel(bad)
+
+    def test_the_log_names_the_type_and_nothing_else(self):
+        for name in protocol.PANELS:
+            self.assertEqual(protocol.log_name(protocol.panel(name)), "panel")
+
+    def test_the_transcript_keeps_only_our_own_panel_words(self):
+        # PANELS and the TAP_TYPE_ENUMS literal are one list in two places.
+        self.assertEqual(set(protocol.PANELS),
+                         protocol.TAP_TYPE_ENUMS[("panel", "panel")])
+        self.assertEqual(protocol.redact(protocol.panel("alternate")),
+                         {"t": "panel", "panel": "alternate"})
+        self.assertEqual(protocol.redact({"t": "panel", "panel": "SECRET"}),
+                         {"t": "panel"})
+
+
 class TestProtocol(unittest.TestCase):
     def test_encode_appends_newline_and_type_version(self):
         line = protocol.encode({"t": "welcome", "v": 1, "app": "x"})
@@ -1481,6 +1512,7 @@ def _builders():
             p2_age_s=4, active_age_s=2),
          None, {"v"}),
         ("edition", protocol.edition("codex"), {"t", "edition"}, {"v"}),
+        ("panel", protocol.panel("alternate"), {"t", "panel"}, {"v"}),
         ("session", protocol.session("SECRET label", 3), {"t", "n"},
          {"v", "label"}),
         ("status", protocol.status("ok", "SECRET detail"), {"t", "state"},

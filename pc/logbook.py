@@ -363,6 +363,12 @@ CONSOLE_MESSAGES = tuple(sorted((
     # [usage] -- firmware/src/main.c, proto.c
     "[usage] panel: DBI bus not ready, MADCTL uncorrected",    # main.c:99
     "[usage] panel: MADCTL write failed",                      # main.c:105
+    # The panel choice (issue #23, `blink config panel`). The MADCTL figure
+    # is cut like any value: the stem alone says a standard panel's MADCTL
+    # was written, at boot or on a live apply, which is what support asks.
+    # The alternate boot line has no value and is kept whole.
+    "[usage] panel: MADCTL=0x",                                # main.c
+    "[usage] panel: alternate, driver MADCTL kept",            # main.c
     "[usage] no app after 60 s; dozing until one speaks",      # main.c:544
     "[usage] firmware boot OK",                                # main.c:570
     "[usage] FATAL: mbedTLS allocator hookup failed",          # main.c:586
@@ -384,6 +390,19 @@ CONSOLE_MESSAGES = tuple(sorted((
     "[cfg] edition already stamped as",                        # proto.c:693
     "[cfg] edition set to",                                    # proto.c:698
     "[cfg] could not store the edition",                       # proto.c:701
+    # The panel message's five answers (issue #23). Which panel was set is
+    # cut like the edition's name is, and so is the store's errno; the
+    # refusal of a name the board does not know is fixed text, kept whole.
+    # "panel saved" is a store that worked and a MADCTL write that did not
+    # (panel.h, panel_handle_msg); its errno is cut the same way. The
+    # cable-only refusal is a panel message that arrived over WiFi, fixed
+    # text too; it was missing here until 2026-11-25, so a WiFi refusal
+    # logged as a bare "[cfg]".
+    "[cfg] panel set to",                                      # issue #23
+    "[cfg] could not store the panel",                         # issue #23
+    "[cfg] panel saved; restart the board to show it",         # issue #23
+    "[cfg] unknown panel; ignored",                            # issue #23
+    "[cfg] panel is set over the cable only; ignored",         # issue #23
     # [theme] -- firmware/src/ui_theme.c, proto.c
     "[theme] preview timed out; back to the stored theme",     # :114
     "[theme] could not store the theme",                       # :155
